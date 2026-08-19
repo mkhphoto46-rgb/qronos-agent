@@ -2,7 +2,12 @@ certifi==2026.7.22
 charset-normalizer==3.5.1
 idna==3.19
 numpy==2.5.2
+onnxruntime==1.29.0
+openwakeword==0.6.0
 psutil==7.2.2
 requests==2.34.2
+scikit-learn==1.9.0
+scipy==1.18.0
 sounddevice==0.5.6
+tqdm==4.70.0
 urllib3==2.7.0
