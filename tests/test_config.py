@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from core.config import CONFIG
+
+
+class TestQronosConfig(unittest.TestCase):
+    def test_project_root_is_correct(self) -> None:
+        expected = Path(r"E:\Project Qronos Agent")
+        self.assertEqual(CONFIG.paths.root, expected)
+
+    def test_security_defaults_are_disabled(self) -> None:
+        self.assertFalse(CONFIG.security.camera_enabled)
+        self.assertFalse(CONFIG.security.microphone_enabled)
+        self.assertFalse(CONFIG.security.remote_access_enabled)
+        self.assertFalse(CONFIG.security.external_ai_enabled)
+
+    def test_destructive_actions_require_approval(self) -> None:
+        self.assertTrue(CONFIG.security.destructive_actions_require_approval)
+
+
+if __name__ == "__main__":
+    unittest.main()
