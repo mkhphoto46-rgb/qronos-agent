@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.activity_guard import ActivityMode
+from core.activity_guard import ActivityMode, ResourcePressure
 from core.model_manager import ModelManager, TaskClass
 from core.resource_guard import GpuStatus, SystemStatus
 from core.resource_policy import ResourceDecision
@@ -174,6 +174,93 @@ class TestModelManager(unittest.TestCase):
 
         self.assertFalse(fast.keep_loaded)
         self.assertFalse(heavy.keep_loaded)
+
+    def test_high_pressure_blocks_heavy_model(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            resource_pressure=ResourcePressure.HIGH,
+        )
+
+        self.assertEqual(
+            result.decision,
+            ResourceDecision.WARN,
+        )
+
+    def test_high_pressure_prevents_fast_model_from_staying_loaded(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            resource_pressure=ResourcePressure.HIGH,
+        )
+
+        self.assertEqual(
+            result.decision,
+            ResourceDecision.ALLOW,
+        )
+        self.assertFalse(result.keep_loaded)
+
+    def test_critical_pressure_blocks_heavy_model(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            resource_pressure=ResourcePressure.CRITICAL,
+        )
+
+        self.assertEqual(
+            result.decision,
+            ResourceDecision.BLOCK,
+        )
+
+    def test_critical_pressure_warns_fast_model(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            resource_pressure=ResourcePressure.CRITICAL,
+        )
+
+        self.assertEqual(
+            result.decision,
+            ResourceDecision.WARN,
+        )
+        self.assertFalse(result.keep_loaded)
+
+    def test_normal_pressure_keeps_fast_brain_warm(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.NORMAL,
+            ResourcePressure.NORMAL,
+        )
+
+        self.assertTrue(result.keep_loaded)
+
+    def test_high_pressure_does_not_keep_fast_brain_warm(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.NORMAL,
+            ResourcePressure.HIGH,
+        )
+
+        self.assertFalse(result.keep_loaded)
+
+    def test_critical_pressure_does_not_keep_fast_brain_warm(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.NORMAL,
+            ResourcePressure.CRITICAL,
+        )
+
+        self.assertFalse(result.keep_loaded)
 
 
 if __name__ == "__main__":

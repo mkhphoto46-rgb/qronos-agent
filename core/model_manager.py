@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from core.activity_guard import ActivityMode
+from core.activity_guard import ActivityMode, ResourcePressure
 from core.model_registry import ModelProfile, get_model
 from core.ollama_controller import OllamaController
 from core.resource_guard import GpuStatus, SystemStatus
@@ -23,7 +23,7 @@ class ModelSelection:
 
 
 class ModelManager:
-    """Choose models while respecting resources and activity mode."""
+    """Choose models while respecting activity and resource pressure."""
 
     def __init__(
         self,
@@ -37,6 +37,7 @@ class ModelManager:
         system: SystemStatus,
         gpu: GpuStatus | None,
         activity_mode: ActivityMode = ActivityMode.NORMAL,
+        resource_pressure: ResourcePressure = ResourcePressure.NORMAL,
     ) -> ModelSelection:
         model = get_model(task_class.value)
 
@@ -45,21 +46,27 @@ class ModelManager:
             gpu=gpu,
         )
 
-        if (
-            task_class is TaskClass.HEAVY
-            and activity_mode
-            in {
-                ActivityMode.GAMING_ASSIST,
-                ActivityMode.GAMING_PERFORMANCE,
-                ActivityMode.CREATOR_ASSIST,
-                ActivityMode.CREATOR_PERFORMANCE,
-            }
+        if self._activity_blocks(
+            task_class=task_class,
+            activity_mode=activity_mode,
         ):
             decision = ResourceDecision.BLOCK
+
+        if resource_pressure is ResourcePressure.CRITICAL:
+            if task_class is TaskClass.HEAVY:
+                decision = ResourceDecision.BLOCK
+            elif decision is ResourceDecision.ALLOW:
+                decision = ResourceDecision.WARN
+
+        elif resource_pressure is ResourcePressure.HIGH:
+            if task_class is TaskClass.HEAVY:
+                if decision is ResourceDecision.ALLOW:
+                    decision = ResourceDecision.WARN
 
         keep_loaded = self._should_keep_loaded(
             task_class=task_class,
             activity_mode=activity_mode,
+            resource_pressure=resource_pressure,
         )
 
         return ModelSelection(
@@ -74,12 +81,14 @@ class ModelManager:
         system: SystemStatus,
         gpu: GpuStatus | None,
         activity_mode: ActivityMode = ActivityMode.NORMAL,
+        resource_pressure: ResourcePressure = ResourcePressure.NORMAL,
     ) -> bool:
         selection = self.select_model(
             task_class=task_class,
             system=system,
             gpu=gpu,
             activity_mode=activity_mode,
+            resource_pressure=resource_pressure,
         )
 
         return selection.decision is ResourceDecision.ALLOW
@@ -88,14 +97,36 @@ class ModelManager:
         self.ollama.unload_all()
 
     @staticmethod
-    def _should_keep_loaded(
+    def _activity_blocks(
         task_class: TaskClass,
         activity_mode: ActivityMode,
     ) -> bool:
-        if activity_mode is ActivityMode.NORMAL:
-            return task_class is TaskClass.FAST
+        if task_class is not TaskClass.HEAVY:
+            return False
 
-        return False
+        return activity_mode in {
+            ActivityMode.GAMING_ASSIST,
+            ActivityMode.GAMING_PERFORMANCE,
+            ActivityMode.CREATOR_ASSIST,
+            ActivityMode.CREATOR_PERFORMANCE,
+        }
+
+    @staticmethod
+    def _should_keep_loaded(
+        task_class: TaskClass,
+        activity_mode: ActivityMode,
+        resource_pressure: ResourcePressure,
+    ) -> bool:
+        if task_class is not TaskClass.FAST:
+            return False
+
+        if activity_mode is not ActivityMode.NORMAL:
+            return False
+
+        if resource_pressure is not ResourcePressure.NORMAL:
+            return False
+
+        return True
 
 
 if __name__ == "__main__":
