@@ -36,29 +36,31 @@ class TestAudioInput(unittest.TestCase):
 
         self.assertFalse(audio.is_running())
 
-    @patch("core.audio_input.sd.InputStream")
+    @patch("core.audio_input._get_sounddevice")
     def test_start_changes_state_to_running(
         self,
-        mock_input_stream: MagicMock,
+        mock_get_sounddevice: MagicMock,
     ) -> None:
-        stream = mock_input_stream.return_value
+        sounddevice = mock_get_sounddevice.return_value
+        stream = sounddevice.InputStream.return_value
         stream.active = True
 
         audio = AudioInput()
 
         audio.start()
 
-        mock_input_stream.assert_called_once()
+        sounddevice.InputStream.assert_called_once()
         stream.start.assert_called_once()
 
         self.assertTrue(audio.is_running())
 
-    @patch("core.audio_input.sd.InputStream")
+    @patch("core.audio_input._get_sounddevice")
     def test_stop_changes_state_to_stopped(
         self,
-        mock_input_stream: MagicMock,
+        mock_get_sounddevice: MagicMock,
     ) -> None:
-        stream = mock_input_stream.return_value
+        sounddevice = mock_get_sounddevice.return_value
+        stream = sounddevice.InputStream.return_value
         stream.active = True
 
         audio = AudioInput()
@@ -77,12 +79,13 @@ class TestAudioInput(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             audio.read_frame()
 
-    @patch("core.audio_input.sd.InputStream")
+    @patch("core.audio_input._get_sounddevice")
     def test_read_frame_returns_expected_size(
         self,
-        mock_input_stream: MagicMock,
+        mock_get_sounddevice: MagicMock,
     ) -> None:
-        stream = mock_input_stream.return_value
+        sounddevice = mock_get_sounddevice.return_value
+        stream = sounddevice.InputStream.return_value
         stream.active = True
 
         stream.read.return_value = (
@@ -109,12 +112,13 @@ class TestAudioInput(unittest.TestCase):
             expected_size,
         )
 
-    @patch("core.audio_input.sd.InputStream")
+    @patch("core.audio_input._get_sounddevice")
     def test_read_frame_returns_bytes(
         self,
-        mock_input_stream: MagicMock,
+        mock_get_sounddevice: MagicMock,
     ) -> None:
-        stream = mock_input_stream.return_value
+        sounddevice = mock_get_sounddevice.return_value
+        stream = sounddevice.InputStream.return_value
         stream.active = True
 
         stream.read.return_value = (
@@ -132,12 +136,13 @@ class TestAudioInput(unittest.TestCase):
 
         self.assertIsInstance(frame, bytes)
 
-    @patch("core.audio_input.sd.InputStream")
+    @patch("core.audio_input._get_sounddevice")
     def test_stream_uses_expected_audio_configuration(
         self,
-        mock_input_stream: MagicMock,
+        mock_get_sounddevice: MagicMock,
     ) -> None:
-        stream = mock_input_stream.return_value
+        sounddevice = mock_get_sounddevice.return_value
+        stream = sounddevice.InputStream.return_value
         stream.active = True
 
         config = AudioConfig(
@@ -150,7 +155,7 @@ class TestAudioInput(unittest.TestCase):
         audio = AudioInput(config)
         audio.start()
 
-        mock_input_stream.assert_called_once_with(
+        sounddevice.InputStream.assert_called_once_with(
             samplerate=16_000,
             channels=1,
             dtype="int16",
@@ -158,12 +163,13 @@ class TestAudioInput(unittest.TestCase):
             device=1,
         )
 
-    @patch("core.audio_input.sd.InputStream")
+    @patch("core.audio_input._get_sounddevice")
     def test_start_is_idempotent(
         self,
-        mock_input_stream: MagicMock,
+        mock_get_sounddevice: MagicMock,
     ) -> None:
-        stream = mock_input_stream.return_value
+        sounddevice = mock_get_sounddevice.return_value
+        stream = sounddevice.InputStream.return_value
         stream.active = True
 
         audio = AudioInput()
@@ -171,15 +177,16 @@ class TestAudioInput(unittest.TestCase):
         audio.start()
         audio.start()
 
-        mock_input_stream.assert_called_once()
+        sounddevice.InputStream.assert_called_once()
         stream.start.assert_called_once()
 
-    @patch("core.audio_input.sd.InputStream")
+    @patch("core.audio_input._get_sounddevice")
     def test_start_closes_stream_when_start_fails(
         self,
-        mock_input_stream: MagicMock,
+        mock_get_sounddevice: MagicMock,
     ) -> None:
-        stream = mock_input_stream.return_value
+        sounddevice = mock_get_sounddevice.return_value
+        stream = sounddevice.InputStream.return_value
         stream.start.side_effect = RuntimeError(
             "Audio device unavailable."
         )

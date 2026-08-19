@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
-import sounddevice as sd
+
+
+def _get_sounddevice() -> Any:
+    """Load sounddevice only when real microphone access is required."""
+    import sounddevice as sd
+
+    return sd
 
 
 @dataclass(frozen=True)
@@ -23,11 +30,13 @@ class AudioInput:
         config: AudioConfig | None = None,
     ) -> None:
         self.config = config or AudioConfig()
-        self._stream: sd.InputStream | None = None
+        self._stream: Any | None = None
 
     def start(self) -> None:
         if self._stream is not None:
             return
+
+        sd = _get_sounddevice()
 
         stream = sd.InputStream(
             samplerate=self.config.sample_rate,
