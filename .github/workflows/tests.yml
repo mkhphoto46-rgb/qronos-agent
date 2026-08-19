@@ -50,5 +50,18 @@ jobs:
       - name: Check Python dependencies
         run: python -m pip check
 
+      - name: Verify CI source
+        run: |
+          echo "===== COMMIT ====="
+          git rev-parse HEAD
+          git log -1 --oneline
+
+          echo "===== test_config.py ====="
+          sed -n '1,80p' tests/test_config.py
+
+          echo "===== test_ollama_controller.py ====="
+          sed -n '1,160p' tests/test_ollama_controller.py
+
       - name: Run Qronos tests
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m unittest discover -s tests -v
