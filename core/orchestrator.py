@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.activity_guard import ActivityGuard, ActivityMode
+from core.activity_guard import ActivityGuard, ActivityMode, ResourcePressure
 from core.model_manager import ModelManager, TaskClass
 from core.ollama_controller import OllamaController
 from core.resource_guard import read_gpu_status, read_system_status
@@ -46,12 +46,13 @@ class Orchestrator:
         results: list[StepResult] = []
 
         for step in plan.steps:
-            activity_mode = self.activity_guard.detect().mode
+            activity_state = self.activity_guard.detect()
 
             result = self._execute_step(
                 step=step,
                 previous_results=results,
-                activity_mode=activity_mode,
+                activity_mode=activity_state.mode,
+                resource_pressure=activity_state.resource_pressure,
             )
 
             results.append(result)
@@ -66,6 +67,7 @@ class Orchestrator:
         step: PlanStep,
         previous_results: list[StepResult],
         activity_mode: ActivityMode,
+        resource_pressure: ResourcePressure,
     ) -> StepResult:
         task_class = self._get_task_class(step)
 
@@ -84,6 +86,7 @@ class Orchestrator:
             selection = self._prepare_resources(
                 task_class=task_class,
                 activity_mode=activity_mode,
+                resource_pressure=resource_pressure,
             )
 
             if selection.decision is not ResourceDecision.ALLOW:
@@ -91,9 +94,9 @@ class Orchestrator:
                     order=step.order,
                     success=False,
                     output="",
-                    error=(
-                        f"Resource policy blocked task: "
-                        f"{selection.decision.value}"
+                    error=self._resource_error(
+                        selection.decision,
+                        resource_pressure,
                     ),
                 )
 
@@ -107,11 +110,17 @@ class Orchestrator:
                 prompt=prompt,
                 think=False,
                 num_predict=256,
-                keep_alive="10m" if selection.keep_loaded else "0",
+                keep_alive=(
+                    "10m"
+                    if selection.keep_loaded
+                    else "0"
+                ),
             )
 
             if not selection.keep_loaded:
-                self.ollama.stop_model(selection.model.name)
+                self.ollama.stop_model(
+                    selection.model.name
+                )
 
             return StepResult(
                 order=step.order,
@@ -131,6 +140,7 @@ class Orchestrator:
         self,
         task_class: TaskClass,
         activity_mode: ActivityMode,
+        resource_pressure: ResourcePressure,
     ):
         """Prepare resources and return the selected model."""
 
@@ -142,40 +152,44 @@ class Orchestrator:
             system=system,
             gpu=gpu,
             activity_mode=activity_mode,
+            resource_pressure=resource_pressure,
         )
 
         if selection.decision is ResourceDecision.ALLOW:
             return selection
 
-        # If activity mode itself blocks the task, do not waste time
-        # unloading models and retrying the same blocked request.
-        if (
-            task_class is TaskClass.HEAVY
-            and activity_mode
-            in {
-                ActivityMode.GAMING_ASSIST,
-                ActivityMode.GAMING_PERFORMANCE,
-                ActivityMode.CREATOR_ASSIST,
-                ActivityMode.CREATOR_PERFORMANCE,
-            }
-        ):
-            return selection
+        # WARN and BLOCK are both handled conservatively for now.
+        # WARN will later become an approval workflow.
+        if selection.decision is not ResourceDecision.ALLOW:
+            running_models = self.ollama.list_running_models()
 
-        running_models = self.ollama.list_running_models()
+            if running_models:
+                self.ollama.unload_all()
 
-        if not running_models:
-            return selection
+                system = read_system_status()
+                gpu = read_gpu_status()
 
-        self.ollama.unload_all()
+                retry = self.model_manager.select_model(
+                    task_class=task_class,
+                    system=system,
+                    gpu=gpu,
+                    activity_mode=activity_mode,
+                    resource_pressure=resource_pressure,
+                )
 
-        system = read_system_status()
-        gpu = read_gpu_status()
+                return retry
 
-        return self.model_manager.select_model(
-            task_class=task_class,
-            system=system,
-            gpu=gpu,
-            activity_mode=activity_mode,
+        return selection
+
+    @staticmethod
+    def _resource_error(
+        decision: ResourceDecision,
+        pressure: ResourcePressure,
+    ) -> str:
+        return (
+            "Qronos blocked this task because the current "
+            f"resource state is {pressure.value} and the "
+            f"resource policy returned {decision.value}."
         )
 
     @staticmethod
@@ -217,12 +231,12 @@ if __name__ == "__main__":
     from core.task_router import TaskType
 
     plan = TaskPlan(
-        goal="Test lifecycle-aware orchestration."
+        goal="Test resource-aware orchestration."
     )
 
     plan.add_step(
         TaskType.FAST,
-        "Reply with exactly: Lifecycle test successful.",
+        "Reply with exactly: Resource-aware orchestration OK.",
     )
 
     orchestrator = Orchestrator()
