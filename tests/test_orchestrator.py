@@ -34,6 +34,20 @@ class TestOrchestrator(unittest.TestCase):
             vram_total_mb=8192,
         )
 
+    def _make_state(
+        self,
+        mode: ActivityMode,
+        pressure: ResourcePressure,
+    ):
+        return type(
+            "State",
+            (),
+            {
+                "mode": mode,
+                "resource_pressure": pressure,
+            },
+        )
+
     def test_empty_plan_returns_no_results(self) -> None:
         plan = TaskPlan(goal="Empty test")
 
@@ -89,16 +103,10 @@ class TestOrchestrator(unittest.TestCase):
             ],
         ) as mock_chat:
 
-            mock_state = type(
-                "State",
-                (),
-                {
-                    "mode": ActivityMode.NORMAL,
-                    "resource_pressure": ResourcePressure.NORMAL,
-                },
+            mock_detect.return_value = self._make_state(
+                ActivityMode.NORMAL,
+                ResourcePressure.NORMAL,
             )
-
-            mock_detect.return_value = mock_state
 
             results = self.orchestrator.execute_plan(plan)
 
@@ -141,18 +149,16 @@ class TestOrchestrator(unittest.TestCase):
         ) as mock_detect, patch.object(
             self.orchestrator.ollama,
             "chat",
-        ) as mock_chat:
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "list_running_models",
+            return_value=[],
+        ) as mock_list_running:
 
-            mock_state = type(
-                "State",
-                (),
-                {
-                    "mode": ActivityMode.NORMAL,
-                    "resource_pressure": ResourcePressure.CRITICAL,
-                },
+            mock_detect.return_value = self._make_state(
+                ActivityMode.NORMAL,
+                ResourcePressure.CRITICAL,
             )
-
-            mock_detect.return_value = mock_state
 
             results = self.orchestrator.execute_plan(plan)
 
@@ -165,6 +171,7 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         mock_chat.assert_not_called()
+        mock_list_running.assert_called_once()
 
     def test_high_pressure_warns_and_does_not_run_heavy_model(self) -> None:
         plan = TaskPlan(goal="High pressure test")
@@ -186,18 +193,16 @@ class TestOrchestrator(unittest.TestCase):
         ) as mock_detect, patch.object(
             self.orchestrator.ollama,
             "chat",
-        ) as mock_chat:
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "list_running_models",
+            return_value=[],
+        ) as mock_list_running:
 
-            mock_state = type(
-                "State",
-                (),
-                {
-                    "mode": ActivityMode.NORMAL,
-                    "resource_pressure": ResourcePressure.HIGH,
-                },
+            mock_detect.return_value = self._make_state(
+                ActivityMode.NORMAL,
+                ResourcePressure.HIGH,
             )
-
-            mock_detect.return_value = mock_state
 
             results = self.orchestrator.execute_plan(plan)
 
@@ -210,6 +215,7 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         mock_chat.assert_not_called()
+        mock_list_running.assert_called_once()
 
     def test_normal_fast_brain_can_stay_warm(self) -> None:
         plan = TaskPlan(goal="Warm fast brain test")
@@ -237,16 +243,10 @@ class TestOrchestrator(unittest.TestCase):
             "stop_model",
         ) as mock_stop:
 
-            mock_state = type(
-                "State",
-                (),
-                {
-                    "mode": ActivityMode.NORMAL,
-                    "resource_pressure": ResourcePressure.NORMAL,
-                },
+            mock_detect.return_value = self._make_state(
+                ActivityMode.NORMAL,
+                ResourcePressure.NORMAL,
             )
-
-            mock_detect.return_value = mock_state
 
             results = self.orchestrator.execute_plan(plan)
 
@@ -285,16 +285,10 @@ class TestOrchestrator(unittest.TestCase):
             "stop_model",
         ) as mock_stop:
 
-            mock_state = type(
-                "State",
-                (),
-                {
-                    "mode": ActivityMode.GAMING_ASSIST,
-                    "resource_pressure": ResourcePressure.NORMAL,
-                },
+            mock_detect.return_value = self._make_state(
+                ActivityMode.GAMING_ASSIST,
+                ResourcePressure.NORMAL,
             )
-
-            mock_detect.return_value = mock_state
 
             results = self.orchestrator.execute_plan(plan)
 
@@ -393,21 +387,16 @@ class TestOrchestrator(unittest.TestCase):
             "chat",
         ) as mock_chat:
 
-            mock_state = type(
-                "State",
-                (),
-                {
-                    "mode": ActivityMode.GAMING_PERFORMANCE,
-                    "resource_pressure": ResourcePressure.NORMAL,
-                },
+            mock_detect.return_value = self._make_state(
+                ActivityMode.GAMING_PERFORMANCE,
+                ResourcePressure.NORMAL,
             )
-
-            mock_detect.return_value = mock_state
 
             results = self.orchestrator.execute_plan(plan)
 
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0].success)
+
         mock_chat.assert_not_called()
 
 
