@@ -8,8 +8,8 @@ from core.config import CONFIG
 
 class TestQronosConfig(unittest.TestCase):
     def test_project_root_is_correct(self) -> None:
-        expected = Path(r"E:\Project Qronos Agent")
-        self.assertEqual(CONFIG.paths.root, expected)
+        expected = Path(__file__).resolve().parents[1]
+        self.assertEqual(CONFIG.paths.root.resolve(), expected.resolve())
 
     def test_security_defaults_are_disabled(self) -> None:
         self.assertFalse(CONFIG.security.camera_enabled)
@@ -18,7 +18,9 @@ class TestQronosConfig(unittest.TestCase):
         self.assertFalse(CONFIG.security.external_ai_enabled)
 
     def test_destructive_actions_require_approval(self) -> None:
-        self.assertTrue(CONFIG.security.destructive_actions_require_approval)
+        self.assertTrue(
+            CONFIG.security.destructive_actions_require_approval
+        )
 
 
 if __name__ == "__main__":
