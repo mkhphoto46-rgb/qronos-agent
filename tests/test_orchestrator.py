@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from core.activity_guard import ActivityMode
 from core.model_manager import TaskClass
 from core.orchestrator import Orchestrator
 from core.resource_guard import GpuStatus, SystemStatus
@@ -138,26 +139,25 @@ class TestOrchestrator(unittest.TestCase):
         ), patch.object(
             self.orchestrator.ollama,
             "list_running_models",
-            return_value=[
-                object(),
-            ],
+            return_value=[object()],
         ), patch.object(
             self.orchestrator.ollama,
             "unload_all",
         ) as mock_unload:
 
             decision = self.orchestrator._prepare_resources(
-                TaskClass.HEAVY
+                TaskClass.HEAVY,
+                ActivityMode.NORMAL,
             )
 
             self.assertEqual(
-                decision,
+                decision.decision,
                 ResourceDecision.ALLOW,
             )
 
             mock_unload.assert_called_once()
 
-    def test_no_unload_when_resources_are_already_safe(self) -> None:
+    def test_no_unload_when_resources_are_safe(self) -> None:
         safe_system = SystemStatus(
             cpu_usage_percent=20.0,
             ram_usage_percent=40.0,
@@ -185,15 +185,180 @@ class TestOrchestrator(unittest.TestCase):
         ) as mock_unload:
 
             decision = self.orchestrator._prepare_resources(
-                TaskClass.FAST
+                TaskClass.FAST,
+                ActivityMode.NORMAL,
             )
 
             self.assertEqual(
-                decision,
+                decision.decision,
                 ResourceDecision.ALLOW,
             )
 
             mock_unload.assert_not_called()
+
+    def test_gaming_mode_blocks_heavy_model(self) -> None:
+        safe_system = SystemStatus(
+            cpu_usage_percent=20.0,
+            ram_usage_percent=40.0,
+            ram_used_gb=12.0,
+            ram_total_gb=31.9,
+        )
+
+        safe_gpu = GpuStatus(
+            name="NVIDIA GeForce RTX 3070 Ti",
+            temperature_c=50,
+            gpu_utilization_percent=10,
+            vram_used_mb=2000,
+            vram_total_mb=8192,
+        )
+
+        with patch(
+            "core.orchestrator.read_system_status",
+            return_value=safe_system,
+        ), patch(
+            "core.orchestrator.read_gpu_status",
+            return_value=safe_gpu,
+        ), patch.object(
+            self.orchestrator.ollama,
+            "chat",
+        ) as mock_chat:
+
+            plan = TaskPlan(goal="Gaming protection test")
+
+            plan.add_step(
+                TaskType.HEAVY,
+                "This must not run during gaming.",
+            )
+
+            with patch.object(
+                self.orchestrator.activity_guard,
+                "detect",
+            ) as mock_detect:
+                mock_detect.return_value.mode = (
+                    ActivityMode.GAMING_PERFORMANCE
+                )
+
+                results = self.orchestrator.execute_plan(plan)
+
+            self.assertEqual(len(results), 1)
+            self.assertFalse(results[0].success)
+            mock_chat.assert_not_called()
+
+    def test_normal_fast_model_uses_warm_lifecycle(self) -> None:
+        safe_system = SystemStatus(
+            cpu_usage_percent=20.0,
+            ram_usage_percent=40.0,
+            ram_used_gb=12.0,
+            ram_total_gb=31.9,
+        )
+
+        safe_gpu = GpuStatus(
+            name="NVIDIA GeForce RTX 3070 Ti",
+            temperature_c=50,
+            gpu_utilization_percent=10,
+            vram_used_mb=2000,
+            vram_total_mb=8192,
+        )
+
+        with patch(
+            "core.orchestrator.read_system_status",
+            return_value=safe_system,
+        ), patch(
+            "core.orchestrator.read_gpu_status",
+            return_value=safe_gpu,
+        ), patch.object(
+            self.orchestrator.activity_guard,
+            "detect",
+        ) as mock_detect, patch.object(
+            self.orchestrator.ollama,
+            "chat",
+            return_value="OK",
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "stop_model",
+        ) as mock_stop:
+
+            mock_detect.return_value.mode = ActivityMode.NORMAL
+
+            plan = TaskPlan(goal="Warm lifecycle test")
+
+            plan.add_step(
+                TaskType.FAST,
+                "Reply with OK",
+            )
+
+            results = self.orchestrator.execute_plan(plan)
+
+            self.assertTrue(results[0].success)
+
+            mock_chat.assert_called_once()
+
+            call_kwargs = mock_chat.call_args.kwargs
+
+            self.assertEqual(
+                call_kwargs["keep_alive"],
+                "10m",
+            )
+
+            mock_stop.assert_not_called()
+
+    def test_gaming_fast_model_uses_on_demand_lifecycle(self) -> None:
+        safe_system = SystemStatus(
+            cpu_usage_percent=20.0,
+            ram_usage_percent=40.0,
+            ram_used_gb=12.0,
+            ram_total_gb=31.9,
+        )
+
+        safe_gpu = GpuStatus(
+            name="NVIDIA GeForce RTX 3070 Ti",
+            temperature_c=50,
+            gpu_utilization_percent=10,
+            vram_used_mb=2000,
+            vram_total_mb=8192,
+        )
+
+        with patch(
+            "core.orchestrator.read_system_status",
+            return_value=safe_system,
+        ), patch(
+            "core.orchestrator.read_gpu_status",
+            return_value=safe_gpu,
+        ), patch.object(
+            self.orchestrator.activity_guard,
+            "detect",
+        ) as mock_detect, patch.object(
+            self.orchestrator.ollama,
+            "chat",
+            return_value="OK",
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "stop_model",
+        ) as mock_stop:
+
+            mock_detect.return_value.mode = ActivityMode.GAMING_ASSIST
+
+            plan = TaskPlan(goal="Gaming lifecycle test")
+
+            plan.add_step(
+                TaskType.FAST,
+                "Reply with OK",
+            )
+
+            results = self.orchestrator.execute_plan(plan)
+
+            self.assertTrue(results[0].success)
+
+            call_kwargs = mock_chat.call_args.kwargs
+
+            self.assertEqual(
+                call_kwargs["keep_alive"],
+                "0",
+            )
+
+            mock_stop.assert_called_once_with(
+                "qwen3.5:9b",
+            )
 
 
 if __name__ == "__main__":

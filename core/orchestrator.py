@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.activity_guard import ActivityGuard, ActivityMode
 from core.model_manager import ModelManager, TaskClass
 from core.ollama_controller import OllamaController
 from core.resource_guard import read_gpu_status, read_system_status
@@ -20,17 +21,21 @@ class StepResult:
 
 
 class Orchestrator:
-    """Execute Qronos plans while respecting resource limits."""
+    """Execute Qronos plans with resource and activity awareness."""
 
     def __init__(
         self,
         ollama: OllamaController | None = None,
         model_manager: ModelManager | None = None,
+        activity_guard: ActivityGuard | None = None,
     ) -> None:
         self.ollama = ollama or OllamaController()
+
         self.model_manager = model_manager or ModelManager(
             ollama=self.ollama,
         )
+
+        self.activity_guard = activity_guard or ActivityGuard()
 
     def execute_plan(
         self,
@@ -41,9 +46,12 @@ class Orchestrator:
         results: list[StepResult] = []
 
         for step in plan.steps:
+            activity_mode = self.activity_guard.detect().mode
+
             result = self._execute_step(
                 step=step,
                 previous_results=results,
+                activity_mode=activity_mode,
             )
 
             results.append(result)
@@ -57,6 +65,7 @@ class Orchestrator:
         self,
         step: PlanStep,
         previous_results: list[StepResult],
+        activity_mode: ActivityMode,
     ) -> StepResult:
         task_class = self._get_task_class(step)
 
@@ -72,24 +81,21 @@ class Orchestrator:
             )
 
         try:
-            decision = self._prepare_resources(task_class)
+            selection = self._prepare_resources(
+                task_class=task_class,
+                activity_mode=activity_mode,
+            )
 
-            if decision is not ResourceDecision.ALLOW:
+            if selection.decision is not ResourceDecision.ALLOW:
                 return StepResult(
                     order=step.order,
                     success=False,
                     output="",
                     error=(
                         f"Resource policy blocked task: "
-                        f"{decision.value}"
+                        f"{selection.decision.value}"
                     ),
                 )
-
-            model_name = (
-                "qwen3.5:9b"
-                if task_class is TaskClass.FAST
-                else "qwen3.6:27b"
-            )
 
             prompt = self._build_prompt(
                 description=step.description,
@@ -97,12 +103,15 @@ class Orchestrator:
             )
 
             response = self.ollama.chat(
-                model_name=model_name,
+                model_name=selection.model.name,
                 prompt=prompt,
                 think=False,
                 num_predict=256,
-                keep_alive="0",
+                keep_alive="10m" if selection.keep_loaded else "0",
             )
+
+            if not selection.keep_loaded:
+                self.ollama.stop_model(selection.model.name)
 
             return StepResult(
                 order=step.order,
@@ -121,13 +130,9 @@ class Orchestrator:
     def _prepare_resources(
         self,
         task_class: TaskClass,
-    ) -> ResourceDecision:
-        """
-        Check resources before starting a task.
-
-        When switching models, unload currently loaded models first.
-        This prevents Qronos from keeping multiple large models in VRAM.
-        """
+        activity_mode: ActivityMode,
+    ):
+        """Prepare resources and return the selected model."""
 
         system = read_system_status()
         gpu = read_gpu_status()
@@ -136,28 +141,42 @@ class Orchestrator:
             task_class=task_class,
             system=system,
             gpu=gpu,
+            activity_mode=activity_mode,
         )
 
         if selection.decision is ResourceDecision.ALLOW:
-            return ResourceDecision.ALLOW
+            return selection
+
+        # If activity mode itself blocks the task, do not waste time
+        # unloading models and retrying the same blocked request.
+        if (
+            task_class is TaskClass.HEAVY
+            and activity_mode
+            in {
+                ActivityMode.GAMING_ASSIST,
+                ActivityMode.GAMING_PERFORMANCE,
+                ActivityMode.CREATOR_ASSIST,
+                ActivityMode.CREATOR_PERFORMANCE,
+            }
+        ):
+            return selection
 
         running_models = self.ollama.list_running_models()
 
         if not running_models:
-            return selection.decision
+            return selection
 
         self.ollama.unload_all()
 
         system = read_system_status()
         gpu = read_gpu_status()
 
-        selection = self.model_manager.select_model(
+        return self.model_manager.select_model(
             task_class=task_class,
             system=system,
             gpu=gpu,
+            activity_mode=activity_mode,
         )
-
-        return selection.decision
 
     @staticmethod
     def _get_task_class(
@@ -198,17 +217,12 @@ if __name__ == "__main__":
     from core.task_router import TaskType
 
     plan = TaskPlan(
-        goal="Test the resource-aware Qronos orchestrator."
+        goal="Test lifecycle-aware orchestration."
     )
 
     plan.add_step(
         TaskType.FAST,
-        "Reply with exactly: Resource-aware step one complete.",
-    )
-
-    plan.add_step(
-        TaskType.FAST,
-        "Reply with exactly: Resource-aware step two complete.",
+        "Reply with exactly: Lifecycle test successful.",
     )
 
     orchestrator = Orchestrator()

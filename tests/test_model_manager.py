@@ -2,14 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from core.model_manager import (
-    ModelManager,
-    TaskClass,
-)
-from core.resource_guard import (
-    GpuStatus,
-    SystemStatus,
-)
+from core.activity_guard import ActivityMode
+from core.model_manager import ModelManager, TaskClass
+from core.resource_guard import GpuStatus, SystemStatus
 from core.resource_policy import ResourceDecision
 
 
@@ -51,6 +46,7 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(result.model.name, "qwen3.5:9b")
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
+        self.assertTrue(result.keep_loaded)
 
     def test_heavy_model_selection(self) -> None:
         result = self.manager.select_model(
@@ -61,6 +57,7 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(result.model.name, "qwen3.6:27b")
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
+        self.assertFalse(result.keep_loaded)
 
     def test_heavy_model_blocked_when_vram_is_critical(self) -> None:
         result = self.manager.select_model(
@@ -97,6 +94,86 @@ class TestModelManager(unittest.TestCase):
         )
 
         self.assertTrue(allowed)
+
+    def test_gaming_assist_blocks_heavy_model(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.GAMING_ASSIST,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.BLOCK)
+
+    def test_gaming_assist_allows_fast_model_on_demand(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.GAMING_ASSIST,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.ALLOW)
+        self.assertFalse(result.keep_loaded)
+
+    def test_gaming_performance_blocks_heavy_model(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.GAMING_PERFORMANCE,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.BLOCK)
+
+    def test_creator_assist_blocks_heavy_model(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.CREATOR_ASSIST,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.BLOCK)
+
+    def test_creator_performance_blocks_heavy_model(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.CREATOR_PERFORMANCE,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.BLOCK)
+
+    def test_creator_performance_fast_model_is_on_demand(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.CREATOR_PERFORMANCE,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.ALLOW)
+        self.assertFalse(result.keep_loaded)
+
+    def test_idle_mode_does_not_keep_models_loaded(self) -> None:
+        fast = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.IDLE,
+        )
+
+        heavy = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.IDLE,
+        )
+
+        self.assertFalse(fast.keep_loaded)
+        self.assertFalse(heavy.keep_loaded)
 
 
 if __name__ == "__main__":
