@@ -27,11 +27,12 @@ class TestResourcePolicy(unittest.TestCase):
         temperature: int,
         vram_used: int,
         vram_total: int = 8192,
+        utilization: int = 0,
     ) -> GpuStatus:
         return GpuStatus(
             name="NVIDIA GeForce RTX 3070 Ti",
             temperature_c=temperature,
-            gpu_utilization_percent=0,
+            gpu_utilization_percent=utilization,
             vram_used_mb=vram_used,
             vram_total_mb=vram_total,
         )
@@ -82,6 +83,28 @@ class TestResourcePolicy(unittest.TestCase):
         result = evaluate_resources(
             self.make_system(cpu=20.0, ram=40.0),
             self.make_gpu(temperature=83, vram_used=2000),
+        )
+        self.assertEqual(result, ResourceDecision.BLOCK)
+
+    def test_high_gpu_utilization_warns(self) -> None:
+        result = evaluate_resources(
+            self.make_system(cpu=20.0, ram=40.0),
+            self.make_gpu(
+                temperature=50,
+                vram_used=2000,
+                utilization=80,
+            ),
+        )
+        self.assertEqual(result, ResourceDecision.WARN)
+
+    def test_critical_gpu_utilization_blocks(self) -> None:
+        result = evaluate_resources(
+            self.make_system(cpu=20.0, ram=40.0),
+            self.make_gpu(
+                temperature=50,
+                vram_used=2000,
+                utilization=95,
+            ),
         )
         self.assertEqual(result, ResourceDecision.BLOCK)
 

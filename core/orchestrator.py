@@ -100,6 +100,27 @@ class Orchestrator:
                     ),
                 )
 
+            # The earlier snapshot may already be stale after model cleanup
+            # or plan preparation. Re-read all resources immediately before
+            # the Ollama request is allowed to load a model.
+            live_state = self.activity_guard.detect()
+            selection = self._prepare_resources(
+                task_class=task_class,
+                activity_mode=live_state.mode,
+                resource_pressure=live_state.resource_pressure,
+            )
+
+            if selection.decision is not ResourceDecision.ALLOW:
+                return StepResult(
+                    order=step.order,
+                    success=False,
+                    output="",
+                    error=self._resource_error(
+                        selection.decision,
+                        live_state.resource_pressure,
+                    ),
+                )
+
             prompt = self._build_prompt(
                 description=step.description,
                 previous_results=previous_results,
@@ -108,8 +129,12 @@ class Orchestrator:
             response = self.ollama.chat(
                 model_name=selection.model.name,
                 prompt=prompt,
-                think=False,
-                num_predict=256,
+                think=(task_class is TaskClass.HEAVY),
+                num_predict=(
+                    512
+                    if task_class is TaskClass.HEAVY
+                    else 256
+                ),
                 keep_alive=(
                     "10m"
                     if selection.keep_loaded

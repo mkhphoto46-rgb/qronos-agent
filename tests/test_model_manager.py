@@ -44,7 +44,7 @@ class TestModelManager(unittest.TestCase):
             self.make_gpu(),
         )
 
-        self.assertEqual(result.model.name, "qwen3.5:9b")
+        self.assertEqual(result.model.name, "qwen3:4b-instruct")
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
         self.assertTrue(result.keep_loaded)
 
@@ -55,7 +55,7 @@ class TestModelManager(unittest.TestCase):
             self.make_gpu(),
         )
 
-        self.assertEqual(result.model.name, "qwen3.6:27b")
+        self.assertEqual(result.model.name, "qwen3:14b")
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
         self.assertFalse(result.keep_loaded)
 
@@ -185,10 +185,10 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(
             result.decision,
-            ResourceDecision.WARN,
+            ResourceDecision.BLOCK,
         )
 
-    def test_high_pressure_prevents_fast_model_from_staying_loaded(self) -> None:
+    def test_high_pressure_blocks_fast_model(self) -> None:
         result = self.manager.select_model(
             TaskClass.FAST,
             self.make_system(),
@@ -198,7 +198,7 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(
             result.decision,
-            ResourceDecision.ALLOW,
+            ResourceDecision.BLOCK,
         )
         self.assertFalse(result.keep_loaded)
 
@@ -215,7 +215,7 @@ class TestModelManager(unittest.TestCase):
             ResourceDecision.BLOCK,
         )
 
-    def test_critical_pressure_warns_fast_model(self) -> None:
+    def test_critical_pressure_blocks_fast_model(self) -> None:
         result = self.manager.select_model(
             TaskClass.FAST,
             self.make_system(),
@@ -225,7 +225,7 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(
             result.decision,
-            ResourceDecision.WARN,
+            ResourceDecision.BLOCK,
         )
         self.assertFalse(result.keep_loaded)
 

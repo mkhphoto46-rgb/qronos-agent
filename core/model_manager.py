@@ -52,16 +52,10 @@ class ModelManager:
         ):
             decision = ResourceDecision.BLOCK
 
-        if resource_pressure is ResourcePressure.CRITICAL:
-            if task_class is TaskClass.HEAVY:
-                decision = ResourceDecision.BLOCK
-            elif decision is ResourceDecision.ALLOW:
-                decision = ResourceDecision.WARN
-
-        elif resource_pressure is ResourcePressure.HIGH:
-            if task_class is TaskClass.HEAVY:
-                if decision is ResourceDecision.ALLOW:
-                    decision = ResourceDecision.WARN
+        # Never load either model while the user's system is already under
+        # measured pressure. Qronos waits for safe headroom instead.
+        if resource_pressure is not ResourcePressure.NORMAL:
+            decision = ResourceDecision.BLOCK
 
         keep_loaded = self._should_keep_loaded(
             task_class=task_class,

@@ -301,6 +301,20 @@ class TestActivityGuard(unittest.TestCase):
             ResourcePressure.NORMAL,
         )
 
+    def test_resource_sensor_failure_fails_closed(self) -> None:
+        guard = ActivityGuard()
+
+        with patch(
+            "core.activity_guard.read_system_status",
+            side_effect=RuntimeError("sensor unavailable"),
+        ):
+            state = guard.detect()
+
+        self.assertEqual(
+            state.resource_pressure,
+            ResourcePressure.CRITICAL,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,9 @@ class ActivityGuard:
     HIGH_VRAM_PERCENT = 75.0
     CRITICAL_VRAM_PERCENT = 90.0
 
+    HIGH_GPU_UTILIZATION_PERCENT = 75
+    CRITICAL_GPU_UTILIZATION_PERCENT = 90
+
     HIGH_GPU_TEMP_C = 75
     CRITICAL_GPU_TEMP_C = 85
 
@@ -146,7 +149,9 @@ class ActivityGuard:
             system = read_system_status()
             gpu = read_gpu_status()
         except Exception:
-            return ResourcePressure.NORMAL
+            # Resource protection fails closed. Starting a model without a
+            # trustworthy system snapshot would violate the load policy.
+            return ResourcePressure.CRITICAL
 
         critical = False
         high = False
@@ -162,7 +167,22 @@ class ActivityGuard:
             high = True
 
         if gpu is not None:
-            if gpu.vram_total_mb > 0:
+            if gpu.gpu_utilization_percent is not None:
+                if (
+                    gpu.gpu_utilization_percent
+                    >= cls.CRITICAL_GPU_UTILIZATION_PERCENT
+                ):
+                    critical = True
+                elif (
+                    gpu.gpu_utilization_percent
+                    >= cls.HIGH_GPU_UTILIZATION_PERCENT
+                ):
+                    high = True
+
+            if (
+                gpu.vram_used_mb is not None
+                and gpu.vram_total_mb not in (None, 0)
+            ):
                 vram_percent = (
                     gpu.vram_used_mb / gpu.vram_total_mb
                 ) * 100.0

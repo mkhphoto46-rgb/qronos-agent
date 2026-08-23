@@ -173,7 +173,7 @@ class TestOrchestrator(unittest.TestCase):
         mock_chat.assert_not_called()
         mock_list_running.assert_called_once()
 
-    def test_high_pressure_warns_and_does_not_run_heavy_model(self) -> None:
+    def test_high_pressure_blocks_and_does_not_run_heavy_model(self) -> None:
         plan = TaskPlan(goal="High pressure test")
 
         plan.add_step(
@@ -210,12 +210,50 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(results[0].success)
 
         self.assertIn(
-            "warn",
+            "block",
             results[0].error.lower(),
         )
 
         mock_chat.assert_not_called()
         mock_list_running.assert_called_once()
+
+    def test_fresh_second_check_blocks_model_load(self) -> None:
+        plan = TaskPlan(goal="Fresh resource check test")
+        plan.add_step(TaskType.FAST, "This must not load.")
+
+        with patch(
+            "core.orchestrator.read_system_status",
+            return_value=self._safe_system(),
+        ), patch(
+            "core.orchestrator.read_gpu_status",
+            return_value=self._safe_gpu(),
+        ), patch.object(
+            self.orchestrator.activity_guard,
+            "detect",
+        ) as mock_detect, patch.object(
+            self.orchestrator.ollama,
+            "chat",
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "list_running_models",
+            return_value=[],
+        ):
+            mock_detect.side_effect = [
+                self._make_state(
+                    ActivityMode.NORMAL,
+                    ResourcePressure.NORMAL,
+                ),
+                self._make_state(
+                    ActivityMode.NORMAL,
+                    ResourcePressure.HIGH,
+                ),
+            ]
+
+            results = self.orchestrator.execute_plan(plan)
+
+        self.assertFalse(results[0].success)
+        self.assertIn("block", results[0].error.lower())
+        mock_chat.assert_not_called()
 
     def test_normal_fast_brain_can_stay_warm(self) -> None:
         plan = TaskPlan(goal="Warm fast brain test")
@@ -256,8 +294,68 @@ class TestOrchestrator(unittest.TestCase):
             mock_chat.call_args.kwargs["keep_alive"],
             "10m",
         )
+        self.assertFalse(
+            mock_chat.call_args.kwargs["think"],
+        )
+        self.assertEqual(
+            mock_chat.call_args.kwargs["num_predict"],
+            256,
+        )
 
         mock_stop.assert_not_called()
+
+    def test_normal_heavy_brain_thinks_and_unloads(self) -> None:
+        plan = TaskPlan(goal="Heavy reasoning test")
+
+        plan.add_step(
+            TaskType.HEAVY,
+            "Analyze this request deeply.",
+        )
+
+        with patch(
+            "core.orchestrator.read_system_status",
+            return_value=self._safe_system(),
+        ), patch(
+            "core.orchestrator.read_gpu_status",
+            return_value=self._safe_gpu(),
+        ), patch.object(
+            self.orchestrator.activity_guard,
+            "detect",
+        ) as mock_detect, patch.object(
+            self.orchestrator.ollama,
+            "chat",
+            return_value="HEAVY_RESULT",
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "stop_model",
+        ) as mock_stop:
+
+            mock_detect.return_value = self._make_state(
+                ActivityMode.NORMAL,
+                ResourcePressure.NORMAL,
+            )
+
+            results = self.orchestrator.execute_plan(plan)
+
+        self.assertTrue(results[0].success)
+        self.assertEqual(
+            mock_chat.call_args.kwargs["model_name"],
+            "qwen3:14b",
+        )
+        self.assertTrue(
+            mock_chat.call_args.kwargs["think"],
+        )
+        self.assertEqual(
+            mock_chat.call_args.kwargs["num_predict"],
+            512,
+        )
+        self.assertEqual(
+            mock_chat.call_args.kwargs["keep_alive"],
+            "0",
+        )
+        mock_stop.assert_called_once_with(
+            "qwen3:14b",
+        )
 
     def test_gaming_fast_brain_is_on_demand(self) -> None:
         plan = TaskPlan(goal="Gaming test")
@@ -300,7 +398,7 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         mock_stop.assert_called_once_with(
-            "qwen3.5:9b",
+            "qwen3:4b-instruct",
         )
 
     def test_prepare_resources_retries_after_unloading_models(self) -> None:

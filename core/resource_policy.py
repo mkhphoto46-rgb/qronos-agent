@@ -28,6 +28,9 @@ class ResourceThresholds:
     gpu_temp_warn_c: int = 75
     gpu_temp_block_c: int = 82
 
+    gpu_utilization_warn_percent: int = 75
+    gpu_utilization_block_percent: int = 90
+
     vram_warn_percent: float = 75.0
     vram_block_percent: float = 90.0
 
@@ -55,6 +58,13 @@ def evaluate_resources(
 
     if gpu is not None:
         if (
+            gpu.gpu_utilization_percent is not None
+            and gpu.gpu_utilization_percent
+            >= thresholds.gpu_utilization_block_percent
+        ):
+            return ResourceDecision.BLOCK
+
+        if (
             gpu.temperature_c is not None
             and gpu.temperature_c >= thresholds.gpu_temp_block_c
         ):
@@ -71,6 +81,13 @@ def evaluate_resources(
         return ResourceDecision.WARN
 
     if gpu is not None:
+        if (
+            gpu.gpu_utilization_percent is not None
+            and gpu.gpu_utilization_percent
+            >= thresholds.gpu_utilization_warn_percent
+        ):
+            return ResourceDecision.WARN
+
         if (
             gpu.temperature_c is not None
             and gpu.temperature_c >= thresholds.gpu_temp_warn_c

@@ -13,15 +13,15 @@ class ModelProfile:
 
 MODELS = {
     "fast": ModelProfile(
-        name="qwen3.5:9b",
+        name="qwen3:4b-instruct",
         role="fast_brain",
-        estimated_vram_gb=6.6,
+        estimated_vram_gb=3.2,
         priority=1,
     ),
     "heavy": ModelProfile(
-        name="qwen3.6:27b",
+        name="qwen3:14b",
         role="heavy_brain",
-        estimated_vram_gb=17.0,
+        estimated_vram_gb=9.3,
         priority=2,
     ),
 }
