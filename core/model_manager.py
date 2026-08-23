@@ -3,11 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from core.activity_guard import ActivityMode, ResourcePressure
-from core.model_registry import ModelProfile, get_model
+from core.activity_guard import (
+    ActivityMode,
+    ResourcePressure,
+)
+from core.brain_runtime import BrainRuntime
+from core.model_registry import (
+    ModelProfile,
+    get_model,
+)
 from core.ollama_controller import OllamaController
-from core.resource_guard import GpuStatus, SystemStatus
-from core.resource_policy import ResourceDecision, evaluate_resources
+from core.resource_guard import (
+    GpuStatus,
+    SystemStatus,
+)
+from core.resource_policy import (
+    ResourceDecision,
+    evaluate_resources,
+)
 
 
 class TaskClass(Enum):
@@ -27,9 +40,17 @@ class ModelManager:
 
     def __init__(
         self,
-        ollama: OllamaController | None = None,
+        runtime: BrainRuntime | None = None,
     ) -> None:
-        self.ollama = ollama or OllamaController()
+        self.runtime = (
+            runtime
+            if runtime is not None
+            else OllamaController()
+        )
+
+        # Temporary compatibility alias.
+        # Remove after the MVP migration away from Ollama-specific naming.
+        self.ollama = self.runtime
 
     def select_model(
         self,
@@ -39,7 +60,9 @@ class ModelManager:
         activity_mode: ActivityMode = ActivityMode.NORMAL,
         resource_pressure: ResourcePressure = ResourcePressure.NORMAL,
     ) -> ModelSelection:
-        model = get_model(task_class.value)
+        model = get_model(
+            task_class.value
+        )
 
         decision = evaluate_resources(
             system=system,
@@ -54,7 +77,10 @@ class ModelManager:
 
         # Never load either model while the user's system is already under
         # measured pressure. Qronos waits for safe headroom instead.
-        if resource_pressure is not ResourcePressure.NORMAL:
+        if (
+            resource_pressure
+            is not ResourcePressure.NORMAL
+        ):
             decision = ResourceDecision.BLOCK
 
         keep_loaded = self._should_keep_loaded(
@@ -85,10 +111,13 @@ class ModelManager:
             resource_pressure=resource_pressure,
         )
 
-        return selection.decision is ResourceDecision.ALLOW
+        return (
+            selection.decision
+            is ResourceDecision.ALLOW
+        )
 
     def unload_all(self) -> None:
-        self.ollama.unload_all()
+        self.runtime.unload_all()
 
     @staticmethod
     def _activity_blocks(
@@ -117,7 +146,10 @@ class ModelManager:
         if activity_mode is not ActivityMode.NORMAL:
             return False
 
-        if resource_pressure is not ResourcePressure.NORMAL:
+        if (
+            resource_pressure
+            is not ResourcePressure.NORMAL
+        ):
             return False
 
         return True

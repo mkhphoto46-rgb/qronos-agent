@@ -1,29 +1,36 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
 import requests
 
+from core.brain_runtime import (
+    BrainRuntime,
+    BrainRuntimeModelStatus,
+)
+
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
-
-@dataclass(frozen=True)
-class OllamaModelStatus:
-    """Information about a currently loaded Ollama model."""
-
-    name: str
-    size: str
-    processor: str
-    context: int
-    until: str
+# Temporary compatibility alias.
+# Existing tests and development code can keep importing
+# OllamaModelStatus while Qronos moves to runtime-neutral types.
+OllamaModelStatus = BrainRuntimeModelStatus
 
 
-class OllamaController:
-    """Control local Ollama models through the local HTTP API."""
+class OllamaController(BrainRuntime):
+    """
+    Development BrainRuntime adapter backed by the local Ollama HTTP API.
 
-    def __init__(self, base_url: str = OLLAMA_BASE_URL) -> None:
+    Qronos higher-level code talks to the BrainRuntime interface instead of
+    depending directly on Ollama. A bundled native runtime can replace this
+    adapter in the production application later.
+    """
+
+    def __init__(
+        self,
+        base_url: str = OLLAMA_BASE_URL,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
 
     def health_check(self) -> bool:
@@ -35,10 +42,13 @@ class OllamaController:
             )
             response.raise_for_status()
             return True
+
         except requests.RequestException:
             return False
 
-    def list_running_models(self) -> list[OllamaModelStatus]:
+    def list_running_models(
+        self,
+    ) -> list[BrainRuntimeModelStatus]:
         """Return currently loaded Ollama models."""
         try:
             response = requests.get(
@@ -46,27 +56,63 @@ class OllamaController:
                 timeout=3,
             )
             response.raise_for_status()
+
         except requests.RequestException as exc:
-            raise RuntimeError("Ollama API is unavailable.") from exc
+            raise RuntimeError(
+                "Ollama API is unavailable."
+            ) from exc
 
         data = response.json()
-        models: list[OllamaModelStatus] = []
 
-        for model in data.get("models", []):
+        models: list[BrainRuntimeModelStatus] = []
+
+        for model in data.get(
+            "models",
+            [],
+        ):
             models.append(
-                OllamaModelStatus(
-                    name=str(model.get("name", "")),
-                    size=str(model.get("size", "")),
-                    processor=str(model.get("processor", "")),
-                    context=int(model.get("context_length", 0) or 0),
-                    until=str(model.get("expires_at", "")),
+                BrainRuntimeModelStatus(
+                    name=str(
+                        model.get(
+                            "name",
+                            "",
+                        )
+                    ),
+                    size=str(
+                        model.get(
+                            "size",
+                            "",
+                        )
+                    ),
+                    processor=str(
+                        model.get(
+                            "processor",
+                            "",
+                        )
+                    ),
+                    context=int(
+                        model.get(
+                            "context_length",
+                            0,
+                        )
+                        or 0
+                    ),
+                    until=str(
+                        model.get(
+                            "expires_at",
+                            "",
+                        )
+                    ),
                 )
             )
 
         return models
 
-    def stop_model(self, model_name: str) -> None:
-        """Unload a model from Ollama."""
+    def stop_model(
+        self,
+        model_name: str,
+    ) -> None:
+        """Unload one model from Ollama."""
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
@@ -78,16 +124,20 @@ class OllamaController:
                 },
                 timeout=10,
             )
+
             response.raise_for_status()
+
         except requests.RequestException as exc:
             raise RuntimeError(
                 f"Could not stop model: {model_name}"
             ) from exc
 
     def unload_all(self) -> None:
-        """Unload all currently running models."""
+        """Unload every currently running model."""
         for model in self.list_running_models():
-            self.stop_model(model.name)
+            self.stop_model(
+                model.name
+            )
 
     def chat(
         self,
@@ -97,7 +147,8 @@ class OllamaController:
         num_predict: Optional[int] = None,
         keep_alive: str = "5m",
     ) -> str:
-        """Send a single chat request to a local Ollama model."""
+        """Send one chat request through the Ollama development runtime."""
+
         options: dict[str, int] = {}
 
         if num_predict is not None:
@@ -123,16 +174,25 @@ class OllamaController:
                 json=payload,
                 timeout=600,
             )
+
             response.raise_for_status()
+
         except requests.RequestException as exc:
             raise RuntimeError(
-                f"Could not send request to model: {model_name}"
+                "Could not send request to model: "
+                f"{model_name}"
             ) from exc
 
         data = response.json()
 
         return str(
-            data.get("message", {}).get("content", "")
+            data.get(
+                "message",
+                {},
+            ).get(
+                "content",
+                "",
+            )
         )
 
 

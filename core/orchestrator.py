@@ -2,10 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.activity_guard import ActivityGuard, ActivityMode, ResourcePressure
-from core.model_manager import ModelManager, TaskClass
+from core.activity_guard import (
+    ActivityGuard,
+    ActivityMode,
+    ResourcePressure,
+)
+from core.brain_runtime import BrainRuntime
+from core.model_manager import (
+    ModelManager,
+    TaskClass,
+)
 from core.ollama_controller import OllamaController
-from core.resource_guard import read_gpu_status, read_system_status
+from core.resource_guard import (
+    read_gpu_status,
+    read_system_status,
+)
 from core.resource_policy import ResourceDecision
 from core.task_plan import PlanStep, TaskPlan
 
@@ -25,17 +36,33 @@ class Orchestrator:
 
     def __init__(
         self,
-        ollama: OllamaController | None = None,
+        runtime: BrainRuntime | None = None,
         model_manager: ModelManager | None = None,
         activity_guard: ActivityGuard | None = None,
     ) -> None:
-        self.ollama = ollama or OllamaController()
-
-        self.model_manager = model_manager or ModelManager(
-            ollama=self.ollama,
+        self.runtime = (
+            runtime
+            if runtime is not None
+            else OllamaController()
         )
 
-        self.activity_guard = activity_guard or ActivityGuard()
+        # Temporary compatibility alias for the existing tests and
+        # development code. Higher-level Qronos code should use runtime.
+        self.ollama = self.runtime
+
+        self.model_manager = (
+            model_manager
+            if model_manager is not None
+            else ModelManager(
+                runtime=self.runtime,
+            )
+        )
+
+        self.activity_guard = (
+            activity_guard
+            if activity_guard is not None
+            else ActivityGuard()
+        )
 
     def execute_plan(
         self,
@@ -46,16 +73,22 @@ class Orchestrator:
         results: list[StepResult] = []
 
         for step in plan.steps:
-            activity_state = self.activity_guard.detect()
+            activity_state = (
+                self.activity_guard.detect()
+            )
 
             result = self._execute_step(
                 step=step,
                 previous_results=results,
                 activity_mode=activity_state.mode,
-                resource_pressure=activity_state.resource_pressure,
+                resource_pressure=(
+                    activity_state.resource_pressure
+                ),
             )
 
-            results.append(result)
+            results.append(
+                result
+            )
 
             if not result.success:
                 break
@@ -69,7 +102,9 @@ class Orchestrator:
         activity_mode: ActivityMode,
         resource_pressure: ResourcePressure,
     ) -> StepResult:
-        task_class = self._get_task_class(step)
+        task_class = self._get_task_class(
+            step
+        )
 
         if task_class is None:
             return StepResult(
@@ -89,7 +124,10 @@ class Orchestrator:
                 resource_pressure=resource_pressure,
             )
 
-            if selection.decision is not ResourceDecision.ALLOW:
+            if (
+                selection.decision
+                is not ResourceDecision.ALLOW
+            ):
                 return StepResult(
                     order=step.order,
                     success=False,
@@ -100,17 +138,25 @@ class Orchestrator:
                     ),
                 )
 
-            # The earlier snapshot may already be stale after model cleanup
-            # or plan preparation. Re-read all resources immediately before
-            # the Ollama request is allowed to load a model.
-            live_state = self.activity_guard.detect()
+            # The earlier resource snapshot may already be stale after
+            # cleanup or plan preparation. Re-read immediately before
+            # allowing the runtime to load or execute a brain.
+            live_state = (
+                self.activity_guard.detect()
+            )
+
             selection = self._prepare_resources(
                 task_class=task_class,
                 activity_mode=live_state.mode,
-                resource_pressure=live_state.resource_pressure,
+                resource_pressure=(
+                    live_state.resource_pressure
+                ),
             )
 
-            if selection.decision is not ResourceDecision.ALLOW:
+            if (
+                selection.decision
+                is not ResourceDecision.ALLOW
+            ):
                 return StepResult(
                     order=step.order,
                     success=False,
@@ -126,13 +172,17 @@ class Orchestrator:
                 previous_results=previous_results,
             )
 
-            response = self.ollama.chat(
+            response = self.runtime.chat(
                 model_name=selection.model.name,
                 prompt=prompt,
-                think=(task_class is TaskClass.HEAVY),
+                think=(
+                    task_class
+                    is TaskClass.HEAVY
+                ),
                 num_predict=(
                     512
-                    if task_class is TaskClass.HEAVY
+                    if task_class
+                    is TaskClass.HEAVY
                     else 256
                 ),
                 keep_alive=(
@@ -143,7 +193,7 @@ class Orchestrator:
             )
 
             if not selection.keep_loaded:
-                self.ollama.stop_model(
+                self.runtime.stop_model(
                     selection.model.name
                 )
 
@@ -172,37 +222,45 @@ class Orchestrator:
         system = read_system_status()
         gpu = read_gpu_status()
 
-        selection = self.model_manager.select_model(
-            task_class=task_class,
-            system=system,
-            gpu=gpu,
-            activity_mode=activity_mode,
-            resource_pressure=resource_pressure,
+        selection = (
+            self.model_manager.select_model(
+                task_class=task_class,
+                system=system,
+                gpu=gpu,
+                activity_mode=activity_mode,
+                resource_pressure=resource_pressure,
+            )
         )
 
-        if selection.decision is ResourceDecision.ALLOW:
+        if (
+            selection.decision
+            is ResourceDecision.ALLOW
+        ):
             return selection
 
         # WARN and BLOCK are both handled conservatively for now.
         # WARN will later become an approval workflow.
-        if selection.decision is not ResourceDecision.ALLOW:
-            running_models = self.ollama.list_running_models()
+        running_models = (
+            self.runtime.list_running_models()
+        )
 
-            if running_models:
-                self.ollama.unload_all()
+        if running_models:
+            self.runtime.unload_all()
 
-                system = read_system_status()
-                gpu = read_gpu_status()
+            system = read_system_status()
+            gpu = read_gpu_status()
 
-                retry = self.model_manager.select_model(
+            retry = (
+                self.model_manager.select_model(
                     task_class=task_class,
                     system=system,
                     gpu=gpu,
                     activity_mode=activity_mode,
                     resource_pressure=resource_pressure,
                 )
+            )
 
-                return retry
+            return retry
 
         return selection
 
@@ -240,7 +298,10 @@ class Orchestrator:
             return description
 
         previous_text = "\n\n".join(
-            f"Step {result.order} result:\n{result.output}"
+            (
+                f"Step {result.order} result:\n"
+                f"{result.output}"
+            )
             for result in previous_results
             if result.success
         )
@@ -265,7 +326,12 @@ if __name__ == "__main__":
     )
 
     orchestrator = Orchestrator()
-    results = orchestrator.execute_plan(plan)
+
+    results = (
+        orchestrator.execute_plan(
+            plan
+        )
+    )
 
     for result in results:
         print(
@@ -274,6 +340,10 @@ if __name__ == "__main__":
         )
 
         if result.success:
-            print(result.output)
+            print(
+                result.output
+            )
         else:
-            print(f"ERROR: {result.error}")
+            print(
+                f"ERROR: {result.error}"
+            )
