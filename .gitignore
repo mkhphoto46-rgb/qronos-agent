@@ -26,6 +26,11 @@ tmp/
 output/
 *.tmp
 
+# Local development snapshots
+qronos_changes.txt
+qronos_files.txt
+test_results.txt
+
 # Local caches
 .cache/
 cache/
@@ -37,6 +42,13 @@ models/**
 *.gguf
 *.safetensors
 *.bin
+
+# Bundled third-party runtime binaries
+# These stay on the development machine and will later be added
+# to the Qronos installer by the build/package pipeline.
+runtime/whisper/bin/
+runtime/whisper/models/
+runtime/whisper/*.zip
 
 # OS / IDE
 .vscode/
