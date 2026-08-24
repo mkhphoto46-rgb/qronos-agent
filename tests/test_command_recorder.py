@@ -135,7 +135,12 @@ class TestCommandRecorder(
 
         self.assertEqual(
             config.silence_seconds,
-            1.0,
+            2.0,
+        )
+
+        self.assertEqual(
+            config.max_duration_seconds,
+            60.0,
         )
 
     def test_invalid_configuration_is_rejected(

@@ -7,6 +7,11 @@ from pathlib import Path
 from core.command_recorder import (
     CommandRecordingResult,
 )
+from core.conversation_session import (
+    ConversationRole,
+    ConversationSession,
+    ConversationSessionConfig,
+)
 from core.orchestrator import (
     StepResult,
 )
@@ -20,6 +25,23 @@ from core.voice_pipeline import (
 from core.voice_trigger import (
     VoiceTriggerEvent,
 )
+
+
+class FakeClock:
+    def __init__(
+        self,
+        initial_time: float = 100.0,
+    ) -> None:
+        self.current_time = initial_time
+
+    def __call__(self) -> float:
+        return self.current_time
+
+    def advance(
+        self,
+        seconds: float,
+    ) -> None:
+        self.current_time += seconds
 
 
 class FakeAudioInput:
@@ -107,7 +129,6 @@ class FakeVADRuntime:
         ready: bool = True,
     ) -> None:
         self.ready = ready
-
         self.prepare_calls = 0
         self.close_calls = 0
 
@@ -177,11 +198,19 @@ class FakeCommandRecorder:
 class FakeSpeechRuntime:
     def __init__(
         self,
-        transcript: str = "Hello Qronos",
+        transcripts: list[str] | None = None,
         ready: bool = True,
     ) -> None:
-        self.transcript = transcript
         self.ready = ready
+
+        self.transcripts = (
+            transcripts
+            if transcripts is not None
+            else [
+                "Hello Qronos",
+            ]
+        )
+
         self.calls = 0
 
     def health_check(self) -> bool:
@@ -195,9 +224,18 @@ class FakeSpeechRuntime:
         del audio_path
         del language
 
+        index = min(
+            self.calls,
+            len(self.transcripts) - 1,
+        )
+
+        transcript = (
+            self.transcripts[index]
+        )
+
         self.calls += 1
 
-        return self.transcript
+        return transcript
 
 
 class FakeTaskRouter:
@@ -225,12 +263,19 @@ class FakeTaskRouter:
 class FakeOrchestrator:
     def __init__(
         self,
+        outputs: list[str] | None = None,
         success: bool = True,
-        output: str = "Brain response",
         error: str | None = None,
     ) -> None:
+        self.outputs = (
+            outputs
+            if outputs is not None
+            else [
+                "Brain response",
+            ]
+        )
+
         self.success = success
-        self.output = output
         self.error = error
         self.plans = []
 
@@ -242,12 +287,21 @@ class FakeOrchestrator:
             plan
         )
 
+        index = min(
+            len(self.plans) - 1,
+            len(self.outputs) - 1,
+        )
+
+        output = (
+            self.outputs[index]
+        )
+
         return [
             StepResult(
                 order=1,
                 success=self.success,
                 output=(
-                    self.output
+                    output
                     if self.success
                     else ""
                 ),
@@ -276,6 +330,15 @@ class TestVoicePipeline(
             self.temp_directory.name
         )
 
+        self.clock = FakeClock()
+
+        self.session = ConversationSession(
+            config=ConversationSessionConfig(
+                inactivity_timeout_seconds=60.0
+            ),
+            clock=self.clock,
+        )
+
         self.audio = FakeAudioInput()
         self.trigger = FakeVoiceTrigger()
         self.vad = FakeVADRuntime()
@@ -286,7 +349,10 @@ class TestVoicePipeline(
         )
 
         self.speech = FakeSpeechRuntime(
-            transcript="Hello Qronos"
+            transcripts=[
+                "What is two plus two?",
+                "What is four plus four?",
+            ]
         )
 
         self.router = FakeTaskRouter(
@@ -295,8 +361,10 @@ class TestVoicePipeline(
 
         self.orchestrator = (
             FakeOrchestrator(
-                success=True,
-                output="Hello from Qronos.",
+                outputs=[
+                    "Four.",
+                    "Eight.",
+                ]
             )
         )
 
@@ -312,6 +380,7 @@ class TestVoicePipeline(
             speech_runtime=self.speech,
             task_router=self.router,
             orchestrator=self.orchestrator,
+            conversation_session=self.session,
             command_audio_path=(
                 self.root
                 / "command.wav"
@@ -389,7 +458,7 @@ class TestVoicePipeline(
         ):
             self.pipeline.listen_once()
 
-    def test_wake_callback_is_called(
+    def test_first_turn_requires_wake_word(
         self,
     ) -> None:
         self.pipeline.prepare()
@@ -402,6 +471,15 @@ class TestVoicePipeline(
             result.success
         )
 
+        self.assertIsNotNone(
+            result.wake_event
+        )
+
+        self.assertEqual(
+            self.trigger.process_calls,
+            1,
+        )
+
         self.assertEqual(
             len(
                 self.wake_events
@@ -409,17 +487,171 @@ class TestVoicePipeline(
             1,
         )
 
-        self.assertEqual(
-            self.wake_events[0].wake_word,
-            "Qronos",
+        self.assertTrue(
+            self.session.is_active
+        )
+
+        self.assertFalse(
+            self.session.requires_wake_word()
+        )
+
+    def test_second_turn_does_not_require_wake_word(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        first = (
+            self.pipeline.listen_once()
+        )
+
+        wake_process_calls_after_first = (
+            self.trigger.process_calls
+        )
+
+        second = (
+            self.pipeline.listen_once()
+        )
+
+        self.assertTrue(
+            first.success
+        )
+
+        self.assertTrue(
+            second.success
+        )
+
+        self.assertIsNotNone(
+            first.wake_event
+        )
+
+        self.assertIsNone(
+            second.wake_event
         )
 
         self.assertEqual(
-            self.trigger.pause_calls,
+            self.trigger.process_calls,
+            wake_process_calls_after_first,
+        )
+
+        self.assertEqual(
+            len(
+                self.wake_events
+            ),
             1,
         )
 
-    def test_successful_voice_command_reaches_brain(
+    def test_two_turns_are_recorded_in_session_history(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        first = (
+            self.pipeline.listen_once()
+        )
+
+        second = (
+            self.pipeline.listen_once()
+        )
+
+        self.assertTrue(
+            first.success
+        )
+
+        self.assertTrue(
+            second.success
+        )
+
+        messages = (
+            self.session.messages
+        )
+
+        self.assertEqual(
+            len(messages),
+            4,
+        )
+
+        self.assertEqual(
+            messages[0].role,
+            ConversationRole.USER,
+        )
+
+        self.assertEqual(
+            messages[0].content,
+            "What is two plus two?",
+        )
+
+        self.assertEqual(
+            messages[1].role,
+            ConversationRole.ASSISTANT,
+        )
+
+        self.assertEqual(
+            messages[1].content,
+            "Four.",
+        )
+
+        self.assertEqual(
+            messages[2].role,
+            ConversationRole.USER,
+        )
+
+        self.assertEqual(
+            messages[2].content,
+            "What is four plus four?",
+        )
+
+        self.assertEqual(
+            messages[3].role,
+            ConversationRole.ASSISTANT,
+        )
+
+        self.assertEqual(
+            messages[3].content,
+            "Eight.",
+        )
+
+    def test_second_turn_routes_second_transcript(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        self.pipeline.listen_once()
+        self.pipeline.listen_once()
+
+        self.assertEqual(
+            self.router.inputs,
+            [
+                "What is two plus two?",
+                "What is four plus four?",
+            ],
+        )
+
+    def test_each_turn_reaches_orchestrator(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        self.pipeline.listen_once()
+        self.pipeline.listen_once()
+
+        self.assertEqual(
+            len(
+                self.orchestrator.plans
+            ),
+            2,
+        )
+
+        self.assertEqual(
+            self.orchestrator.plans[0].goal,
+            "What is two plus two?",
+        )
+
+        self.assertEqual(
+            self.orchestrator.plans[1].goal,
+            "What is four plus four?",
+        )
+
+    def test_successful_first_turn_returns_response(
         self,
     ) -> None:
         self.pipeline.prepare()
@@ -434,16 +666,12 @@ class TestVoicePipeline(
 
         self.assertEqual(
             result.transcript,
-            "Hello Qronos",
+            "What is two plus two?",
         )
 
         self.assertEqual(
             result.response,
-            "Hello from Qronos.",
-        )
-
-        self.assertIsNotNone(
-            result.wake_event
+            "Four.",
         )
 
         self.assertIsNotNone(
@@ -459,69 +687,128 @@ class TestVoicePipeline(
             TaskType.FAST,
         )
 
-        self.assertEqual(
-            self.router.inputs,
-            [
-                "Hello Qronos",
-            ],
-        )
-
-        self.assertEqual(
-            len(
-                self.orchestrator.plans
-            ),
-            1,
-        )
-
-        plan = (
-            self.orchestrator.plans[0]
-        )
-
-        self.assertEqual(
-            plan.goal,
-            "Hello Qronos",
-        )
-
-        self.assertEqual(
-            len(plan.steps),
-            1,
-        )
-
-        self.assertEqual(
-            plan.steps[0].task_type,
-            TaskType.FAST,
-        )
-
-    def test_microphone_is_paused_during_brain_work_and_rearmed(
+    def test_successful_second_turn_returns_second_response(
         self,
     ) -> None:
         self.pipeline.prepare()
 
         self.pipeline.listen_once()
 
-        self.assertEqual(
-            self.trigger.pause_calls,
-            1,
-        )
-
-        self.assertEqual(
-            self.trigger.resume_calls,
-            1,
-        )
-
-        self.assertGreaterEqual(
-            self.audio.stop_calls,
-            1,
+        result = (
+            self.pipeline.listen_once()
         )
 
         self.assertTrue(
-            self.audio.is_running()
+            result.success
         )
 
-    def test_empty_transcript_fails_cleanly(
+        self.assertEqual(
+            result.transcript,
+            "What is four plus four?",
+        )
+
+        self.assertEqual(
+            result.response,
+            "Eight.",
+        )
+
+        self.assertIsNone(
+            result.wake_event
+        )
+
+    def test_session_timeout_requires_wake_word_again(
         self,
     ) -> None:
-        self.speech.transcript = "   "
+        self.pipeline.prepare()
+
+        self.pipeline.listen_once()
+
+        self.assertFalse(
+            self.session.requires_wake_word()
+        )
+
+        first_wake_calls = (
+            self.trigger.process_calls
+        )
+
+        self.clock.advance(
+            60.0
+        )
+
+        self.assertTrue(
+            self.session.requires_wake_word()
+        )
+
+        result = (
+            self.pipeline.listen_once()
+        )
+
+        self.assertTrue(
+            result.success
+        )
+
+        self.assertIsNotNone(
+            result.wake_event
+        )
+
+        self.assertGreater(
+            self.trigger.process_calls,
+            first_wake_calls,
+        )
+
+        self.assertEqual(
+            len(
+                self.wake_events
+            ),
+            2,
+        )
+
+    def test_processing_time_does_not_expire_session(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        self.session.start()
+        self.session.begin_processing()
+
+        self.clock.advance(
+            600.0
+        )
+
+        self.assertTrue(
+            self.session.is_active
+        )
+
+        self.assertFalse(
+            self.session.requires_wake_word()
+        )
+
+    def test_follow_up_listening_restores_timeout_window(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        self.pipeline.listen_once()
+
+        remaining = (
+            self.session.seconds_until_timeout()
+        )
+
+        self.assertIsNotNone(
+            remaining
+        )
+
+        self.assertAlmostEqual(
+            remaining or 0.0,
+            60.0,
+        )
+
+    def test_empty_transcript_fails_cleanly_but_keeps_session_active(
+        self,
+    ) -> None:
+        self.speech.transcripts = [
+            "   ",
+        ]
 
         self.pipeline.prepare()
 
@@ -548,12 +835,15 @@ class TestVoicePipeline(
             [],
         )
 
-        self.assertEqual(
-            self.trigger.resume_calls,
-            1,
+        self.assertTrue(
+            self.session.is_active
         )
 
-    def test_orchestrator_failure_is_returned(
+        self.assertFalse(
+            self.session.requires_wake_word()
+        )
+
+    def test_orchestrator_failure_keeps_conversation_open(
         self,
     ) -> None:
         self.orchestrator.success = False
@@ -579,6 +869,10 @@ class TestVoicePipeline(
         self.assertEqual(
             result.response,
             "",
+        )
+
+        self.assertTrue(
+            self.session.is_active
         )
 
     def test_prepare_fails_when_vad_is_not_ready(
@@ -611,10 +905,12 @@ class TestVoicePipeline(
             self.pipeline.is_prepared
         )
 
-    def test_stop_stops_listening_but_does_not_close_vad(
+    def test_stop_stops_listening_but_keeps_session_object(
         self,
     ) -> None:
         self.pipeline.prepare()
+
+        self.pipeline.listen_once()
 
         self.pipeline.stop()
 
@@ -635,10 +931,12 @@ class TestVoicePipeline(
             0,
         )
 
-    def test_close_releases_pipeline_resources(
+    def test_close_closes_conversation_session(
         self,
     ) -> None:
         self.pipeline.prepare()
+
+        self.pipeline.listen_once()
 
         self.pipeline.close()
 
@@ -657,6 +955,14 @@ class TestVoicePipeline(
         self.assertEqual(
             self.vad.close_calls,
             1,
+        )
+
+        self.assertFalse(
+            self.session.is_active
+        )
+
+        self.assertTrue(
+            self.session.requires_wake_word()
         )
 
     def test_closed_pipeline_cannot_be_prepared_again(

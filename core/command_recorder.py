@@ -43,8 +43,8 @@ class CommandRecorderConfig:
     speech_start_threshold: float = 0.50
     speech_continue_threshold: float = 0.50
 
-    silence_seconds: float = 1.0
-    max_duration_seconds: float = 15.0
+    silence_seconds: float = 2.0
+    max_duration_seconds: float = 60.0
     start_timeout_seconds: float = 8.0
 
     pre_roll_seconds: float = 0.32
@@ -245,6 +245,7 @@ class CommandRecorder:
             == 0
         ):
             pre_roll_frames = 0
+
         else:
             pre_roll_frames = (
                 self._seconds_to_frames(

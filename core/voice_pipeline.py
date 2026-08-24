@@ -11,6 +11,9 @@ from core.command_recorder import (
     CommandRecordingResult,
 )
 from core.config import CONFIG
+from core.conversation_session import (
+    ConversationSession,
+)
 from core.orchestrator import (
     Orchestrator,
     StepResult,
@@ -43,7 +46,7 @@ WakeDetectedCallback = Callable[
 @dataclass(frozen=True)
 class VoicePipelineResult:
     """
-    Final result of one complete Qronos voice interaction.
+    Final result of one Qronos voice turn.
     """
 
     success: bool
@@ -57,33 +60,29 @@ class VoicePipelineResult:
 
 class VoicePipeline:
     """
-    Connect Qronos wake word, command recording, STT, routing, and Brain.
+    Connect Qronos wake word, conversation session, command recording,
+    speech-to-text, routing, and Brain execution.
 
-    Flow:
+    Conversation behavior:
 
-        Wake Word
+        No active session
             ->
-        Command Recorder + VAD
+        Wait for Wake Word
             ->
-        Speech-to-Text
+        Start ConversationSession
             ->
-        Task Router
+        Record command
             ->
-        Orchestrator
+        Process
             ->
-        Fast / Heavy Brain
+        Respond
+            ->
+        Follow-up listening
 
-    A lightweight wake-detected callback may be supplied by the UI or
-    diagnostics layer. It runs immediately after the wake word is accepted
-    and before command recording begins.
+    While the ConversationSession remains active, later turns do not
+    require another wake word.
 
-    This allows Qronos to visibly or audibly acknowledge the transition:
-
-        LISTENING FOR WAKE WORD
-            ->
-        WAKE DETECTED
-            ->
-        LISTENING FOR COMMAND
+    When the session expires or closes, Qronos returns to wake-word mode.
     """
 
     def __init__(
@@ -95,6 +94,7 @@ class VoicePipeline:
         speech_runtime: SpeechRuntime,
         task_router: TaskRouter,
         orchestrator: Orchestrator,
+        conversation_session: ConversationSession,
         command_audio_path: str | Path = DEFAULT_COMMAND_AUDIO_PATH,
         on_wake_detected: WakeDetectedCallback | None = None,
     ) -> None:
@@ -105,6 +105,7 @@ class VoicePipeline:
         self.speech_runtime = speech_runtime
         self.task_router = task_router
         self.orchestrator = orchestrator
+        self.conversation_session = conversation_session
 
         self.command_audio_path = Path(
             command_audio_path
@@ -127,11 +128,7 @@ class VoicePipeline:
 
     def prepare(self) -> None:
         """
-        Prepare every latency-sensitive component before listening.
-
-        Wake-word and VAD models are loaded before the user is asked to
-        speak. The microphone is then started and Qronos enters listening
-        mode.
+        Prepare latency-sensitive components before listening.
         """
 
         if self._closed:
@@ -186,14 +183,6 @@ class VoicePipeline:
         self,
         event: VoiceTriggerEvent,
     ) -> None:
-        """
-        Notify the presentation layer that command capture is about to start.
-
-        The callback must remain lightweight. It is intended for state
-        changes such as UI animation, text feedback, or a short acknowledgement
-        sound, not expensive processing.
-        """
-
         if self.on_wake_detected is None:
             return
 
@@ -226,25 +215,56 @@ class VoicePipeline:
 
         return results[-1]
 
-    def _rearm_microphone(
+    def _ensure_microphone_running(
         self,
     ) -> None:
-        if (
-            self._closed
-            or not self._prepared
-        ):
-            return
-
         if not self.audio_input.is_running():
             self.audio_input.start()
 
-        self.voice_trigger.resume()
+    def _prepare_for_turn(
+        self,
+    ) -> VoiceTriggerEvent | None:
+        """
+        Prepare the microphone for the next user turn.
+
+        If the conversation is inactive, wait for the wake word and start
+        a new session.
+
+        If the conversation is already active, skip wake-word detection and
+        immediately listen for the follow-up command.
+        """
+
+        self._ensure_microphone_running()
+
+        if self.conversation_session.requires_wake_word():
+            wake_event = (
+                self._wait_for_wake_word()
+            )
+
+            self.voice_trigger.pause()
+
+            self.conversation_session.start()
+
+            self._notify_wake_detected(
+                wake_event
+            )
+
+            return wake_event
+
+        self.voice_trigger.pause()
+
+        self.conversation_session.begin_listening()
+
+        return None
 
     def listen_once(
         self,
     ) -> VoicePipelineResult:
         """
-        Wait for Qronos, capture one command, and return one Brain response.
+        Capture and execute one conversation turn.
+
+        The first turn of a conversation requires the Qronos wake word.
+        Follow-up turns inside the active session do not.
         """
 
         if self._closed:
@@ -265,17 +285,7 @@ class VoicePipeline:
 
         try:
             wake_event = (
-                self._wait_for_wake_word()
-            )
-
-            # Freeze wake-word processing immediately so the accepted wake
-            # word cannot create another trigger while command capture starts.
-            self.voice_trigger.pause()
-
-            # Notify UI / diagnostics immediately. This is the boundary
-            # between "say Qronos" and "say your command".
-            self._notify_wake_detected(
-                wake_event
+                self._prepare_for_turn()
             )
 
             recording = (
@@ -284,10 +294,9 @@ class VoicePipeline:
                 )
             )
 
-            # Qronos is now thinking. Stop microphone capture so unnecessary
-            # microphone input is not consumed while Whisper and the Brain
-            # are working.
             self.audio_input.stop()
+
+            self.conversation_session.begin_processing()
 
             transcript = (
                 self.speech_runtime.transcribe_file(
@@ -297,6 +306,8 @@ class VoicePipeline:
             ).strip()
 
             if not transcript:
+                self.conversation_session.begin_listening()
+
                 return VoicePipelineResult(
                     success=False,
                     wake_event=wake_event,
@@ -309,6 +320,10 @@ class VoicePipeline:
                         "an empty command."
                     ),
                 )
+
+            self.conversation_session.add_user_message(
+                transcript
+            )
 
             route = (
                 self.task_router.route(
@@ -334,6 +349,8 @@ class VoicePipeline:
             )
 
             if final_step is None:
+                self.conversation_session.begin_listening()
+
                 return VoicePipelineResult(
                     success=False,
                     wake_event=wake_event,
@@ -348,6 +365,8 @@ class VoicePipeline:
                 )
 
             if not final_step.success:
+                self.conversation_session.begin_listening()
+
                 return VoicePipelineResult(
                     success=False,
                     wake_event=wake_event,
@@ -361,17 +380,30 @@ class VoicePipeline:
                     ),
                 )
 
+            self.conversation_session.begin_responding()
+
+            response = final_step.output
+
+            self.conversation_session.add_assistant_message(
+                response
+            )
+
+            self.conversation_session.begin_listening()
+
             return VoicePipelineResult(
                 success=True,
                 wake_event=wake_event,
                 recording=recording,
                 transcript=transcript,
                 route=route,
-                response=final_step.output,
+                response=response,
                 error=None,
             )
 
         except TimeoutError as exc:
+            if self.conversation_session.is_active:
+                self.conversation_session.begin_listening()
+
             return VoicePipelineResult(
                 success=False,
                 wake_event=wake_event,
@@ -383,6 +415,9 @@ class VoicePipeline:
             )
 
         except Exception as exc:
+            if self.conversation_session.is_active:
+                self.conversation_session.begin_listening()
+
             return VoicePipelineResult(
                 success=False,
                 wake_event=wake_event,
@@ -394,11 +429,18 @@ class VoicePipeline:
             )
 
         finally:
-            self._rearm_microphone()
+            if (
+                not self._closed
+                and self._prepared
+            ):
+                self._ensure_microphone_running()
+
+                if self.conversation_session.requires_wake_word():
+                    self.voice_trigger.resume()
 
     def stop(self) -> None:
         """
-        Stop listening without permanently destroying native runtimes.
+        Stop listening without permanently closing native runtimes.
         """
 
         if self._closed:
@@ -411,7 +453,7 @@ class VoicePipeline:
 
     def close(self) -> None:
         """
-        Permanently release the voice pipeline and native VAD resources.
+        Permanently release the pipeline and native VAD runtime.
         """
 
         if self._closed:
@@ -420,6 +462,8 @@ class VoicePipeline:
         self.audio_input.stop()
         self.voice_trigger.stop()
         self.vad_runtime.close()
+
+        self.conversation_session.close()
 
         self._prepared = False
         self._closed = True
