@@ -4,6 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from core.brain_runtime import (
+    BrainMessage,
+    BrainMessageRole,
+)
 from core.command_recorder import (
     CommandRecordingResult,
 )
@@ -277,14 +281,27 @@ class FakeOrchestrator:
 
         self.success = success
         self.error = error
+
         self.plans = []
+
+        self.conversation_contexts: list[
+            list[BrainMessage]
+        ] = []
 
     def execute_plan(
         self,
         plan,
+        conversation_messages=None,
     ) -> list[StepResult]:
         self.plans.append(
             plan
+        )
+
+        self.conversation_contexts.append(
+            list(
+                conversation_messages
+                or []
+            )
         )
 
         index = min(
@@ -610,6 +627,110 @@ class TestVoicePipeline(
             "Eight.",
         )
 
+    def test_first_turn_has_no_previous_conversation_context(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        result = (
+            self.pipeline.listen_once()
+        )
+
+        self.assertTrue(
+            result.success
+        )
+
+        self.assertEqual(
+            len(
+                self.orchestrator.conversation_contexts
+            ),
+            1,
+        )
+
+        self.assertEqual(
+            self.orchestrator.conversation_contexts[0],
+            [],
+        )
+
+    def test_second_turn_receives_previous_conversation_context(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        first = (
+            self.pipeline.listen_once()
+        )
+
+        second = (
+            self.pipeline.listen_once()
+        )
+
+        self.assertTrue(
+            first.success
+        )
+
+        self.assertTrue(
+            second.success
+        )
+
+        self.assertEqual(
+            len(
+                self.orchestrator.conversation_contexts
+            ),
+            2,
+        )
+
+        second_context = (
+            self.orchestrator.conversation_contexts[1]
+        )
+
+        self.assertEqual(
+            len(second_context),
+            2,
+        )
+
+        self.assertEqual(
+            second_context[0].role,
+            BrainMessageRole.USER,
+        )
+
+        self.assertEqual(
+            second_context[0].content,
+            "What is two plus two?",
+        )
+
+        self.assertEqual(
+            second_context[1].role,
+            BrainMessageRole.ASSISTANT,
+        )
+
+        self.assertEqual(
+            second_context[1].content,
+            "Four.",
+        )
+
+    def test_current_user_turn_is_not_duplicated_in_context(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        self.pipeline.listen_once()
+        self.pipeline.listen_once()
+
+        second_context = (
+            self.orchestrator.conversation_contexts[1]
+        )
+
+        contents = [
+            message.content
+            for message in second_context
+        ]
+
+        self.assertNotIn(
+            "What is four plus four?",
+            contents,
+        )
+
     def test_second_turn_routes_second_transcript(
         self,
     ) -> None:
@@ -761,6 +882,44 @@ class TestVoicePipeline(
                 self.wake_events
             ),
             2,
+        )
+
+    def test_new_session_does_not_receive_old_context(
+        self,
+    ) -> None:
+        self.pipeline.prepare()
+
+        first = (
+            self.pipeline.listen_once()
+        )
+
+        self.assertTrue(
+            first.success
+        )
+
+        self.clock.advance(
+            60.0
+        )
+
+        self.assertTrue(
+            self.session.requires_wake_word()
+        )
+
+        second = (
+            self.pipeline.listen_once()
+        )
+
+        self.assertTrue(
+            second.success
+        )
+
+        second_context = (
+            self.orchestrator.conversation_contexts[1]
+        )
+
+        self.assertEqual(
+            second_context,
+            [],
         )
 
     def test_processing_time_does_not_expire_session(

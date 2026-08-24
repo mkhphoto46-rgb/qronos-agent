@@ -6,12 +6,17 @@ from pathlib import Path
 from typing import Callable
 
 from core.audio_input import AudioInput
+from core.brain_runtime import (
+    BrainMessage,
+    BrainMessageRole,
+)
 from core.command_recorder import (
     CommandRecorder,
     CommandRecordingResult,
 )
 from core.config import CONFIG
 from core.conversation_session import (
+    ConversationRole,
     ConversationSession,
 )
 from core.orchestrator import (
@@ -82,7 +87,8 @@ class VoicePipeline:
     While the ConversationSession remains active, later turns do not
     require another wake word.
 
-    When the session expires or closes, Qronos returns to wake-word mode.
+    Conversation history is converted to runtime-neutral BrainMessage
+    objects so Fast Brain and Heavy Brain receive the same context.
     """
 
     def __init__(
@@ -257,6 +263,67 @@ class VoicePipeline:
 
         return None
 
+    def _build_conversation_context(
+        self,
+    ) -> list[BrainMessage]:
+        """
+        Convert stored Qronos conversation history into Brain messages.
+
+        The newest user message is intentionally excluded because the
+        current TaskPlan step already contains that same transcript.
+
+        Without this exclusion, the current user turn would be sent to
+        the model twice.
+        """
+
+        stored_messages = list(
+            self.conversation_session.messages
+        )
+
+        if not stored_messages:
+            return []
+
+        if (
+            stored_messages[-1].role
+            is ConversationRole.USER
+        ):
+            stored_messages = (
+                stored_messages[:-1]
+            )
+
+        brain_messages: list[
+            BrainMessage
+        ] = []
+
+        for message in stored_messages:
+            if (
+                message.role
+                is ConversationRole.USER
+            ):
+                role = (
+                    BrainMessageRole.USER
+                )
+
+            elif (
+                message.role
+                is ConversationRole.ASSISTANT
+            ):
+                role = (
+                    BrainMessageRole.ASSISTANT
+                )
+
+            else:
+                continue
+
+            brain_messages.append(
+                BrainMessage(
+                    role=role,
+                    content=message.content,
+                )
+            )
+
+        return brain_messages
+
     def listen_once(
         self,
     ) -> VoicePipelineResult:
@@ -265,6 +332,10 @@ class VoicePipeline:
 
         The first turn of a conversation requires the Qronos wake word.
         Follow-up turns inside the active session do not.
+
+        Previous user and assistant turns are supplied to the Brain so
+        references such as "that", "he", "the previous number", and similar
+        conversational dependencies can be resolved.
         """
 
         if self._closed:
@@ -325,6 +396,10 @@ class VoicePipeline:
                 transcript
             )
 
+            conversation_context = (
+                self._build_conversation_context()
+            )
+
             route = (
                 self.task_router.route(
                     transcript
@@ -338,7 +413,10 @@ class VoicePipeline:
 
             results = (
                 self.orchestrator.execute_plan(
-                    plan
+                    plan,
+                    conversation_messages=(
+                        conversation_context
+                    ),
                 )
             )
 

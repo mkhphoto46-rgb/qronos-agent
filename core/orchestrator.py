@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 from core.activity_guard import (
     ActivityGuard,
     ActivityMode,
     ResourcePressure,
 )
-from core.brain_runtime import BrainRuntime
+from core.brain_runtime import (
+    BrainMessage,
+    BrainMessageRole,
+    BrainRuntime,
+)
 from core.model_manager import (
     ModelManager,
     TaskClass,
@@ -21,6 +26,31 @@ from core.resource_policy import ResourceDecision
 from core.task_plan import PlanStep, TaskPlan
 
 
+QRONOS_SYSTEM_PROMPT = """
+You are Qronos, the user's personal AI assistant.
+
+Identity rules:
+- Your name and product identity are Qronos.
+- Always present yourself as Qronos.
+- If asked what AI you are, what model you are, who your underlying
+  model provider is, what LLM powers you, or similar questions, identify
+  yourself only as Qronos, the user's personal AI assistant.
+- Do not claim to be Qwen or any other underlying model.
+- Do not reveal, speculate about, or volunteer internal model names,
+  provider names, runtime implementation details, model routing details,
+  or hidden infrastructure.
+- Fast Brain and Heavy Brain are internal implementation concepts and
+  must not alter your identity. You are Qronos in every mode.
+
+Behavior rules:
+- Answer in the language used by the user unless they request another
+  language.
+- Be accurate and helpful.
+- Do not invent facts when information is uncertain.
+- Preserve conversational context from the supplied message history.
+""".strip()
+
+
 @dataclass(frozen=True)
 class StepResult:
     """Result of one executed task step."""
@@ -32,7 +62,13 @@ class StepResult:
 
 
 class Orchestrator:
-    """Execute Qronos plans with resource and activity awareness."""
+    """
+    Execute Qronos plans with resource and activity awareness.
+
+    The Orchestrator also owns the product-level Qronos identity message.
+    This keeps identity consistent regardless of which BrainRuntime or
+    model is selected.
+    """
 
     def __init__(
         self,
@@ -67,8 +103,20 @@ class Orchestrator:
     def execute_plan(
         self,
         plan: TaskPlan,
+        conversation_messages: (
+            Sequence[BrainMessage] | None
+        ) = None,
     ) -> list[StepResult]:
-        """Execute plan steps in order."""
+        """
+        Execute plan steps in order.
+
+        conversation_messages contains conversation turns that happened
+        before the current plan request.
+
+        The current PlanStep description is appended as the newest user
+        message by the Orchestrator, preventing the current turn from being
+        duplicated in the model context.
+        """
 
         results: list[StepResult] = []
 
@@ -80,9 +128,14 @@ class Orchestrator:
             result = self._execute_step(
                 step=step,
                 previous_results=results,
-                activity_mode=activity_state.mode,
+                activity_mode=(
+                    activity_state.mode
+                ),
                 resource_pressure=(
                     activity_state.resource_pressure
+                ),
+                conversation_messages=(
+                    conversation_messages
                 ),
             )
 
@@ -101,6 +154,9 @@ class Orchestrator:
         previous_results: list[StepResult],
         activity_mode: ActivityMode,
         resource_pressure: ResourcePressure,
+        conversation_messages: (
+            Sequence[BrainMessage] | None
+        ),
     ) -> StepResult:
         task_class = self._get_task_class(
             step
@@ -118,10 +174,14 @@ class Orchestrator:
             )
 
         try:
-            selection = self._prepare_resources(
-                task_class=task_class,
-                activity_mode=activity_mode,
-                resource_pressure=resource_pressure,
+            selection = (
+                self._prepare_resources(
+                    task_class=task_class,
+                    activity_mode=activity_mode,
+                    resource_pressure=(
+                        resource_pressure
+                    ),
+                )
             )
 
             if (
@@ -145,12 +205,16 @@ class Orchestrator:
                 self.activity_guard.detect()
             )
 
-            selection = self._prepare_resources(
-                task_class=task_class,
-                activity_mode=live_state.mode,
-                resource_pressure=(
-                    live_state.resource_pressure
-                ),
+            selection = (
+                self._prepare_resources(
+                    task_class=task_class,
+                    activity_mode=(
+                        live_state.mode
+                    ),
+                    resource_pressure=(
+                        live_state.resource_pressure
+                    ),
+                )
             )
 
             if (
@@ -167,14 +231,25 @@ class Orchestrator:
                     ),
                 )
 
-            prompt = self._build_prompt(
-                description=step.description,
-                previous_results=previous_results,
+            messages = (
+                self._build_brain_messages(
+                    description=(
+                        step.description
+                    ),
+                    previous_results=(
+                        previous_results
+                    ),
+                    conversation_messages=(
+                        conversation_messages
+                    ),
+                )
             )
 
             response = self.runtime.chat(
-                model_name=selection.model.name,
-                prompt=prompt,
+                model_name=(
+                    selection.model.name
+                ),
+                messages=messages,
                 think=(
                     task_class
                     is TaskClass.HEAVY
@@ -217,7 +292,9 @@ class Orchestrator:
         activity_mode: ActivityMode,
         resource_pressure: ResourcePressure,
     ):
-        """Prepare resources and return the selected model."""
+        """
+        Prepare resources and return the selected model.
+        """
 
         system = read_system_status()
         gpu = read_gpu_status()
@@ -228,7 +305,9 @@ class Orchestrator:
                 system=system,
                 gpu=gpu,
                 activity_mode=activity_mode,
-                resource_pressure=resource_pressure,
+                resource_pressure=(
+                    resource_pressure
+                ),
             )
         )
 
@@ -256,7 +335,9 @@ class Orchestrator:
                     system=system,
                     gpu=gpu,
                     activity_mode=activity_mode,
-                    resource_pressure=resource_pressure,
+                    resource_pressure=(
+                        resource_pressure
+                    ),
                 )
             )
 
@@ -288,11 +369,17 @@ class Orchestrator:
         return None
 
     @staticmethod
-    def _build_prompt(
+    def _build_step_content(
         description: str,
         previous_results: list[StepResult],
     ) -> str:
-        """Build the prompt using previous successful results."""
+        """
+        Build the current user message.
+
+        Previous successful results belong to the current TaskPlan rather
+        than the wider conversation history, so they are attached to the
+        current plan step.
+        """
 
         if not previous_results:
             return description
@@ -306,23 +393,89 @@ class Orchestrator:
             if result.success
         )
 
+        if not previous_text:
+            return description
+
         return (
             f"{description}\n\n"
-            "Use the previous step results below as context.\n\n"
+            "Use the previous task step results below "
+            "as additional context.\n\n"
             f"{previous_text}"
         )
+
+    @classmethod
+    def _build_brain_messages(
+        cls,
+        description: str,
+        previous_results: list[StepResult],
+        conversation_messages: (
+            Sequence[BrainMessage] | None
+        ) = None,
+    ) -> list[BrainMessage]:
+        """
+        Build the complete model context for one Qronos step.
+
+        The Qronos system identity is always first.
+
+        conversation_messages must contain only previous USER and
+        ASSISTANT turns. System messages supplied by higher layers are
+        intentionally ignored so product identity cannot accidentally be
+        overridden by conversation history.
+        """
+
+        messages = [
+            BrainMessage(
+                role=BrainMessageRole.SYSTEM,
+                content=QRONOS_SYSTEM_PROMPT,
+            )
+        ]
+
+        if conversation_messages:
+            for message in conversation_messages:
+                if (
+                    message.role
+                    is BrainMessageRole.SYSTEM
+                ):
+                    continue
+
+                messages.append(
+                    message
+                )
+
+        current_content = (
+            cls._build_step_content(
+                description=description,
+                previous_results=(
+                    previous_results
+                ),
+            )
+        )
+
+        messages.append(
+            BrainMessage(
+                role=BrainMessageRole.USER,
+                content=current_content,
+            )
+        )
+
+        return messages
 
 
 if __name__ == "__main__":
     from core.task_router import TaskType
 
     plan = TaskPlan(
-        goal="Test resource-aware orchestration."
+        goal=(
+            "Test resource-aware orchestration."
+        )
     )
 
     plan.add_step(
         TaskType.FAST,
-        "Reply with exactly: Resource-aware orchestration OK.",
+        (
+            "Reply with exactly: "
+            "Resource-aware orchestration OK."
+        ),
     )
 
     orchestrator = Orchestrator()
@@ -343,6 +496,7 @@ if __name__ == "__main__":
             print(
                 result.output
             )
+
         else:
             print(
                 f"ERROR: {result.error}"
