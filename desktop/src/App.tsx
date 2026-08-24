@@ -1,49 +1,70 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+import QronosOrb from "./components/QronosOrb";
+import type { OrbState } from "./components/OrbState";
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+function App() {
+  const [orbState, setOrbState] =
+    useState<OrbState>("idle");
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <main className="app">
+      <div className="ambient ambient-cyan" />
+      <div className="ambient ambient-violet" />
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+      <header className="brand">
+        <div className="brand-name">
+          Q R O N O S
+        </div>
+
+        <div className="brand-beam">
+          <div className="brand-beam-base" />
+          <div className="brand-beam-runner" />
+        </div>
+      </header>
+
+      <section className="core-zone">
+        <div className="orb-shell">
+          <div className="orb-ring orb-ring-1" />
+          <div className="orb-ring orb-ring-2" />
+
+          <QronosOrb
+            size={460}
+            state={orbState}
+          />
+        </div>
+      </section>
+
+      <div className="orb-debug-controls">
+        <button
+          type="button"
+          onClick={() => setOrbState("idle")}
+        >
+          Idle
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setOrbState("listening")}
+        >
+          Listening
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setOrbState("thinking")}
+        >
+          Thinking
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setOrbState("responding")}
+        >
+          Responding
+        </button>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
     </main>
   );
 }

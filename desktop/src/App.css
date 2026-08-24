@@ -1,116 +1,840 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafb);
-}
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+  font-family:
+    "Bahnschrift",
+    "Segoe UI Variable",
+    "Segoe UI",
+    sans-serif;
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+  color: #eef7ff;
+  background: #02060a;
 }
 
-.container {
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
   margin: 0;
-  padding-top: 10vh;
+  background: #02060a;
+}
+
+body {
+  overflow: hidden;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.app {
+  position: relative;
+
+  width: 100vw;
+  height: 100vh;
+
+  /*
+   * IMPORTANT:
+   *
+   * No forced minimum viewport.
+   * This fixes the small-window lock.
+   */
+  min-width: 0;
+  min-height: 0;
+
+  overflow: hidden;
+
+  background:
+    radial-gradient(
+      circle at 50% 42%,
+      rgba(18, 40, 62, 0.18),
+      transparent 38%
+    ),
+    #02060a;
+}
+
+.ambient {
+  position: absolute;
+
+  border-radius: 50%;
+
+  filter: blur(110px);
+
+  pointer-events: none;
+
+  will-change: transform;
+}
+
+.ambient-cyan {
+  width: 34vw;
+  height: 34vw;
+
+  /*
+   * Removed old minimum dimensions.
+   * Background now scales with window.
+   */
+  min-width: 0;
+  min-height: 0;
+
+  left: 2vw;
+  top: 8vh;
+
+  background:
+    rgba(
+      0,
+      190,
+      255,
+      0.11
+    );
+
+  animation:
+    cyanFlow
+    14s
+    ease-in-out
+    infinite
+    alternate;
+}
+
+.ambient-violet {
+  width: 36vw;
+  height: 36vw;
+
+  min-width: 0;
+  min-height: 0;
+
+  right: 1vw;
+  top: 6vh;
+
+  background:
+    rgba(
+      110,
+      76,
+      255,
+      0.11
+    );
+
+  animation:
+    violetFlow
+    17s
+    ease-in-out
+    infinite
+    alternate;
+}
+
+@keyframes cyanFlow {
+  from {
+    transform:
+      translate3d(
+        -4vw,
+        0,
+        0
+      )
+      scale(0.92);
+  }
+
+  to {
+    transform:
+      translate3d(
+        8vw,
+        8vh,
+        0
+      )
+      scale(1.08);
+  }
+}
+
+@keyframes violetFlow {
+  from {
+    transform:
+      translate3d(
+        5vw,
+        -3vh,
+        0
+      )
+      scale(1.04);
+  }
+
+  to {
+    transform:
+      translate3d(
+        -8vw,
+        9vh,
+        0
+      )
+      scale(0.94);
+  }
+}
+
+.brand {
+  position: absolute;
+
+  z-index: 10;
+
+  top:
+    clamp(
+      12px,
+      4vh,
+      42px
+    );
+
+  left: 50%;
+
+  transform:
+    translateX(-50%);
+
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+
+  flex-direction:
+    column;
+
+  align-items:
+    center;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+.brand-name {
+  direction: ltr;
+
+  color:
+    rgba(
+      232,
+      242,
+      250,
+      0.88
+    );
+
+  font-size:
+    clamp(
+      8px,
+      1vw,
+      15px
+    );
+
+  font-weight: 300;
+
+  letter-spacing:
+    clamp(
+      4px,
+      0.75vw,
+      12px
+    );
+
+  padding-left:
+    clamp(
+      4px,
+      0.75vw,
+      12px
+    );
+
+  white-space: nowrap;
+
+  text-shadow:
+    0 0 9px
+    rgba(
+      255,
+      255,
+      255,
+      0.14
+    );
 }
 
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
+.brand-beam {
+  position: relative;
+
+  width:
+    clamp(
+      120px,
+      18vw,
+      290px
+    );
+
+  height: 20px;
+
+  margin-top: 8px;
+
+  overflow: hidden;
+
+  -webkit-mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      black 18%,
+      black 82%,
+      transparent 100%
+    );
+
+  mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      black 18%,
+      black 82%,
+      transparent 100%
+    );
 }
 
-.row {
+.brand-beam-base {
+  position: absolute;
+
+  left: 0;
+  right: 0;
+
+  top: 9px;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(
+        255,
+        255,
+        255,
+        0.08
+      )
+      14%,
+      rgba(
+        255,
+        255,
+        255,
+        0.42
+      )
+      36%,
+      rgba(
+        255,
+        255,
+        255,
+        0.68
+      )
+      50%,
+      rgba(
+        255,
+        255,
+        255,
+        0.42
+      )
+      64%,
+      rgba(
+        255,
+        255,
+        255,
+        0.08
+      )
+      86%,
+      transparent 100%
+    );
+
+  box-shadow:
+    0 0 4px
+    rgba(
+      255,
+      255,
+      255,
+      0.14
+    ),
+    0 0 12px
+    rgba(
+      170,
+      215,
+      255,
+      0.08
+    );
+}
+
+.brand-beam-runner {
+  position: absolute;
+
+  top: 4px;
+
+  width: 118px;
+  height: 11px;
+
+  opacity: 0;
+
+  border-radius: 50%;
+
+  background:
+    radial-gradient(
+      ellipse at center,
+      rgba(
+        255,
+        255,
+        255,
+        0.34
+      )
+      0%,
+      rgba(
+        235,
+        248,
+        255,
+        0.18
+      )
+      20%,
+      rgba(
+        188,
+        226,
+        255,
+        0.07
+      )
+      48%,
+      rgba(
+        160,
+        210,
+        255,
+        0.025
+      )
+      67%,
+      transparent 82%
+    );
+
+  filter: blur(3.6px);
+
+  will-change:
+    left,
+    opacity,
+    transform;
+
+  animation:
+    beamTravel
+    18s
+    cubic-bezier(
+      0.42,
+      0,
+      0.58,
+      1
+    )
+    infinite;
+}
+
+.brand-beam-runner::after {
+  content: "";
+
+  position: absolute;
+
+  left: 18%;
+  right: 18%;
+
+  top: 5px;
+
+  height: 1px;
+
+  border-radius: 999px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(
+        255,
+        255,
+        255,
+        0.12
+      )
+      18%,
+      rgba(
+        255,
+        255,
+        255,
+        0.72
+      )
+      50%,
+      rgba(
+        255,
+        255,
+        255,
+        0.12
+      )
+      82%,
+      transparent 100%
+    );
+
+  box-shadow:
+    0 0 3px
+    rgba(
+      255,
+      255,
+      255,
+      0.16
+    );
+}
+
+@keyframes beamTravel {
+  0% {
+    left: -125px;
+    opacity: 0;
+
+    transform:
+      scaleX(0.92);
+  }
+
+  10% {
+    opacity: 0.12;
+  }
+
+  22% {
+    opacity: 0.3;
+  }
+
+  42% {
+    opacity: 0.48;
+
+    transform:
+      scaleX(1);
+  }
+
+  58% {
+    opacity: 0.48;
+
+    transform:
+      scaleX(1);
+  }
+
+  78% {
+    opacity: 0.3;
+  }
+
+  90% {
+    opacity: 0.12;
+  }
+
+  100% {
+    left:
+      calc(
+        100% + 15px
+      );
+
+    opacity: 0;
+
+    transform:
+      scaleX(0.92);
+  }
+}
+
+/*
+ * ======================================
+ * RESPONSIVE ORB CONTAINER
+ * ======================================
+ */
+.core-zone {
+  position: absolute;
+
+  left: 50%;
+  top: 47%;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    );
+
+  /*
+   * The Orb now continuously scales
+   * with BOTH window width and height.
+   *
+   * No minimum pixel lock.
+   */
+  width:
+    min(
+      58vw,
+      58vh,
+      560px
+    );
+
+  height:
+    min(
+      58vw,
+      58vh,
+      560px
+    );
+
+  min-width: 0;
+  min-height: 0;
+
   display: flex;
+
+  align-items: center;
   justify-content: center;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+.orb-shell {
+  position: relative;
+
+  width: 100%;
+  height: 100%;
+
+  min-width: 0;
+  min-height: 0;
+
+  display: flex;
+
+  align-items: center;
+  justify-content: center;
 }
 
-a:hover {
-  color: #535bf2;
+/*
+ * IMPORTANT:
+ *
+ * QronosOrb.tsx now controls the
+ * actual canvas dimensions.
+ *
+ * We no longer force 460px here.
+ */
+.orb-shell canvas {
+  z-index: 4;
 }
 
-h1 {
-  text-align: center;
+.orb-ring {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    );
+
+  border-radius: 50%;
+
+  border:
+    1px solid
+    rgba(
+      60,
+      159,
+      220,
+      0.09
+    );
+
+  pointer-events: none;
 }
 
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+.orb-ring-1 {
+  width: 96%;
+  height: 96%;
+
+  animation:
+    ringBreathing
+    8s
+    ease-in-out
+    infinite;
 }
 
-button {
+.orb-ring-2 {
+  width: 84%;
+  height: 84%;
+
+  opacity: 0.55;
+
+  animation:
+    ringBreathing
+    10s
+    ease-in-out
+    infinite
+    reverse;
+}
+
+@keyframes ringBreathing {
+  0%,
+  100% {
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(0.995);
+
+    opacity: 0.4;
+  }
+
+  50% {
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(1.015);
+
+    opacity: 0.72;
+  }
+}
+
+.orb-debug-controls {
+  position: absolute;
+
+  z-index: 30;
+
+  left: 50%;
+  bottom:
+    clamp(
+      8px,
+      2.8vh,
+      28px
+    );
+
+  transform:
+    translateX(-50%);
+
+  display: flex;
+
+  gap:
+    clamp(
+      4px,
+      0.7vw,
+      10px
+    );
+}
+
+.orb-debug-controls button {
+  min-width:
+    clamp(
+      58px,
+      7vw,
+      92px
+    );
+
+  height:
+    clamp(
+      24px,
+      3.4vh,
+      34px
+    );
+
+  padding:
+    0
+    clamp(
+      7px,
+      1vw,
+      16px
+    );
+
+  border:
+    1px solid
+    rgba(
+      77,
+      184,
+      255,
+      0.18
+    );
+
+  border-radius:
+    999px;
+
+  background:
+    rgba(
+      5,
+      16,
+      24,
+      0.72
+    );
+
+  color:
+    rgba(
+      190,
+      221,
+      240,
+      0.76
+    );
+
+  font-size:
+    clamp(
+      8px,
+      1vw,
+      13px
+    );
+
   cursor: pointer;
+
+  transition:
+    background
+      160ms
+      ease,
+    color
+      160ms
+      ease,
+    border-color
+      160ms
+      ease,
+    transform
+      160ms
+      ease;
 }
 
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.orb-debug-controls button:hover {
+  background:
+    rgba(
+      18,
+      48,
+      68,
+      0.86
+    );
+
+  color:
+    #dff8ff;
+
+  border-color:
+    rgba(
+      80,
+      211,
+      255,
+      0.42
+    );
+
+  transform:
+    translateY(-1px);
 }
 
-input,
-button {
-  outline: none;
+/*
+ * Narrow / small window behaviour.
+ */
+@media (
+  max-width: 760px
+) {
+  .core-zone {
+    width:
+      min(
+        66vw,
+        56vh
+      );
+
+    height:
+      min(
+        66vw,
+        56vh
+      );
+
+    min-width: 0;
+    min-height: 0;
+  }
 }
 
-#greet-input {
-  margin-right: 5px;
-}
+/*
+ * Very short windows.
+ */
+@media (
+  max-height: 520px
+) {
+  .core-zone {
+    top: 48%;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+    width:
+      min(
+        48vw,
+        52vh
+      );
+
+    height:
+      min(
+        48vw,
+        52vh
+      );
   }
 
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
+  .brand {
+    top: 8px;
   }
 }
