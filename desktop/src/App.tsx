@@ -2,6 +2,7 @@ import { useState } from "react";
 import "./App.css";
 
 import QronosOrb from "./components/QronosOrb";
+import OrbTaskRenderer from "./components/OrbTaskRenderer";
 import type { OrbState } from "./components/OrbState";
 
 function App() {
@@ -33,34 +34,46 @@ function App() {
             size={460}
             state={orbState}
           />
+
+          <OrbTaskRenderer
+            state={orbState}
+          />
         </div>
       </section>
 
       <div className="orb-debug-controls">
         <button
           type="button"
-          onClick={() => setOrbState("idle")}
+          onClick={() =>
+            setOrbState("idle")
+          }
         >
           Idle
         </button>
 
         <button
           type="button"
-          onClick={() => setOrbState("listening")}
+          onClick={() =>
+            setOrbState("listening")
+          }
         >
           Listening
         </button>
 
         <button
           type="button"
-          onClick={() => setOrbState("thinking")}
+          onClick={() =>
+            setOrbState("thinking")
+          }
         >
           Thinking
         </button>
 
         <button
           type="button"
-          onClick={() => setOrbState("responding")}
+          onClick={() =>
+            setOrbState("responding")
+          }
         >
           Responding
         </button>
