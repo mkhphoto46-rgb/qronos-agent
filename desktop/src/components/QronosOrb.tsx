@@ -41,6 +41,7 @@ type BurstSpark = {
   brightness: number;
   tangent: number;
   far: boolean;
+  micro: boolean;
 };
 
 type CachedRoamingPoint = {
@@ -97,6 +98,9 @@ type VisualState = {
 
   burstRate: number;
   burstEnergy: number;
+
+  microEruptionRate: number;
+  microEruptionEnergy: number;
 };
 
 type StatePresence = {
@@ -160,6 +164,9 @@ const VISUAL_STATES: Record<OrbState, VisualState> = {
 
     burstRate: 0.022,
     burstEnergy: 0.1,
+
+    microEruptionRate: 0.015,
+    microEruptionEnergy: 0.08,
   },
 
   listening: {
@@ -208,6 +215,9 @@ const VISUAL_STATES: Record<OrbState, VisualState> = {
 
     burstRate: 0.52,
     burstEnergy: 0.76,
+
+    microEruptionRate: 0.25,
+    microEruptionEnergy: 0.38,
   },
 
   thinking: {
@@ -256,6 +266,9 @@ const VISUAL_STATES: Record<OrbState, VisualState> = {
 
     burstRate: 1.08,
     burstEnergy: 1,
+
+    microEruptionRate: 0.95,
+    microEruptionEnergy: 1,
   },
 
   responding: {
@@ -304,6 +317,9 @@ const VISUAL_STATES: Record<OrbState, VisualState> = {
 
     burstRate: 0.54,
     burstEnergy: 0.78,
+
+    microEruptionRate: 0.54,
+    microEruptionEnergy: 0.66,
   },
 };
 
@@ -396,12 +412,6 @@ function QronosOrb({
     let viewportHeight =
       window.innerHeight;
 
-    /*
-     * =====================================
-     * PRE-RENDERED GLOW SPRITES
-     * =====================================
-     */
-
     const createGlowSprite = (
       inner: string,
       middle: string,
@@ -430,21 +440,15 @@ function QronosOrb({
           32,
         );
 
-      gradient.addColorStop(
-        0,
-        inner,
-      );
-
+      gradient.addColorStop(0, inner);
       gradient.addColorStop(
         0.16,
         middle,
       );
-
       gradient.addColorStop(
         0.52,
         outer,
       );
-
       gradient.addColorStop(
         1,
         "rgba(0,0,0,0)",
@@ -518,12 +522,6 @@ function QronosOrb({
         previousAlpha;
     };
 
-    /*
-     * =====================================
-     * RESIZE
-     * =====================================
-     */
-
     const resizeCoreCanvas = () => {
       const parent =
         coreCanvas.parentElement;
@@ -547,8 +545,7 @@ function QronosOrb({
 
       dpr =
         Math.min(
-          window.devicePixelRatio ||
-            1,
+          window.devicePixelRatio || 1,
           MAX_DPR,
         );
 
@@ -587,8 +584,7 @@ function QronosOrb({
 
       dpr =
         Math.min(
-          window.devicePixelRatio ||
-            1,
+          window.devicePixelRatio || 1,
           MAX_DPR,
         );
 
@@ -603,10 +599,7 @@ function QronosOrb({
         },
       ];
 
-      for (
-        const target
-        of targets
-      ) {
+      for (const target of targets) {
         target.canvas.width =
           Math.round(
             viewportWidth * dpr,
@@ -659,12 +652,6 @@ function QronosOrb({
       "resize",
       onWindowResize,
     );
-
-    /*
-     * =====================================
-     * PARTICLE CREATION
-     * =====================================
-     */
 
     const baseParticles: Particle[] =
       [];
@@ -787,9 +774,6 @@ function QronosOrb({
       }
     }
 
-    /*
-     * Broad A.
-     */
     const shell2Count = 2300;
 
     for (
@@ -862,9 +846,6 @@ function QronosOrb({
       });
     }
 
-    /*
-     * Thin B.
-     */
     const shell3Count = 1450;
 
     for (
@@ -958,9 +939,6 @@ function QronosOrb({
       });
     }
 
-    /*
-     * Local dust.
-     */
     for (
       let index = 0;
       index < 260;
@@ -1023,9 +1001,6 @@ function QronosOrb({
       });
     }
 
-    /*
-     * Back roaming.
-     */
     for (
       let index = 0;
       index < 760;
@@ -1095,9 +1070,6 @@ function QronosOrb({
       });
     }
 
-    /*
-     * Front roaming.
-     */
     for (
       let index = 0;
       index < 980;
@@ -1167,9 +1139,6 @@ function QronosOrb({
       });
     }
 
-    /*
-     * Preallocated environment buffers.
-     */
     const cachedBackPoints:
       CachedRoamingPoint[] =
       backRoamingParticles.map(
@@ -1194,13 +1163,10 @@ function QronosOrb({
         }),
       );
 
-    const initial =
-      VISUAL_STATES[
-        stateRef.current
-      ];
-
     const visual: VisualState = {
-      ...initial,
+      ...VISUAL_STATES[
+        stateRef.current
+      ],
     };
 
     const presence: StatePresence = {
@@ -1228,12 +1194,6 @@ function QronosOrb({
           ? 1
           : 0,
     };
-
-    /*
-     * =====================================
-     * CLOCKS
-     * =====================================
-     */
 
     let animationFrame = 0;
 
@@ -1275,14 +1235,17 @@ function QronosOrb({
 
     let burstThreshold =
       0.8 +
-      Math.random() *
-        0.35;
+      Math.random() * 0.35;
 
     /*
-     * =====================================
-     * PROJECTION
-     * =====================================
+     * NEW
+     * Independent micro-eruption budget.
      */
+    let microEruptionCharge = 0;
+
+    let microEruptionThreshold =
+      0.7 +
+      Math.random() * 0.55;
 
     const projectParticle = (
       particle: Particle,
@@ -1371,16 +1334,6 @@ function QronosOrb({
         z,
       };
     };
-
-    /*
-     * =====================================
-     * ENVIRONMENT PARTICLES
-     *
-     * IMPORTANT:
-     * Updated EVERY FRAME.
-     * No 30Hz stepping.
-     * =====================================
-     */
 
     const updateRoamingCache = (
       particles: RoamingParticle[],
@@ -1611,8 +1564,7 @@ function QronosOrb({
         const flowX =
           Math.sin(
             angle * 1.7 +
-              chaosPhase *
-                0.7 +
+              chaosPhase * 0.7 +
               particle.phase,
           ) *
           visual.chaosStrength *
@@ -1693,10 +1645,8 @@ function QronosOrb({
           ) *
           (
             0.78 +
-            escapeGate *
-              0.36 +
-            wildGate *
-              0.42
+            escapeGate * 0.36 +
+            wildGate * 0.42
           );
 
         if (
@@ -1729,10 +1679,8 @@ function QronosOrb({
     const drawRoamingCache = (
       ctx:
         CanvasRenderingContext2D,
-
       cache:
         CachedRoamingPoint[],
-
       front:
         boolean,
     ) => {
@@ -1753,18 +1701,8 @@ function QronosOrb({
 
         ctx.fillStyle =
           front
-            ? `rgba(
-                78,
-                214,
-                255,
-                ${point.alpha}
-              )`
-            : `rgba(
-                48,
-                160,
-                225,
-                ${point.alpha}
-              )`;
+            ? `rgba(78,214,255,${point.alpha})`
+            : `rgba(48,160,225,${point.alpha})`;
 
         ctx.beginPath();
 
@@ -1794,41 +1732,23 @@ function QronosOrb({
       }
     };
 
-    /*
-     * =====================================
-     * LEGACY B ESCAPE
-     *
-     * Same approved motion.
-     * No map.
-     * No sort.
-     * =====================================
-     */
-
     const drawLegacyShell3Escape = (
       ctx:
         CanvasRenderingContext2D,
-
       centerX:
         number,
-
       centerY:
         number,
-
       baseRadius:
         number,
-
       tiltX:
         number,
-
       tiltZ:
         number,
-
       scale:
         number,
-
       luminosity:
         number,
-
       appReach:
         number,
     ) => {
@@ -1989,21 +1909,16 @@ function QronosOrb({
         const point =
           projectParticle(
             particle,
-
             radius +
               violetLift,
-
             bodyRotationPhase +
               shell3DriftPhase +
               transitionSpinPhase +
               twist,
-
             tiltX * 1.12,
             tiltZ * 0.78,
-
             centerX,
             centerY,
-
             renderSize,
           );
 
@@ -2025,7 +1940,6 @@ function QronosOrb({
         const alpha =
           Math.min(
             0.88,
-
             visual.shell3Strength *
               luminosity *
               (
@@ -2039,7 +1953,6 @@ function QronosOrb({
         const particleSize =
           Math.max(
             0.07,
-
             particle.sizeNoise *
               geometryScale *
               (
@@ -2054,12 +1967,7 @@ function QronosOrb({
           );
 
         ctx.fillStyle =
-          `rgba(
-            68,
-            184,
-            255,
-            ${alpha}
-          )`;
+          `rgba(68,184,255,${alpha})`;
 
         ctx.beginPath();
 
@@ -2096,7 +2004,6 @@ function QronosOrb({
           const violetAlpha =
             Math.min(
               0.68,
-
               violetMask *
                 luminosity *
                 (
@@ -2116,12 +2023,7 @@ function QronosOrb({
             );
 
           ctx.fillStyle =
-            `rgba(
-              135,
-              96,
-              255,
-              ${violetAlpha}
-            )`;
+            `rgba(135,96,255,${violetAlpha})`;
 
           ctx.beginPath();
 
@@ -2153,37 +2055,23 @@ function QronosOrb({
       }
     };
 
-    /*
-     * =====================================
-     * LEGACY A ESCAPE
-     * =====================================
-     */
-
     const drawLegacyShell2Escape = (
       ctx:
         CanvasRenderingContext2D,
-
       centerX:
         number,
-
       centerY:
         number,
-
       baseRadius:
         number,
-
       tiltX:
         number,
-
       tiltZ:
         number,
-
       scale:
         number,
-
       luminosity:
         number,
-
       appReach:
         number,
     ) => {
@@ -2298,20 +2186,15 @@ function QronosOrb({
         const point =
           projectParticle(
             particle,
-
             radius,
-
             bodyRotationPhase +
               shell2DriftPhase +
               transitionSpinPhase +
               lateralWave,
-
             tiltX * 0.82,
             tiltZ * 1.15,
-
             centerX,
             centerY,
-
             renderSize,
           );
 
@@ -2333,7 +2216,6 @@ function QronosOrb({
         const alpha =
           Math.min(
             0.92,
-
             ribbonMask *
               visual.shell2Strength *
               luminosity *
@@ -2348,7 +2230,6 @@ function QronosOrb({
         const particleSize =
           Math.max(
             0.07,
-
             particle.sizeNoise *
               geometryScale *
               (
@@ -2357,20 +2238,13 @@ function QronosOrb({
               ) *
               (
                 1 +
-                ribbonMask *
-                  0.95 +
-                escapeGate *
-                  0.15
+                ribbonMask * 0.95 +
+                escapeGate * 0.15
               ),
           );
 
         ctx.fillStyle =
-          `rgba(
-            74,
-            216,
-            255,
-            ${alpha}
-          )`;
+          `rgba(74,216,255,${alpha})`;
 
         ctx.beginPath();
 
@@ -2403,12 +2277,6 @@ function QronosOrb({
         }
       }
     };
-
-    /*
-     * =====================================
-     * BURSTS
-     * =====================================
-     */
 
     const spawnBurst = (
       time: number,
@@ -2493,15 +2361,106 @@ function QronosOrb({
           far:
             presence.thinking >
             0.35,
+
+          micro: false,
         });
       }
     };
 
     /*
      * =====================================
-     * FRAME
+     * NEW
+     * MICRO ENERGY ERUPTION
+     *
+     * Tiny burst emitted FROM a bright ridge.
+     * Reuses BurstSpark system.
      * =====================================
      */
+    const spawnMicroEruption = (
+      time: number,
+      eruptionAngle: number,
+      ridgeStrength: number,
+    ) => {
+      const energy =
+        visual.microEruptionEnergy *
+        ridgeStrength;
+
+      const count =
+        Math.max(
+          3,
+          Math.round(
+            3 +
+              energy * 7 +
+              Math.random() * 3,
+          ),
+        );
+
+      for (
+        let index = 0;
+        index < count;
+        index += 1
+      ) {
+        burstSparks.push({
+          startTime:
+            time +
+            Math.random() * 0.055,
+
+          duration:
+            0.42 +
+            Math.random() *
+              (
+                0.3 +
+                energy * 0.22
+              ),
+
+          angle:
+            eruptionAngle +
+            (
+              Math.random() -
+              0.5
+            ) *
+              (
+                0.13 +
+                energy * 0.2
+              ),
+
+          distance:
+            renderSize *
+            (
+              0.022 +
+              energy * 0.045 +
+              Math.random() *
+                0.042
+            ),
+
+          size:
+            0.11 +
+            Math.random() *
+              (
+                0.18 +
+                energy * 0.2
+              ),
+
+          brightness:
+            0.42 +
+            energy * 0.27 +
+            Math.random() *
+              0.23,
+
+          tangent:
+            (
+              Math.random() -
+              0.5
+            ) *
+            renderSize *
+            0.025,
+
+          far: false,
+
+          micro: true,
+        });
+      }
+    };
 
     const render = (
       timestamp: number,
@@ -2551,8 +2510,7 @@ function QronosOrb({
       const amount =
         1 -
         Math.exp(
-          -deltaSeconds *
-            2.05,
+          -deltaSeconds * 2.05,
         );
 
       const keys =
@@ -2562,10 +2520,7 @@ function QronosOrb({
           keyof VisualState
         >;
 
-      for (
-        const key
-        of keys
-      ) {
+      for (const key of keys) {
         visual[key] =
           lerp(
             visual[key],
@@ -2629,10 +2584,6 @@ function QronosOrb({
           2,
         );
 
-      /*
-       * Shared transition.
-       * No reset.
-       */
       transitionSpinPhase +=
         transitionEnvelope *
         1.9 *
@@ -2794,8 +2745,7 @@ function QronosOrb({
         renderSize / 2;
 
       const baseRadius =
-        renderSize *
-        0.342;
+        renderSize * 0.342;
 
       const geometryScale =
         renderSize / 460;
@@ -2805,7 +2755,6 @@ function QronosOrb({
           390,
           Math.max(
             renderSize * 0.55,
-
             Math.min(
               viewportWidth,
               viewportHeight,
@@ -2851,14 +2800,6 @@ function QronosOrb({
         ) *
           0.02;
 
-      /*
-       * =====================================
-       * CRITICAL FIX
-       *
-       * Environment is recalculated
-       * EVERY FRAME.
-       * =====================================
-       */
       updateRoamingCache(
         backRoamingParticles,
         cachedBackPoints,
@@ -2877,25 +2818,15 @@ function QronosOrb({
         baseRadius,
       );
 
-      /*
-       * =====================================
-       * BACK
-       * =====================================
-       */
       drawLegacyShell3Escape(
         backCtx,
-
         appCenterX,
         appCenterY,
-
         baseRadius,
-
         tiltX,
         tiltZ,
-
         scale,
         luminosity,
-
         appReach,
       );
 
@@ -2906,14 +2837,15 @@ function QronosOrb({
       );
 
       /*
-       * =====================================
-       * MAIN ORB
-       *
-       * No array map.
-       * No depth sort.
-       * Direct stable rendering.
-       * =====================================
+       * Best ridge candidate from THIS frame.
+       * No new array and no sorting.
        */
+      let eruptionCandidateStrength =
+        0;
+
+      let eruptionCandidateAngle =
+        0;
+
       for (
         let index = 0;
         index < baseParticles.length;
@@ -3136,18 +3068,13 @@ function QronosOrb({
         const point =
           projectParticle(
             particle,
-
             radius,
-
             rotation +
               transitionSpinPhase,
-
             tiltX,
             tiltZ,
-
             localCenterX,
             localCenterY,
-
             renderSize,
           );
 
@@ -3262,7 +3189,6 @@ function QronosOrb({
         const alpha =
           Math.min(
             1,
-
             (
               0.095 +
               depth * 0.96
@@ -3287,7 +3213,6 @@ function QronosOrb({
         const particleSize =
           Math.max(
             0.08,
-
             particle.sizeNoise *
               geometryScale *
               (
@@ -3342,12 +3267,7 @@ function QronosOrb({
           );
 
         coreCtx.fillStyle =
-          `rgba(
-            ${red},
-            ${green},
-            ${blue},
-            ${alpha}
-          )`;
+          `rgba(${red},${green},${blue},${alpha})`;
 
         coreCtx.beginPath();
 
@@ -3361,10 +3281,6 @@ function QronosOrb({
 
         coreCtx.fill();
 
-        /*
-         * Glow only on a very small
-         * percentage of particles.
-         */
         if (
           particle.brightnessNoise >
             1.2 &&
@@ -3395,12 +3311,62 @@ function QronosOrb({
               0.45,
           );
         }
+
+        /*
+         * PERFORMANCE-SAFE RIDGE PICKER
+         *
+         * Check only 1 out of every
+         * 13 visible particles.
+         */
+        if (
+          index % 13 === 0 &&
+          ridgeMask >
+            eruptionCandidateStrength &&
+          ridgeMask > 0.64 &&
+          normalizedRadius >
+            0.78 &&
+          depth > 0.4
+        ) {
+          eruptionCandidateStrength =
+            ridgeMask;
+
+          eruptionCandidateAngle =
+            Math.atan2(
+              dy,
+              dx,
+            );
+        }
       }
 
       /*
-       * =====================================
-       * LOCAL ATTACHED A
-       * =====================================
+       * Trigger one tiny eruption only
+       * when enough energy has accumulated.
+       */
+      microEruptionCharge +=
+        visual.microEruptionRate *
+        deltaSeconds;
+
+      if (
+        microEruptionCharge >=
+          microEruptionThreshold &&
+        eruptionCandidateStrength >
+          0.64
+      ) {
+        spawnMicroEruption(
+          time,
+          eruptionCandidateAngle,
+          eruptionCandidateStrength,
+        );
+
+        microEruptionCharge = 0;
+
+        microEruptionThreshold =
+          0.72 +
+          Math.random() * 0.58;
+      }
+
+      /*
+       * LOCAL A
        */
       for (
         let index = 0;
@@ -3473,19 +3439,14 @@ function QronosOrb({
         const point =
           projectParticle(
             particle,
-
             radius,
-
             bodyRotationPhase +
               shell2DriftPhase +
               transitionSpinPhase,
-
             tiltX * 0.82,
             tiltZ * 1.15,
-
             localCenterX,
             localCenterY,
-
             renderSize,
           );
 
@@ -3503,7 +3464,6 @@ function QronosOrb({
         const alpha =
           Math.min(
             0.9,
-
             ribbonMask *
               visual.shell2Strength *
               luminosity *
@@ -3517,7 +3477,6 @@ function QronosOrb({
         const particleSize =
           Math.max(
             0.08,
-
             particle.sizeNoise *
               geometryScale *
               (
@@ -3527,12 +3486,7 @@ function QronosOrb({
           );
 
         coreCtx.fillStyle =
-          `rgba(
-            74,
-            216,
-            255,
-            ${alpha}
-          )`;
+          `rgba(74,216,255,${alpha})`;
 
         coreCtx.beginPath();
 
@@ -3548,9 +3502,7 @@ function QronosOrb({
       }
 
       /*
-       * =====================================
-       * LOCAL ATTACHED B + VIOLET
-       * =====================================
+       * LOCAL B + VIOLET
        */
       for (
         let index = 0;
@@ -3638,9 +3590,7 @@ function QronosOrb({
         const point =
           projectParticle(
             particle,
-
             radius,
-
             bodyRotationPhase +
               shell3DriftPhase +
               transitionSpinPhase +
@@ -3648,13 +3598,10 @@ function QronosOrb({
               violetMask *
                 visual.violetTwist *
                 0.06,
-
             tiltX * 1.12,
             tiltZ * 0.78,
-
             localCenterX,
             localCenterY,
-
             renderSize,
           );
 
@@ -3672,7 +3619,6 @@ function QronosOrb({
         const alpha =
           Math.min(
             0.88,
-
             visual.shell3Strength *
               luminosity *
               (
@@ -3685,19 +3631,13 @@ function QronosOrb({
         const particleSize =
           Math.max(
             0.08,
-
             particle.sizeNoise *
               geometryScale *
               1.08,
           );
 
         coreCtx.fillStyle =
-          `rgba(
-            70,
-            186,
-            255,
-            ${alpha}
-          )`;
+          `rgba(70,186,255,${alpha})`;
 
         coreCtx.beginPath();
 
@@ -3717,7 +3657,6 @@ function QronosOrb({
           const violetAlpha =
             Math.min(
               0.66,
-
               violetMask *
                 luminosity *
                 (
@@ -3736,12 +3675,7 @@ function QronosOrb({
             );
 
           coreCtx.fillStyle =
-            `rgba(
-              135,
-              96,
-              255,
-              ${violetAlpha}
-            )`;
+            `rgba(135,96,255,${violetAlpha})`;
 
           coreCtx.beginPath();
 
@@ -3773,9 +3707,7 @@ function QronosOrb({
       }
 
       /*
-       * =====================================
        * LOCAL DUST
-       * =====================================
        */
       const localActivity =
         0.72 +
@@ -3819,29 +3751,22 @@ function QronosOrb({
             0.91;
 
         coreCtx.fillStyle =
-          `rgba(
-            80,
-            205,
-            255,
-            ${
-              ambient.alpha *
-              luminosity *
-              localActivity
-            }
-          )`;
+          `rgba(80,205,255,${
+            ambient.alpha *
+            luminosity *
+            localActivity
+          })`;
 
         coreCtx.beginPath();
 
         coreCtx.arc(
           x,
           y,
-
           Math.max(
             0.06,
             ambient.size *
               geometryScale,
           ),
-
           0,
           Math.PI * 2,
         );
@@ -3850,9 +3775,7 @@ function QronosOrb({
       }
 
       /*
-       * =====================================
-       * BURSTS
-       * =====================================
+       * EXISTING LARGE BURST SYSTEM
        */
       burstCharge +=
         visual.burstRate *
@@ -3868,16 +3791,19 @@ function QronosOrb({
 
         burstThreshold =
           0.74 +
-          Math.random() *
-            0.36;
+          Math.random() * 0.36;
       }
 
+      /*
+       * SHARED SPARK RENDERER
+       *
+       * Handles both normal bursts
+       * and the new Micro Eruptions.
+       */
       for (
         let index =
           burstSparks.length - 1;
-
         index >= 0;
-
         index -= 1
       ) {
         const spark =
@@ -3910,16 +3836,18 @@ function QronosOrb({
         const outward =
           Math.pow(
             progress,
-
-            spark.far
-              ? 0.72
-              : 0.82,
+            spark.micro
+              ? 0.66
+              : spark.far
+                ? 0.72
+                : 0.82,
           ) *
           spark.distance;
 
         const tangent =
           Math.sin(
-            progress * Math.PI,
+            progress *
+              Math.PI,
           ) *
           spark.tangent;
 
@@ -3954,10 +3882,11 @@ function QronosOrb({
         const alpha =
           Math.pow(
             1 - progress,
-
-            spark.far
-              ? 1.25
-              : 1.62,
+            spark.micro
+              ? 1.15
+              : spark.far
+                ? 1.25
+                : 1.62,
           ) *
           spark.brightness *
           luminosity;
@@ -3965,18 +3894,14 @@ function QronosOrb({
         const sparkSize =
           Math.max(
             0.07,
-
             spark.size *
               geometryScale,
           );
 
         coreCtx.fillStyle =
-          `rgba(
-            110,
-            225,
-            255,
-            ${alpha}
-          )`;
+          spark.micro
+            ? `rgba(145,239,255,${alpha})`
+            : `rgba(110,225,255,${alpha})`;
 
         coreCtx.beginPath();
 
@@ -3990,9 +3915,17 @@ function QronosOrb({
 
         coreCtx.fill();
 
+        /*
+         * Only strongest micro sparks
+         * receive sprite glow.
+         */
         if (
           spark.brightness >
-            0.7 &&
+            (
+              spark.micro
+                ? 0.72
+                : 0.7
+            ) &&
           alpha > 0.18
         ) {
           drawGlowSprite(
@@ -4003,30 +3936,24 @@ function QronosOrb({
             sparkSize,
             visual.particleGlow *
               alpha *
-              0.45,
+              (
+                spark.micro
+                  ? 0.38
+                  : 0.45
+              ),
           );
         }
       }
 
-      /*
-       * =====================================
-       * FRONT
-       * =====================================
-       */
       drawLegacyShell2Escape(
         frontCtx,
-
         appCenterX,
         appCenterY,
-
         baseRadius,
-
         tiltX,
         tiltZ,
-
         scale,
         luminosity,
-
         appReach,
       );
 
@@ -4068,15 +3995,11 @@ function QronosOrb({
         aria-label={`Qronos Orb ${state}`}
         style={{
           position: "absolute",
-
           left: "50%",
           top: "50%",
-
           transform:
             "translate(-50%, -50%)",
-
           zIndex: 4,
-
           pointerEvents: "none",
         }}
       />
@@ -4091,15 +4014,11 @@ function QronosOrb({
             aria-hidden="true"
             style={{
               position: "fixed",
-
               left: 0,
               top: 0,
-
               width: "100vw",
               height: "100vh",
-
               zIndex: 3,
-
               pointerEvents:
                 "none",
             }}
@@ -4117,15 +4036,11 @@ function QronosOrb({
             aria-hidden="true"
             style={{
               position: "fixed",
-
               left: 0,
               top: 0,
-
               width: "100vw",
               height: "100vh",
-
               zIndex: 5,
-
               pointerEvents:
                 "none",
             }}
