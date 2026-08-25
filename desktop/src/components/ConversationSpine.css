@@ -1,0 +1,716 @@
+.app {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.command-input,
+.memory-pocket-copy-zone {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* =========================================
+   ROOT
+   ========================================= */
+
+.conversation-spine {
+  position: absolute;
+  z-index: 13;
+
+  left: clamp(26px, 2.5vw, 42px);
+  top: 50%;
+
+  width: clamp(470px, 34vw, 590px);
+  height: min(96vh, 940px);
+
+  transform: translateY(-50%);
+
+  display: flex;
+  flex-direction: column;
+
+  overflow: visible;
+  pointer-events: auto;
+
+  direction: ltr;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.conversation-spine-header {
+  position: relative;
+  z-index: 20;
+
+  width: clamp(210px, 18vw, 270px);
+  height: clamp(34px, 4vh, 42px);
+
+  display: flex;
+  align-items: center;
+
+  padding-left: 10px;
+  pointer-events: none;
+}
+
+.conversation-spine-title {
+  color: rgba(94, 218, 253, 0.84);
+  font-size: clamp(10px, 0.72vw, 12px);
+  font-weight: 500;
+  letter-spacing: 0.25em;
+}
+
+.conversation-spine-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: visible;
+  background: transparent;
+}
+
+.conversation-dna-zone {
+  position: absolute;
+  left: 0;
+  top: -1%;
+
+  width: clamp(315px, 24vw, 385px);
+  height: 103%;
+
+  overflow: visible;
+  background: transparent;
+}
+
+.oracle-dna-canvas {
+  position: absolute;
+  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
+  display: block;
+  pointer-events: auto;
+  touch-action: none;
+  background: transparent;
+}
+
+/* =========================================
+   MEMORY POCKET
+   ========================================= */
+
+.memory-pocket {
+  --memory-pocket-top: 44%;
+
+  position: absolute;
+  z-index: 18;
+
+  left: clamp(142px, 10.7vw, 182px);
+  top: var(--memory-pocket-top);
+
+  width: clamp(290px, 22vw, 355px);
+  min-height: clamp(180px, 18.5vh, 225px);
+
+  padding: 10px 10px 10px 28px;
+
+  transform: translateY(-50%);
+  transform-origin: left center;
+
+  color: rgba(241, 251, 254, 0.99);
+
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  overflow: visible;
+
+  opacity: 0;
+  animation: memoryPocketReveal 460ms
+    cubic-bezier(0.17, 0.84, 0.3, 1)
+    forwards;
+
+  transition:
+    top 380ms cubic-bezier(0.2, 0.8, 0.25, 1),
+    left 380ms cubic-bezier(0.2, 0.8, 0.25, 1);
+}
+
+@keyframes memoryPocketReveal {
+  0% {
+    opacity: 0;
+    transform:
+      translateY(-50%)
+      translateX(-16px);
+    filter: blur(2px);
+  }
+
+  100% {
+    opacity: 1;
+    transform:
+      translateY(-50%)
+      translateX(0);
+    filter: blur(0);
+  }
+}
+
+/* =========================================
+   SOFT FOG BEHIND TEXT
+   ========================================= */
+
+.memory-pocket-fog {
+  position: absolute;
+  inset: -12px -20px -12px -30px;
+  pointer-events: none;
+  z-index: 1;
+
+  background:
+    radial-gradient(
+      ellipse at 25% 50%,
+      rgba(4, 18, 27, 0.92) 0%,
+      rgba(4, 17, 25, 0.78) 28%,
+      rgba(4, 16, 24, 0.56) 48%,
+      rgba(3, 14, 21, 0.28) 64%,
+      rgba(3, 12, 19, 0.08) 76%,
+      rgba(2, 10, 16, 0) 100%
+    );
+
+  filter: blur(10px);
+  opacity: 0.95;
+}
+
+/* =========================================
+   SLIT / OPENING
+   ========================================= */
+
+.memory-pocket-slit {
+  position: absolute;
+  z-index: 3;
+
+  left: -18px;
+  top: 50%;
+
+  width: 38px;
+  height: 144px;
+
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.memory-pocket-slit::before {
+  content: "";
+
+  position: absolute;
+  left: 8px;
+  top: 0;
+
+  width: 18px;
+  height: 100%;
+
+  border-radius: 50%;
+
+  background:
+    radial-gradient(
+      ellipse at 50% 50%,
+      rgba(120, 226, 255, 0.28) 0%,
+      rgba(104, 216, 248, 0.16) 18%,
+      rgba(74, 193, 233, 0.1) 34%,
+      rgba(32, 102, 146, 0.04) 52%,
+      rgba(10, 33, 49, 0) 76%
+    );
+
+  filter: blur(7px);
+  opacity: 0.9;
+}
+
+.memory-pocket-slit i {
+  position: absolute;
+  left: 16px;
+
+  width: 2px;
+  height: 2px;
+
+  border-radius: 50%;
+  background: rgba(163, 240, 255, 0.92);
+
+  animation: slitPulse 3.8s ease-in-out infinite;
+}
+
+.memory-pocket-slit i:nth-child(1) {
+  top: 10%;
+}
+.memory-pocket-slit i:nth-child(2) {
+  top: 22%;
+  animation-delay: -0.35s;
+}
+.memory-pocket-slit i:nth-child(3) {
+  top: 34%;
+  animation-delay: -0.7s;
+}
+.memory-pocket-slit i:nth-child(4) {
+  top: 48%;
+  animation-delay: -1.05s;
+}
+.memory-pocket-slit i:nth-child(5) {
+  top: 61%;
+  animation-delay: -1.4s;
+}
+.memory-pocket-slit i:nth-child(6) {
+  top: 75%;
+  animation-delay: -1.75s;
+}
+.memory-pocket-slit i:nth-child(7) {
+  top: 88%;
+  animation-delay: -2.1s;
+}
+
+@keyframes slitPulse {
+  0%,
+  100% {
+    opacity: 0.22;
+    transform: translateX(0) scale(0.75);
+  }
+
+  50% {
+    opacity: 0.98;
+    transform: translateX(2px) scale(1.25);
+  }
+}
+
+/* =========================================
+   PARTICLE BLOOM
+   ========================================= */
+
+.memory-pocket-bloom {
+  position: absolute;
+  z-index: 2;
+
+  left: -34px;
+  top: 50%;
+
+  width: 92px;
+  height: 158px;
+
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.memory-pocket-bloom i {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+  opacity: 0.18;
+
+  animation: bloomFloat 4.8s ease-in-out infinite;
+}
+
+.memory-pocket-bloom i:nth-child(1) {
+  left: 8px;
+  top: 12%;
+  background: rgba(145, 231, 255, 0.95);
+}
+.memory-pocket-bloom i:nth-child(2) {
+  left: 18px;
+  top: 19%;
+  background: rgba(175, 148, 255, 0.8);
+  animation-delay: -0.4s;
+}
+.memory-pocket-bloom i:nth-child(3) {
+  left: 30px;
+  top: 26%;
+  background: rgba(107, 223, 255, 0.84);
+  animation-delay: -0.8s;
+}
+.memory-pocket-bloom i:nth-child(4) {
+  left: 12px;
+  top: 37%;
+  background: rgba(164, 145, 255, 0.84);
+  animation-delay: -1.2s;
+}
+.memory-pocket-bloom i:nth-child(5) {
+  left: 26px;
+  top: 44%;
+  background: rgba(140, 233, 255, 0.95);
+  animation-delay: -1.6s;
+}
+.memory-pocket-bloom i:nth-child(6) {
+  left: 39px;
+  top: 49%;
+  background: rgba(112, 217, 255, 0.84);
+  animation-delay: -2s;
+}
+.memory-pocket-bloom i:nth-child(7) {
+  left: 16px;
+  top: 56%;
+  background: rgba(171, 150, 255, 0.84);
+  animation-delay: -2.4s;
+}
+.memory-pocket-bloom i:nth-child(8) {
+  left: 28px;
+  top: 63%;
+  background: rgba(151, 235, 255, 0.88);
+  animation-delay: -2.8s;
+}
+.memory-pocket-bloom i:nth-child(9) {
+  left: 10px;
+  top: 71%;
+  background: rgba(115, 218, 255, 0.84);
+  animation-delay: -3.2s;
+}
+.memory-pocket-bloom i:nth-child(10) {
+  left: 24px;
+  top: 78%;
+  background: rgba(175, 148, 255, 0.84);
+  animation-delay: -3.6s;
+}
+.memory-pocket-bloom i:nth-child(11) {
+  left: 36px;
+  top: 84%;
+  background: rgba(145, 231, 255, 0.95);
+  animation-delay: -4s;
+}
+.memory-pocket-bloom i:nth-child(12) {
+  left: 16px;
+  top: 90%;
+  background: rgba(116, 214, 255, 0.88);
+  animation-delay: -4.4s;
+}
+
+@keyframes bloomFloat {
+  0%,
+  100% {
+    opacity: 0.12;
+    transform: translate3d(0, 0, 0) scale(0.75);
+    filter: blur(0.2px);
+  }
+
+  50% {
+    opacity: 0.86;
+    transform: translate3d(4px, -2px, 0) scale(1.32);
+    filter: blur(1px);
+  }
+}
+
+/* =========================================
+   HEADER
+   ========================================= */
+
+.memory-pocket-header {
+  position: relative;
+  z-index: 6;
+
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+
+  direction: ltr;
+}
+
+.memory-pocket-identity {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.memory-pocket-role {
+  font-size: clamp(13px, 0.9vw, 15px);
+  font-weight: 560;
+  letter-spacing: 0.18em;
+}
+
+.memory-pocket-role-user {
+  color: rgba(111, 229, 255, 0.97);
+}
+
+.memory-pocket-role-qronos {
+  color: rgba(179, 166, 255, 0.97);
+}
+
+.memory-pocket-time {
+  color: rgba(184, 214, 225, 0.8);
+  font-size: clamp(11px, 0.72vw, 13px);
+  font-weight: 450;
+}
+
+.memory-pocket-close {
+  width: 28px;
+  height: 28px;
+
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  flex: 0 0 auto;
+
+  border: 0;
+  border-radius: 50%;
+  outline: none;
+
+  background: transparent;
+  color: rgba(162, 217, 235, 0.7);
+
+  font-size: 18px;
+  cursor: pointer;
+
+  transition:
+    color 180ms ease,
+    background 180ms ease,
+    transform 180ms ease;
+}
+
+.memory-pocket-close:hover {
+  color: rgba(238, 251, 255, 1);
+  background: rgba(77, 188, 226, 0.075);
+  transform: scale(1.06);
+}
+
+/* =========================================
+   TEXT
+   ========================================= */
+
+.memory-pocket-copy-zone {
+  position: relative;
+  z-index: 6;
+
+  margin-top: 14px;
+  padding: 2px 4px 2px 0;
+
+  direction: rtl;
+  text-align: right;
+  outline: none;
+  cursor: text;
+
+  opacity: 0;
+  animation: memoryPocketTextReveal 420ms
+    110ms ease-out forwards;
+}
+
+@keyframes memoryPocketTextReveal {
+  0% {
+    opacity: 0;
+    transform: translateX(-10px);
+    filter: blur(1px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+.memory-pocket-copy-zone p {
+  margin: 0;
+  color: rgba(243, 251, 254, 0.99);
+
+  font-size: clamp(18px, 1.24vw, 21px);
+  line-height: 1.92;
+  font-weight: 430;
+}
+
+.memory-pocket-copy-zone ::selection {
+  color: rgba(252, 255, 255, 1);
+  background: rgba(62, 185, 224, 0.4);
+}
+
+/* =========================================
+   FOOTER
+   ========================================= */
+
+.memory-pocket-footer {
+  position: relative;
+  z-index: 6;
+
+  margin-top: 16px;
+
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  direction: ltr;
+
+  color: rgba(151, 206, 223, 0.68);
+  font-size: clamp(8px, 0.57vw, 10px);
+  font-weight: 460;
+  letter-spacing: 0.13em;
+}
+
+.memory-pocket-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 8px;
+}
+
+.memory-pocket-typing i {
+  width: 2.5px;
+  height: 2.5px;
+
+  border-radius: 50%;
+  background: rgba(116, 229, 255, 0.82);
+
+  opacity: 0.14;
+  animation: memoryPocketTyping 2.8s
+    ease-in-out infinite;
+}
+
+.memory-pocket-typing i:nth-child(2) {
+  animation-delay: 0.34s;
+}
+.memory-pocket-typing i:nth-child(3) {
+  animation-delay: 0.68s;
+}
+
+@keyframes memoryPocketTyping {
+  0%,
+  18%,
+  100% {
+    opacity: 0.12;
+    transform: scale(0.72);
+  }
+
+  42% {
+    opacity: 0.82;
+    transform: scale(1.08);
+  }
+
+  62% {
+    opacity: 0.24;
+    transform: scale(0.82);
+  }
+}
+
+/* =========================================
+   FOOTER LABEL BELOW DNA
+   ========================================= */
+
+.conversation-spine-footer {
+  position: relative;
+  z-index: 20;
+
+  width: clamp(210px, 18vw, 270px);
+  height: clamp(32px, 3.8vh, 40px);
+
+  display: flex;
+  align-items: center;
+  gap: 9px;
+
+  padding-left: 10px;
+
+  color: rgba(138, 197, 215, 0.58);
+  font-size: clamp(8px, 0.52vw, 10px);
+  letter-spacing: 0.14em;
+
+  direction: ltr;
+  background: transparent;
+}
+
+.conversation-memory-core {
+  position: relative;
+  width: 14px;
+  height: 14px;
+}
+
+.conversation-memory-core::before,
+.conversation-memory-core::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(99, 218, 251, 0.18);
+}
+
+.conversation-memory-core::before {
+  inset: 2px;
+}
+
+.conversation-memory-core::after {
+  inset: -2px;
+  opacity: 0.38;
+}
+
+.conversation-memory-core i {
+  position: absolute;
+  left: 5px;
+  top: 5px;
+
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+  background: rgba(113, 230, 255, 0.9);
+
+  animation: memoryFooterPulse 3.1s
+    ease-in-out infinite;
+}
+
+@keyframes memoryFooterPulse {
+  50% {
+    opacity: 0.32;
+    transform: scale(1.5);
+  }
+}
+
+/* =========================================
+   RESPONSIVE
+   ========================================= */
+
+@media (max-width: 1180px) {
+  .conversation-spine {
+    left: 16px;
+    width: clamp(420px, 32vw, 520px);
+  }
+
+  .conversation-dna-zone {
+    width: clamp(280px, 22vw, 340px);
+  }
+
+  .memory-pocket {
+    left: clamp(132px, 10vw, 165px);
+    width: clamp(260px, 20vw, 320px);
+  }
+}
+
+@media (max-width: 920px) {
+  .conversation-spine {
+    width: 390px;
+  }
+
+  .conversation-dna-zone {
+    width: 250px;
+  }
+
+  .memory-pocket {
+    left: 122px;
+    width: 250px;
+    min-height: 160px;
+    padding: 8px 8px 8px 24px;
+  }
+
+  .memory-pocket-copy-zone p {
+    font-size: 15px;
+    line-height: 1.86;
+  }
+
+  .memory-pocket-role {
+    font-size: 11px;
+  }
+
+  .memory-pocket-time {
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 760px) {
+  .conversation-spine {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .memory-pocket,
+  .memory-pocket-copy-zone,
+  .memory-pocket-slit i,
+  .memory-pocket-bloom i,
+  .memory-pocket-typing i,
+  .conversation-memory-core i {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

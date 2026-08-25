@@ -1,0 +1,1895 @@
+.system-constellation {
+  position: absolute;
+  z-index: 12;
+
+  right:
+    clamp(
+      18px,
+      3vw,
+      58px
+    );
+
+  top: 50%;
+
+  transform:
+    translateY(-50%);
+
+  width:
+    clamp(
+      290px,
+      25vw,
+      390px
+    );
+
+  height:
+    min(
+      71vh,
+      680px
+    );
+
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+
+  color:
+    rgba(
+      229,
+      243,
+      249,
+      0.94
+    );
+
+  pointer-events: auto;
+}
+
+/* =========================================================
+   HEADERS
+   ========================================================= */
+
+.constellation-header,
+.storage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  min-height: 30px;
+}
+
+.constellation-kicker {
+  color:
+    rgba(
+      92,
+      215,
+      252,
+      0.78
+    );
+
+  font-size:
+    clamp(
+      9px,
+      0.68vw,
+      11px
+    );
+
+  letter-spacing: 0.24em;
+  font-weight: 450;
+}
+
+/* =========================================================
+   SYSTEM LIVE SIGNAL
+   ========================================================= */
+
+.system-live-signal {
+  display: flex;
+  align-items: center;
+
+  gap: 6px;
+
+  padding-right: 3px;
+}
+
+.system-live-signal i {
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      103,
+      225,
+      255,
+      0.88
+    );
+
+  opacity: 0.18;
+
+  animation:
+    systemSignal
+    2.4s
+    ease-in-out
+    infinite;
+}
+
+.system-live-signal
+  i:nth-child(2) {
+  animation-delay: 0.28s;
+}
+
+.system-live-signal
+  i:nth-child(3) {
+  animation-delay: 0.56s;
+}
+
+@keyframes systemSignal {
+  0%,
+  100% {
+    opacity: 0.15;
+
+    transform:
+      scale(0.75);
+  }
+
+  48% {
+    opacity: 0.92;
+
+    transform:
+      scale(1.25);
+  }
+}
+
+/* =========================================================
+   SYSTEM GRID
+   ========================================================= */
+
+.system-grid {
+  margin-top:
+    clamp(
+      8px,
+      1vh,
+      12px
+    );
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(
+      2,
+      minmax(
+        0,
+        1fr
+      )
+    );
+
+  gap:
+    clamp(
+      12px,
+      1.2vw,
+      18px
+    );
+}
+
+.system-metric {
+  position: relative;
+
+  min-height:
+    clamp(
+      84px,
+      9.2vh,
+      104px
+    );
+
+  padding:
+    clamp(
+      10px,
+      0.9vw,
+      14px
+    )
+    clamp(
+      8px,
+      0.8vw,
+      12px
+    );
+
+  isolation: isolate;
+
+  cursor: default;
+}
+
+.system-metric-1,
+.system-metric-4 {
+  animation:
+    systemNodeDriftA
+    7.8s
+    ease-in-out
+    infinite;
+}
+
+.system-metric-2,
+.system-metric-3 {
+  animation:
+    systemNodeDriftB
+    8.6s
+    ease-in-out
+    infinite;
+}
+
+.system-metric-2 {
+  animation-delay: -2.4s;
+}
+
+.system-metric-3 {
+  animation-delay: -4.8s;
+}
+
+.system-metric-4 {
+  animation-delay: -3.6s;
+}
+
+@keyframes systemNodeDriftA {
+  0%,
+  100% {
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      );
+  }
+
+  42% {
+    transform:
+      translate3d(
+        2px,
+        -2px,
+        0
+      );
+  }
+
+  72% {
+    transform:
+      translate3d(
+        -1px,
+        2px,
+        0
+      );
+  }
+}
+
+@keyframes systemNodeDriftB {
+  0%,
+  100% {
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      );
+  }
+
+  38% {
+    transform:
+      translate3d(
+        -2px,
+        2px,
+        0
+      );
+  }
+
+  75% {
+    transform:
+      translate3d(
+        2px,
+        -1px,
+        0
+      );
+  }
+}
+
+/* =========================================================
+   SYSTEM TEXT
+   ========================================================= */
+
+.metric-main {
+  position: relative;
+  z-index: 3;
+
+  display: flex;
+
+  align-items: baseline;
+  justify-content: space-between;
+
+  gap: 10px;
+}
+
+.metric-label {
+  color:
+    rgba(
+      91,
+      209,
+      248,
+      0.76
+    );
+
+  font-size:
+    clamp(
+      9px,
+      0.72vw,
+      11px
+    );
+
+  letter-spacing: 0.18em;
+}
+
+.metric-main strong {
+  color:
+    rgba(
+      244,
+      251,
+      254,
+      0.99
+    );
+
+  font-size:
+    clamp(
+      20px,
+      1.65vw,
+      27px
+    );
+
+  font-weight: 420;
+  line-height: 1;
+}
+
+.metric-detail {
+  position: relative;
+  z-index: 3;
+
+  display: block;
+
+  margin-top: 7px;
+
+  color:
+    rgba(
+      177,
+      207,
+      220,
+      0.74
+    );
+
+  font-size:
+    clamp(
+      8px,
+      0.59vw,
+      10px
+    );
+
+  text-align: right;
+
+  white-space: nowrap;
+}
+
+/* =========================================================
+   SYSTEM PARTICLES
+   ========================================================= */
+
+.metric-particle {
+  position: absolute;
+  z-index: 2;
+
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      104,
+      225,
+      255,
+      0.82
+    );
+
+  opacity: 0.34;
+
+  pointer-events: none;
+
+  will-change:
+    transform,
+    opacity;
+}
+
+.metric-particle-a {
+  left: 7%;
+  top: 18%;
+
+  animation:
+    metricParticleA
+    5.8s
+    ease-in-out
+    infinite;
+}
+
+.metric-particle-b {
+  right: 6%;
+  top: 55%;
+
+  animation:
+    metricParticleB
+    6.6s
+    ease-in-out
+    infinite;
+}
+
+.metric-particle-c {
+  left: 47%;
+  bottom: 7%;
+
+  width: 2px;
+  height: 2px;
+
+  animation:
+    metricParticleC
+    7.4s
+    ease-in-out
+    infinite;
+}
+
+@keyframes metricParticleA {
+  50% {
+    opacity: 0.82;
+
+    transform:
+      translate3d(
+        5px,
+        -3px,
+        0
+      );
+  }
+}
+
+@keyframes metricParticleB {
+  50% {
+    opacity: 0.76;
+
+    transform:
+      translate3d(
+        -4px,
+        4px,
+        0
+      );
+  }
+}
+
+@keyframes metricParticleC {
+  50% {
+    opacity: 0.7;
+
+    transform:
+      translate3d(
+        3px,
+        -5px,
+        0
+      );
+  }
+}
+
+/* =========================================================
+   SYSTEM ENERGY
+   ========================================================= */
+
+.metric-energy {
+  position: absolute;
+  z-index: 2;
+
+  left: 8px;
+  right: 8px;
+
+  bottom: 5px;
+
+  height: 1px;
+
+  overflow: hidden;
+
+  opacity: 0.72;
+}
+
+.metric-energy::before {
+  content: "";
+
+  position: absolute;
+  inset: 0;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        75,
+        188,
+        229,
+        0.12
+      ),
+      transparent
+    );
+}
+
+.metric-energy span {
+  position: absolute;
+
+  left: 0;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        99,
+        225,
+        255,
+        0.95
+      ),
+      transparent
+    );
+
+  animation:
+    metricEnergyPulse
+    4.1s
+    ease-in-out
+    infinite;
+}
+
+.metric-energy i {
+  position: absolute;
+
+  left: 0;
+  top: -1px;
+
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      129,
+      235,
+      255,
+      0.92
+    );
+
+  animation:
+    metricEnergyRunner
+    5.2s
+    ease-in-out
+    infinite;
+}
+
+@keyframes metricEnergyPulse {
+  0%,
+  100% {
+    opacity: 0.2;
+
+    transform:
+      scaleX(0.55);
+  }
+
+  48% {
+    opacity: 0.9;
+
+    transform:
+      scaleX(1);
+  }
+}
+
+@keyframes metricEnergyRunner {
+  0% {
+    left: 0%;
+    opacity: 0;
+  }
+
+  15% {
+    opacity: 0.9;
+  }
+
+  78% {
+    opacity: 0.7;
+  }
+
+  100% {
+    left: 96%;
+    opacity: 0;
+  }
+}
+
+/* =========================================================
+   HOVER BLOOM
+   ========================================================= */
+
+.metric-hover-bloom,
+.volume-hover-bloom {
+  position: absolute;
+  z-index: 0;
+
+  left: 50%;
+  top: 50%;
+
+  width: 170%;
+  height: 180%;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scale(0.72);
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  pointer-events: none;
+
+  background:
+    radial-gradient(
+      ellipse at center,
+      rgba(
+        62,
+        200,
+        248,
+        0.13
+      ),
+      rgba(
+        43,
+        155,
+        200,
+        0.045
+      )
+      38%,
+      transparent 72%
+    );
+
+  transition:
+    opacity
+      260ms
+      ease,
+    transform
+      320ms
+      ease;
+
+  will-change:
+    opacity,
+    transform;
+}
+
+.system-metric:hover
+  .metric-hover-bloom,
+.volume-node:hover
+  .volume-hover-bloom {
+  opacity: 1;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scale(1);
+}
+
+.system-metric:hover
+  .metric-label {
+  color:
+    rgba(
+      123,
+      232,
+      255,
+      0.98
+    );
+}
+
+.system-metric:hover
+  .metric-main
+  strong {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      1
+    );
+}
+
+/* =========================================================
+   SYSTEM HEALTH — BACKEND READY
+   stable / warning / critical
+   ========================================================= */
+
+.system-status {
+  display: flex;
+
+  align-items: center;
+  justify-content: center;
+
+  gap: 10px;
+
+  margin-top: 10px;
+
+  font-size:
+    clamp(
+      8px,
+      0.62vw,
+      10px
+    );
+
+  font-weight: 500;
+
+  letter-spacing: 0.14em;
+
+  transition:
+    color
+      220ms
+      ease;
+}
+
+.system-status-core {
+  position: relative;
+
+  width: 17px;
+  height: 17px;
+
+  border:
+    1px solid
+    currentColor;
+
+  border-radius: 50%;
+
+  opacity: 0.9;
+}
+
+.system-status-core::before {
+  content: "";
+
+  position: absolute;
+
+  inset: 3px;
+
+  border:
+    1px solid
+    currentColor;
+
+  border-radius: 50%;
+
+  opacity: 0.26;
+
+  animation:
+    systemStatusRingPulse
+    2.5s
+    ease-in-out
+    infinite;
+}
+
+.system-status-core i {
+  position: absolute;
+
+  left: 5px;
+  top: 5px;
+
+  width: 5px;
+  height: 5px;
+
+  border-radius: 50%;
+
+  background:
+    currentColor;
+
+  animation:
+    systemStatusPulse
+    2.1s
+    ease-in-out
+    infinite;
+}
+
+.system-status[data-health="stable"] {
+  color:
+    rgba(
+      104,
+      241,
+      176,
+      0.94
+    );
+}
+
+.system-status[data-health="warning"] {
+  color:
+    rgba(
+      248,
+      205,
+      92,
+      0.96
+    );
+}
+
+.system-status[data-health="critical"] {
+  color:
+    rgba(
+      255,
+      92,
+      92,
+      0.96
+    );
+}
+
+@keyframes systemStatusPulse {
+  0%,
+  100% {
+    opacity: 1;
+
+    transform:
+      scale(0.9);
+  }
+
+  50% {
+    opacity: 0.44;
+
+    transform:
+      scale(1.45);
+  }
+}
+
+@keyframes systemStatusRingPulse {
+  0%,
+  100% {
+    opacity: 0.2;
+
+    transform:
+      scale(0.82);
+  }
+
+  50% {
+    opacity: 0.72;
+
+    transform:
+      scale(1.18);
+  }
+}
+
+/* =========================================================
+   SEPARATOR
+   ========================================================= */
+
+.constellation-separator {
+  height:
+    clamp(
+      24px,
+      3.2vh,
+      34px
+    );
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 7px;
+
+  opacity: 0.42;
+}
+
+.constellation-separator span {
+  flex: 1;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        74,
+        185,
+        225,
+        0.24
+      ),
+      transparent
+    );
+}
+
+.constellation-separator i {
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      92,
+      218,
+      255,
+      0.78
+    );
+
+  animation:
+    separatorPulse
+    3s
+    ease-in-out
+    infinite;
+}
+
+@keyframes separatorPulse {
+  50% {
+    opacity: 0.25;
+
+    transform:
+      scale(1.4);
+  }
+}
+
+/* =========================================================
+   STORAGE HEADER
+   ========================================================= */
+
+.storage-live {
+  display: flex;
+
+  align-items: center;
+
+  gap: 6px;
+
+  color:
+    rgba(
+      93,
+      227,
+      170,
+      0.78
+    );
+
+  font-size: 7px;
+
+  letter-spacing: 0.18em;
+}
+
+.storage-live i {
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      103,
+      238,
+      177,
+      0.96
+    );
+
+  animation:
+    storageLivePulse
+    2.4s
+    ease-in-out
+    infinite;
+}
+
+@keyframes storageLivePulse {
+  50% {
+    opacity: 0.32;
+
+    transform:
+      scale(1.35);
+  }
+}
+
+/* =========================================================
+   STORAGE GRID
+   ========================================================= */
+
+.storage-grid {
+  margin-top:
+    clamp(
+      9px,
+      1.1vh,
+      13px
+    );
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(
+      2,
+      minmax(
+        0,
+        1fr
+      )
+    );
+
+  gap:
+    clamp(
+      10px,
+      0.9vw,
+      14px
+    );
+}
+
+.volume-node {
+  position: relative;
+
+  min-width: 0;
+
+  min-height:
+    clamp(
+      82px,
+      9vh,
+      100px
+    );
+
+  display: grid;
+
+  grid-template-columns:
+    52px
+    minmax(
+      0,
+      1fr
+    );
+
+  align-items: center;
+
+  gap: 10px;
+
+  padding:
+    5px
+    2px;
+
+  border: 0;
+  outline: none;
+
+  background: transparent;
+
+  color:
+    rgba(
+      221,
+      240,
+      247,
+      0.86
+    );
+
+  text-align: left;
+
+  cursor: pointer;
+
+  isolation: isolate;
+}
+
+/* =========================================================
+   STORAGE RING
+   ========================================================= */
+
+.volume-orbit {
+  position: relative;
+  z-index: 2;
+
+  width: 52px;
+  height: 52px;
+}
+
+.volume-orbit svg {
+  width: 52px;
+  height: 52px;
+
+  transform:
+    rotate(-90deg);
+
+  overflow: visible;
+}
+
+.volume-ring-background {
+  fill: none;
+
+  stroke:
+    rgba(
+      72,
+      174,
+      214,
+      0.11
+    );
+
+  stroke-width: 1.35;
+}
+
+.volume-ring-value {
+  fill: none;
+
+  stroke-width: 2;
+
+  stroke-linecap: round;
+
+  transition:
+    opacity
+      220ms
+      ease;
+
+  animation:
+    usedArcPresence
+    3.8s
+    ease-in-out
+    infinite;
+}
+
+/*
+ * The used arc never moves into the
+ * empty region.
+ * Only its internal SVG gradient moves,
+ * creating a continuous liquid light flow.
+ */
+@keyframes usedArcPresence {
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+
+  48% {
+    opacity: 1;
+  }
+
+  76% {
+    opacity: 0.88;
+  }
+}
+
+.volume-core-dot {
+  position: absolute;
+
+  left: 24px;
+  top: 24px;
+
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      107,
+      226,
+      255,
+      0.76
+    );
+
+  animation:
+    volumeCorePulse
+    2.9s
+    ease-in-out
+    infinite;
+}
+
+@keyframes volumeCorePulse {
+  50% {
+    opacity: 0.32;
+
+    transform:
+      scale(1.5);
+  }
+}
+
+/* =========================================================
+   STORAGE INFORMATION
+   ========================================================= */
+
+.volume-info {
+  position: relative;
+  z-index: 2;
+
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+}
+
+.volume-title-row {
+  display: flex;
+
+  align-items: baseline;
+  justify-content: space-between;
+
+  gap: 7px;
+}
+
+.volume-title-row strong {
+  color:
+    rgba(
+      240,
+      250,
+      253,
+      0.98
+    );
+
+  font-size:
+    clamp(
+      14px,
+      1.05vw,
+      17px
+    );
+
+  font-weight: 500;
+}
+
+.volume-title-row > span {
+  color:
+    rgba(
+      109,
+      221,
+      252,
+      0.88
+    );
+
+  font-size:
+    clamp(
+      10px,
+      0.78vw,
+      12px
+    );
+}
+
+.volume-info small {
+  margin-top: 4px;
+
+  color:
+    rgba(
+      184,
+      211,
+      222,
+      0.76
+    );
+
+  font-size:
+    clamp(
+      8px,
+      0.57vw,
+      10px
+    );
+
+  font-weight: 400;
+
+  white-space: nowrap;
+}
+
+.volume-name {
+  margin-top: 4px;
+
+  color:
+    rgba(
+      144,
+      191,
+      208,
+      0.62
+    );
+
+  font-size:
+    clamp(
+      7px,
+      0.49vw,
+      9px
+    );
+
+  letter-spacing: 0.1em;
+}
+
+.volume-kind {
+  position: absolute;
+
+  z-index: 2;
+
+  right: 2px;
+  top: 2px;
+
+  color:
+    rgba(
+      139,
+      188,
+      205,
+      0.55
+    );
+
+  font-size:
+    clamp(
+      6px,
+      0.4vw,
+      7px
+    );
+
+  letter-spacing: 0.1em;
+}
+
+/* =========================================================
+   STORAGE HOVER
+   ========================================================= */
+
+.volume-node:hover
+  .volume-ring-value {
+  opacity: 1;
+}
+
+.volume-node:hover
+  .volume-title-row
+  strong {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      1
+    );
+}
+
+/* =========================================================
+   QRONOS STORAGE
+   ========================================================= */
+
+.qronos-storage-orbit {
+  position: relative;
+  z-index: 2;
+
+  width: 52px;
+  height: 52px;
+}
+
+.qronos-storage-orbit svg {
+  position: relative;
+
+  z-index: 3;
+
+  width: 52px;
+  height: 52px;
+
+  overflow: visible;
+}
+
+.qronos-storage-ring {
+  fill: none;
+
+  stroke-linecap: round;
+}
+
+.qronos-storage-ring-a {
+  stroke:
+    rgba(
+      96,
+      218,
+      252,
+      0.5
+    );
+
+  stroke-width: 1.35;
+
+  stroke-dasharray:
+    19
+    9
+    31
+    41;
+
+  animation:
+    qronosRingA
+    14s
+    linear
+    infinite;
+
+  transform-origin:
+    26px
+    26px;
+}
+
+.qronos-storage-ring-b {
+  stroke:
+    rgba(
+      132,
+      108,
+      255,
+      0.32
+    );
+
+  stroke-width: 1;
+
+  stroke-dasharray:
+    12
+    16
+    24
+    48;
+
+  animation:
+    qronosRingB
+    18s
+    linear
+    infinite;
+
+  transform-origin:
+    26px
+    26px;
+}
+
+@keyframes qronosRingA {
+  to {
+    transform:
+      rotate(360deg);
+  }
+}
+
+@keyframes qronosRingB {
+  to {
+    transform:
+      rotate(-360deg);
+  }
+}
+
+/* =========================================================
+   QRONOS PULSE WAVES
+   ========================================================= */
+
+.qronos-pulse-wave {
+  position: absolute;
+
+  z-index: 1;
+
+  left: 50%;
+  top: 50%;
+
+  width: 24px;
+  height: 24px;
+
+  border:
+    1px solid
+    rgba(
+      104,
+      224,
+      255,
+      0.36
+    );
+
+  border-radius: 50%;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scale(0.55);
+
+  opacity: 0;
+
+  pointer-events: none;
+
+  animation:
+    qronosPulseWave
+    5.4s
+    ease-out
+    infinite;
+}
+
+.qronos-pulse-wave-2 {
+  animation-delay:
+    0.65s;
+}
+
+@keyframes qronosPulseWave {
+  0%,
+  68% {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(0.55);
+  }
+
+  72% {
+    opacity: 0.42;
+  }
+
+  88% {
+    opacity: 0.16;
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(2.25);
+  }
+}
+
+.qronos-storage-core {
+  position: absolute;
+
+  z-index: 4;
+
+  left: 23px;
+  top: 23px;
+
+  width: 6px;
+  height: 6px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      151,
+      239,
+      255,
+      0.98
+    );
+
+  animation:
+    qronosStorageCore
+    3s
+    ease-in-out
+    infinite;
+}
+
+@keyframes qronosStorageCore {
+  0%,
+  100% {
+    opacity: 0.72;
+
+    transform:
+      scale(0.9);
+  }
+
+  50% {
+    opacity: 1;
+
+    transform:
+      scale(1.42);
+  }
+}
+
+.qronos-storage-particle {
+  position: absolute;
+
+  z-index: 4;
+
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      101,
+      223,
+      255,
+      0.9
+    );
+}
+
+.qsp-1 {
+  left: 8px;
+  top: 15px;
+
+  animation:
+    qspA
+    5.4s
+    ease-in-out
+    infinite;
+}
+
+.qsp-2 {
+  right: 7px;
+  top: 19px;
+
+  animation:
+    qspB
+    6.1s
+    ease-in-out
+    infinite;
+}
+
+.qsp-3 {
+  left: 24px;
+  bottom: 4px;
+
+  animation:
+    qspC
+    6.8s
+    ease-in-out
+    infinite;
+}
+
+@keyframes qspA {
+  50% {
+    transform:
+      translate(
+        4px,
+        -3px
+      );
+
+    opacity: 0.45;
+  }
+}
+
+@keyframes qspB {
+  50% {
+    transform:
+      translate(
+        -4px,
+        3px
+      );
+
+    opacity: 0.4;
+  }
+}
+
+@keyframes qspC {
+  50% {
+    transform:
+      translate(
+        2px,
+        -5px
+      );
+
+    opacity: 0.48;
+  }
+}
+
+.qronos-storage-health {
+  margin-top: 4px;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 5px;
+
+  color:
+    rgba(
+      102,
+      231,
+      173,
+      0.82
+    );
+
+  font-size:
+    clamp(
+      7px,
+      0.48vw,
+      8px
+    );
+
+  letter-spacing: 0.11em;
+}
+
+.qronos-storage-health i {
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      103,
+      236,
+      174,
+      0.95
+    );
+}
+
+/* =========================================================
+   RESPONSIVE
+   ========================================================= */
+
+@media (max-width: 1180px) {
+  .system-constellation {
+    right: 12px;
+
+    width:
+      clamp(
+        260px,
+        24vw,
+        325px
+      );
+
+    height:
+      min(
+        68vh,
+        620px
+      );
+  }
+
+  .system-grid {
+    gap: 10px;
+  }
+
+  .system-metric {
+    min-height: 82px;
+  }
+
+  .storage-grid {
+    gap: 8px;
+  }
+}
+
+@media (max-width: 920px) {
+  .system-constellation {
+    width: 235px;
+  }
+
+  .system-metric {
+    min-height: 74px;
+
+    padding:
+      8px
+      6px;
+  }
+
+  .metric-main strong {
+    font-size: 18px;
+  }
+
+  .metric-detail {
+    font-size: 7px;
+  }
+
+  .volume-node {
+    grid-template-columns:
+      42px
+      minmax(
+        0,
+        1fr
+      );
+
+    min-height: 72px;
+  }
+
+  .volume-orbit,
+  .qronos-storage-orbit {
+    width: 42px;
+    height: 42px;
+  }
+
+  .volume-orbit svg,
+  .qronos-storage-orbit svg {
+    width: 42px;
+    height: 42px;
+  }
+
+  .volume-title-row strong {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 760px) {
+  .system-constellation {
+    right: 8px;
+    top: 18%;
+
+    transform: none;
+
+    width: 190px;
+    height: 48vh;
+
+    justify-content:
+      flex-start;
+  }
+
+  .system-grid {
+    gap: 5px;
+  }
+
+  .system-metric {
+    min-height: 64px;
+  }
+
+  .metric-main strong {
+    font-size: 15px;
+  }
+
+  .metric-detail {
+    display: none;
+  }
+
+  .metric-energy {
+    bottom: 2px;
+  }
+
+  .constellation-separator {
+    height: 18px;
+  }
+
+  .storage-grid {
+    gap: 3px;
+  }
+
+  .volume-node {
+    grid-template-columns:
+      34px
+      minmax(
+        0,
+        1fr
+      );
+
+    min-height: 58px;
+  }
+
+  .volume-orbit,
+  .qronos-storage-orbit,
+  .volume-orbit svg,
+  .qronos-storage-orbit svg {
+    width: 34px;
+    height: 34px;
+  }
+
+  .volume-info small,
+  .volume-name,
+  .volume-kind,
+  .qronos-storage-health {
+    display: none;
+  }
+
+  .system-status {
+    gap: 7px;
+
+    font-size: 7px;
+  }
+
+  .system-status-core {
+    width: 14px;
+    height: 14px;
+  }
+
+  .system-status-core i {
+    left: 4px;
+    top: 4px;
+
+    width: 4px;
+    height: 4px;
+  }
+}
+
+@media (max-height: 650px) {
+  .system-constellation {
+    height: 62vh;
+  }
+
+  .system-metric {
+    min-height: 66px;
+  }
+
+  .constellation-separator {
+    height: 18px;
+  }
+
+  .volume-node {
+    min-height: 56px;
+  }
+}
+
+/* =========================================================
+   REDUCED MOTION
+   ========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  .system-live-signal i,
+  .system-metric,
+  .metric-particle,
+  .metric-energy span,
+  .metric-energy i,
+  .system-status-core::before,
+  .system-status-core i,
+  .constellation-separator i,
+  .storage-live i,
+  .volume-ring-value,
+  .volume-core-dot,
+  .qronos-storage-ring,
+  .qronos-pulse-wave,
+  .qronos-storage-core,
+  .qronos-storage-particle {
+    animation-duration:
+      0.001ms !important;
+
+    animation-iteration-count:
+      1 !important;
+  }
+}
