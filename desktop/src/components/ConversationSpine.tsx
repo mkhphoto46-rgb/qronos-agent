@@ -26,7 +26,10 @@ type Conversation = {
   role: ConversationRole;
   time: string;
   text: string;
-  progress: number;
+  /*
+   * Where this memory sits along the DNA spine, 0..1. Not task progress.
+   */
+  spinePosition: number;
 };
 
 const conversations: Conversation[] = [
@@ -36,7 +39,7 @@ const conversations: Conversation[] = [
     time: "19:34",
     text:
       "DNA بخش Context باید از جنس Particleهای Oracle باشد و Memory Knot بخشی از خود ساختار DNA احساس شود، نه یک عنصر جدا که روی آن قرار گرفته باشد.",
-    progress: 0.24,
+    spinePosition: 0.24,
   },
 
   {
@@ -45,7 +48,7 @@ const conversations: Conversation[] = [
     time: "19:21",
     text:
       "وقتی Memory انتخاب می‌شود، DNA باید در همان نقطه باز شود و متن از دل این شکاف بیرون بیاید؛ نه اینکه یک Card مستقل روی صفحه ظاهر شود.",
-    progress: 0.5,
+    spinePosition: 0.5,
   },
 
   {
@@ -54,15 +57,15 @@ const conversations: Conversation[] = [
     time: "19:06",
     text:
       "فوکوس اصلی رابط همچنان روی Oracle مرکزی باقی می‌ماند. Memory Pocket فقط حافظه انتخاب‌شده را از دل DNA آشکار می‌کند و تاریخچه کامل در بخش Conversations قرار می‌گیرد.",
-    progress: 0.76,
+    spinePosition: 0.76,
   },
 ];
 
 function getPocketPosition(
-  progress: number,
+  spinePosition: number,
 ) {
   const raw =
-    18 + progress * 61;
+    18 + spinePosition * 61;
 
   return Math.min(
     66,
@@ -93,8 +96,8 @@ function ConversationSpine() {
           (conversation) => ({
             id:
               conversation.id,
-            progress:
-              conversation.progress,
+            spinePosition:
+              conversation.spinePosition,
             role:
               conversation.role,
           }),
@@ -126,7 +129,7 @@ function ConversationSpine() {
       return {
         "--memory-pocket-top":
           `${getPocketPosition(
-            selectedConversation.progress,
+            selectedConversation.spinePosition,
           )}%`,
       } as CSSProperties;
     }, [

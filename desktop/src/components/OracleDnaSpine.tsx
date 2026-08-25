@@ -12,7 +12,14 @@ type MemoryRole =
 
 export type OracleMemoryNode = {
   id: string;
-  progress: number;
+  /*
+   * Position of this memory along the DNA spine, 0..1.
+   *
+   * Deliberately not called "progress": TaskEvent carries a real progress
+   * field for task completion, and confusing the two would put a task
+   * percentage on the spine or a spine position in a progress bar.
+   */
+  spinePosition: number;
   role: MemoryRole;
 };
 
@@ -766,7 +773,7 @@ function OracleDnaSpine({
 
       if (activeMemory) {
         activeProgress +=
-          (activeMemory.progress -
+          (activeMemory.spinePosition -
             activeProgress) *
           0.085;
       }
@@ -1069,7 +1076,7 @@ function OracleDnaSpine({
         memoriesRef.current
       ) {
         const progress =
-          memory.progress;
+          memory.spinePosition;
 
         const phase =
           progress *
