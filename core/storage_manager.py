@@ -12,7 +12,8 @@ from core.storage_budget import (
     ComponentUsage,
     classify_usage,
     measure_component,
-    total_managed_cap_bytes,
+    total_hard_cap_bytes,
+    total_soft_cap_bytes,
 )
 from core.storage_guard import (
     StorageStatus,
@@ -78,13 +79,30 @@ class ComponentReport:
 
     @property
     def is_breached(self) -> bool:
+        """Usage has reached the hard cap; growth must stop."""
         return self.level is CapLevel.HARD
+
+    @property
+    def is_alarming(self) -> bool:
+        """
+        A non-disposable component has crossed its soft cap.
+
+        For memory the soft cap is a defect detector rather than a cleanup
+        trigger, so crossing it is worth reporting immediately instead of
+        waiting for the emergency ceiling.
+        """
+        return (
+            not self.budget.disposable
+            and self.level is not CapLevel.NORMAL
+        )
 
     def describe(self) -> str:
         return (
             f"{self.component.value}: "
-            f"{self.usage.total_gb:.3f} / {self.budget.hard_cap_gb:.2f} GB "
-            f"({self.usage.file_count} files) "
+            f"{self.usage.total_gb:.3f} GB "
+            f"(soft {self.budget.soft_cap_gb:.2f} / hard "
+            f"{self.budget.hard_cap_gb:.2f} GB, "
+            f"{self.usage.file_count} files) "
             f"level={self.level.value} "
             f"decision={self.evaluation.decision.value}"
         )
@@ -112,6 +130,14 @@ class StorageReport:
             report.component
             for report in self.components
             if report.is_breached
+        )
+
+    @property
+    def alarming_components(self) -> tuple[BudgetComponent, ...]:
+        return tuple(
+            report.component
+            for report in self.components
+            if report.is_alarming
         )
 
     @property
@@ -367,24 +393,32 @@ class StorageManager:
         """
         Conditions that indicate a defect rather than a routine state.
 
-        A non-disposable component reaching its hard cap is the important one.
-        The memory cap is sized so that reaching it means consolidation has
-        stopped working — cleanup cannot fix that, and quietly deleting
-        meaningful memory would hide the fault.
+        A non-disposable component crossing its **soft** cap is the important
+        one. Memory's 2 GB soft cap is sized so that reaching it means
+        consolidation has stopped working — cleanup cannot fix that, and
+        quietly deleting meaningful memory would hide the fault. Waiting for
+        the 15 GB emergency ceiling would mean noticing the fault long after
+        it started.
         """
         resolved = report if report is not None else self.report()
 
         messages: list[str] = []
 
         for entry in resolved.components:
-            if entry.is_breached and not entry.budget.disposable:
+            if entry.is_alarming:
+                ceiling = (
+                    " The emergency ceiling has been reached."
+                    if entry.is_breached
+                    else ""
+                )
+
                 messages.append(
-                    f"{entry.component.value} has reached its hard cap of "
-                    f"{entry.budget.hard_cap_gb:.2f} GB at "
-                    f"{entry.usage.total_gb:.3f} GB. This component is not "
-                    "disposable, so the cap being reached indicates that "
-                    "consolidation is not working. Investigate rather than "
-                    "delete."
+                    f"{entry.component.value} is at "
+                    f"{entry.usage.total_gb:.3f} GB, above its "
+                    f"{entry.budget.soft_cap_gb:.2f} GB alarm threshold. "
+                    "This component is not disposable, so cleanup cannot "
+                    "reduce it. Investigate consolidation rather than "
+                    f"deleting.{ceiling}"
                 )
 
             if entry.usage.partial:
@@ -424,8 +458,11 @@ def main() -> None:
 
     print("=== Qronos Storage Manager ===")
     print(
-        f"Managed data: {bytes_to_gb(report.managed_bytes):.3f} GB of "
-        f"{bytes_to_gb(total_managed_cap_bytes(manager.budgets)):.2f} GB"
+        f"Managed data: {bytes_to_gb(report.managed_bytes):.3f} GB "
+        f"(normal footprint "
+        f"{bytes_to_gb(total_soft_cap_bytes(manager.budgets)):.2f} GB, "
+        f"emergency envelope "
+        f"{bytes_to_gb(total_hard_cap_bytes(manager.budgets)):.2f} GB)"
     )
     print(f"Volume: {report.volume_evaluation.decision.value}")
     print(f"  {report.volume_evaluation.reason}")

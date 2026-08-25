@@ -62,6 +62,7 @@ class ManagerTestCase(unittest.TestCase):
             ComponentBudget(
                 component=BudgetComponent.VISION_TEMP,
                 root=self.vision_root,
+                soft_cap_bytes=600,
                 hard_cap_bytes=1_000,
                 max_age_seconds=7 * DAY,
                 disposable=True,
@@ -69,6 +70,7 @@ class ManagerTestCase(unittest.TestCase):
             ComponentBudget(
                 component=BudgetComponent.MEMORY,
                 root=self.memory_root,
+                soft_cap_bytes=600,
                 hard_cap_bytes=1_000,
                 disposable=False,
             ),
@@ -184,12 +186,26 @@ class TestReport(ManagerTestCase):
 
 
 class TestDecisions(ManagerTestCase):
-    def test_evaluate_write_reflects_component_pressure(self) -> None:
+    def test_disposable_data_above_its_soft_cap_still_allows_writes(
+        self,
+    ) -> None:
+        # Under the two-cap model, growth is permitted right up to the hard
+        # cap; the soft cap only starts background cleanup.
         self.make_file(self.vision_root, "a.bin", 950)
 
         result = self.manager.evaluate_write(BudgetComponent.VISION_TEMP)
 
+        self.assertIs(result.decision, StorageDecision.ALLOW)
+        self.assertIn("cleanup", result.reason.lower())
+
+    def test_non_disposable_data_above_its_soft_cap_warns(self) -> None:
+        # Memory cannot be reduced by cleanup, so its soft cap is an alarm.
+        self.make_file(self.memory_root, "memory.db", 950)
+
+        result = self.manager.evaluate_write(BudgetComponent.MEMORY)
+
         self.assertIs(result.decision, StorageDecision.WARN)
+        self.assertIn("alarm threshold", result.reason)
 
     def test_evaluate_write_blocks_a_breaching_write(self) -> None:
         self.make_file(self.vision_root, "a.bin", 500)
@@ -373,10 +389,29 @@ class TestEmergencySequence(ManagerTestCase):
 
 
 class TestAlarms(ManagerTestCase):
-    def test_a_breached_non_disposable_component_raises_an_alarm(self) -> None:
-        # The memory cap is sized so that reaching it means consolidation has
-        # stopped working. Cleanup cannot fix that, and quietly deleting
-        # meaningful memory would hide the fault.
+    def test_a_non_disposable_component_alarms_at_its_soft_cap(self) -> None:
+        # The alarm fires at the soft cap, not the hard one. Waiting for the
+        # emergency ceiling would mean noticing a consolidation failure long
+        # after it started.
+        self.make_file(self.memory_root, "memory.db", 700)
+
+        report = self.manager.report(
+            status=StorageStatus(volumes=(make_volume(free_gb=400.0),))
+        )
+        alarms = self.manager.alarms(report)
+
+        self.assertEqual(len(alarms), 1)
+        self.assertIn("alarm threshold", alarms[0])
+        self.assertIn("Investigate consolidation", alarms[0])
+        self.assertNotIn("emergency ceiling", alarms[0])
+        self.assertIn(
+            BudgetComponent.MEMORY,
+            report.alarming_components,
+        )
+
+    def test_reaching_the_emergency_ceiling_is_named_in_the_alarm(
+        self,
+    ) -> None:
         self.make_file(self.memory_root, "memory.db", 1_200)
 
         report = self.manager.report(
@@ -385,11 +420,11 @@ class TestAlarms(ManagerTestCase):
         alarms = self.manager.alarms(report)
 
         self.assertEqual(len(alarms), 1)
-        self.assertIn("consolidation is not working", alarms[0])
-        self.assertIn("Investigate rather than delete", alarms[0])
+        self.assertIn("emergency ceiling", alarms[0])
 
     def test_a_breached_disposable_component_raises_no_alarm(self) -> None:
-        # Vision temp being full is routine; cleanup handles it.
+        # Vision temp being full is routine; cleanup handles it. Only a
+        # component cleanup cannot reduce is worth alarming about.
         self.make_file(self.vision_root, "a.bin", 1_500)
 
         report = self.manager.report(
@@ -465,6 +500,10 @@ class TestDefaultConstruction(unittest.TestCase):
         manager = StorageManager()
 
         self.assertEqual(len(manager.budgets), len(BudgetComponent))
+        self.assertIn(
+            BudgetComponent.IMAGE_TEMP,
+            {budget.component for budget in manager.budgets},
+        )
         self.assertIsNotNone(manager.janitor)
 
     def test_the_janitor_shares_the_manager_registry(self) -> None:

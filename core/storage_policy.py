@@ -284,12 +284,18 @@ def evaluate_component_write(
     """
     Decide whether a component may accept more data.
 
-    Maps the soft/medium/hard ladder onto a decision:
+    Maps the two-cap ladder onto a decision:
 
     ``NORMAL``  allow
-    ``SOFT``    allow, cleanup should run in the background
-    ``MEDIUM``  warn, refuse low-priority writes
+    ``SOFT``    disposable: allow, cleanup should run in the background
+                non-disposable: warn, because the soft cap is an alarm
     ``HARD``    block until the component is back under its cap
+
+    The soft cap means different things either side of ``disposable``. For a
+    disposable component it is a routine cleanup trigger and needs no attention.
+    For a component holding meaningful state it is a defect signal: memory is
+    sized so that crossing 2 GB indicates consolidation has stopped working, and
+    that must surface rather than pass silently.
 
     Fail-closed on a partial measurement. A partial walk understates usage, so
     treating it as proof of headroom could let a component grow past its cap
@@ -314,27 +320,27 @@ def evaluate_component_write(
 
     level = classify_usage(budget, usage)
 
-    if level is CapLevel.MEDIUM:
-        return StorageEvaluation(
-            decision=StorageDecision.WARN,
-            reason=(
-                f"{budget.component.value} is at "
-                f"{bytes_to_gb(usage.total_bytes):.3f} GB, above its medium "
-                f"cap of {bytes_to_gb(budget.medium_cap_bytes):.3f} GB. "
-                "Cleanup should run and low-priority writes should be "
-                "refused."
-            ),
-            component=budget.component,
-        )
-
     if level is CapLevel.SOFT:
+        if not budget.disposable:
+            return StorageEvaluation(
+                decision=StorageDecision.WARN,
+                reason=(
+                    f"{budget.component.value} is at "
+                    f"{bytes_to_gb(usage.total_bytes):.3f} GB, above its "
+                    f"{budget.soft_cap_gb:.2f} GB alarm threshold. This "
+                    "component is not disposable, so cleanup cannot reduce "
+                    "it. Investigate consolidation."
+                ),
+                component=budget.component,
+            )
+
         return StorageEvaluation(
             decision=StorageDecision.ALLOW,
             reason=(
                 f"{budget.component.value} is at "
                 f"{bytes_to_gb(usage.total_bytes):.3f} GB, above its soft cap "
-                f"of {bytes_to_gb(budget.soft_cap_bytes):.3f} GB. Background "
-                "cleanup should run."
+                f"of {budget.soft_cap_gb:.2f} GB. Background cleanup should "
+                "run."
             ),
             component=budget.component,
         )
@@ -343,8 +349,8 @@ def evaluate_component_write(
         decision=StorageDecision.ALLOW,
         reason=(
             f"{budget.component.value} is at "
-            f"{bytes_to_gb(usage.total_bytes):.3f} GB of "
-            f"{budget.hard_cap_gb:.2f} GB."
+            f"{bytes_to_gb(usage.total_bytes):.3f} GB, below its "
+            f"{budget.soft_cap_gb:.2f} GB soft cap."
         ),
         component=budget.component,
     )

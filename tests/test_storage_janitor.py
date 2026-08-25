@@ -61,10 +61,16 @@ class JanitorTestCase(unittest.TestCase):
         max_age_seconds: float | None = None,
         disposable: bool = True,
         root: Path | None = None,
+        soft_cap_bytes: int | None = None,
     ) -> ComponentBudget:
         return ComponentBudget(
             component=BudgetComponent.VISION_TEMP,
             root=root if root is not None else self.managed,
+            soft_cap_bytes=(
+                soft_cap_bytes
+                if soft_cap_bytes is not None
+                else int(hard_cap_bytes * 0.6)
+            ),
             hard_cap_bytes=hard_cap_bytes,
             max_age_seconds=max_age_seconds,
             disposable=disposable,

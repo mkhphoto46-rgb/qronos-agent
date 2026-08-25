@@ -13,6 +13,7 @@ from core.storage_guard import bytes_to_gb, gb_to_bytes
 # declared in core.config. They are derived rather than added to QronosPaths so
 # that the storage subsystem can be reviewed without touching shared config.
 VISION_TEMP_DIR = CONFIG.paths.temp / "vision"
+IMAGE_TEMP_DIR = CONFIG.paths.temp / "image"
 FILESYSTEM_INDEX_DIR = CONFIG.paths.data / "index"
 
 
@@ -21,23 +22,27 @@ class BudgetComponent(Enum):
 
     MEMORY = "memory"
     VISION_TEMP = "vision_temp"
+    IMAGE_TEMP = "image_temp"
     FILESYSTEM_METADATA = "filesystem_metadata"
     LOGS_AND_TEMP = "logs_and_temp"
 
 
 class CapLevel(Enum):
     """
-    How close a component is to its hard cap.
+    Where measured usage sits on the two-cap ladder.
 
     NORMAL   below the soft cap; nothing to do
-    SOFT     start removing the oldest disposable items quietly
-    MEDIUM   remove aggressively, tell the user, refuse low-priority writes
-    HARD     refuse all new writes for this component until it is back under
+    SOFT     normal cleanup starts; oldest disposable data is reclaimed first
+    HARD     growth is blocked until safe reclamation succeeds
+
+    Two caps, not three. The soft cap is where routine reclamation begins and
+    the hard cap is a boundary a component may not grow past. There is
+    deliberately no middle level: an intermediate band would need its own
+    distinct action to justify existing, and there isn't one.
     """
 
     NORMAL = "normal"
     SOFT = "soft"
-    MEDIUM = "medium"
     HARD = "hard"
 
 
@@ -63,37 +68,36 @@ class ComponentBudget:
     AND would let a component sit just under its size cap indefinitely while
     accumulating stale data.
 
-    ``hard_cap_bytes`` and ``max_age_seconds`` come from the approved budgets in
-    the master context. ``soft_fraction`` and ``medium_fraction`` are policy
-    defaults chosen here, not measurements, and are marked PENDING in the master
-    context until signed off.
+    Both caps are absolute rather than a fraction of one another. Their ratio
+    varies enormously per component — memory allows 2 GB normally against a
+    15 GB emergency ceiling, while vision temp allows 500 MB against 1.5 GB —
+    and a shared percentage could not express both.
     """
 
     component: BudgetComponent
     root: Path
+    soft_cap_bytes: int
     hard_cap_bytes: int
     max_age_seconds: float | None = None
-    soft_fraction: float = 0.60
-    medium_fraction: float = 0.80
 
     # Deleting data is only appropriate for disposable, Qronos-owned artifacts.
     # A component holding meaningful state (memory) must be consolidated and
-    # compacted first, and a breach is evidence of a defect rather than a
-    # routine condition.
+    # compacted by the component that understands it. For such a component the
+    # soft cap is an alarm rather than a cleanup trigger.
     disposable: bool = True
 
     def __post_init__(self) -> None:
-        if self.hard_cap_bytes <= 0:
+        if self.soft_cap_bytes <= 0:
             raise ValueError(
-                "hard_cap_bytes must be positive: "
-                f"{self.hard_cap_bytes}"
+                "soft_cap_bytes must be positive: "
+                f"{self.soft_cap_bytes}"
             )
 
-        if not 0.0 < self.soft_fraction < self.medium_fraction < 1.0:
+        if self.hard_cap_bytes <= self.soft_cap_bytes:
             raise ValueError(
-                "Expected 0 < soft_fraction < medium_fraction < 1, got "
-                f"soft={self.soft_fraction} "
-                f"medium={self.medium_fraction}"
+                "hard_cap_bytes must exceed soft_cap_bytes, got "
+                f"soft={self.soft_cap_bytes} "
+                f"hard={self.hard_cap_bytes}"
             )
 
         if (
@@ -106,12 +110,8 @@ class ComponentBudget:
             )
 
     @property
-    def soft_cap_bytes(self) -> int:
-        return int(self.hard_cap_bytes * self.soft_fraction)
-
-    @property
-    def medium_cap_bytes(self) -> int:
-        return int(self.hard_cap_bytes * self.medium_fraction)
+    def soft_cap_gb(self) -> float:
+        return bytes_to_gb(self.soft_cap_bytes)
 
     @property
     def hard_cap_gb(self) -> float:
@@ -125,34 +125,55 @@ class ComponentBudget:
         return self.max_age_seconds / SECONDS_PER_DAY
 
 
-# Approved budgets. Total managed data is roughly 3.5 GB, which replaces the
-# earlier 30 GB envelope. A cap that cannot be reached is not a safety limit:
-# the memory cap in particular is sized so that breaching it is a meaningful
-# signal that consolidation has stopped working.
+# Approved budgets. The soft caps keep the normal footprint low while the hard
+# caps preserve a large emergency envelope, which is the point of the two-cap
+# model: routine operation stays small, and a component still has headroom
+# before it is refused outright.
+#
+# Memory is the case the two caps were introduced for. A single 15 GB limit
+# could never be reached by distilled memory, making it decoration rather than
+# a safety limit; a single 2 GB limit would throw away headroom. Split, the
+# 2 GB soft cap becomes a working defect detector and 15 GB stays an emergency
+# ceiling.
 DEFAULT_BUDGETS: tuple[ComponentBudget, ...] = (
     ComponentBudget(
         component=BudgetComponent.MEMORY,
         root=CONFIG.paths.memory,
-        hard_cap_bytes=gb_to_bytes(2.0),
+        soft_cap_bytes=gb_to_bytes(2.0),
+        hard_cap_bytes=gb_to_bytes(15.0),
         max_age_seconds=None,
         disposable=False,
     ),
     ComponentBudget(
         component=BudgetComponent.VISION_TEMP,
         root=VISION_TEMP_DIR,
-        hard_cap_bytes=gb_to_bytes(0.5),
+        soft_cap_bytes=gb_to_bytes(0.5),
+        hard_cap_bytes=gb_to_bytes(1.5),
         max_age_seconds=7 * SECONDS_PER_DAY,
     ),
     ComponentBudget(
+        component=BudgetComponent.IMAGE_TEMP,
+        root=IMAGE_TEMP_DIR,
+        soft_cap_bytes=gb_to_bytes(3.0),
+        hard_cap_bytes=gb_to_bytes(10.0),
+        max_age_seconds=30 * SECONDS_PER_DAY,
+    ),
+    # Sourced from the filesystem index design envelope: a target of hundreds
+    # of megabytes with a 1-2 GB ceiling.
+    ComponentBudget(
         component=BudgetComponent.FILESYSTEM_METADATA,
         root=FILESYSTEM_INDEX_DIR,
-        hard_cap_bytes=gb_to_bytes(0.5),
+        soft_cap_bytes=gb_to_bytes(0.5),
+        hard_cap_bytes=gb_to_bytes(2.0),
         max_age_seconds=None,
     ),
+    # PENDING: no approved figures exist for logs. These are chosen here and
+    # must be confirmed rather than assumed correct.
     ComponentBudget(
         component=BudgetComponent.LOGS_AND_TEMP,
         root=CONFIG.paths.logs,
-        hard_cap_bytes=gb_to_bytes(0.5),
+        soft_cap_bytes=gb_to_bytes(0.25),
+        hard_cap_bytes=gb_to_bytes(1.0),
         max_age_seconds=30 * SECONDS_PER_DAY,
     ),
 )
@@ -314,7 +335,7 @@ def classify_usage(
     usage: ComponentUsage,
 ) -> CapLevel:
     """
-    Place measured usage on the soft/medium/hard ladder.
+    Place measured usage on the two-cap ladder.
 
     Compared against the hard cap first so that a component far over its limit
     is never reported as merely SOFT.
@@ -323,9 +344,6 @@ def classify_usage(
 
     if total >= budget.hard_cap_bytes:
         return CapLevel.HARD
-
-    if total >= budget.medium_cap_bytes:
-        return CapLevel.MEDIUM
 
     if total >= budget.soft_cap_bytes:
         return CapLevel.SOFT
@@ -378,10 +396,27 @@ def budget_for(
     )
 
 
-def total_managed_cap_bytes(
+def total_soft_cap_bytes(
     budgets: tuple[ComponentBudget, ...] = DEFAULT_BUDGETS,
 ) -> int:
-    """Sum of every component's hard cap."""
+    """
+    Sum of every component's soft cap: the expected normal footprint.
+
+    This is the number that describes Qronos in ordinary operation.
+    """
+    return sum(budget.soft_cap_bytes for budget in budgets)
+
+
+def total_hard_cap_bytes(
+    budgets: tuple[ComponentBudget, ...] = DEFAULT_BUDGETS,
+) -> int:
+    """
+    Sum of every component's hard cap: the emergency envelope.
+
+    Reaching this total would mean every component simultaneously sat at its
+    ceiling, which should never happen in practice. It bounds the worst case
+    rather than describing the expected one.
+    """
     return sum(budget.hard_cap_bytes for budget in budgets)
 
 
@@ -393,8 +428,12 @@ def main() -> None:
 
     print("=== Qronos Managed-Storage Budgets ===")
     print(
-        f"Total cap: "
-        f"{bytes_to_gb(total_managed_cap_bytes()):.2f} GB"
+        f"Normal footprint (soft): "
+        f"{bytes_to_gb(total_soft_cap_bytes()):.2f} GB"
+    )
+    print(
+        f"Emergency envelope (hard): "
+        f"{bytes_to_gb(total_hard_cap_bytes()):.2f} GB"
     )
     print()
 
@@ -411,8 +450,10 @@ def main() -> None:
 
         print(
             f"{budget.component.value}: "
-            f"{usage.total_gb:.3f} / {budget.hard_cap_gb:.2f} GB "
-            f"({usage.file_count} files, {age})"
+            f"{usage.total_gb:.3f} GB "
+            f"(soft {budget.soft_cap_gb:.2f} / hard "
+            f"{budget.hard_cap_gb:.2f} GB, "
+            f"{usage.file_count} files, {age})"
         )
         print(
             f"  level={level.value} "

@@ -18,7 +18,8 @@ from core.storage_budget import (
     classify_usage,
     measure_component,
     resolve_trigger,
-    total_managed_cap_bytes,
+    total_hard_cap_bytes,
+    total_soft_cap_bytes,
 )
 from core.storage_guard import gb_to_bytes
 
@@ -28,6 +29,7 @@ NOW = 1_800_000_000.0
 
 def make_budget(
     root: Path,
+    soft_cap_bytes: int = 600,
     hard_cap_bytes: int = 1_000,
     max_age_seconds: float | None = None,
     disposable: bool = True,
@@ -35,6 +37,7 @@ def make_budget(
     return ComponentBudget(
         component=BudgetComponent.VISION_TEMP,
         root=root,
+        soft_cap_bytes=soft_cap_bytes,
         hard_cap_bytes=hard_cap_bytes,
         max_age_seconds=max_age_seconds,
         disposable=disposable,
@@ -64,39 +67,32 @@ def entry(name: str, size: int, age_seconds: float) -> FileEntry:
 
 
 class TestComponentBudgetValidation(unittest.TestCase):
-    def test_rejects_non_positive_hard_cap(self) -> None:
+    def test_rejects_non_positive_soft_cap(self) -> None:
         with self.assertRaises(ValueError):
-            make_budget(Path("/x"), hard_cap_bytes=0)
+            make_budget(Path("/x"), soft_cap_bytes=0)
 
-    def test_rejects_out_of_order_fractions(self) -> None:
+    def test_rejects_hard_cap_below_soft_cap(self) -> None:
         with self.assertRaises(ValueError):
-            ComponentBudget(
-                component=BudgetComponent.VISION_TEMP,
-                root=Path("/x"),
-                hard_cap_bytes=100,
-                soft_fraction=0.9,
-                medium_fraction=0.5,
-            )
+            make_budget(Path("/x"), soft_cap_bytes=900, hard_cap_bytes=500)
 
-    def test_rejects_fraction_at_or_above_one(self) -> None:
+    def test_rejects_equal_caps(self) -> None:
+        # Equal caps would collapse the two-cap model into one.
         with self.assertRaises(ValueError):
-            ComponentBudget(
-                component=BudgetComponent.VISION_TEMP,
-                root=Path("/x"),
-                hard_cap_bytes=100,
-                soft_fraction=0.6,
-                medium_fraction=1.0,
-            )
+            make_budget(Path("/x"), soft_cap_bytes=500, hard_cap_bytes=500)
 
     def test_rejects_non_positive_age(self) -> None:
         with self.assertRaises(ValueError):
             make_budget(Path("/x"), max_age_seconds=0.0)
 
-    def test_derived_caps(self) -> None:
-        budget = make_budget(Path("/x"), hard_cap_bytes=1_000)
+    def test_caps_are_absolute_not_a_ratio(self) -> None:
+        # Memory sits at 2 GB soft against a 15 GB hard cap, a ratio no shared
+        # percentage could express alongside vision temp's 500 MB / 1.5 GB.
+        budget = make_budget(
+            Path("/x"), soft_cap_bytes=200, hard_cap_bytes=9_000
+        )
 
-        self.assertEqual(budget.soft_cap_bytes, 600)
-        self.assertEqual(budget.medium_cap_bytes, 800)
+        self.assertEqual(budget.soft_cap_bytes, 200)
+        self.assertEqual(budget.hard_cap_bytes, 9_000)
 
     def test_max_age_days_conversion(self) -> None:
         budget = make_budget(
@@ -116,30 +112,65 @@ class TestApprovedBudgets(unittest.TestCase):
 
         self.assertEqual(covered, set(BudgetComponent))
 
-    def test_memory_is_two_gigabytes_and_not_disposable(self) -> None:
+    def test_memory_alarms_at_two_gigabytes_with_a_fifteen_gb_ceiling(
+        self,
+    ) -> None:
+        # The case the two-cap model exists for: 2 GB is a defect detector,
+        # 15 GB is the emergency ceiling.
         budget = budget_for(BudgetComponent.MEMORY)
 
-        self.assertEqual(budget.hard_cap_bytes, gb_to_bytes(2.0))
+        self.assertEqual(budget.soft_cap_bytes, gb_to_bytes(2.0))
+        self.assertEqual(budget.hard_cap_bytes, gb_to_bytes(15.0))
         self.assertFalse(budget.disposable)
         self.assertIsNone(budget.max_age_seconds)
 
-    def test_vision_temp_is_half_a_gigabyte_and_seven_days(self) -> None:
+    def test_vision_temp_is_half_a_gig_soft_and_seven_days(self) -> None:
         budget = budget_for(BudgetComponent.VISION_TEMP)
 
-        self.assertEqual(budget.hard_cap_bytes, gb_to_bytes(0.5))
+        self.assertEqual(budget.soft_cap_bytes, gb_to_bytes(0.5))
+        self.assertEqual(budget.hard_cap_bytes, gb_to_bytes(1.5))
         self.assertEqual(budget.max_age_seconds, 7 * SECONDS_PER_DAY)
         self.assertTrue(budget.disposable)
 
-    def test_total_managed_cap_is_about_three_and_a_half_gigabytes(
+    def test_image_temp_exists_because_image_generation_is_on_demand(
         self,
     ) -> None:
-        total = total_managed_cap_bytes()
+        # Image generation is an approved on-demand capability, so its
+        # temporary previews and rejected generations need a budget.
+        budget = budget_for(BudgetComponent.IMAGE_TEMP)
 
-        self.assertAlmostEqual(total / gb_to_bytes(1.0), 3.5, places=6)
+        self.assertEqual(budget.soft_cap_bytes, gb_to_bytes(3.0))
+        self.assertEqual(budget.hard_cap_bytes, gb_to_bytes(10.0))
+        self.assertEqual(budget.max_age_seconds, 30 * SECONDS_PER_DAY)
+        self.assertTrue(budget.disposable)
+
+    def test_every_soft_cap_is_below_its_hard_cap(self) -> None:
+        for budget in DEFAULT_BUDGETS:
+            with self.subTest(component=budget.component.value):
+                self.assertLess(
+                    budget.soft_cap_bytes,
+                    budget.hard_cap_bytes,
+                )
+
+    def test_normal_footprint_is_much_smaller_than_the_envelope(self) -> None:
+        # The point of the model: routine operation stays small while a large
+        # emergency envelope remains available.
+        soft = total_soft_cap_bytes()
+        hard = total_hard_cap_bytes()
+
+        self.assertAlmostEqual(soft / gb_to_bytes(1.0), 6.25, places=6)
+        self.assertAlmostEqual(hard / gb_to_bytes(1.0), 29.5, places=6)
+        self.assertLess(soft * 4, hard)
 
     def test_budget_for_rejects_an_unknown_component(self) -> None:
         with self.assertRaises(ValueError):
             budget_for(BudgetComponent.MEMORY, budgets=())
+
+    def test_image_temp_has_its_own_directory(self) -> None:
+        vision = budget_for(BudgetComponent.VISION_TEMP)
+        image = budget_for(BudgetComponent.IMAGE_TEMP)
+
+        self.assertNotEqual(vision.root, image.root)
 
 
 class TestFileEntry(unittest.TestCase):
@@ -231,7 +262,7 @@ class TestComponentUsage(unittest.TestCase):
 
 class TestClassifyUsage(unittest.TestCase):
     def setUp(self) -> None:
-        self.budget = make_budget(Path("/x"), hard_cap_bytes=1_000)
+        self.budget = make_budget(Path("/x"), soft_cap_bytes=600, hard_cap_bytes=1_000)
 
     def test_below_soft_cap_is_normal(self) -> None:
         self.assertIs(
@@ -245,16 +276,16 @@ class TestClassifyUsage(unittest.TestCase):
             CapLevel.SOFT,
         )
 
-    def test_at_medium_cap_is_medium(self) -> None:
-        self.assertIs(
-            classify_usage(self.budget, make_usage(800)),
-            CapLevel.MEDIUM,
-        )
-
     def test_at_hard_cap_is_hard(self) -> None:
         self.assertIs(
             classify_usage(self.budget, make_usage(1_000)),
             CapLevel.HARD,
+        )
+
+    def test_between_the_caps_is_soft_not_hard(self) -> None:
+        self.assertIs(
+            classify_usage(self.budget, make_usage(999)),
+            CapLevel.SOFT,
         )
 
     def test_far_over_the_hard_cap_is_still_hard_not_soft(self) -> None:
@@ -268,6 +299,7 @@ class TestResolveTrigger(unittest.TestCase):
     def test_no_trigger_when_small_and_fresh(self) -> None:
         budget = make_budget(
             Path("/x"),
+            soft_cap_bytes=600,
             hard_cap_bytes=1_000,
             max_age_seconds=100.0,
         )
@@ -281,6 +313,7 @@ class TestResolveTrigger(unittest.TestCase):
     def test_size_alone_triggers(self) -> None:
         budget = make_budget(
             Path("/x"),
+            soft_cap_bytes=600,
             hard_cap_bytes=1_000,
             max_age_seconds=10_000.0,
         )
@@ -296,6 +329,7 @@ class TestResolveTrigger(unittest.TestCase):
         # cleaned when its data is stale.
         budget = make_budget(
             Path("/x"),
+            soft_cap_bytes=600_000,
             hard_cap_bytes=1_000_000,
             max_age_seconds=100.0,
         )
@@ -309,6 +343,7 @@ class TestResolveTrigger(unittest.TestCase):
     def test_both_triggers_are_reported_together(self) -> None:
         budget = make_budget(
             Path("/x"),
+            soft_cap_bytes=600,
             hard_cap_bytes=1_000,
             max_age_seconds=100.0,
         )
@@ -320,7 +355,7 @@ class TestResolveTrigger(unittest.TestCase):
         )
 
     def test_no_age_limit_means_size_only(self) -> None:
-        budget = make_budget(Path("/x"), hard_cap_bytes=1_000)
+        budget = make_budget(Path("/x"), soft_cap_bytes=600, hard_cap_bytes=1_000)
         usage = make_usage(10, entries=(entry("a", 10, 10_000_000.0),))
 
         self.assertIs(

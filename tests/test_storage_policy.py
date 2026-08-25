@@ -36,12 +36,15 @@ def make_volume(
 
 
 def make_budget(
+    soft_cap_bytes: int = 600,
     hard_cap_bytes: int = 1_000,
     disposable: bool = True,
+    component: BudgetComponent = BudgetComponent.VISION_TEMP,
 ) -> ComponentBudget:
     return ComponentBudget(
-        component=BudgetComponent.VISION_TEMP,
+        component=component,
         root=Path("/fake"),
+        soft_cap_bytes=soft_cap_bytes,
         hard_cap_bytes=hard_cap_bytes,
         disposable=disposable,
     )
@@ -248,17 +251,35 @@ class TestEvaluateComponentWrite(unittest.TestCase):
         result = evaluate_component_write(make_budget(), make_usage(100))
 
         self.assertIs(result.decision, StorageDecision.ALLOW)
+        self.assertIn("below", result.reason)
 
-    def test_soft_level_allows_but_says_cleanup_should_run(self) -> None:
+    def test_soft_level_on_disposable_data_allows_and_asks_for_cleanup(
+        self,
+    ) -> None:
         result = evaluate_component_write(make_budget(), make_usage(650))
 
         self.assertIs(result.decision, StorageDecision.ALLOW)
         self.assertIn("cleanup", result.reason.lower())
 
-    def test_medium_level_warns(self) -> None:
-        result = evaluate_component_write(make_budget(), make_usage(850))
+    def test_soft_level_on_non_disposable_data_warns_instead(self) -> None:
+        # Memory's soft cap is a defect detector, not a cleanup trigger:
+        # cleanup cannot reduce a component whose data is meaningful, so
+        # crossing it must surface rather than pass silently.
+        result = evaluate_component_write(
+            make_budget(disposable=False),
+            make_usage(650),
+        )
 
         self.assertIs(result.decision, StorageDecision.WARN)
+        self.assertIn("alarm threshold", result.reason)
+        self.assertIn("Investigate consolidation", result.reason)
+
+    def test_just_under_the_hard_cap_still_allows_disposable_writes(
+        self,
+    ) -> None:
+        result = evaluate_component_write(make_budget(), make_usage(999))
+
+        self.assertIs(result.decision, StorageDecision.ALLOW)
 
     def test_hard_cap_blocks(self) -> None:
         result = evaluate_component_write(make_budget(), make_usage(1_000))
