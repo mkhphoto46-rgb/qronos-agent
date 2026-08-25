@@ -23,6 +23,7 @@ logs/
 # Temporary files
 temp/
 tmp/
+output/
 *.tmp
 
 # Local caches
@@ -30,7 +31,9 @@ tmp/
 cache/
 
 # AI model files
-models/
+models/**
+!models/wake_word/
+!models/wake_word/qronos_recommended_settings.json
 *.gguf
 *.safetensors
 *.bin
