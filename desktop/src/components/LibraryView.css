@@ -1,0 +1,1981 @@
+.library-view {
+  position: absolute;
+  inset: 0;
+  z-index: 17;
+  overflow: hidden;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 72% 44%, rgba(45, 67, 137, 0.1), transparent 34%);
+}
+
+.library-view-entering,
+.library-view-visible,
+.library-view-leaving {
+  visibility: visible;
+}
+
+.library-view-entering,
+.library-view-visible {
+  pointer-events: auto;
+}
+
+.library-view-entering {
+  animation: libraryViewIn 360ms 140ms ease-out both;
+}
+
+.library-view-visible {
+  opacity: 1;
+}
+
+.library-view-leaving {
+  animation: libraryViewOut 760ms 120ms ease-in both;
+}
+
+@keyframes libraryViewIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes libraryViewOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.library-particle-canvas {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+.library-storage-origin {
+  position: absolute;
+  z-index: 2;
+  right: calc(94px * var(--qronos-ui-scale));
+  top: 51%;
+  width: 84px;
+  height: 84px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-50%) scale(0.68);
+}
+
+.library-view-entering .library-storage-origin {
+  animation: libraryStorageOriginWake 920ms ease-out both;
+}
+
+.library-view-visible .library-storage-origin {
+  opacity: 0.18;
+  transform: translateY(-50%) scale(0.88);
+}
+
+.library-view-leaving .library-storage-origin {
+  animation: libraryStorageOriginWake 920ms ease-in reverse both;
+}
+
+.library-storage-origin-core,
+.library-storage-origin-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.library-storage-origin-core {
+  width: 9px;
+  height: 9px;
+  background: rgba(103, 237, 255, 0.95);
+  box-shadow:
+    0 0 15px rgba(74, 220, 255, 0.66),
+    0 0 36px rgba(95, 111, 255, 0.24);
+}
+
+.library-storage-origin-ring {
+  border: 1px solid rgba(96, 145, 255, 0.22);
+}
+
+.library-storage-origin-ring-a {
+  width: 34px;
+  height: 34px;
+  animation: libraryOriginOrbit 4.2s linear infinite;
+}
+
+.library-storage-origin-ring-b {
+  width: 60px;
+  height: 60px;
+  opacity: 0.42;
+  animation: libraryOriginOrbit 6.6s linear infinite reverse;
+}
+
+@keyframes libraryOriginOrbit {
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@keyframes libraryStorageOriginWake {
+  0% { opacity: 0; transform: translateY(-50%) scale(0.32); }
+  34% { opacity: 0.9; }
+  100% { opacity: 0.18; transform: translateY(-50%) scale(0.88); }
+}
+
+.library-header,
+.library-toolbar,
+.library-layout {
+  left: 50%;
+  width: min(1180px, calc(100vw - 170px));
+  transform: translateX(-50%);
+}
+
+.library-header {
+  position: absolute;
+  z-index: 5;
+  top: calc(56px * var(--qronos-ui-scale));
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 22px;
+  opacity: 0;
+}
+
+.library-view-entering .library-header {
+  animation: libraryHeaderIn 560ms 560ms ease-out both;
+}
+
+.library-view-visible .library-header { opacity: 1; }
+.library-view-leaving .library-header { animation: libraryHeaderOut 340ms ease-in both; }
+
+.library-heading { text-align: right; }
+
+.library-heading > span {
+  color: rgba(118, 157, 255, 0.66);
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.18em;
+}
+
+.library-heading h1 {
+  margin: 4px 0 0;
+  color: rgba(244, 250, 255, 0.98);
+  font-size: 25px;
+  font-weight: 430;
+}
+
+.library-heading p {
+  margin: 5px 0 0;
+  color: rgba(151, 183, 204, 0.55);
+  font-size: 9.5px;
+}
+
+.library-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  direction: ltr;
+  color: rgba(122, 170, 208, 0.58);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+}
+
+.library-summary strong {
+  color: rgba(108, 217, 255, 0.86);
+  font-size: 10px;
+}
+
+.library-summary i {
+  width: 3px;
+  height: 3px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background: rgba(111, 126, 255, 0.72);
+}
+
+.library-back {
+  position: absolute;
+  left: 0;
+  top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 2px;
+  background: transparent;
+  color: rgba(130, 191, 227, 0.68);
+  cursor: pointer;
+}
+
+.library-back:hover { color: rgba(228, 248, 255, 0.96); }
+.library-back span { font-size: 9px; }
+.library-back svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@keyframes libraryHeaderIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); filter: blur(1.4px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); filter: blur(0); }
+}
+
+@keyframes libraryHeaderOut {
+  to { opacity: 0; transform: translateX(-50%) translateY(-7px); filter: blur(1px); }
+}
+
+.library-toolbar {
+  position: absolute;
+  z-index: 6;
+  top: calc(128px * var(--qronos-ui-scale));
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 230px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  opacity: 0;
+}
+
+.library-view-entering .library-toolbar {
+  animation: libraryToolbarIn 560ms 650ms ease-out both;
+}
+
+.library-view-visible .library-toolbar { opacity: 1; }
+.library-view-leaving .library-toolbar { animation: libraryToolbarOut 300ms ease-in both; }
+
+.library-search {
+  height: 34px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid rgba(82, 160, 216, 0.12);
+  border-radius: 9px;
+  background: rgba(7, 22, 32, 0.34);
+}
+
+.library-search svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: rgba(95, 204, 241, 0.64);
+  stroke-width: 1.5;
+}
+
+.library-search input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: rgba(239, 249, 253, 0.94);
+  font-size: 9px;
+}
+
+.library-search input::placeholder { color: rgba(140, 178, 196, 0.46); }
+
+.library-filters {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.library-filters::-webkit-scrollbar { display: none; }
+
+.library-filter {
+  flex: 0 0 auto;
+  min-height: 27px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: rgba(11, 31, 43, 0.28);
+  color: rgba(151, 187, 204, 0.58);
+  font-size: 7.5px;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.library-filter:hover {
+  transform: translateY(-1px);
+  color: rgba(210, 236, 247, 0.9);
+}
+
+.library-filter-active {
+  background: linear-gradient(135deg, rgba(52, 108, 162, 0.34), rgba(75, 82, 180, 0.26));
+  color: rgba(230, 249, 255, 0.96);
+}
+
+.library-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  direction: ltr;
+}
+
+.library-select-wrap {
+  height: 31px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid rgba(84, 151, 205, 0.1);
+  border-radius: 8px;
+  background: rgba(8, 25, 35, 0.28);
+}
+
+.library-select-wrap span {
+  color: rgba(109, 166, 205, 0.46);
+  font-size: 6px;
+  letter-spacing: 0.12em;
+}
+
+.library-select-wrap select {
+  border: 0;
+  outline: 0;
+  background: rgba(6, 20, 29, 0.92);
+  color: rgba(211, 236, 247, 0.84);
+  font-size: 7px;
+}
+
+.library-view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.library-view-toggle button {
+  height: 29px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: rgba(9, 28, 39, 0.28);
+  color: rgba(119, 171, 199, 0.48);
+  font-size: 6.5px;
+  cursor: pointer;
+}
+
+.library-view-toggle button.active {
+  color: rgba(220, 243, 252, 0.92);
+  background: rgba(50, 91, 139, 0.28);
+}
+
+@keyframes libraryToolbarIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-5px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+@keyframes libraryToolbarOut {
+  to { opacity: 0; transform: translateX(-50%) translateY(-5px); }
+}
+
+.library-layout {
+  position: absolute;
+  z-index: 5;
+  top: calc(190px * var(--qronos-ui-scale));
+  bottom: calc(92px * var(--qronos-ui-scale));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 18px;
+  opacity: 0;
+}
+
+.library-view-entering .library-layout {
+  animation: libraryLayoutIn 680ms 720ms ease-out both;
+}
+
+.library-view-visible .library-layout { opacity: 1; }
+.library-view-leaving .library-layout { animation: libraryLayoutOut 420ms ease-in both; }
+
+@keyframes libraryLayoutIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); filter: blur(1.8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); filter: blur(0); }
+}
+
+@keyframes libraryLayoutOut {
+  to { opacity: 0; transform: translateX(-50%) translateY(7px); filter: blur(1.3px); }
+}
+
+.library-artifact-area {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 4px 10px 48px 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(74, 151, 211, 0.13) transparent;
+}
+
+.library-artifact-area::-webkit-scrollbar { width: 3px; }
+.library-artifact-area::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(74, 151, 211, 0.14);
+}
+
+.library-date-group + .library-date-group { margin-top: 24px; }
+
+.library-date-heading {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 6px;
+  direction: ltr;
+}
+
+.library-date-heading span {
+  color: rgba(117, 159, 208, 0.56);
+  font-size: 7px;
+  font-weight: 720;
+  letter-spacing: 0.13em;
+}
+
+.library-date-heading i {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(91, 147, 214, 0.14), transparent);
+}
+
+.library-date-heading small {
+  color: rgba(98, 203, 241, 0.58);
+  font-size: 7px;
+}
+
+.library-artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.library-artifact-row {
+  position: relative;
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) 96px;
+  align-items: center;
+  gap: 13px;
+  padding: 7px 10px 7px 7px;
+  border: 1px solid rgba(73, 139, 191, 0.075);
+  border-radius: 13px 7px 13px 7px;
+  background: linear-gradient(135deg, rgba(8, 25, 36, 0.34), rgba(5, 16, 24, 0.17));
+  outline: 0;
+  cursor: default;
+  transition:
+    transform 170ms ease,
+    border-color 170ms ease,
+    background 170ms ease,
+    filter 170ms ease,
+    box-shadow 170ms ease;
+}
+
+.library-artifact-row:hover {
+  transform: translateX(-2px) translateY(-1px);
+  border-color: rgba(85, 164, 230, 0.18);
+  background: linear-gradient(135deg, rgba(10, 34, 48, 0.48), rgba(8, 20, 32, 0.28));
+  filter: brightness(1.055);
+  box-shadow: 0 0 26px rgba(63, 93, 203, 0.035);
+}
+
+.library-artifact-selected {
+  border-color: rgba(85, 183, 237, 0.28);
+  box-shadow:
+    inset 0 0 0 1px rgba(89, 104, 238, 0.08),
+    0 0 30px rgba(54, 116, 209, 0.04);
+}
+
+.library-artifact-preview,
+.library-detail-preview {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(91, 163, 221, 0.12);
+  background: radial-gradient(circle at 50% 45%, rgba(30, 72, 100, 0.56), rgba(6, 20, 29, 0.74));
+}
+
+.library-artifact-preview {
+  width: 72px;
+  height: 60px;
+  border-radius: 10px;
+}
+
+.library-preview-cyan {
+  background: radial-gradient(circle at 42% 38%, rgba(43, 151, 192, 0.36), rgba(5, 20, 29, 0.78));
+}
+
+.library-preview-indigo {
+  background: radial-gradient(circle at 44% 40%, rgba(70, 86, 189, 0.34), rgba(7, 17, 32, 0.8));
+}
+
+.library-preview-violet {
+  background: radial-gradient(circle at 44% 40%, rgba(113, 76, 181, 0.3), rgba(8, 17, 31, 0.8));
+}
+
+.library-preview-neutral {
+  background: radial-gradient(circle at 44% 40%, rgba(69, 99, 118, 0.28), rgba(7, 18, 25, 0.8));
+}
+
+.library-artifact-preview svg,
+.library-detail-preview svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: rgba(131, 223, 255, 0.88);
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.library-preview-indigo svg { stroke: rgba(132, 153, 255, 0.9); }
+.library-preview-violet svg { stroke: rgba(188, 153, 255, 0.88); }
+.library-preview-neutral svg { stroke: rgba(171, 203, 217, 0.7); }
+
+.library-artifact-preview strong,
+.library-detail-preview strong {
+  position: absolute;
+  right: 5px;
+  bottom: 4px;
+  color: rgba(202, 231, 244, 0.54);
+  font-size: 5.5px;
+  letter-spacing: 0.08em;
+}
+
+.library-preview-particles i {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: rgba(135, 229, 255, 0.72);
+  opacity: 0.25;
+  transition: transform 300ms ease, opacity 300ms ease;
+}
+
+.library-preview-particles i:nth-child(1) { left: 16px; top: 13px; }
+.library-preview-particles i:nth-child(2) { left: 50px; top: 16px; }
+.library-preview-particles i:nth-child(3) { left: 54px; top: 43px; }
+.library-preview-particles i:nth-child(4) { left: 21px; top: 46px; }
+
+.library-artifact-row:hover .library-preview-particles i { opacity: 0.86; }
+.library-artifact-row:hover .library-preview-particles i:nth-child(1) { transform: translate(5px, -3px); }
+.library-artifact-row:hover .library-preview-particles i:nth-child(2) { transform: translate(3px, 5px); }
+.library-artifact-row:hover .library-preview-particles i:nth-child(3) { transform: translate(-5px, 2px); }
+.library-artifact-row:hover .library-preview-particles i:nth-child(4) { transform: translate(-3px, -5px); }
+
+.library-artifact-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.library-artifact-name {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  color: rgba(240, 249, 253, 0.94);
+  font-size: 10.4px;
+  font-weight: 690;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+
+.library-artifact-name:hover { color: rgba(255, 255, 255, 1); }
+
+.library-rename-input {
+  width: min(380px, 100%);
+  height: 27px;
+  padding: 0 7px;
+  border: 1px solid rgba(93, 180, 239, 0.28);
+  border-radius: 6px;
+  outline: 0;
+  background: rgba(5, 18, 27, 0.9);
+  color: rgba(246, 252, 255, 0.98);
+  font-size: 10px;
+}
+
+.library-artifact-meta-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  direction: ltr;
+  color: rgba(143, 179, 198, 0.56);
+  font-size: 6.8px;
+}
+
+.library-artifact-meta-line i {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: rgba(104, 154, 216, 0.5);
+}
+
+.library-artifact-meta-secondary { color: rgba(124, 161, 181, 0.47); }
+
+.library-artifact-status-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  direction: ltr;
+}
+
+.library-artifact-status {
+  padding: 3px 6px;
+  border-radius: 999px;
+  font-size: 6px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+}
+
+.library-status-available {
+  color: rgba(89, 221, 184, 0.82);
+  background: rgba(44, 116, 92, 0.12);
+}
+
+.library-status-duplicate {
+  color: rgba(255, 186, 92, 0.88);
+  background: rgba(134, 89, 33, 0.14);
+}
+
+.library-status-link-error {
+  color: rgba(255, 111, 125, 0.82);
+  background: rgba(141, 43, 54, 0.13);
+}
+
+.library-artifact-status-zone small {
+  color: rgba(214, 153, 89, 0.5);
+  font-size: 5.4px;
+}
+
+.library-artifact-area-gallery .library-artifact-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.library-artifact-area-gallery .library-artifact-row {
+  min-height: 120px;
+  grid-template-columns: 104px minmax(0, 1fr);
+  grid-template-rows: 1fr auto;
+}
+
+.library-artifact-area-gallery .library-artifact-preview {
+  width: 98px;
+  height: 92px;
+  grid-row: 1 / span 2;
+}
+
+.library-artifact-area-gallery .library-artifact-status-zone {
+  grid-column: 2;
+  align-items: flex-start;
+}
+
+.library-detail-panel {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 12px;
+  border-left: 1px solid rgba(85, 122, 209, 0.12);
+  background: linear-gradient(180deg, rgba(8, 23, 34, 0.44), rgba(5, 15, 24, 0.22));
+  scrollbar-width: none;
+}
+
+.library-detail-panel::-webkit-scrollbar { display: none; }
+
+.library-detail-preview {
+  width: 100%;
+  height: 122px;
+  border-radius: 13px 7px 13px 7px;
+}
+
+.library-detail-preview svg { width: 43px; height: 43px; }
+.library-detail-preview strong { right: 9px; bottom: 8px; font-size: 7px; }
+
+.library-detail-title { margin-top: 13px; }
+.library-detail-title span {
+  color: rgba(105, 151, 221, 0.5);
+  font-size: 6px;
+  letter-spacing: 0.14em;
+}
+
+.library-detail-title h2 {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: rgba(239, 248, 252, 0.94);
+  font-size: 12px;
+  font-weight: 630;
+  line-height: 1.45;
+}
+
+.library-detail-grid {
+  margin: 14px 0 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 8px;
+}
+
+.library-detail-grid > div { min-width: 0; }
+.library-detail-grid .wide { grid-column: 1 / -1; }
+
+.library-detail-grid dt {
+  color: rgba(105, 143, 190, 0.46);
+  font-size: 5.5px;
+  letter-spacing: 0.11em;
+}
+
+.library-detail-grid dd {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: rgba(190, 217, 229, 0.72);
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-duplicate-panel {
+  margin-top: 14px;
+  padding: 9px;
+  border: 1px solid rgba(212, 142, 68, 0.14);
+  border-radius: 8px;
+  background: rgba(78, 48, 20, 0.12);
+}
+
+.library-duplicate-panel span {
+  display: block;
+  color: rgba(255, 183, 88, 0.76);
+  font-size: 6px;
+  letter-spacing: 0.1em;
+}
+
+.library-duplicate-panel strong {
+  display: block;
+  margin-top: 5px;
+  color: rgba(234, 213, 188, 0.8);
+  font-size: 7px;
+}
+
+.library-duplicate-panel p {
+  margin: 5px 0 0;
+  color: rgba(177, 152, 126, 0.56);
+  font-size: 6px;
+  line-height: 1.6;
+}
+
+.library-detail-actions,
+.library-danger-actions {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.library-detail-actions button,
+.library-danger-actions button {
+  min-height: 29px;
+  border-radius: 7px;
+  background: rgba(14, 39, 53, 0.42);
+  color: rgba(170, 207, 224, 0.7);
+  font-size: 6px;
+  cursor: pointer;
+}
+
+.library-detail-actions button:hover {
+  color: rgba(232, 249, 255, 0.94);
+  background: rgba(23, 55, 74, 0.54);
+}
+
+.library-primary-action {
+  grid-column: 1 / -1;
+  color: rgba(221, 247, 255, 0.94) !important;
+  background: linear-gradient(135deg, rgba(44, 109, 155, 0.48), rgba(66, 70, 173, 0.34)) !important;
+}
+
+.library-danger-actions { margin-top: 10px; }
+.library-danger-actions button {
+  color: rgba(217, 117, 127, 0.68);
+  background: rgba(71, 25, 30, 0.16);
+}
+
+.library-danger-actions button:hover {
+  color: rgba(255, 143, 153, 0.92);
+  background: rgba(94, 31, 38, 0.24);
+}
+
+.library-context-menu {
+  position: fixed;
+  z-index: 80;
+  width: 188px;
+  padding: 6px;
+  border: 1px solid rgba(87, 154, 218, 0.16);
+  border-radius: 10px;
+  background: rgba(5, 17, 26, 0.96);
+  box-shadow: 0 16px 46px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  animation: libraryContextIn 130ms ease-out;
+}
+
+.library-context-menu button {
+  width: 100%;
+  min-height: 31px;
+  padding: 0 9px;
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(194, 220, 232, 0.78);
+  text-align: left;
+  font-size: 7.5px;
+  cursor: pointer;
+}
+
+.library-context-menu button:hover {
+  background: rgba(39, 78, 106, 0.32);
+  color: rgba(239, 250, 255, 0.96);
+}
+
+.library-context-menu .danger { color: rgba(236, 129, 139, 0.78); }
+.library-context-menu .danger-strong { color: rgba(255, 97, 112, 0.88); }
+
+.library-context-separator {
+  display: block;
+  height: 1px;
+  margin: 5px 3px;
+  background: rgba(87, 143, 186, 0.1);
+}
+
+@keyframes libraryContextIn {
+  from { opacity: 0; transform: scale(0.97) translateY(-2px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.library-toast {
+  position: absolute;
+  z-index: 90;
+  left: 50%;
+  bottom: calc(88px * var(--qronos-ui-scale));
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border: 1px solid rgba(88, 160, 222, 0.15);
+  border-radius: 999px;
+  background: rgba(6, 20, 29, 0.9);
+  color: rgba(203, 231, 242, 0.82);
+  font-size: 7px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.28);
+  animation: libraryToastIn 180ms ease-out;
+}
+
+@keyframes libraryToastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.library-empty {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: rgba(139, 174, 191, 0.52);
+}
+
+.library-empty svg {
+  width: 34px;
+  height: 34px;
+  fill: none;
+  stroke: rgba(102, 166, 205, 0.44);
+  stroke-width: 1.3;
+}
+
+.library-empty strong {
+  color: rgba(193, 217, 229, 0.7);
+  font-size: 10px;
+}
+
+.library-empty span { font-size: 7px; }
+
+/* HOME <-> LIBRARY */
+
+.app-view-entering-library .qrt-panel {
+  pointer-events: none;
+  animation: libraryTelemetryRelease 820ms cubic-bezier(0.18, 0.78, 0.2, 1) both;
+}
+
+.app-view-library .qrt-panel {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-view-leaving-library .qrt-panel {
+  pointer-events: none;
+  animation: libraryTelemetryReturn 940ms 90ms cubic-bezier(0.18, 0.78, 0.2, 1) both;
+}
+
+.app-view-entering-library .conversation-spine,
+.app-view-entering-library .debug-panel,
+.app-view-entering-library .core-zone,
+.app-view-entering-library .orb-status,
+.app-view-entering-library .command-dock {
+  pointer-events: none;
+  animation: libraryHomeOut 420ms ease-in both;
+}
+
+.app-view-library .conversation-spine,
+.app-view-library .debug-panel,
+.app-view-library .core-zone,
+.app-view-library .orb-status,
+.app-view-library .command-dock {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-view-leaving-library .conversation-spine,
+.app-view-leaving-library .debug-panel,
+.app-view-leaving-library .core-zone,
+.app-view-leaving-library .orb-status,
+.app-view-leaving-library .command-dock {
+  pointer-events: none;
+  animation: libraryHomeIn 560ms 480ms ease-out both;
+}
+
+@keyframes libraryTelemetryRelease {
+  0% {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(var(--qronos-ui-scale)) translateX(0);
+  }
+  40% { opacity: 0.74; }
+  100% {
+    opacity: 0;
+    filter: blur(1.7px);
+    transform: scale(var(--qronos-ui-scale)) translateX(-84px);
+  }
+}
+
+@keyframes libraryTelemetryReturn {
+  0% {
+    opacity: 0;
+    filter: blur(1.7px);
+    transform: scale(var(--qronos-ui-scale)) translateX(-84px);
+  }
+  46% { opacity: 0.46; }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(var(--qronos-ui-scale)) translateX(0);
+  }
+}
+
+@keyframes libraryHomeOut {
+  to { opacity: 0; filter: blur(1.2px); }
+}
+
+@keyframes libraryHomeIn {
+  from { opacity: 0; filter: blur(1.2px); }
+  to { opacity: 1; filter: blur(0); }
+}
+
+@media (max-width: 1180px) {
+  .library-header,
+  .library-toolbar,
+  .library-layout {
+    width: calc(100vw - 110px);
+  }
+
+  .library-toolbar {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+
+  .library-toolbar-right {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+
+  .library-layout {
+    grid-template-columns: minmax(0, 1fr) 230px;
+  }
+}
+
+@media (max-height: 720px) {
+  .library-header { top: 42px; }
+  .library-toolbar { top: 105px; }
+  .library-layout { top: 162px; bottom: 82px; }
+  .library-artifact-row { min-height: 68px; }
+  .library-artifact-preview { height: 52px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .library-view,
+  .library-particle-canvas,
+  .library-storage-origin,
+  .library-header,
+  .library-toolbar,
+  .library-layout,
+  .library-artifact-row,
+  .library-preview-particles i,
+  .qrt-panel,
+  .conversation-spine,
+  .core-zone,
+  .orb-status,
+  .command-dock,
+  .debug-panel {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+
+/* =========================================================
+   LIBRARY TYPOGRAPHY PASS — V2
+   Keep approved geometry/capsule sizes.
+   Increase readability and information density only.
+   ========================================================= */
+
+/* Header */
+.library-heading > span {
+  font-size: 10px;
+  letter-spacing: 0.17em;
+}
+
+.library-heading h1 {
+  font-size: 29px;
+}
+
+.library-heading p {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.library-summary {
+  font-size: 9px;
+}
+
+.library-summary strong {
+  font-size: 13px;
+}
+
+.library-back span {
+  font-size: 11px;
+}
+
+/* Search */
+.library-search svg {
+  width: 18px;
+  height: 18px;
+}
+
+.library-search input {
+  font-size: 11.5px;
+  font-weight: 520;
+}
+
+.library-search input::placeholder {
+  font-size: 11.5px;
+}
+
+/* Filters — same capsule height, larger readable contents */
+.library-filter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  font-size: 9.5px;
+  font-weight: 620;
+
+  line-height: 1;
+}
+
+.library-filter-icon {
+  width: 15px;
+  height: 15px;
+
+  display: inline-grid;
+  place-items: center;
+
+  flex: 0 0 15px;
+}
+
+.library-filter-icon svg {
+  width: 15px;
+  height: 15px;
+
+  fill: none;
+
+  stroke: currentColor;
+  stroke-width: 1.55;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.library-filter-label {
+  line-height: 1;
+}
+
+/* Sort + view controls */
+.library-select-wrap span {
+  font-size: 7.5px;
+  font-weight: 700;
+}
+
+.library-select-wrap select {
+  font-size: 9.5px;
+  font-weight: 620;
+}
+
+.library-view-toggle button {
+  font-size: 8.5px;
+  font-weight: 720;
+  letter-spacing: 0.035em;
+}
+
+/* Date grouping */
+.library-date-heading span {
+  font-size: 9px;
+  font-weight: 760;
+}
+
+.library-date-heading small {
+  font-size: 8.5px;
+  font-weight: 700;
+}
+
+/* Artifact row */
+.library-artifact-preview svg {
+  width: 32px;
+  height: 32px;
+}
+
+.library-artifact-preview strong {
+  right: 6px;
+  bottom: 5px;
+
+  font-size: 7.5px;
+  font-weight: 760;
+}
+
+.library-artifact-name {
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.library-rename-input {
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.library-artifact-meta-line {
+  font-size: 8.7px;
+  font-weight: 560;
+}
+
+.library-artifact-meta-secondary {
+  font-size: 8.4px;
+}
+
+.library-artifact-status {
+  font-size: 7.5px;
+  font-weight: 790;
+}
+
+.library-artifact-status-zone small {
+  font-size: 6.8px;
+  font-weight: 720;
+}
+
+/* Detail panel */
+.library-detail-preview svg {
+  width: 48px;
+  height: 48px;
+}
+
+.library-detail-preview strong {
+  font-size: 9px;
+  font-weight: 760;
+}
+
+.library-detail-title span {
+  font-size: 7.5px;
+  font-weight: 720;
+}
+
+.library-detail-title h2 {
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+
+.library-detail-grid dt {
+  font-size: 7px;
+  font-weight: 720;
+}
+
+.library-detail-grid dd {
+  font-size: 9px;
+  font-weight: 560;
+}
+
+.library-duplicate-panel span {
+  font-size: 7.5px;
+}
+
+.library-duplicate-panel strong {
+  font-size: 9px;
+}
+
+.library-duplicate-panel p {
+  font-size: 7.5px;
+}
+
+/* Detail actions */
+.library-detail-actions button,
+.library-danger-actions button {
+  font-size: 7.8px;
+  font-weight: 700;
+}
+
+/* Context menu */
+.library-context-menu button {
+  font-size: 9px;
+  font-weight: 560;
+}
+
+/* Toast / empty */
+.library-toast {
+  font-size: 9px;
+}
+
+.library-empty strong {
+  font-size: 12px;
+}
+
+.library-empty span {
+  font-size: 9px;
+}
+
+
+/* =========================================================
+   LIBRARY READABILITY / SPACING PASS — V3
+   Preserve approved artifact geometry and visual theme.
+   ========================================================= */
+
+/* Move title block slightly upward and create breathing room
+   before the search/filter toolbar. */
+.library-header {
+  top:
+    calc(
+      46px *
+      var(
+        --qronos-ui-scale
+      )
+    );
+}
+
+.library-heading p {
+  margin-top: 3px;
+}
+
+.library-toolbar {
+  top:
+    calc(
+      140px *
+      var(
+        --qronos-ui-scale
+      )
+    );
+}
+
+.library-layout {
+  top:
+    calc(
+      204px *
+      var(
+        --qronos-ui-scale
+      )
+    );
+}
+
+/* Sort capsule: larger shell + typography. */
+.library-select-wrap {
+  height: 36px;
+
+  padding:
+    0
+    11px;
+
+  gap: 9px;
+
+  border-radius: 9px;
+}
+
+.library-select-wrap span {
+  font-size: 8.5px;
+}
+
+.library-select-wrap select {
+  font-size: 10.5px;
+}
+
+/* Compact / Gallery controls: larger capsules. */
+.library-view-toggle {
+  gap: 5px;
+}
+
+.library-view-toggle button {
+  height: 35px;
+
+  padding:
+    0
+    11px;
+
+  border-radius: 8px;
+
+  font-size: 9.5px;
+}
+
+/* Thumbnail type label — more legible without changing box size. */
+.library-artifact-preview strong {
+  right: 6px;
+  bottom: 5px;
+
+  font-size: 9px;
+  font-weight: 800;
+}
+
+/* Artifact metadata under title. */
+.library-artifact-meta-line {
+  font-size: 9.7px;
+  font-weight: 590;
+}
+
+.library-artifact-meta-secondary {
+  font-size: 9.3px;
+  font-weight: 560;
+}
+
+/* Status tags and adjacent note. */
+.library-artifact-status {
+  padding:
+    5px
+    8px;
+
+  font-size: 9px;
+  font-weight: 820;
+}
+
+.library-artifact-status-zone small {
+  font-size: 8.3px;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+}
+
+/* Detail panel metadata — significantly more readable. */
+.library-detail-grid {
+  margin-top: 16px;
+
+  gap:
+    12px
+    9px;
+}
+
+.library-detail-grid dt {
+  font-size: 8.5px;
+  font-weight: 760;
+}
+
+.library-detail-grid dd {
+  margin-top: 4px;
+
+  font-size: 10.5px;
+  font-weight: 590;
+}
+
+.library-duplicate-panel span {
+  font-size: 8.5px;
+}
+
+.library-duplicate-panel strong {
+  font-size: 10px;
+}
+
+.library-duplicate-panel p {
+  font-size: 8.5px;
+  line-height: 1.7;
+}
+
+/* More breathing room before actions. */
+.library-detail-actions {
+  margin-top: 22px;
+
+  gap: 8px;
+}
+
+.library-detail-actions button,
+.library-danger-actions button {
+  min-height: 34px;
+
+  font-size: 9px;
+  font-weight: 740;
+}
+
+.library-danger-actions {
+  margin-top: 12px;
+
+  gap: 8px;
+}
+
+/* Right-click menu readability follows the same scale. */
+.library-context-menu button {
+  min-height: 33px;
+
+  font-size: 9.5px;
+  font-weight: 590;
+}
+
+/* Keep top filters at their approved size; only preserve icon clarity. */
+.library-filter-icon {
+  width: 16px;
+  height: 16px;
+
+  flex-basis: 16px;
+}
+
+.library-filter-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Slightly stronger transition-origin visual density. */
+.library-storage-origin-core {
+  width: 11px;
+  height: 11px;
+
+  box-shadow:
+    0 0 18px
+      rgba(
+        75,
+        220,
+        255,
+        0.78
+      ),
+    0 0 46px
+      rgba(
+        92,
+        111,
+        255,
+        0.34
+      );
+}
+
+.library-storage-origin-ring-a {
+  width: 40px;
+  height: 40px;
+}
+
+.library-storage-origin-ring-b {
+  width: 70px;
+  height: 70px;
+}
+
+/* Short-screen correction after toolbar spacing increase. */
+@media (
+  max-height:
+  720px
+) {
+  .library-header {
+    top: 36px;
+  }
+
+  .library-toolbar {
+    top: 112px;
+  }
+
+  .library-layout {
+    top: 172px;
+  }
+}
+
+
+/* =========================================================
+   LIBRARY READABILITY PASS — V4
+   Larger tags, detail metadata, context menu.
+   Keep approved icon and artifact geometry.
+   ========================================================= */
+
+.library-artifact-status {
+  padding:
+    6px
+    10px;
+
+  font-size: 10.5px;
+  font-weight: 840;
+}
+
+.library-artifact-status-zone {
+  gap: 6px;
+}
+
+.library-artifact-status-zone small {
+  font-size: 9.6px;
+  font-weight: 780;
+  line-height: 1.25;
+}
+
+.library-artifact-meta-line {
+  font-size: 10.6px;
+  font-weight: 610;
+  line-height: 1.3;
+}
+
+.library-artifact-meta-secondary {
+  font-size: 10.2px;
+  font-weight: 585;
+}
+
+.library-detail-grid {
+  margin-top: 18px;
+
+  gap:
+    14px
+    10px;
+}
+
+.library-detail-grid dt {
+  font-size: 9.6px;
+  font-weight: 780;
+}
+
+.library-detail-grid dd {
+  margin-top: 5px;
+
+  font-size: 11.8px;
+  font-weight: 610;
+  line-height: 1.35;
+}
+
+.library-duplicate-panel {
+  margin-top: 17px;
+}
+
+.library-duplicate-panel span {
+  font-size: 9.4px;
+  font-weight: 780;
+}
+
+.library-duplicate-panel strong {
+  font-size: 11px;
+}
+
+.library-duplicate-panel p {
+  font-size: 9.5px;
+  line-height: 1.72;
+}
+
+.library-detail-actions {
+  margin-top: 26px;
+}
+
+.library-detail-actions button,
+.library-danger-actions button {
+  min-height: 35px;
+
+  font-size: 9.8px;
+  font-weight: 760;
+}
+
+.library-context-menu {
+  width: 204px;
+
+  padding:
+    7px;
+}
+
+.library-context-menu button {
+  min-height: 36px;
+
+  padding:
+    0
+    11px;
+
+  font-size: 10.6px;
+  font-weight: 620;
+}
+
+.library-context-separator {
+  margin:
+    6px
+    4px;
+}
+
+/* =========================================================
+   DIRECT LIBRARY <-> CONVERSATIONS TRANSITION
+   Never reveal the Home composition between sibling views.
+   ========================================================= */
+
+.app-cross-to-conversations.app-view-leaving-library
+  .conversation-spine,
+.app-cross-to-conversations.app-view-leaving-library
+  .qrt-panel,
+.app-cross-to-conversations.app-view-leaving-library
+  .debug-panel,
+.app-cross-to-conversations.app-view-leaving-library
+  .core-zone,
+.app-cross-to-conversations.app-view-leaving-library
+  .orb-status,
+.app-cross-to-conversations.app-view-leaving-library
+  .command-dock,
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversation-spine,
+.app-cross-to-conversations.app-view-entering-conversations
+  .qrt-panel,
+.app-cross-to-conversations.app-view-entering-conversations
+  .debug-panel,
+.app-cross-to-conversations.app-view-entering-conversations
+  .core-zone,
+.app-cross-to-conversations.app-view-entering-conversations
+  .orb-status,
+.app-cross-to-conversations.app-view-entering-conversations
+  .command-dock {
+  opacity: 0 !important;
+
+  pointer-events: none !important;
+
+  animation: none !important;
+
+  filter: none !important;
+}
+
+.app-cross-to-library.app-view-leaving-conversations
+  .conversation-spine,
+.app-cross-to-library.app-view-leaving-conversations
+  .qrt-panel,
+.app-cross-to-library.app-view-leaving-conversations
+  .debug-panel,
+.app-cross-to-library.app-view-leaving-conversations
+  .core-zone,
+.app-cross-to-library.app-view-leaving-conversations
+  .orb-status,
+.app-cross-to-library.app-view-leaving-conversations
+  .command-dock,
+.app-cross-to-library.app-view-entering-library
+  .conversation-spine,
+.app-cross-to-library.app-view-entering-library
+  .qrt-panel,
+.app-cross-to-library.app-view-entering-library
+  .debug-panel,
+.app-cross-to-library.app-view-entering-library
+  .core-zone,
+.app-cross-to-library.app-view-entering-library
+  .orb-status,
+.app-cross-to-library.app-view-entering-library
+  .command-dock {
+  opacity: 0 !important;
+
+  pointer-events: none !important;
+
+  animation: none !important;
+
+  filter: none !important;
+}
+
+
+/* =========================================================
+   FAST LIBRARY <-> CONVERSATIONS TRANSITION — V5
+   Cross-view only. Home transitions stay unchanged.
+   ========================================================= */
+
+.app-cross-to-conversations
+  .library-view-leaving {
+  animation:
+    libraryViewOut
+    150ms
+    ease-in
+    both !important;
+}
+
+.app-cross-to-conversations
+  .conversations-view-entering {
+  animation:
+    conversationsViewFadeIn
+    180ms
+    ease-out
+    both !important;
+}
+
+.app-cross-to-library
+  .conversations-view-leaving {
+  animation:
+    conversationsViewFadeOut
+    150ms
+    ease-in
+    both !important;
+}
+
+.app-cross-to-library
+  .library-view-entering {
+  animation:
+    libraryViewIn
+    180ms
+    ease-out
+    both !important;
+}
+
+.app-cross-to-conversations
+  .library-header,
+.app-cross-to-conversations
+  .library-toolbar,
+.app-cross-to-conversations
+  .library-layout,
+.app-cross-to-library
+  .conversations-header,
+.app-cross-to-library
+  .conversations-day-divider,
+.app-cross-to-library
+  .conversations-stream {
+  animation-duration:
+    120ms
+    !important;
+
+  animation-delay:
+    0ms
+    !important;
+}
+
+.app-cross-to-conversations
+  .library-particle-canvas,
+.app-cross-to-library
+  .conversations-particle-canvas {
+  opacity: 0.35;
+}
+
+.app-cross-to-conversations
+  .library-storage-origin,
+.app-cross-to-library
+  .conversations-transition-field,
+.app-cross-to-library
+  .conversations-oracle-presence {
+  animation-duration:
+    140ms
+    !important;
+
+  animation-delay:
+    0ms
+    !important;
+}
+
+
+/* =========================================================
+   SMOOTH FAST SIBLING CROSSFADE — V6
+   Fixes the jump without slowing the transition down.
+   Both source and destination remain visible briefly and overlap.
+   ========================================================= */
+
+/* Library -> Conversations:
+   Library component normally becomes hidden as soon as phase changes.
+   Keep it alive for the 300ms sibling crossfade. */
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-view {
+  visibility: visible !important;
+  pointer-events: none !important;
+
+  animation:
+    qronosLibrarySiblingFadeOut
+    300ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.24,
+      1
+    )
+    both !important;
+}
+
+/* Conversations enters at the same time instead of after Library disappears. */
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-view {
+  visibility: visible !important;
+  pointer-events: none !important;
+
+  animation:
+    qronosConversationSiblingFadeIn
+    300ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.24,
+      1
+    )
+    both !important;
+}
+
+/* Conversations -> Library */
+.app-cross-to-library.app-view-entering-library
+  .conversations-view {
+  visibility: visible !important;
+  pointer-events: none !important;
+
+  animation:
+    qronosConversationSiblingFadeOut
+    300ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.24,
+      1
+    )
+    both !important;
+}
+
+.app-cross-to-library.app-view-entering-library
+  .library-view {
+  visibility: visible !important;
+  pointer-events: none !important;
+
+  animation:
+    qronosLibrarySiblingFadeIn
+    300ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.24,
+      1
+    )
+    both !important;
+}
+
+/* Keep sibling content stable during the overlap.
+   No translate jump, no intermediate Home geometry. */
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-header,
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-toolbar,
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-layout,
+.app-cross-to-library.app-view-entering-library
+  .conversations-header,
+.app-cross-to-library.app-view-entering-library
+  .conversations-day-divider,
+.app-cross-to-library.app-view-entering-library
+  .conversations-stream {
+  transform: none;
+  filter: none !important;
+}
+
+/* Restore the centering transform where those sections need it. */
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-header,
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-toolbar,
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-layout {
+  transform:
+    translateX(-50%) !important;
+}
+
+.app-cross-to-library.app-view-entering-library
+  .conversations-header,
+.app-cross-to-library.app-view-entering-library
+  .conversations-day-divider,
+.app-cross-to-library.app-view-entering-library
+  .conversations-stream {
+  transform:
+    translateX(-50%) !important;
+}
+
+/* Fade decorative fields instead of snapping them off. */
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-particle-canvas {
+  animation:
+    qronosSiblingParticlesOut
+    260ms
+    ease-out
+    both !important;
+}
+
+.app-cross-to-library.app-view-entering-library
+  .conversations-particle-canvas {
+  animation:
+    qronosSiblingParticlesOut
+    260ms
+    ease-out
+    both !important;
+}
+
+@keyframes qronosLibrarySiblingFadeOut {
+  0% {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  58% {
+    opacity: 0.58;
+  }
+
+  100% {
+    opacity: 0;
+    filter: blur(0.7px);
+  }
+}
+
+@keyframes qronosConversationSiblingFadeIn {
+  0% {
+    opacity: 0;
+    filter: blur(0.7px);
+  }
+
+  42% {
+    opacity: 0.42;
+  }
+
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes qronosConversationSiblingFadeOut {
+  0% {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  58% {
+    opacity: 0.58;
+  }
+
+  100% {
+    opacity: 0;
+    filter: blur(0.7px);
+  }
+}
+
+@keyframes qronosLibrarySiblingFadeIn {
+  0% {
+    opacity: 0;
+    filter: blur(0.7px);
+  }
+
+  42% {
+    opacity: 0.42;
+  }
+
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes qronosSiblingParticlesOut {
+  from {
+    opacity: 0.38;
+  }
+
+  to {
+    opacity: 0;
+  }
+}

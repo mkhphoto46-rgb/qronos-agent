@@ -1,0 +1,516 @@
+/* =========================================================
+   QRONOS SIBLING TRANSITION — PHASE SHIFT REDESIGN
+   No traveling particle stream.
+   No projectile.
+   No full-screen translation.
+   Source dissolves locally -> phase veil -> target forms locally.
+   ========================================================= */
+
+.cross-view-particle-transition {
+  position: absolute;
+
+  z-index: 52;
+
+  inset: 0;
+
+  visibility: hidden;
+
+  opacity: 0;
+
+  pointer-events: none;
+
+  overflow: hidden;
+}
+
+.cross-view-particle-transition-active {
+  visibility: visible;
+
+  opacity: 1;
+}
+
+.cross-view-particle-transition canvas {
+  position: absolute;
+
+  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
+  display: block;
+}
+
+/* =========================================================
+   CENTRAL PHASE VEIL
+   This replaces the old "particle projectile".
+   It is a very soft field expansion in the middle.
+   ========================================================= */
+
+.cross-view-phase-veil {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  width: 52%;
+  height: 46%;
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scaleX(0.72)
+    scaleY(0.86);
+
+  background:
+    radial-gradient(
+      ellipse at center,
+      rgba(
+        98,
+        146,
+        255,
+        0.07
+      )
+      0%,
+      rgba(
+        69,
+        215,
+        255,
+        0.045
+      )
+      27%,
+      rgba(
+        45,
+        103,
+        170,
+        0.022
+      )
+      48%,
+      transparent
+      72%
+    );
+
+  filter:
+    blur(18px);
+
+  animation:
+    qronosPhaseVeil
+    360ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both;
+}
+
+@keyframes qronosPhaseVeil {
+  0% {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scaleX(0.72)
+      scaleY(0.86);
+  }
+
+  42% {
+    opacity: 0.52;
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scaleX(1.08)
+      scaleY(1);
+  }
+}
+
+/* =========================================================
+   LOCAL SOURCE / TARGET GLOWS
+   ========================================================= */
+
+.cross-view-source-glow,
+.cross-view-target-glow {
+  position: absolute;
+
+  top: 50%;
+
+  width: 170px;
+  height: 170px;
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  transform:
+    translateY(-50%)
+    scale(0.82);
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(
+        231,
+        253,
+        255,
+        0.18
+      ),
+      rgba(
+        68,
+        220,
+        255,
+        0.07
+      )
+      22%,
+      rgba(
+        97,
+        111,
+        255,
+        0.04
+      )
+      46%,
+      transparent
+      72%
+    );
+
+  filter:
+    blur(7px);
+}
+
+.cross-view-particle-transition-to-conversations
+  .cross-view-source-glow {
+  right: 4%;
+
+  animation:
+    qronosLocalSourceFade
+    185ms
+    ease-out
+    both;
+}
+
+.cross-view-particle-transition-to-conversations
+  .cross-view-target-glow {
+  left: 4%;
+
+  animation:
+    qronosLocalTargetForm
+    190ms
+    165ms
+    ease-out
+    both;
+}
+
+.cross-view-particle-transition-to-library
+  .cross-view-source-glow {
+  left: 4%;
+
+  animation:
+    qronosLocalSourceFade
+    185ms
+    ease-out
+    both;
+}
+
+.cross-view-particle-transition-to-library
+  .cross-view-target-glow {
+  right: 4%;
+
+  animation:
+    qronosLocalTargetForm
+    190ms
+    165ms
+    ease-out
+    both;
+}
+
+@keyframes qronosLocalSourceFade {
+  0% {
+    opacity: 0.28;
+
+    transform:
+      translateY(-50%)
+      scale(0.78);
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translateY(-50%)
+      scale(1.24);
+  }
+}
+
+@keyframes qronosLocalTargetForm {
+  0% {
+    opacity: 0;
+
+    transform:
+      translateY(-50%)
+      scale(1.22);
+  }
+
+  68% {
+    opacity: 0.22;
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translateY(-50%)
+      scale(0.84);
+  }
+}
+
+/* =========================================================
+   SIBLING VIEW STATE CONTROL
+   Freeze internal Home animations during sibling transition.
+   ========================================================= */
+
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-view,
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-view,
+.app-cross-to-library.app-view-entering-library
+  .library-view,
+.app-cross-to-library.app-view-entering-library
+  .conversations-view {
+  visibility: visible !important;
+
+  pointer-events: none !important;
+
+  filter: none !important;
+}
+
+/*
+ * Disable only internal transition animation during sibling change.
+ * Geometry stays completely frozen.
+ */
+
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-view *,
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-view *,
+.app-cross-to-library.app-view-entering-library
+  .library-view *,
+.app-cross-to-library.app-view-entering-library
+  .conversations-view * {
+  animation: none !important;
+}
+
+/*
+ * Do not run page-owned particle transition canvases here.
+ * The dedicated local dissolve/form canvas owns the motion.
+ */
+
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-particle-canvas,
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-particle-canvas,
+.app-cross-to-library.app-view-entering-library
+  .library-particle-canvas,
+.app-cross-to-library.app-view-entering-library
+  .conversations-particle-canvas {
+  opacity: 0 !important;
+}
+
+/*
+ * Lock centered elements to their approved coordinates.
+ * No translate movement during sibling transition.
+ */
+
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-header,
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-toolbar,
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-layout,
+.app-cross-to-library.app-view-entering-library
+  .library-header,
+.app-cross-to-library.app-view-entering-library
+  .library-toolbar,
+.app-cross-to-library.app-view-entering-library
+  .library-layout,
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-header,
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-day-divider,
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-stream,
+.app-cross-to-library.app-view-entering-library
+  .conversations-header,
+.app-cross-to-library.app-view-entering-library
+  .conversations-day-divider,
+.app-cross-to-library.app-view-entering-library
+  .conversations-stream {
+  transform:
+    translateX(-50%) !important;
+
+  filter: none !important;
+}
+
+/* =========================================================
+   CLEAN OPACITY CROSSFADE
+   No translate. No slide. No jump.
+   ========================================================= */
+
+.app-cross-to-conversations.app-view-entering-conversations
+  .library-view {
+  opacity: 1;
+
+  animation:
+    qronosLibraryPhaseOut
+    360ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both !important;
+}
+
+.app-cross-to-conversations.app-view-entering-conversations
+  .conversations-view {
+  opacity: 0;
+
+  animation:
+    qronosConversationsPhaseIn
+    360ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both !important;
+}
+
+.app-cross-to-library.app-view-entering-library
+  .conversations-view {
+  opacity: 1;
+
+  animation:
+    qronosConversationsPhaseOut
+    360ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both !important;
+}
+
+.app-cross-to-library.app-view-entering-library
+  .library-view {
+  opacity: 0;
+
+  animation:
+    qronosLibraryPhaseIn
+    360ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both !important;
+}
+
+@keyframes qronosLibraryPhaseOut {
+  0% {
+    opacity: 1;
+  }
+
+  46% {
+    opacity: 0.68;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes qronosConversationsPhaseIn {
+  0% {
+    opacity: 0;
+  }
+
+  54% {
+    opacity: 0.34;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes qronosConversationsPhaseOut {
+  0% {
+    opacity: 1;
+  }
+
+  46% {
+    opacity: 0.68;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes qronosLibraryPhaseIn {
+  0% {
+    opacity: 0;
+  }
+
+  54% {
+    opacity: 0.34;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .cross-view-particle-transition,
+  .cross-view-phase-veil,
+  .cross-view-source-glow,
+  .cross-view-target-glow,
+  .app-cross-to-conversations
+    .library-view,
+  .app-cross-to-conversations
+    .conversations-view,
+  .app-cross-to-library
+    .library-view,
+  .app-cross-to-library
+    .conversations-view {
+    animation-duration:
+      0.001ms
+      !important;
+
+    animation-iteration-count:
+      1
+      !important;
+  }
+}

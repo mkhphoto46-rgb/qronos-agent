@@ -13,6 +13,8 @@ import "./App.css";
 
 import ConversationSpine from "./components/ConversationSpine";
 import ConversationsView from "./components/ConversationsView";
+import LibraryView from "./components/LibraryView";
+import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
@@ -39,7 +41,10 @@ type ViewPhase =
   | "home"
   | "entering-conversations"
   | "conversations"
-  | "leaving-conversations";
+  | "leaving-conversations"
+  | "entering-library"
+  | "library"
+  | "leaving-library";
 
 const debugItems: DebugItem[] = [
   {
@@ -146,6 +151,16 @@ function App() {
       "home",
     );
 
+  const [
+    crossViewTarget,
+    setCrossViewTarget,
+  ] =
+    useState<
+      | "conversations"
+      | "library"
+      | null
+    >(null);
+
   const viewTransitionTimerRef =
     useRef<number | null>(
       null,
@@ -181,6 +196,49 @@ function App() {
 
       clearViewTransitionTimer();
 
+      if (
+        viewPhase ===
+          "library" ||
+        viewPhase ===
+          "entering-library"
+      ) {
+        setCrossViewTarget(
+          "conversations",
+        );
+
+        /*
+         * Direct cross-fade:
+         * source Library stays visually alive through a parent CSS override
+         * while Conversations enters underneath/over it.
+         */
+        setViewPhase(
+          "entering-conversations",
+        );
+
+        viewTransitionTimerRef.current =
+          window.setTimeout(
+            () => {
+              setViewPhase(
+                "conversations",
+              );
+
+              setCrossViewTarget(
+                null,
+              );
+
+              viewTransitionTimerRef.current =
+                null;
+            },
+            420,
+          );
+
+        return;
+      }
+
+      setCrossViewTarget(
+        null,
+      );
+
       setViewPhase(
         "entering-conversations",
       );
@@ -199,22 +257,113 @@ function App() {
         );
     };
 
-  const returnHome =
+  const openLibrary =
     () => {
       if (
         viewPhase ===
-          "home" ||
+          "library" ||
         viewPhase ===
-          "leaving-conversations"
+          "entering-library"
       ) {
         return;
       }
 
       clearViewTransitionTimer();
 
-      setViewPhase(
-        "leaving-conversations",
+      if (
+        viewPhase ===
+          "conversations" ||
+        viewPhase ===
+          "entering-conversations"
+      ) {
+        setCrossViewTarget(
+          "library",
+        );
+
+        /*
+         * Direct cross-fade:
+         * source Conversations stays visually alive through a parent CSS override
+         * while Library enters underneath/over it.
+         */
+        setViewPhase(
+          "entering-library",
+        );
+
+        viewTransitionTimerRef.current =
+          window.setTimeout(
+            () => {
+              setViewPhase(
+                "library",
+              );
+
+              setCrossViewTarget(
+                null,
+              );
+
+              viewTransitionTimerRef.current =
+                null;
+            },
+            420,
+          );
+
+        return;
+      }
+
+      setCrossViewTarget(
+        null,
       );
+
+      setViewPhase(
+        "entering-library",
+      );
+
+      viewTransitionTimerRef.current =
+        window.setTimeout(
+          () => {
+            setViewPhase(
+              "library",
+            );
+
+            viewTransitionTimerRef.current =
+              null;
+          },
+          1120,
+        );
+    };
+
+  const returnHome =
+    () => {
+      if (
+        viewPhase ===
+          "home" ||
+        viewPhase ===
+          "leaving-conversations" ||
+        viewPhase ===
+          "leaving-library"
+      ) {
+        return;
+      }
+
+      clearViewTransitionTimer();
+
+      setCrossViewTarget(
+        null,
+      );
+
+      if (
+        viewPhase ===
+          "library" ||
+        viewPhase ===
+          "entering-library"
+      ) {
+        setViewPhase(
+          "leaving-library",
+        );
+      } else {
+        setViewPhase(
+          "leaving-conversations",
+        );
+      }
 
       viewTransitionTimerRef.current =
         window.setTimeout(
@@ -376,7 +525,11 @@ function App() {
 
   return (
     <main
-      className={`app app-view-${viewPhase}`}
+      className={`app app-view-${viewPhase} ${
+        crossViewTarget
+          ? `app-cross-to-${crossViewTarget}`
+          : ""
+      }`}
       dir="rtl"
       style={
         {
@@ -606,7 +759,29 @@ function App() {
         </div>
       </section>
 
+      <CrossViewParticleTransition
+        target={
+          crossViewTarget
+        }
+      />
+
       <ConversationsView
+        phase={
+          viewPhase ===
+            "entering-library" ||
+          viewPhase ===
+            "library" ||
+          viewPhase ===
+            "leaving-library"
+            ? "home"
+            : viewPhase
+        }
+        onClose={
+          returnHome
+        }
+      />
+
+      <LibraryView
         phase={
           viewPhase
         }
@@ -625,7 +800,9 @@ function App() {
             viewPhase ===
               "home" ||
             viewPhase ===
-              "leaving-conversations"
+              "leaving-conversations" ||
+            viewPhase ===
+              "leaving-library"
               ? "nav-item nav-item-active"
               : "nav-item"
           }
@@ -707,40 +884,43 @@ function App() {
 
         <button
           type="button"
-          className="nav-item"
-          aria-label="منابع"
+          className={
+            viewPhase ===
+              "library" ||
+            viewPhase ===
+              "entering-library"
+              ? "nav-item nav-item-active"
+              : "nav-item"
+          }
+          aria-label="کتابخانه"
+          onClick={
+            openLibrary
+          }
         >
           <span className="nav-icon">
             <svg
               viewBox="0 0 28 28"
               aria-hidden="true"
             >
-              <circle
-                cx="7"
-                cy="14"
-                r="2.1"
-              />
-
-              <circle
-                cx="20.8"
-                cy="7"
-                r="2.1"
-              />
-
-              <circle
-                cx="20.8"
-                cy="21"
-                r="2.1"
+              <path
+                d="M5.5 8.2 14 4l8.5 4.2L14 12.4 5.5 8.2Z"
               />
 
               <path
-                d="M9 13.1 18.8 8M9 14.9l9.8 5.1M20.8 9.2v9.6"
+                d="M5.5 13.1 14 17.3l8.5-4.2M5.5 18 14 22.2l8.5-4.2"
+              />
+
+              <circle
+                className="nav-icon-core"
+                cx="14"
+                cy="12.4"
+                r="1.5"
               />
             </svg>
           </span>
 
           <span>
-            منابع
+            کتابخانه
           </span>
         </button>
 

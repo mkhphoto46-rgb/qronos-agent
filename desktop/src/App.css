@@ -4086,3 +4086,20 @@ button {
   .bottom-nav {
   pointer-events: none;
 }
+
+
+/* =========================================================
+   LIBRARY VIEW NAV / TRANSITION LOCK
+   ========================================================= */
+
+.app-view-entering-library
+  .bottom-nav,
+.app-view-leaving-library
+  .bottom-nav {
+  pointer-events: none;
+}
+
+.app-view-library
+  .bottom-nav {
+  pointer-events: auto;
+}
