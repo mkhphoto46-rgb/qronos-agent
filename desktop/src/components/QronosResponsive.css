@@ -471,3 +471,241 @@
   transform-origin:
     center center;
 }
+
+
+/* =========================================================
+   LIBRARY — ONE SHARED RESPONSIVE SCALE
+   ---------------------------------------------------------
+   The Library now uses the same --qronos-ui-scale as Home.
+   Its approved 1180px composition stays intact internally;
+   the whole composition scales as one unit.
+   This prevents:
+   - detail panel overlapping toolbar
+   - filters keeping a different size
+   - header/subtitle colliding with search
+   - action buttons disappearing because of mixed breakpoints
+   ========================================================= */
+
+.library-responsive-shell {
+  position: absolute !important;
+
+  z-index: 4 !important;
+
+  left: 50% !important;
+  top: 0 !important;
+
+  width: 1180px !important;
+
+  /*
+   * The shell's logical height compensates for transform scaling.
+   * Visually it still occupies exactly the available viewport.
+   */
+  height:
+    calc(
+      100vh /
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform:
+    translateX(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform-origin:
+    center top !important;
+
+  pointer-events: none;
+}
+
+.library-responsive-shell
+  .library-header,
+.library-responsive-shell
+  .library-toolbar,
+.library-responsive-shell
+  .library-layout {
+  width: 1180px !important;
+
+  max-width: none !important;
+
+  pointer-events: auto;
+}
+
+/*
+ * Component-level width/height breakpoints are intentionally
+ * neutralized here. Scaling is handled by the shared coordinator,
+ * not by a second independent Library breakpoint system.
+ */
+
+.library-responsive-shell
+  .library-header {
+  top: 46px !important;
+}
+
+.library-responsive-shell
+  .library-toolbar {
+  top: 140px !important;
+
+  grid-template-columns:
+    230px
+    minmax(
+      0,
+      1fr
+    )
+    auto !important;
+}
+
+.library-responsive-shell
+  .library-toolbar-right {
+  grid-column: auto !important;
+
+  justify-self: auto !important;
+}
+
+.library-responsive-shell
+  .library-layout {
+  top: 204px !important;
+  bottom: 92px !important;
+
+  grid-template-columns:
+    minmax(
+      0,
+      1fr
+    )
+    264px !important;
+}
+
+/* Keep every category capsule and control in the same scale system. */
+
+.library-responsive-shell
+  .library-search,
+.library-responsive-shell
+  .library-filters,
+.library-responsive-shell
+  .library-filter,
+.library-responsive-shell
+  .library-select-wrap,
+.library-responsive-shell
+  .library-view-toggle,
+.library-responsive-shell
+  .library-detail-panel,
+.library-responsive-shell
+  .library-artifact-row {
+  transform-origin:
+    center center;
+}
+
+/* Selected-artifact panel must always remain internally scrollable. */
+
+.library-responsive-shell
+  .library-detail-panel {
+  min-height: 0 !important;
+
+  overflow-y: auto !important;
+
+  overscroll-behavior: contain;
+}
+
+/* Preserve access to the action area at short window heights. */
+
+.library-responsive-shell
+  .library-detail-actions {
+  margin-top: 26px !important;
+}
+
+.library-responsive-shell
+  .library-danger-actions {
+  margin-bottom: 18px !important;
+}
+
+/*
+ * The context menu is position:fixed and therefore intentionally
+ * remains outside the scaled shell; it follows the actual pointer.
+ */
+
+/* =========================================================
+   CONVERSATIONS COMPOSER — SHARED SCALE
+   ========================================================= */
+
+.conversations-composer {
+  transform-origin:
+    center bottom;
+}
+
+/* =========================================================
+   No Library max-width/max-height layout mutation.
+   Shared scale remains the single coordinator.
+   ========================================================= */
+
+@media (
+  max-width:
+  1180px
+) {
+  .library-responsive-shell
+    .library-header,
+  .library-responsive-shell
+    .library-toolbar,
+  .library-responsive-shell
+    .library-layout {
+    width: 1180px !important;
+  }
+
+  .library-responsive-shell
+    .library-toolbar {
+    grid-template-columns:
+      230px
+      minmax(
+        0,
+        1fr
+      )
+      auto !important;
+  }
+
+  .library-responsive-shell
+    .library-toolbar-right {
+    grid-column: auto !important;
+
+    justify-self: auto !important;
+  }
+
+  .library-responsive-shell
+    .library-layout {
+    grid-template-columns:
+      minmax(
+        0,
+        1fr
+      )
+      264px !important;
+  }
+}
+
+@media (
+  max-height:
+  720px
+) {
+  .library-responsive-shell
+    .library-header {
+    top: 46px !important;
+  }
+
+  .library-responsive-shell
+    .library-toolbar {
+    top: 140px !important;
+  }
+
+  .library-responsive-shell
+    .library-layout {
+    top: 204px !important;
+    bottom: 92px !important;
+  }
+
+  .library-responsive-shell
+    .library-artifact-row {
+    min-height: 76px !important;
+  }
+
+  .library-responsive-shell
+    .library-artifact-preview {
+    height: 60px !important;
+  }
+}

@@ -14,6 +14,7 @@ import "./App.css";
 import ConversationSpine from "./components/ConversationSpine";
 import ConversationsView from "./components/ConversationsView";
 import LibraryView from "./components/LibraryView";
+import PermissionsView from "./components/PermissionsView";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QronosOrb from "./components/QronosOrb";
@@ -44,7 +45,10 @@ type ViewPhase =
   | "leaving-conversations"
   | "entering-library"
   | "library"
-  | "leaving-library";
+  | "leaving-library"
+  | "entering-permissions"
+  | "permissions"
+  | "leaving-permissions";
 
 const debugItems: DebugItem[] = [
   {
@@ -161,6 +165,26 @@ function App() {
       | null
     >(null);
 
+  const [
+    permissionsExitTarget,
+    setPermissionsExitTarget,
+  ] =
+    useState<
+      | "conversations"
+      | "library"
+      | null
+    >(null);
+
+  const [
+    permissionsEntrySource,
+    setPermissionsEntrySource,
+  ] =
+    useState<
+      | "conversations"
+      | "library"
+      | null
+    >(null);
+
   const viewTransitionTimerRef =
     useRef<number | null>(
       null,
@@ -195,6 +219,48 @@ function App() {
       }
 
       clearViewTransitionTimer();
+
+      if (
+        viewPhase ===
+          "permissions" ||
+        viewPhase ===
+          "entering-permissions"
+      ) {
+        setCrossViewTarget(
+          null,
+        );
+
+        setPermissionsEntrySource(
+          null,
+        );
+
+        setPermissionsExitTarget(
+          "conversations",
+        );
+
+        setViewPhase(
+          "entering-conversations",
+        );
+
+        viewTransitionTimerRef.current =
+          window.setTimeout(
+            () => {
+              setViewPhase(
+                "conversations",
+              );
+
+              setPermissionsExitTarget(
+                null,
+              );
+
+              viewTransitionTimerRef.current =
+                null;
+            },
+            520,
+          );
+
+        return;
+      }
 
       if (
         viewPhase ===
@@ -272,6 +338,48 @@ function App() {
 
       if (
         viewPhase ===
+          "permissions" ||
+        viewPhase ===
+          "entering-permissions"
+      ) {
+        setCrossViewTarget(
+          null,
+        );
+
+        setPermissionsEntrySource(
+          null,
+        );
+
+        setPermissionsExitTarget(
+          "library",
+        );
+
+        setViewPhase(
+          "entering-library",
+        );
+
+        viewTransitionTimerRef.current =
+          window.setTimeout(
+            () => {
+              setViewPhase(
+                "library",
+              );
+
+              setPermissionsExitTarget(
+                null,
+              );
+
+              viewTransitionTimerRef.current =
+                null;
+            },
+            520,
+          );
+
+        return;
+      }
+
+      if (
+        viewPhase ===
           "conversations" ||
         viewPhase ===
           "entering-conversations"
@@ -331,6 +439,117 @@ function App() {
         );
     };
 
+  const openPermissions =
+    () => {
+      if (
+        viewPhase ===
+          "permissions" ||
+        viewPhase ===
+          "entering-permissions"
+      ) {
+        return;
+      }
+
+      clearViewTransitionTimer();
+
+      setPermissionsExitTarget(
+        null,
+      );
+
+      setCrossViewTarget(
+        null,
+      );
+
+      if (
+        viewPhase ===
+          "library" ||
+        viewPhase ===
+          "entering-library"
+      ) {
+        setPermissionsEntrySource(
+          "library",
+        );
+
+        setViewPhase(
+          "entering-permissions",
+        );
+
+        viewTransitionTimerRef.current =
+          window.setTimeout(
+            () => {
+              setViewPhase(
+                "permissions",
+              );
+
+              setPermissionsEntrySource(
+                null,
+              );
+
+              viewTransitionTimerRef.current =
+                null;
+            },
+            620,
+          );
+
+        return;
+      }
+
+      if (
+        viewPhase ===
+          "conversations" ||
+        viewPhase ===
+          "entering-conversations"
+      ) {
+        setPermissionsEntrySource(
+          "conversations",
+        );
+
+        setViewPhase(
+          "entering-permissions",
+        );
+
+        viewTransitionTimerRef.current =
+          window.setTimeout(
+            () => {
+              setViewPhase(
+                "permissions",
+              );
+
+              setPermissionsEntrySource(
+                null,
+              );
+
+              viewTransitionTimerRef.current =
+                null;
+            },
+            620,
+          );
+
+        return;
+      }
+
+      setPermissionsEntrySource(
+        null,
+      );
+
+      setViewPhase(
+        "entering-permissions",
+      );
+
+      viewTransitionTimerRef.current =
+        window.setTimeout(
+          () => {
+            setViewPhase(
+              "permissions",
+            );
+
+            viewTransitionTimerRef.current =
+              null;
+          },
+          980,
+        );
+    };
+
   const returnHome =
     () => {
       if (
@@ -339,12 +558,22 @@ function App() {
         viewPhase ===
           "leaving-conversations" ||
         viewPhase ===
-          "leaving-library"
+          "leaving-library" ||
+        viewPhase ===
+          "leaving-permissions"
       ) {
         return;
       }
 
       clearViewTransitionTimer();
+
+      setPermissionsExitTarget(
+        null,
+      );
+
+      setPermissionsEntrySource(
+        null,
+      );
 
       setCrossViewTarget(
         null,
@@ -358,6 +587,15 @@ function App() {
       ) {
         setViewPhase(
           "leaving-library",
+        );
+      } else if (
+        viewPhase ===
+          "permissions" ||
+        viewPhase ===
+          "entering-permissions"
+      ) {
+        setViewPhase(
+          "leaving-permissions",
         );
       } else {
         setViewPhase(
@@ -528,6 +766,14 @@ function App() {
       className={`app app-view-${viewPhase} ${
         crossViewTarget
           ? `app-cross-to-${crossViewTarget}`
+          : ""
+      } ${
+        permissionsExitTarget
+          ? `app-permissions-direct-to-${permissionsExitTarget}`
+          : ""
+      } ${
+        permissionsEntrySource
+          ? `app-permissions-direct-from-${permissionsEntrySource}`
           : ""
       }`}
       dir="rtl"
@@ -767,14 +1013,25 @@ function App() {
 
       <ConversationsView
         phase={
+          permissionsEntrySource ===
+            "conversations" &&
           viewPhase ===
-            "entering-library" ||
-          viewPhase ===
-            "library" ||
-          viewPhase ===
-            "leaving-library"
-            ? "home"
-            : viewPhase
+            "entering-permissions"
+            ? "conversations"
+            : viewPhase ===
+                  "entering-library" ||
+                viewPhase ===
+                  "library" ||
+                viewPhase ===
+                  "leaving-library" ||
+                viewPhase ===
+                  "entering-permissions" ||
+                viewPhase ===
+                  "permissions" ||
+                viewPhase ===
+                  "leaving-permissions"
+              ? "home"
+              : viewPhase
         }
         onClose={
           returnHome
@@ -783,7 +1040,30 @@ function App() {
 
       <LibraryView
         phase={
-          viewPhase
+          permissionsEntrySource ===
+            "library" &&
+          viewPhase ===
+            "entering-permissions"
+            ? "library"
+            : viewPhase ===
+                  "entering-permissions" ||
+                viewPhase ===
+                  "permissions" ||
+                viewPhase ===
+                  "leaving-permissions"
+              ? "home"
+              : viewPhase
+        }
+        onClose={
+          returnHome
+        }
+      />
+
+      <PermissionsView
+        phase={
+          permissionsExitTarget
+            ? "leaving-permissions"
+            : viewPhase
         }
         onClose={
           returnHome
@@ -802,7 +1082,9 @@ function App() {
             viewPhase ===
               "leaving-conversations" ||
             viewPhase ===
-              "leaving-library"
+              "leaving-library" ||
+            viewPhase ===
+              "leaving-permissions"
               ? "nav-item nav-item-active"
               : "nav-item"
           }
@@ -926,8 +1208,19 @@ function App() {
 
         <button
           type="button"
-          className="nav-item"
+          data-qronos-nav="permissions"
+          className={
+            viewPhase ===
+              "permissions" ||
+            viewPhase ===
+              "entering-permissions"
+              ? "nav-item nav-item-active"
+              : "nav-item"
+          }
           aria-label="مجوزها"
+          onClick={
+            openPermissions
+          }
         >
           <span className="nav-icon">
             <svg

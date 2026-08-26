@@ -1912,3 +1912,468 @@
       0.34
     );
 }
+
+
+/* =========================================================
+   CONVERSATIONS CHAT COMPOSER — V1
+   Visual/local chat capability.
+   Backend/LLM transport is intentionally not faked here.
+   ========================================================= */
+
+.conversations-stream {
+  bottom:
+    calc(
+      184px *
+      var(--qronos-ui-scale)
+    );
+}
+
+.conversations-composer {
+  position: absolute;
+
+  z-index: 7;
+
+  left: 50%;
+
+  bottom:
+    calc(
+      82px *
+      var(--qronos-ui-scale)
+    );
+
+  width: 640px;
+
+  transform:
+    translateX(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    );
+
+  transform-origin:
+    center bottom;
+
+  opacity: 0;
+
+  pointer-events: none;
+}
+
+.conversations-view-entering
+  .conversations-composer {
+  animation:
+    conversationsComposerIn
+    430ms
+    700ms
+    ease-out
+    both;
+}
+
+.conversations-view-visible
+  .conversations-composer {
+  opacity: 1;
+
+  pointer-events: auto;
+}
+
+.conversations-view-leaving
+  .conversations-composer {
+  animation:
+    conversationsComposerOut
+    220ms
+    ease-in
+    both;
+}
+
+.conversations-composer-shell {
+  position: relative;
+
+  min-height: 52px;
+
+  display: grid;
+
+  grid-template-columns:
+    66px
+    minmax(
+      0,
+      1fr
+    )
+    42px;
+
+  align-items: center;
+
+  gap: 10px;
+
+  padding:
+    8px
+    9px
+    8px
+    12px;
+
+  border:
+    1px solid
+    rgba(
+      82,
+      187,
+      226,
+      0.16
+    );
+
+  border-radius:
+    15px
+    7px
+    15px
+    7px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(
+        8,
+        28,
+        39,
+        0.79
+      ),
+      rgba(
+        4,
+        15,
+        23,
+        0.72
+      )
+    );
+
+  box-shadow:
+    inset
+      0
+      1px
+      0
+      rgba(
+        255,
+        255,
+        255,
+        0.028
+      ),
+    0
+      14px
+      46px
+      rgba(
+        0,
+        0,
+        0,
+        0.2
+      );
+
+  backdrop-filter:
+    blur(20px)
+    saturate(122%);
+
+  -webkit-backdrop-filter:
+    blur(20px)
+    saturate(122%);
+}
+
+.conversations-composer-state {
+  direction: ltr;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  gap: 6px;
+
+  color:
+    rgba(
+      103,
+      203,
+      236,
+      0.62
+    );
+
+  font-size: 8px;
+
+  font-weight: 780;
+
+  letter-spacing: 0.14em;
+}
+
+.conversations-composer-state i {
+  width: 5px;
+  height: 5px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      81,
+      226,
+      255,
+      0.92
+    );
+
+  box-shadow:
+    0
+    0
+    10px
+    rgba(
+      72,
+      214,
+      255,
+      0.42
+    );
+}
+
+.conversations-composer-input {
+  width: 100%;
+
+  min-width: 0;
+
+  height: 24px;
+
+  max-height: 88px;
+
+  padding:
+    2px
+    4px;
+
+  overflow-y: auto;
+
+  resize: none;
+
+  border: 0;
+
+  outline: 0;
+
+  background: transparent;
+
+  color:
+    rgba(
+      240,
+      249,
+      253,
+      0.96
+    );
+
+  font-size: 13px;
+
+  line-height: 1.7;
+
+  text-align: right;
+
+  direction: rtl;
+
+  scrollbar-width: thin;
+
+  scrollbar-color:
+    rgba(
+      76,
+      190,
+      226,
+      0.18
+    )
+    transparent;
+}
+
+.conversations-composer-input::placeholder {
+  color:
+    rgba(
+      139,
+      179,
+      198,
+      0.46
+    );
+}
+
+.conversations-composer-send {
+  width: 40px;
+  height: 40px;
+
+  display: grid;
+
+  place-items: center;
+
+  border-radius: 11px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(
+        48,
+        128,
+        166,
+        0.5
+      ),
+      rgba(
+        67,
+        78,
+        175,
+        0.34
+      )
+    );
+
+  color:
+    rgba(
+      226,
+      250,
+      255,
+      0.96
+    );
+
+  cursor: pointer;
+
+  transition:
+    transform
+      150ms
+      ease,
+    filter
+      150ms
+      ease,
+    opacity
+      150ms
+      ease;
+}
+
+.conversations-composer-send:hover:not(:disabled) {
+  transform:
+    translateY(-1px);
+
+  filter:
+    brightness(1.12);
+}
+
+.conversations-composer-send:active:not(:disabled) {
+  transform:
+    translateY(0)
+    scale(0.96);
+}
+
+.conversations-composer-send:disabled {
+  opacity: 0.28;
+
+  cursor: default;
+}
+
+.conversations-composer-send svg {
+  width: 20px;
+  height: 20px;
+
+  fill: none;
+
+  stroke: currentColor;
+
+  stroke-width: 1.45;
+
+  stroke-linecap: round;
+
+  stroke-linejoin: round;
+}
+
+.conversations-composer-hint {
+  min-height: 19px;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  gap: 8px;
+
+  direction: ltr;
+
+  color:
+    rgba(
+      119,
+      160,
+      181,
+      0.42
+    );
+
+  font-size: 6.5px;
+
+  letter-spacing: 0.055em;
+}
+
+.conversations-composer-hint i {
+  width: 2px;
+  height: 2px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      82,
+      197,
+      233,
+      0.38
+    );
+}
+
+@keyframes conversationsComposerIn {
+  from {
+    opacity: 0;
+
+    transform:
+      translateX(-50%)
+      scale(
+        var(--qronos-ui-scale)
+      )
+      translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+
+    transform:
+      translateX(-50%)
+      scale(
+        var(--qronos-ui-scale)
+      )
+      translateY(0);
+  }
+}
+
+@keyframes conversationsComposerOut {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+/* Short screens keep the composer and stream separated. */
+
+@media (
+  max-height:
+  720px
+) {
+  .conversations-stream {
+    bottom:
+      calc(
+        166px *
+        var(--qronos-ui-scale)
+      );
+  }
+
+  .conversations-composer {
+    bottom:
+      calc(
+        72px *
+        var(--qronos-ui-scale)
+      );
+  }
+}
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .conversations-composer {
+    animation-duration:
+      0.001ms !important;
+
+    animation-iteration-count:
+      1 !important;
+  }
+}

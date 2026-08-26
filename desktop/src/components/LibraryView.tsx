@@ -793,7 +793,8 @@ function LibraryView({
         <span className="library-storage-origin-ring library-storage-origin-ring-b" />
       </div>
 
-      <header className="library-header">
+      <div className="library-responsive-shell">
+        <header className="library-header">
         <div className="library-heading">
           <span>QRONOS ARTIFACT ARCHIVE</span>
           <h1>کتابخانه</h1>
@@ -1101,6 +1102,7 @@ function LibraryView({
             </>
           )}
         </aside>
+      </div>
       </div>
 
       {menu && (

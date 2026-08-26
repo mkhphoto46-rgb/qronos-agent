@@ -2,6 +2,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 
 import "./ConversationsView.css";
@@ -73,7 +74,7 @@ const MAX_DPR = 1;
 const TRANSITION_MS = 1120;
 const PARTICLE_COUNT = 520;
 
-const messages: ConversationMessage[] = [
+const initialMessages: ConversationMessage[] = [
   {
     id: "m1",
     role: "qronos",
@@ -1009,6 +1010,79 @@ function ConversationsView({
   phase,
   onClose,
 }: ConversationsViewProps) {
+  const [
+    messages,
+    setMessages,
+  ] =
+    useState<ConversationMessage[]>(
+      initialMessages,
+    );
+
+  const [
+    draft,
+    setDraft,
+  ] =
+    useState("");
+
+  const streamRef =
+    useRef<HTMLDivElement | null>(
+      null,
+    );
+
+  const composerRef =
+    useRef<HTMLTextAreaElement | null>(
+      null,
+    );
+
+  const sendMessage =
+    () => {
+      const text =
+        draft.trim();
+
+      if (!text) {
+        return;
+      }
+
+      const now =
+        new Date();
+
+      const time =
+        new Intl.DateTimeFormat(
+          "en-GB",
+          {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          },
+        ).format(
+          now,
+        );
+
+      setMessages(
+        (
+          current,
+        ) => [
+          ...current,
+          {
+            id:
+              `local-${now.getTime()}`,
+            role: "user",
+            time,
+            text,
+          },
+        ],
+      );
+
+      setDraft("");
+
+      if (
+        composerRef.current
+      ) {
+        composerRef.current.style.height =
+          "24px";
+      }
+    };
+
   const selectBubbleContent =
     (
       element:
@@ -1071,8 +1145,37 @@ function ConversationsView({
             ),
           0,
         ),
-      [],
+      [messages],
     );
+
+  useEffect(() => {
+    if (
+      phase !==
+      "conversations"
+    ) {
+      return;
+    }
+
+    const stream =
+      streamRef.current;
+
+    if (!stream) {
+      return;
+    }
+
+    window.requestAnimationFrame(
+      () => {
+        stream.scrollTo({
+          top:
+            stream.scrollHeight,
+          behavior: "smooth",
+        });
+      },
+    );
+  }, [
+    messages.length,
+    phase,
+  ]);
 
   return (
     <section
@@ -1166,7 +1269,10 @@ function ConversationsView({
         <span />
       </div>
 
-      <div className="conversations-stream">
+      <div
+        ref={streamRef}
+        className="conversations-stream"
+      >
         {messages.map(
           (
             message,
@@ -1351,6 +1457,109 @@ function ConversationsView({
           },
         )}
       </div>
+
+      <form
+        className="conversations-composer"
+        onSubmit={(
+          event,
+        ) => {
+          event.preventDefault();
+
+          sendMessage();
+        }}
+      >
+        <div className="conversations-composer-shell">
+          <span
+            className="conversations-composer-state"
+            aria-hidden="true"
+          >
+            <i />
+            CHAT
+          </span>
+
+          <textarea
+            ref={composerRef}
+            value={draft}
+            rows={1}
+            className="conversations-composer-input"
+            placeholder="پیام به Qronos..."
+            aria-label="پیام جدید"
+            onChange={(
+              event,
+            ) => {
+              setDraft(
+                event.target.value,
+              );
+
+              const element =
+                event.currentTarget;
+
+              element.style.height =
+                "24px";
+
+              const nextHeight =
+                Math.min(
+                  element.scrollHeight,
+                  88,
+                );
+
+              element.style.height =
+                `${Math.max(
+                  24,
+                  nextHeight,
+                )}px`;
+            }}
+            onKeyDown={(
+              event,
+            ) => {
+              if (
+                event.key ===
+                  "Enter" &&
+                !event.shiftKey
+              ) {
+                event.preventDefault();
+
+                sendMessage();
+              }
+            }}
+          />
+
+          <button
+            type="submit"
+            className="conversations-composer-send"
+            aria-label="ارسال پیام"
+            disabled={
+              !draft.trim()
+            }
+          >
+            <svg
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <path d="m5 12.1 13.2-6.3-4.8 12.7-2.2-4.4L5 12.1Z" />
+              <path d="m11.2 14.1 7-8.3" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="conversations-composer-hint">
+          <span>
+            ENTER ارسال
+          </span>
+
+          <i />
+
+          <span>
+            SHIFT + ENTER خط جدید
+          </span>
+
+          <i />
+
+          <span>
+            UI LOCAL PROTOTYPE
+          </span>
+        </div>
+      </form>
     </section>
   );
 }
