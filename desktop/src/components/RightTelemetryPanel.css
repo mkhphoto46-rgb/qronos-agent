@@ -1,0 +1,1865 @@
+/* =========================================================
+   QRONOS RIGHT TELEMETRY
+   MOTION / ATOMIC CORE PASS
+   ========================================================= */
+
+.qrt-panel {
+  position: absolute;
+  z-index: 12;
+
+  top: clamp(58px, 7vh, 76px);
+  right: clamp(52px, 5.4vw, 74px);
+
+  width: clamp(270px, 22vw, 298px);
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 0;
+
+  max-height: calc(100vh - 86px);
+
+  box-sizing: border-box;
+
+  pointer-events: auto;
+
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+/* =========================================================
+   HEADERS
+   ========================================================= */
+
+.qrt-heading {
+  height: 21px;
+
+  display: flex;
+  align-items: center;
+
+  padding: 0 2px 4px;
+}
+
+.qrt-heading > span {
+  color: rgba(190, 237, 255, 0.94);
+
+  font-size: 9px;
+  font-weight: 800;
+
+  letter-spacing: 0.24em;
+}
+
+.qrt-heading > small {
+  margin-left: auto;
+
+  color: rgba(52, 231, 176, 0.68);
+
+  font-size: 6px;
+  font-weight: 700;
+
+  letter-spacing: 0.12em;
+}
+
+/* =========================================================
+   SYSTEM
+   Slightly shifted right.
+   Status slot stays locked with it.
+   ========================================================= */
+
+.qrt-system-block {
+  flex: 0 0 auto;
+
+  width: 246px;
+
+  margin-left: auto;
+  margin-right: auto;
+
+  transform: translateX(9px);
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 4px;
+}
+
+.qrt-system-heading {
+  justify-content: flex-start;
+}
+
+.qrt-heading-dots {
+  display: flex;
+  align-items: center;
+
+  gap: 4px;
+
+  margin-left: 6px;
+}
+
+.qrt-heading-dots i {
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+
+  background: rgba(78, 226, 255, 0.92);
+
+  box-shadow:
+    0 0 7px
+      rgba(71, 220, 255, 0.36);
+
+  animation:
+    qrtSystemDotPulse
+    2.05s
+    ease-in-out
+    infinite;
+}
+
+.qrt-heading-dots i:nth-child(2) {
+  animation-delay: 0.34s;
+}
+
+.qrt-heading-dots i:nth-child(3) {
+  animation-delay: 0.68s;
+}
+
+/* =========================================================
+   SYSTEM ROW
+   ========================================================= */
+
+.qrt-system-grid {
+  width: 100%;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 4px;
+}
+
+.qrt-metric {
+  width: 100%;
+  height: 38px;
+
+  display: grid;
+
+  grid-template-columns:
+    38px
+    38px
+    54px
+    51px;
+
+  align-items: center;
+
+  column-gap: 3px;
+
+  padding: 0;
+
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.qrt-metric-icon {
+  position: relative;
+
+  width: 35px;
+  height: 35px;
+
+  display: grid;
+  place-items: center;
+
+  border-radius: 9px;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(9, 43, 64, 0.88),
+      rgba(4, 18, 29, 0.76)
+    );
+
+  box-shadow:
+    inset 0 0 0 1px
+      rgba(69, 197, 245, 0.16),
+    0 0 13px
+      rgba(42, 180, 231, 0.045);
+}
+
+.qrt-metric-icon svg {
+  position: relative;
+  z-index: 3;
+
+  width: 21px;
+  height: 21px;
+
+  fill: none;
+
+  stroke: rgba(69, 229, 255, 0.98);
+
+  stroke-width: 1.9;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.qrt-metric-violet
+  .qrt-metric-icon
+  svg {
+  stroke: rgba(205, 143, 255, 0.98);
+}
+
+.qrt-metric-label {
+  color: rgba(241, 250, 254, 0.98);
+
+  font-size: 10px;
+  font-weight: 850;
+
+  white-space: nowrap;
+}
+
+/* =========================================================
+   LIVE SYSTEM GRAPH
+   ========================================================= */
+
+.qrt-metric-wave {
+  width: 54px;
+  height: 16px;
+
+  display: flex;
+  align-items: center;
+
+  -webkit-mask-image:
+    linear-gradient(
+      90deg,
+      transparent,
+      #000 15%,
+      #000 85%,
+      transparent
+    );
+
+  mask-image:
+    linear-gradient(
+      90deg,
+      transparent,
+      #000 15%,
+      #000 85%,
+      transparent
+    );
+}
+
+.qrt-metric-graph {
+  width: 100%;
+  height: 16px;
+
+  display: block;
+
+  overflow: visible;
+}
+
+.qrt-metric-graph-cyan {
+  color: rgba(54, 220, 255, 0.9);
+}
+
+.qrt-metric-graph-violet {
+  color: rgba(193, 128, 255, 0.94);
+}
+
+.qrt-metric-graph-glow {
+  fill: none;
+
+  stroke: currentColor;
+
+  stroke-width: 3;
+
+  opacity: 0.08;
+
+  filter: blur(1.3px);
+}
+
+.qrt-metric-graph-line {
+  fill: none;
+
+  stroke: currentColor;
+
+  stroke-width: 1;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+
+  opacity: 0.72;
+}
+
+.qrt-metric-graph-energy {
+  fill: none;
+
+  stroke-width: 1.4;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+
+  opacity: 0.9;
+
+  filter:
+    drop-shadow(
+      0 0 2px currentColor
+    );
+}
+
+.qrt-metric-reading {
+  display: flex;
+  flex-direction: column;
+
+  align-items: flex-start;
+
+  gap: 2px;
+
+  white-space: nowrap;
+}
+
+.qrt-metric-reading strong {
+  color: rgba(100, 236, 255, 1);
+
+  font-size: 15px;
+  font-weight: 900;
+
+  line-height: 1;
+}
+
+.qrt-metric-violet
+  .qrt-metric-reading
+  strong {
+  color: rgba(205, 142, 255, 1);
+}
+
+.qrt-metric-reading span {
+  color: rgba(162, 193, 211, 0.64);
+
+  font-size: 5.5px;
+  font-weight: 600;
+}
+
+/* =========================================================
+   SINGLE FUNCTIONAL STATUS SLOT
+   ========================================================= */
+
+.qrt-status-slot {
+  width: 246px;
+  height: 31px;
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(3, 1fr);
+
+  align-items: center;
+
+  margin-top: 3px;
+}
+
+/*
+ * The current status always occupies slot 1.
+ * Stable / Degraded / Critical therefore use
+ * exactly the same position later.
+ */
+
+.qrt-status-preview {
+  grid-column: 1;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: flex-start;
+
+  gap: 5px;
+
+  padding-left: 4px;
+}
+
+.qrt-status-label {
+  font-size: 6.5px;
+  font-weight: 800;
+
+  letter-spacing: 0.08em;
+
+  white-space: nowrap;
+}
+
+.qrt-status-emitter {
+  position: relative;
+
+  width: 15px;
+  height: 15px;
+
+  flex: 0 0 15px;
+}
+
+.qrt-status-core,
+.qrt-status-ring {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  transform-origin: center center;
+}
+
+.qrt-status-core {
+  z-index: 3;
+
+  width: 5px;
+  height: 5px;
+
+  margin:
+    -2.5px 0 0 -2.5px;
+
+  border-radius: 50%;
+
+  animation:
+    qrtStatusCore
+    1.8s
+    ease-in-out
+    infinite;
+}
+
+.qrt-status-ring {
+  width: 5px;
+  height: 5px;
+
+  margin:
+    -2.5px 0 0 -2.5px;
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  animation:
+    qrtStatusRing
+    2.8s
+    ease-out
+    infinite;
+}
+
+.qrt-status-ring-b {
+  animation-delay: 1.35s;
+}
+
+/* STABLE */
+
+.qrt-status-stable
+  .qrt-status-core {
+  background: rgba(57, 246, 183, 1);
+
+  box-shadow:
+    0 0 6px
+      rgba(57, 246, 183, 0.9);
+}
+
+.qrt-status-stable
+  .qrt-status-ring {
+  border:
+    1px solid
+    rgba(57, 246, 183, 0.66);
+}
+
+.qrt-status-stable
+  .qrt-status-label {
+  color: rgba(65, 241, 183, 0.94);
+}
+
+/* DEGRADED */
+
+.qrt-status-degraded
+  .qrt-status-core {
+  background: rgba(255, 195, 71, 1);
+
+  box-shadow:
+    0 0 6px
+      rgba(255, 195, 71, 0.82);
+}
+
+.qrt-status-degraded
+  .qrt-status-ring {
+  border:
+    1px solid
+    rgba(255, 195, 71, 0.6);
+}
+
+.qrt-status-degraded
+  .qrt-status-label {
+  color: rgba(255, 200, 87, 0.9);
+}
+
+/* CRITICAL */
+
+.qrt-status-critical
+  .qrt-status-core {
+  background: rgba(255, 78, 95, 1);
+
+  box-shadow:
+    0 0 6px
+      rgba(255, 78, 95, 0.82);
+}
+
+.qrt-status-critical
+  .qrt-status-ring {
+  border:
+    1px solid
+    rgba(255, 78, 95, 0.6);
+}
+
+.qrt-status-critical
+  .qrt-status-label {
+  color: rgba(255, 91, 106, 0.92);
+}
+
+/* =========================================================
+   STORAGE
+   ========================================================= */
+
+.qrt-storage-block {
+  flex: 0 0 auto;
+
+  width: 100%;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 5px;
+
+  margin-top: 17px;
+}
+
+.qrt-qronos-fixed {
+  flex: 0 0 auto;
+}
+
+.qrt-drive-scroll {
+  width: 100%;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 5px;
+
+  max-height: 212px;
+
+  overflow-y: auto;
+
+  padding-right: 2px;
+
+  scrollbar-width: thin;
+
+  scrollbar-color:
+    rgba(66, 185, 235, 0.2)
+    transparent;
+}
+
+.qrt-drive-scroll::-webkit-scrollbar {
+  width: 3px;
+}
+
+.qrt-drive-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.qrt-drive-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+
+  background:
+    rgba(66, 185, 235, 0.2);
+}
+
+.qrt-storage-row {
+  width: 100%;
+  min-height: 43px;
+
+  display: grid;
+
+  grid-template-columns:
+    42px
+    minmax(118px, 1fr)
+    62px
+    43px;
+
+  align-items: center;
+
+  column-gap: 3px;
+
+  padding: 0;
+
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.qrt-storage-row-pinned {
+  min-height: 51px;
+}
+
+/* =========================================================
+   NORMAL STORAGE ICON
+   ========================================================= */
+
+.qrt-storage-icon {
+  position: relative;
+
+  width: 39px;
+  height: 39px;
+
+  display: grid;
+  place-items: center;
+
+  border-radius: 9px;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(8, 39, 57, 0.72),
+      rgba(3, 15, 25, 0.42)
+    );
+
+  box-shadow:
+    inset 0 0 0 1px
+      rgba(66, 192, 240, 0.11);
+}
+
+.qrt-storage-icon svg {
+  position: relative;
+  z-index: 3;
+
+  width: 23px;
+  height: 23px;
+
+  fill: none;
+
+  stroke: rgba(60, 224, 255, 0.98);
+
+  stroke-width: 1.65;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.qrt-storage-row-violet
+  .qrt-storage-icon
+  svg {
+  stroke: rgba(194, 132, 255, 0.98);
+}
+
+/* =========================================================
+   QRONOS STORAGE
+   NO BOX AT ALL
+   ========================================================= */
+
+.qrt-qronos-storage-icon {
+  overflow: visible;
+
+  background: transparent;
+
+  border: 0;
+
+  border-radius: 0;
+
+  box-shadow: none;
+}
+
+.qrt-qronos-storage-icon::before {
+  content: "";
+
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  width: 34px;
+  height: 34px;
+
+  transform:
+    translate(-50%, -50%);
+
+  border-radius: 50%;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(65, 245, 202, 0.13),
+      rgba(65, 245, 202, 0.035) 45%,
+      transparent 72%
+    );
+
+  filter: blur(1px);
+
+  animation:
+    qrtQronosHalo
+    4.4s
+    ease-in-out
+    infinite;
+}
+
+.qrt-qronos-glyph {
+  z-index: 5;
+
+  width: 29px !important;
+  height: 29px !important;
+
+  overflow: visible;
+}
+
+.qrt-qronos-glyph-shell {
+  stroke: rgba(69, 244, 203, 0.94);
+
+  animation:
+    qrtQronosShell
+    4.2s
+    ease-in-out
+    infinite;
+}
+
+.qrt-qronos-glyph-axis {
+  stroke: rgba(120, 252, 222, 0.8);
+
+  animation:
+    qrtQronosAxis
+    3.4s
+    ease-in-out
+    infinite;
+}
+
+.qrt-qronos-glyph-core {
+  fill: rgba(139, 255, 228, 0.96);
+
+  stroke: rgba(139, 255, 228, 0.98);
+
+  transform-origin: 14px 13px;
+
+  animation:
+    qrtQronosCore
+    2.5s
+    ease-in-out
+    infinite;
+}
+
+/* =========================================================
+   QRONOS ATOMIC PARTICLES
+   ========================================================= */
+
+.qrt-qronos-orbit {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  border-radius: 50%;
+
+  background: rgba(161, 255, 234, 0.98);
+
+  box-shadow:
+    0 0 7px
+      rgba(77, 243, 204, 0.66);
+
+  transform-origin: 0 0;
+
+  pointer-events: none;
+}
+
+.qrt-qronos-orbit-a {
+  width: 3px;
+  height: 3px;
+
+  margin: -1.5px;
+
+  animation:
+    qrtAtomA
+    4.7s
+    linear
+    infinite;
+}
+
+.qrt-qronos-orbit-b {
+  width: 2px;
+  height: 2px;
+
+  margin: -1px;
+
+  animation:
+    qrtAtomB
+    6.2s
+    linear
+    infinite;
+}
+
+.qrt-qronos-orbit-c {
+  width: 2.5px;
+  height: 2.5px;
+
+  margin: -1.25px;
+
+  animation:
+    qrtAtomC
+    5.6s
+    linear
+    infinite;
+}
+
+.qrt-qronos-orbit-d {
+  width: 1.7px;
+  height: 1.7px;
+
+  margin: -0.85px;
+
+  opacity: 0.75;
+
+  animation:
+    qrtAtomD
+    7.3s
+    linear
+    infinite;
+}
+
+.qrt-qronos-orbit-e {
+  width: 2px;
+  height: 2px;
+
+  margin: -1px;
+
+  opacity: 0.86;
+
+  animation:
+    qrtAtomE
+    8.1s
+    linear
+    infinite;
+}
+
+/* =========================================================
+   UNIVERSAL ICON ENERGY PULSE
+   ========================================================= */
+
+.qrt-icon-energy-pulse {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  z-index: 1;
+
+  width: 20px;
+  height: 20px;
+
+  margin:
+    -10px 0 0 -10px;
+
+  border:
+    1px solid
+    rgba(73, 221, 255, 0.18);
+
+  border-radius: 50%;
+
+  pointer-events: none;
+
+  opacity: 0;
+
+  animation:
+    qrtIconEnergyPulse
+    4.2s
+    ease-out
+    infinite;
+}
+
+.qrt-storage-row:nth-child(2n)
+  .qrt-icon-energy-pulse {
+  animation-delay: -1.4s;
+}
+
+.qrt-storage-row:nth-child(3n)
+  .qrt-icon-energy-pulse {
+  animation-delay: -2.6s;
+}
+
+.qrt-metric:nth-child(2n)
+  .qrt-icon-energy-pulse {
+  animation-delay: -1.8s;
+}
+
+/* =========================================================
+   STORAGE TEXT
+   ========================================================= */
+
+.qrt-storage-copy {
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 3px;
+}
+
+.qrt-storage-name {
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  color: rgba(242, 250, 254, 0.99);
+
+  font-size: 10.8px;
+  font-weight: 850;
+}
+
+.qrt-storage-drive-title {
+  min-width: 0;
+
+  display: flex;
+
+  align-items: baseline;
+
+  gap: 0;
+
+  overflow: hidden;
+}
+
+.qrt-storage-drive-letter {
+  flex: 0 0 auto;
+
+  color: rgba(245, 252, 255, 1);
+
+  font-size: 14.5px;
+  font-weight: 950;
+
+  line-height: 1;
+}
+
+.qrt-storage-drive-colon {
+  flex: 0 0 auto;
+
+  margin-left: 3px;
+  margin-right: 7px;
+
+  color: rgba(179, 226, 243, 0.82);
+
+  font-size: 12px;
+  font-weight: 800;
+
+  line-height: 1;
+}
+
+.qrt-storage-drive-name {
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  color: rgba(233, 246, 252, 0.97);
+
+  font-size: 9.8px;
+  font-weight: 850;
+}
+
+.qrt-storage-meta {
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  color: rgba(178, 210, 225, 0.76);
+
+  font-size: 7.6px;
+  font-weight: 650;
+}
+
+/* =========================================================
+   STORAGE METER
+   ========================================================= */
+
+.qrt-storage-meter {
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 4px;
+
+  transform:
+    translateX(-10px);
+}
+
+.qrt-storage-detail {
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  color: rgba(178, 210, 226, 0.76);
+
+  font-size: 8px;
+  font-weight: 650;
+
+  text-align: right;
+}
+
+.qrt-storage-track {
+  position: relative;
+
+  width: 62px;
+  height: 3px;
+
+  border-radius: 999px;
+
+  background:
+    rgba(72, 141, 176, 0.14);
+
+  overflow: hidden;
+}
+
+.qrt-storage-track > i {
+  position: relative;
+
+  display: block;
+
+  height: 100%;
+
+  border-radius: inherit;
+
+  overflow: hidden;
+
+  background:
+    linear-gradient(
+      90deg,
+      rgba(51, 216, 255, 0.9),
+      rgba(73, 176, 255, 0.94)
+    );
+
+  animation:
+    qrtStorageFillBreath
+    4.8s
+    ease-in-out
+    infinite;
+}
+
+.qrt-storage-track > i::after {
+  content: "";
+
+  position: absolute;
+
+  top: -2px;
+  bottom: -2px;
+
+  left: -16px;
+
+  width: 14px;
+
+  border-radius: 999px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(211, 251, 255, 0.32),
+      rgba(244, 255, 255, 1),
+      rgba(146, 239, 255, 0.3),
+      transparent
+    );
+
+  filter: blur(0.4px);
+
+  opacity: 0;
+
+  animation:
+    qrtStorageLightRun
+    3.4s
+    ease-in-out
+    infinite;
+}
+
+.qrt-storage-row:nth-child(2n)
+  .qrt-storage-track
+  > i::after {
+  animation-delay: -1.1s;
+}
+
+.qrt-storage-row:nth-child(3n)
+  .qrt-storage-track
+  > i::after {
+  animation-delay: -2.2s;
+}
+
+.qrt-storage-row-pinned
+  .qrt-storage-track
+  > i {
+  background:
+    linear-gradient(
+      90deg,
+      rgba(52, 240, 180, 0.94),
+      rgba(62, 219, 255, 0.97)
+    );
+}
+
+.qrt-storage-row-violet
+  .qrt-storage-track
+  > i {
+  background:
+    linear-gradient(
+      90deg,
+      rgba(87, 199, 255, 0.88),
+      rgba(190, 124, 255, 0.94)
+    );
+}
+
+.qrt-storage-percent {
+  color: rgba(80, 232, 255, 1);
+
+  font-size: 13.5px;
+  font-weight: 900;
+
+  text-align: left;
+}
+
+.qrt-storage-row-pinned
+  .qrt-storage-percent {
+  color: rgba(57, 245, 184, 1);
+}
+
+.qrt-storage-row-violet
+  .qrt-storage-percent {
+  color: rgba(204, 142, 255, 1);
+}
+
+/* =========================================================
+   DEVICES
+   3 COLUMNS × 2 ROWS
+   NO CAPSULES
+   ========================================================= */
+
+.qrt-devices-block {
+  flex: 0 0 auto;
+
+  width: 100%;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 5px;
+
+  margin-top: 8px;
+}
+
+.qrt-device-scroll {
+  width: 100%;
+
+  display: grid;
+
+  grid-template-rows:
+    repeat(2, 76px);
+
+  grid-auto-flow: column;
+
+  grid-auto-columns: 92px;
+
+  gap:
+    6px 7px;
+
+  overflow-x: auto;
+  overflow-y: hidden;
+
+  padding:
+    1px 2px 5px;
+
+  scrollbar-width: thin;
+
+  scrollbar-color:
+    rgba(66, 185, 235, 0.22)
+    transparent;
+
+  scroll-behavior: smooth;
+}
+
+.qrt-device-scroll::-webkit-scrollbar {
+  height: 4px;
+}
+
+.qrt-device-scroll::-webkit-scrollbar-track {
+  background:
+    rgba(56, 121, 151, 0.06);
+
+  border-radius: 999px;
+}
+
+.qrt-device-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+
+  background:
+    rgba(74, 195, 241, 0.28);
+}
+
+.qrt-device {
+  width: 92px;
+  height: 76px;
+
+  display: flex;
+
+  flex-direction: column;
+
+  align-items: center;
+
+  justify-content: flex-start;
+
+  gap: 3px;
+
+  padding: 0;
+
+  background: transparent;
+
+  border: 0;
+
+  border-radius: 0;
+
+  box-shadow: none;
+}
+
+/*
+ * Device icon itself has no visible capsule now.
+ * The invisible 42×42 container only controls layout.
+ */
+
+.qrt-device-icon {
+  position: relative;
+
+  width: 42px;
+  height: 42px;
+
+  display: grid;
+  place-items: center;
+
+  flex: 0 0 42px;
+
+  background: transparent;
+
+  border: 0;
+
+  border-radius: 0;
+
+  box-shadow: none;
+}
+
+.qrt-device-icon svg {
+  position: relative;
+
+  z-index: 3;
+
+  width: 27px;
+  height: 27px;
+
+  fill: none;
+
+  stroke: rgba(76, 225, 255, 0.98);
+
+  stroke-width: 1.75;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+
+  filter:
+    drop-shadow(
+      0 0 3px
+        rgba(65, 218, 255, 0.14)
+    );
+}
+
+.qrt-device-state {
+  position: absolute;
+
+  z-index: 4;
+
+  right: 1px;
+  bottom: 2px;
+
+  width: 7px;
+  height: 7px;
+
+  border:
+    1.5px solid
+    rgba(3, 14, 23, 0.96);
+
+  border-radius: 50%;
+}
+
+.qrt-device-state-online {
+  background: rgba(53, 242, 178, 0.98);
+}
+
+.qrt-device-state-idle {
+  background: rgba(70, 215, 255, 0.98);
+}
+
+.qrt-device-state-busy {
+  background: rgba(194, 130, 255, 0.98);
+}
+
+.qrt-device-copy {
+  width: 100%;
+
+  min-width: 0;
+
+  display: flex;
+
+  flex-direction: column;
+
+  align-items: center;
+
+  gap: 2px;
+}
+
+.qrt-device-name {
+  width: 100%;
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  text-align: center;
+
+  color: rgba(243, 250, 254, 1);
+
+  font-size: 9.6px;
+  font-weight: 850;
+}
+
+.qrt-device-type {
+  width: 100%;
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  text-align: center;
+
+  color: rgba(176, 208, 224, 0.76);
+
+  font-size: 7.2px;
+  font-weight: 650;
+}
+
+/* =========================================================
+   MOTION
+   ========================================================= */
+
+@keyframes qrtSystemDotPulse {
+  0%,
+  100% {
+    opacity: 0.15;
+
+    transform: scale(0.62);
+  }
+
+  38% {
+    opacity: 1;
+
+    transform: scale(1.35);
+  }
+
+  58% {
+    opacity: 0.52;
+
+    transform: scale(0.9);
+  }
+}
+
+@keyframes qrtStatusCore {
+  0%,
+  100% {
+    transform: scale(0.82);
+
+    opacity: 0.72;
+  }
+
+  50% {
+    transform: scale(1.18);
+
+    opacity: 1;
+  }
+}
+
+@keyframes qrtStatusRing {
+  0% {
+    transform: scale(1);
+
+    opacity: 0;
+  }
+
+  12% {
+    opacity: 0.64;
+  }
+
+  100% {
+    transform: scale(5);
+
+    opacity: 0;
+  }
+}
+
+@keyframes qrtIconEnergyPulse {
+  0% {
+    transform: scale(0.45);
+
+    opacity: 0;
+  }
+
+  12% {
+    opacity: 0.42;
+  }
+
+  62% {
+    opacity: 0.12;
+  }
+
+  100% {
+    transform: scale(2.05);
+
+    opacity: 0;
+  }
+}
+
+@keyframes qrtStorageLightRun {
+  0% {
+    left: -16px;
+
+    opacity: 0;
+  }
+
+  14% {
+    opacity: 0.9;
+  }
+
+  70% {
+    opacity: 0.9;
+  }
+
+  91% {
+    opacity: 0.12;
+  }
+
+  100% {
+    left: calc(100% + 2px);
+
+    opacity: 0;
+  }
+}
+
+@keyframes qrtStorageFillBreath {
+  0%,
+  100% {
+    filter: brightness(0.92);
+  }
+
+  50% {
+    filter: brightness(1.12);
+  }
+}
+
+@keyframes qrtQronosHalo {
+  0%,
+  100% {
+    transform:
+      translate(-50%, -50%)
+      scale(0.88);
+
+    opacity: 0.54;
+  }
+
+  50% {
+    transform:
+      translate(-50%, -50%)
+      scale(1.15);
+
+    opacity: 1;
+  }
+}
+
+@keyframes qrtQronosShell {
+  0%,
+  100% {
+    opacity: 0.66;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes qrtQronosAxis {
+  0%,
+  100% {
+    opacity: 0.38;
+  }
+
+  50% {
+    opacity: 0.96;
+  }
+}
+
+@keyframes qrtQronosCore {
+  0%,
+  100% {
+    transform: scale(0.8);
+
+    opacity: 0.68;
+  }
+
+  50% {
+    transform: scale(1.28);
+
+    opacity: 1;
+  }
+}
+
+/*
+ * Five different atomic paths.
+ * Different radius / angle / speed / direction.
+ */
+
+@keyframes qrtAtomA {
+  0% {
+    transform:
+      rotate(0deg)
+      translateX(22px)
+      scale(0.72);
+
+    opacity: 0;
+  }
+
+  12% {
+    opacity: 0.95;
+  }
+
+  88% {
+    opacity: 0.72;
+  }
+
+  100% {
+    transform:
+      rotate(360deg)
+      translateX(22px)
+      scale(0.72);
+
+    opacity: 0;
+  }
+}
+
+@keyframes qrtAtomB {
+  0% {
+    transform:
+      rotate(70deg)
+      translateX(18px)
+      translateY(5px)
+      scale(0.65);
+
+    opacity: 0.1;
+  }
+
+  50% {
+    opacity: 0.78;
+  }
+
+  100% {
+    transform:
+      rotate(430deg)
+      translateX(18px)
+      translateY(5px)
+      scale(0.65);
+
+    opacity: 0.08;
+  }
+}
+
+@keyframes qrtAtomC {
+  0% {
+    transform:
+      rotate(180deg)
+      translateX(24px)
+      translateY(-4px);
+
+    opacity: 0;
+  }
+
+  20% {
+    opacity: 0.82;
+  }
+
+  80% {
+    opacity: 0.65;
+  }
+
+  100% {
+    transform:
+      rotate(-180deg)
+      translateX(24px)
+      translateY(-4px);
+
+    opacity: 0;
+  }
+}
+
+@keyframes qrtAtomD {
+  0% {
+    transform:
+      rotate(240deg)
+      translateX(16px)
+      translateY(7px);
+
+    opacity: 0.18;
+  }
+
+  48% {
+    opacity: 0.7;
+  }
+
+  100% {
+    transform:
+      rotate(600deg)
+      translateX(16px)
+      translateY(7px);
+
+    opacity: 0.12;
+  }
+}
+
+@keyframes qrtAtomE {
+  0% {
+    transform:
+      rotate(-30deg)
+      translateX(20px)
+      translateY(-6px);
+
+    opacity: 0;
+  }
+
+  16% {
+    opacity: 0.9;
+  }
+
+  72% {
+    opacity: 0.45;
+  }
+
+  100% {
+    transform:
+      rotate(-390deg)
+      translateX(20px)
+      translateY(-6px);
+
+    opacity: 0;
+  }
+}
+
+/* =========================================================
+   RESPONSIVE
+   ========================================================= */
+
+@media (max-width: 1180px) {
+  .qrt-panel {
+    right: 44px;
+
+    width: 280px;
+  }
+
+  .qrt-system-block {
+    width: 238px;
+
+    transform: translateX(8px);
+  }
+
+  .qrt-status-slot {
+    width: 238px;
+  }
+
+  .qrt-metric {
+    grid-template-columns:
+      37px
+      36px
+      51px
+      49px;
+  }
+
+  .qrt-metric-wave {
+    width: 51px;
+  }
+
+  .qrt-storage-row {
+    grid-template-columns:
+      40px
+      minmax(108px, 1fr)
+      58px
+      40px;
+  }
+
+  .qrt-storage-track {
+    width: 58px;
+  }
+
+  .qrt-device-scroll {
+    grid-auto-columns: 87px;
+  }
+
+  .qrt-device {
+    width: 87px;
+  }
+}
+
+@media (max-width: 1040px) {
+  .qrt-panel {
+    top: 54px;
+
+    right: 34px;
+
+    width: 266px;
+
+    max-height:
+      calc(100vh - 70px);
+  }
+
+  .qrt-system-block {
+    width: 228px;
+
+    transform: translateX(7px);
+  }
+
+  .qrt-status-slot {
+    width: 228px;
+  }
+
+  .qrt-metric {
+    grid-template-columns:
+      35px
+      34px
+      47px
+      47px;
+  }
+
+  .qrt-metric-icon {
+    width: 33px;
+    height: 33px;
+  }
+
+  .qrt-metric-wave {
+    width: 47px;
+  }
+
+  .qrt-storage-block {
+    margin-top: 12px;
+  }
+
+  .qrt-storage-row {
+    grid-template-columns:
+      39px
+      minmax(99px, 1fr)
+      53px
+      37px;
+  }
+
+  .qrt-storage-track {
+    width: 53px;
+  }
+
+  .qrt-storage-meter {
+    transform: translateX(-6px);
+  }
+
+  .qrt-device-scroll {
+    grid-auto-columns: 82px;
+  }
+
+  .qrt-device {
+    width: 82px;
+  }
+
+  .qrt-device-name {
+    font-size: 9px;
+  }
+
+  .qrt-device-type {
+    font-size: 6.7px;
+  }
+}
+
+/*
+ * Protect system from leaving top of app.
+ */
+
+@media (max-height: 720px) {
+  .qrt-panel {
+    top: 48px;
+    bottom: 14px;
+
+    max-height: none;
+
+    overflow-y: auto;
+
+    scrollbar-width: none;
+  }
+
+  .qrt-panel::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+
+  .qrt-system-grid {
+    gap: 2px;
+  }
+
+  .qrt-metric {
+    height: 34px;
+  }
+
+  .qrt-metric-icon {
+    width: 31px;
+    height: 31px;
+  }
+
+  .qrt-metric-icon svg {
+    width: 19px;
+    height: 19px;
+  }
+
+  .qrt-status-slot {
+    height: 26px;
+
+    margin-top: 1px;
+  }
+
+  .qrt-storage-block {
+    margin-top: 9px;
+  }
+
+  .qrt-drive-scroll {
+    max-height: 145px;
+  }
+
+  .qrt-storage-row {
+    min-height: 38px;
+  }
+
+  .qrt-storage-row-pinned {
+    min-height: 44px;
+  }
+
+  .qrt-devices-block {
+    margin-top: 5px;
+  }
+
+  .qrt-device-scroll {
+    grid-template-rows:
+      repeat(2, 70px);
+  }
+
+  .qrt-device {
+    height: 70px;
+  }
+}

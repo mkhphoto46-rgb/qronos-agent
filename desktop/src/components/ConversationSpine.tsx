@@ -135,11 +135,6 @@ function buildPocketParticles(): MemoryPocketParticle[] {
           (index % 7) *
             0.055,
 
-        /*
-         * Delays are deliberately very close together.
-         * This avoids the old "groups of particles"
-         * appearing in visible steps.
-         */
         delay:
           (index % 17) *
           7,
@@ -198,7 +193,7 @@ function ConversationSpine() {
     setDisplayedId,
   ] =
     useState<string | null>(
-      "conversation-1",
+      null,
     );
 
   const [
@@ -206,7 +201,7 @@ function ConversationSpine() {
     setMemoryPhase,
   ] =
     useState<OracleMemoryPhase>(
-      "open",
+      "closed",
     );
 
   const [
@@ -414,12 +409,6 @@ function ConversationSpine() {
       );
   };
 
-  /*
-   * Only the particle source follows
-   * the frozen DNA node.
-   *
-   * The chat geometry stays stable.
-   */
   useLayoutEffect(() => {
     if (
       !memoryAnchor ||

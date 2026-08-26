@@ -68,7 +68,13 @@
 
 .conversation-dna-zone {
   position: absolute;
-  left: 0;
+
+  /*
+   * DNA shifted slightly toward
+   * the left edge of the app.
+   */
+  left: -18px;
+
   top: -1%;
 
   width: clamp(315px, 24vw, 385px);
@@ -101,7 +107,12 @@
   position: absolute;
   z-index: 18;
 
-  left: clamp(142px, 10.7vw, 182px);
+  /*
+   * Pocket moved only slightly right.
+   * Keep the visual connection with DNA.
+   */
+  left: clamp(150px, 11.2vw, 190px);
+
   top: var(--memory-pocket-top);
 
   width: clamp(290px, 22vw, 355px);
@@ -658,11 +669,13 @@
   }
 
   .conversation-dna-zone {
+    left: -15px;
+
     width: clamp(280px, 22vw, 340px);
   }
 
   .memory-pocket {
-    left: clamp(132px, 10vw, 165px);
+    left: clamp(138px, 10.5vw, 171px);
     width: clamp(260px, 20vw, 320px);
   }
 }
@@ -673,11 +686,13 @@
   }
 
   .conversation-dna-zone {
+    left: -12px;
+
     width: 250px;
   }
 
   .memory-pocket {
-    left: 122px;
+    left: 128px;
     width: 250px;
     min-height: 160px;
     padding: 8px 8px 8px 24px;

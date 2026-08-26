@@ -1,67 +1,105 @@
+# ==========================================================
+# QRONOS AGENT - GIT IGNORE
+# ==========================================================
+
+# ----------------------------------------------------------
 # Python
+# ----------------------------------------------------------
+
 .venv/
 __pycache__/
 *.py[cod]
 *.pyo
 
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ----------------------------------------------------------
 # Environment / secrets
+# ----------------------------------------------------------
+
 .env
 .env.*
 !.env.example
 
-# Qronos private data
 data/
 memory/
 private/
 secrets/
 credentials/
 
-# Logs
+# ----------------------------------------------------------
+# Logs / temporary output
+# ----------------------------------------------------------
+
 logs/
 *.log
 
-# Temporary files
 temp/
 tmp/
 output/
 *.tmp
 
-# Local development snapshots
+# ----------------------------------------------------------
+# Local Qronos development artifacts
+# ----------------------------------------------------------
+
 qronos_changes.txt
 qronos_files.txt
 test_results.txt
 
+desktop/qronos_*_diff.txt*
+desktop/backups/
+
+# Accidental local command/file artifact.
+desktop/npm
+
+# ----------------------------------------------------------
 # Local caches
+# ----------------------------------------------------------
+
 .cache/
 cache/
 
+# ----------------------------------------------------------
 # AI model files
+# ----------------------------------------------------------
+
 models/**
 !models/wake_word/
 !models/wake_word/qronos_recommended_settings.json
+
 *.gguf
 *.safetensors
 *.bin
 
+# ----------------------------------------------------------
 # Bundled third-party runtime binaries
-# These stay on the development machine and will later be added
-# to the Qronos installer by the build/package pipeline.
+# ----------------------------------------------------------
+#
+# These remain on the development machine.
+# They will later be included through the
+# Qronos installer/build packaging pipeline.
+# ----------------------------------------------------------
+
 runtime/whisper/bin/
 runtime/whisper/models/
 runtime/whisper/*.zip
 
-# OS / IDE
+# ----------------------------------------------------------
+# Local databases
+# ----------------------------------------------------------
+
+*.db
+*.sqlite
+*.sqlite3
+
+# ----------------------------------------------------------
+# Operating system / IDE
+# ----------------------------------------------------------
+
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
-# Python tooling
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Local databases
-*.db
-*.sqlite
-*.sqlite3

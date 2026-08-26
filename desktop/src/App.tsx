@@ -3,10 +3,12 @@ import {
   useMemo,
   useState,
 } from "react";
+
 import "./App.css";
+import "./components/QronosResponsive.css";
 
 import ConversationSpine from "./components/ConversationSpine";
-import LivingTelemetryField from "./components/LivingTelemetryField";
+import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
 import type { OrbState } from "./components/OrbState";
@@ -85,7 +87,7 @@ const statusByScenario: Record<
   listening: "گوش می‌دهم",
   thinking: "در حال پردازش",
   responding: "پاسخ آماده است",
-  chat: "در حال چت",
+  chat: "در حال گفتگو",
   userVoice:
     "در حال شنیدن صدای شما",
   qronosVoice:
@@ -117,29 +119,32 @@ function App() {
       "idle",
     );
 
-  const orbState = useMemo(
-    () =>
-      orbStateByScenario[
-        scenario
-      ],
-    [scenario],
-  );
+  const orbState =
+    useMemo(
+      () =>
+        orbStateByScenario[
+          scenario
+        ],
+      [scenario],
+    );
 
-  const statusLabel = useMemo(
-    () =>
-      statusByScenario[
-        scenario
-      ],
-    [scenario],
-  );
+  const statusLabel =
+    useMemo(
+      () =>
+        statusByScenario[
+          scenario
+        ],
+      [scenario],
+    );
 
-  const statusSubtitle = useMemo(
-    () =>
-      subtitleByScenario[
-        scenario
-      ],
-    [scenario],
-  );
+  const statusSubtitle =
+    useMemo(
+      () =>
+        subtitleByScenario[
+          scenario
+        ],
+      [scenario],
+    );
 
   useEffect(() => {
     const mapByKey: Record<
@@ -280,7 +285,7 @@ function App() {
 
       <ConversationSpine />
 
-      <LivingTelemetryField />
+      <RightTelemetryPanel />
 
       <section className="core-zone">
         <div className="orb-shell">
@@ -357,7 +362,7 @@ function App() {
           <input
             className="command-input"
             type="text"
-            placeholder="از کرونوس بپرس"
+            placeholder="از کرونوس بپرس..."
             aria-label="دستور کرونوس"
           />
 
