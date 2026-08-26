@@ -1,0 +1,1174 @@
+/* =========================================================
+   QRONOS MEMORY BLOOM
+   Smooth continuous memory materialization.
+   No brightness jumps between opening and open states.
+   ========================================================= */
+
+.memory-pocket {
+  --memory-node-source-x: 0px;
+  --memory-node-source-y: 50%;
+
+  animation: none;
+  opacity: 1;
+}
+
+/* =========================================================
+   WHOLE MEMORY POCKET
+   ========================================================= */
+
+.memory-pocket-opening {
+  animation:
+    qronosMemoryPocketOpen
+    760ms
+    cubic-bezier(
+      0.18,
+      0.78,
+      0.2,
+      1
+    )
+    both;
+}
+
+.memory-pocket-open {
+  opacity: 1;
+}
+
+.memory-pocket-closing {
+  pointer-events: none;
+
+  animation:
+    qronosMemoryPocketClose
+    620ms
+    cubic-bezier(
+      0.36,
+      0,
+      0.72,
+      0.25
+    )
+    both;
+}
+
+@keyframes qronosMemoryPocketOpen {
+  0% {
+    opacity: 0;
+
+    transform:
+      translateY(-50%)
+      translateX(-7px)
+      scale(0.985);
+
+    filter: blur(1.8px);
+  }
+
+  28% {
+    opacity: 0.3;
+
+    transform:
+      translateY(-50%)
+      translateX(-4px)
+      scale(0.99);
+
+    filter: blur(1.1px);
+  }
+
+  65% {
+    opacity: 0.78;
+
+    transform:
+      translateY(-50%)
+      translateX(-1px)
+      scale(0.997);
+
+    filter: blur(0.35px);
+  }
+
+  100% {
+    opacity: 1;
+
+    transform:
+      translateY(-50%)
+      translateX(0)
+      scale(1);
+
+    filter: blur(0);
+  }
+}
+
+@keyframes qronosMemoryPocketClose {
+  0% {
+    opacity: 1;
+
+    transform:
+      translateY(-50%)
+      translateX(0)
+      scale(1);
+
+    filter: blur(0);
+  }
+
+  44% {
+    opacity: 0.72;
+
+    transform:
+      translateY(-50%)
+      translateX(-2px)
+      scale(0.996);
+
+    filter: blur(0.35px);
+  }
+
+  78% {
+    opacity: 0.28;
+
+    transform:
+      translateY(-50%)
+      translateX(-5px)
+      scale(0.989);
+
+    filter: blur(1px);
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translateY(-50%)
+      translateX(-7px)
+      scale(0.984);
+
+    filter: blur(1.7px);
+  }
+}
+
+/* =========================================================
+   CHAT EDGE SLIT
+   ========================================================= */
+
+.memory-pocket-slit {
+  position: absolute !important;
+
+  z-index: 4;
+
+  left: -18px !important;
+  top: 50% !important;
+
+  width: 38px !important;
+  height: 144px !important;
+
+  transform:
+    translateY(-50%) !important;
+
+  pointer-events: none;
+
+  opacity: 0.72;
+}
+
+.memory-pocket-opening
+  .memory-pocket-slit {
+  animation:
+    qronosSlitOpen
+    820ms
+    ease-out
+    both;
+}
+
+.memory-pocket-closing
+  .memory-pocket-slit {
+  animation:
+    qronosSlitClose
+    560ms
+    ease-in
+    both;
+}
+
+@keyframes qronosSlitOpen {
+  0% {
+    opacity: 0;
+  }
+
+  40% {
+    opacity: 0.32;
+  }
+
+  100% {
+    opacity: 0.72;
+  }
+}
+
+@keyframes qronosSlitClose {
+  0% {
+    opacity: 0.72;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+/* =========================================================
+   PARTICLE FIELD
+   ========================================================= */
+
+.memory-pocket-bloom {
+  position: absolute !important;
+
+  z-index: 2;
+
+  inset: -10px -16px -10px -10px !important;
+
+  width: auto !important;
+  height: auto !important;
+
+  transform: none !important;
+
+  overflow: visible;
+
+  pointer-events: none;
+
+  opacity: 1 !important;
+}
+
+.memory-pocket-anchor-pending
+  .memory-pocket-bloom {
+  visibility: hidden;
+}
+
+.memory-pocket-anchor-ready
+  .memory-pocket-bloom {
+  visibility: visible;
+}
+
+/* =========================================================
+   INDIVIDUAL PARTICLES
+   ========================================================= */
+
+.memory-pocket
+  .memory-pocket-bloom
+  i {
+  position: absolute !important;
+
+  left:
+    var(
+      --memory-node-source-x
+    ) !important;
+
+  top:
+    var(
+      --memory-node-source-y
+    ) !important;
+
+  width:
+    var(
+      --memory-particle-size,
+      3px
+    ) !important;
+
+  height:
+    var(
+      --memory-particle-size,
+      3px
+    ) !important;
+
+  margin: 0;
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  background:
+    rgba(
+      103,
+      224,
+      255,
+      0.94
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    7px
+    rgba(
+      80,
+      211,
+      255,
+      0.2
+    );
+
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(0.2);
+
+  will-change:
+    transform,
+    opacity;
+}
+
+/* white accents */
+
+.memory-pocket
+  .memory-pocket-bloom
+  i:nth-child(7n) {
+  background:
+    rgba(
+      239,
+      253,
+      255,
+      0.96
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    9px
+    rgba(
+      187,
+      245,
+      255,
+      0.3
+    );
+}
+
+/* violet accents */
+
+.memory-pocket
+  .memory-pocket-bloom
+  i:nth-child(12n) {
+  background:
+    rgba(
+      164,
+      145,
+      255,
+      0.88
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      128,
+      105,
+      255,
+      0.22
+    );
+}
+
+/* =========================================================
+   OPENING PARTICLES
+   ========================================================= */
+
+.memory-pocket-anchor-ready.memory-pocket-opening
+  .memory-pocket-bloom
+  i {
+  animation:
+    qronosParticleMaterialize
+    760ms
+    cubic-bezier(
+      0.18,
+      0.76,
+      0.2,
+      1
+    )
+    var(
+      --memory-particle-delay,
+      0ms
+    )
+    both;
+}
+
+@keyframes qronosParticleMaterialize {
+  0% {
+    opacity: 0;
+
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      )
+      scale(0.18);
+  }
+
+  20% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.24
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.13
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.13
+        ),
+        0
+      )
+      scale(0.5);
+  }
+
+  48% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.48
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.5
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.5
+        ),
+        0
+      )
+      scale(0.88);
+  }
+
+  78% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.3
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.84
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.84
+        ),
+        0
+      )
+      scale(0.98);
+  }
+
+  /*
+   * IMPORTANT:
+   * This final frame is EXACTLY the same visual state
+   * as the first frame of the breathing animation.
+   */
+  100% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.22
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --memory-particle-target-x
+          ) -
+          var(
+            --memory-node-source-x
+          )
+        ),
+        calc(
+          var(
+            --memory-particle-target-y
+          ) -
+          var(
+            --memory-node-source-y
+          )
+        ),
+        0
+      )
+      scale(1);
+  }
+}
+
+/* =========================================================
+   OPEN IDLE
+   First frame exactly matches opening 100%.
+   ========================================================= */
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i {
+  opacity:
+    calc(
+      var(
+        --memory-particle-alpha,
+        0.5
+      ) *
+      0.22
+    );
+
+  transform:
+    translate3d(
+      calc(
+        var(
+          --memory-particle-target-x
+        ) -
+        var(
+          --memory-node-source-x
+        )
+      ),
+      calc(
+        var(
+          --memory-particle-target-y
+        ) -
+        var(
+          --memory-node-source-y
+        )
+      ),
+      0
+    )
+    scale(1);
+
+  animation:
+    qronosParticleBreath
+    var(
+      --memory-particle-duration,
+      5.5s
+    )
+    ease-in-out
+    220ms
+    infinite
+    alternate
+    both;
+}
+
+/*
+ * Stagger starts only AFTER the opening transition.
+ * No negative delay = no phase jump.
+ */
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(3n) {
+  animation-delay: 340ms;
+}
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(4n) {
+  animation-delay: 470ms;
+}
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(5n) {
+  animation-delay: 590ms;
+}
+
+@keyframes qronosParticleBreath {
+  /*
+   * EXACT MATCH with materialize 100%.
+   */
+  0% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.22
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --memory-particle-target-x
+          ) -
+          var(
+            --memory-node-source-x
+          )
+        ),
+        calc(
+          var(
+            --memory-particle-target-y
+          ) -
+          var(
+            --memory-node-source-y
+          )
+        ),
+        0
+      )
+      scale(1);
+  }
+
+  50% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.31
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --memory-particle-target-x
+          ) -
+          var(
+            --memory-node-source-x
+          ) +
+          var(
+            --memory-particle-drift-x,
+            3px
+          )
+        ),
+        calc(
+          var(
+            --memory-particle-target-y
+          ) -
+          var(
+            --memory-node-source-y
+          ) +
+          var(
+            --memory-particle-drift-y,
+            2px
+          )
+        ),
+        0
+      )
+      scale(1.035);
+  }
+
+  100% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.19
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --memory-particle-target-x
+          ) -
+          var(
+            --memory-node-source-x
+          ) -
+          var(
+            --memory-particle-drift-x,
+            3px
+          )
+        ),
+        calc(
+          var(
+            --memory-particle-target-y
+          ) -
+          var(
+            --memory-node-source-y
+          ) -
+          var(
+            --memory-particle-drift-y,
+            2px
+          )
+        ),
+        0
+      )
+      scale(0.975);
+  }
+}
+
+/* =========================================================
+   CLOSING
+   ========================================================= */
+
+.memory-pocket-anchor-ready.memory-pocket-closing
+  .memory-pocket-bloom
+  i {
+  animation:
+    qronosParticleDissolve
+    600ms
+    cubic-bezier(
+      0.4,
+      0,
+      0.72,
+      0.28
+    )
+    var(
+      --memory-particle-return-delay,
+      0ms
+    )
+    both;
+}
+
+@keyframes qronosParticleDissolve {
+  0% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.22
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --memory-particle-target-x
+          ) -
+          var(
+            --memory-node-source-x
+          )
+        ),
+        calc(
+          var(
+            --memory-particle-target-y
+          ) -
+          var(
+            --memory-node-source-y
+          )
+        ),
+        0
+      )
+      scale(1);
+  }
+
+  35% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.32
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.76
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.76
+        ),
+        0
+      )
+      scale(0.9);
+  }
+
+  70% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.38
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.3
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.3
+        ),
+        0
+      )
+      scale(0.68);
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      )
+      scale(0.14);
+  }
+}
+
+/* =========================================================
+   TEXT MATERIALIZATION
+   ========================================================= */
+
+.memory-pocket-copy-zone {
+  position: relative;
+
+  z-index: 6;
+
+  opacity: 1;
+
+  filter: none;
+}
+
+.memory-pocket-opening
+  .memory-pocket-copy-zone,
+.memory-pocket-open
+  .memory-pocket-copy-zone,
+.memory-pocket-closing
+  .memory-pocket-copy-zone {
+  animation: none !important;
+}
+
+.memory-pocket-opening
+  .memory-pocket-copy-zone {
+  animation:
+    qronosMemoryTextMaterialize
+    720ms
+    70ms
+    cubic-bezier(
+      0.2,
+      0.72,
+      0.2,
+      1
+    )
+    both !important;
+}
+
+@keyframes qronosMemoryTextMaterialize {
+  0% {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.7px
+      );
+
+    transform:
+      translateX(
+        -4px
+      );
+
+    clip-path:
+      inset(
+        0
+        100%
+        0
+        0
+      );
+  }
+
+  30% {
+    opacity: 0.22;
+
+    filter:
+      blur(
+        1px
+      );
+
+    clip-path:
+      inset(
+        0
+        67%
+        0
+        0
+      );
+  }
+
+  62% {
+    opacity: 0.72;
+
+    filter:
+      blur(
+        0.4px
+      );
+
+    transform:
+      translateX(
+        -1px
+      );
+
+    clip-path:
+      inset(
+        0
+        25%
+        0
+        0
+      );
+  }
+
+  100% {
+    opacity: 1;
+
+    filter: blur(0);
+
+    transform:
+      translateX(
+        0
+      );
+
+    clip-path:
+      inset(
+        0
+        0
+        0
+        0
+      );
+  }
+}
+
+.memory-pocket-open
+  .memory-pocket-copy-zone {
+  opacity: 1 !important;
+
+  transform: none !important;
+
+  filter: none !important;
+
+  clip-path:
+    inset(
+      0
+      0
+      0
+      0
+    ) !important;
+}
+
+.memory-pocket-closing
+  .memory-pocket-copy-zone {
+  animation:
+    qronosMemoryTextDissolve
+    470ms
+    cubic-bezier(
+      0.4,
+      0,
+      0.72,
+      0.28
+    )
+    both !important;
+}
+
+@keyframes qronosMemoryTextDissolve {
+  0% {
+    opacity: 1;
+
+    filter: blur(0);
+
+    transform:
+      translateX(
+        0
+      );
+
+    clip-path:
+      inset(
+        0
+        0
+        0
+        0
+      );
+  }
+
+  55% {
+    opacity: 0.48;
+
+    filter:
+      blur(
+        0.5px
+      );
+
+    transform:
+      translateX(
+        -2px
+      );
+
+    clip-path:
+      inset(
+        0
+        32%
+        0
+        0
+      );
+  }
+
+  100% {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.5px
+      );
+
+    transform:
+      translateX(
+        -4px
+      );
+
+    clip-path:
+      inset(
+        0
+        88%
+        0
+        0
+      );
+  }
+}
+
+/* =========================================================
+   FOG
+   ========================================================= */
+
+.memory-pocket-fog {
+  opacity: 0.64 !important;
+
+  filter:
+    blur(
+      13px
+    ) !important;
+
+  background:
+    radial-gradient(
+      ellipse
+      at
+      38%
+      50%,
+      rgba(
+        4,
+        19,
+        28,
+        0.68
+      )
+      0%,
+      rgba(
+        4,
+        17,
+        25,
+        0.46
+      )
+      38%,
+      rgba(
+        4,
+        15,
+        23,
+        0.18
+      )
+      66%,
+      transparent
+      100%
+    ) !important;
+}
+
+/* =========================================================
+   REDUCED MOTION
+   ========================================================= */
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .memory-pocket-opening,
+  .memory-pocket-closing,
+  .memory-pocket-slit,
+  .memory-pocket-bloom i,
+  .memory-pocket-copy-zone {
+    animation-duration:
+      0.001ms !important;
+
+    animation-iteration-count:
+      1 !important;
+  }
+}

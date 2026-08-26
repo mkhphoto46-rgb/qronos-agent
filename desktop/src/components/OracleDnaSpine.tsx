@@ -6,9 +6,21 @@ import {
 const TAU = Math.PI * 2;
 const MAX_DPR = 1.25;
 
+const RELEASE_DURATION_MS =
+  1200;
+
+const MEMORY_SIGNAL_DURATION_MS =
+  1900;
+
 type MemoryRole =
   | "user"
   | "qronos";
+
+export type OracleMemoryPhase =
+  | "closed"
+  | "opening"
+  | "open"
+  | "closing";
 
 export type OracleMemoryNode = {
   id: string;
@@ -16,11 +28,27 @@ export type OracleMemoryNode = {
   role: MemoryRole;
 };
 
+export type OracleMemoryAnchor = {
+  id: string;
+  clientX: number;
+  clientY: number;
+};
+
 type OracleDnaSpineProps = {
   memories: OracleMemoryNode[];
+
   activeId: string | null;
+
+  phase:
+    OracleMemoryPhase;
+
   onSelect: (
     id: string,
+  ) => void;
+
+  onAnchorChange?: (
+    anchor:
+      OracleMemoryAnchor | null,
   ) => void;
 };
 
@@ -42,6 +70,10 @@ type DustParticle = {
   size: number;
   alpha: number;
   phase: number;
+
+  twinkleStrength: number;
+  twinkleSpeed: number;
+  twinklePhase: number;
 };
 
 type BridgeParticle = {
@@ -49,6 +81,7 @@ type BridgeParticle = {
   offset: number;
   size: number;
   alpha: number;
+  pulse: number;
 };
 
 type KnotParticle = {
@@ -65,6 +98,86 @@ type KnotScreenPosition = {
   y: number;
 };
 
+type FrozenKnot = {
+  id: string;
+  x: number;
+  y: number;
+};
+
+type ReleasedKnot = {
+  id: string;
+  x: number;
+  y: number;
+  startedAt: number;
+};
+
+type MemorySignal = {
+  fromProgress: number;
+  toProgress: number;
+  startedAt: number;
+};
+
+function clamp01(
+  value: number,
+) {
+  return Math.max(
+    0,
+    Math.min(
+      1,
+      value,
+    ),
+  );
+}
+
+function smoothStep(
+  value: number,
+) {
+  const t =
+    clamp01(
+      value,
+    );
+
+  return (
+    t *
+    t *
+    (3 - 2 * t)
+  );
+}
+
+function smootherStep(
+  value: number,
+) {
+  const t =
+    clamp01(
+      value,
+    );
+
+  return (
+    t *
+    t *
+    t *
+    (
+      t *
+        (
+          t * 6 -
+          15
+        ) +
+      10
+    )
+  );
+}
+
+function mix(
+  a: number,
+  b: number,
+  t: number,
+) {
+  return (
+    a +
+    (b - a) * t
+  );
+}
+
 function seededRandom(
   seed: number,
 ) {
@@ -73,9 +186,11 @@ function seededRandom(
 
   return () => {
     value =
-      (value *
-        1664525 +
-        1013904223) >>>
+      (
+        value *
+          1664525 +
+        1013904223
+      ) >>>
       0;
 
     return (
@@ -100,7 +215,9 @@ function createSprite(
   canvas.height = 32;
 
   const context =
-    canvas.getContext("2d");
+    canvas.getContext(
+      "2d",
+    );
 
   if (!context) {
     return canvas;
@@ -129,7 +246,7 @@ function createSprite(
 
     gradient.addColorStop(
       0.42,
-      "rgba(43,177,231,0.35)",
+      "rgba(43,177,231,0.42)",
     );
   } else if (
     type === "violet"
@@ -146,7 +263,7 @@ function createSprite(
 
     gradient.addColorStop(
       0.42,
-      "rgba(94,68,222,0.31)",
+      "rgba(94,68,222,0.35)",
     );
   } else {
     gradient.addColorStop(
@@ -161,7 +278,7 @@ function createSprite(
 
     gradient.addColorStop(
       0.44,
-      "rgba(91,213,250,0.27)",
+      "rgba(91,213,250,0.34)",
     );
   }
 
@@ -215,30 +332,37 @@ function buildHelixParticles() {
           progress,
 
           strand:
-            strand as 0 | 1,
+            strand as
+              | 0
+              | 1,
 
           clusterOffset:
             -1.25 +
             cluster * 0.5,
 
           sideNoise:
-            (random() - 0.5) *
+            (random() -
+              0.5) *
             5.2,
 
           yNoise:
-            (random() - 0.5) *
+            (random() -
+              0.5) *
             4.4,
 
           sizeNoise:
             0.4 +
-            random() * 0.82,
+            random() *
+              0.82,
 
           alphaNoise:
             0.46 +
-            random() * 0.54,
+            random() *
+              0.54,
 
           phaseNoise:
-            (random() - 0.5) *
+            (random() -
+              0.5) *
             0.14,
         });
       }
@@ -255,34 +379,82 @@ function buildDustParticles() {
   const particles:
     DustParticle[] = [];
 
+  /*
+   * Original:
+   * 560
+   *
+   * Current target:
+   * ~56% more than original.
+   *
+   * 560 × 1.56 ≈ 874
+   */
   for (
     let index = 0;
-    index < 560;
+    index < 874;
     index += 1
   ) {
+    const extraParticle =
+      index >= 560;
+
+    const canTwinkle =
+      random() <
+      0.18;
+
     particles.push({
       progress:
         random(),
 
       side:
-        random() > 0.5
+        random() >
+        0.5
           ? 1
           : -1,
 
       spread:
-        6 +
-        random() * 62,
+        4 +
+        Math.pow(
+          random(),
+          0.82,
+        ) *
+          68,
 
       size:
-        0.18 +
-        random() * 0.92,
+        extraParticle
+          ? 0.13 +
+            random() *
+              0.74
+          : 0.18 +
+            random() *
+              0.92,
 
       alpha:
-        0.018 +
-        random() * 0.16,
+        extraParticle
+          ? 0.011 +
+            random() *
+              0.09
+          : 0.018 +
+            random() *
+              0.16,
 
       phase:
-        random() * TAU,
+        random() *
+        TAU,
+
+      twinkleStrength:
+        canTwinkle
+          ? 0.28 +
+            random() *
+              0.48
+          : 0,
+
+      twinkleSpeed:
+        0.24 +
+        random() *
+          0.42,
+
+      twinklePhase:
+        random() *
+        TAU,
     });
   }
 
@@ -303,7 +475,8 @@ function buildBridgeParticles() {
   ) {
     const progress =
       0.035 +
-      row * 0.032;
+      row *
+        0.032;
 
     for (
       let dot = 1;
@@ -317,12 +490,18 @@ function buildBridgeParticles() {
           dot / 11,
 
         size:
-          0.3 +
-          random() * 0.37,
+          0.38 +
+          random() *
+            0.46,
 
         alpha:
-          0.045 +
-          random() * 0.13,
+          0.11 +
+          random() *
+            0.16,
+
+        pulse:
+          random() *
+          TAU,
       });
     }
   }
@@ -344,7 +523,8 @@ function buildKnotParticles() {
   ) {
     particles.push({
       angle:
-        random() * TAU,
+        random() *
+        TAU,
 
       radius:
         2 +
@@ -356,14 +536,17 @@ function buildKnotParticles() {
 
       size:
         0.35 +
-        random() * 0.95,
+        random() *
+          0.95,
 
       alpha:
         0.25 +
-        random() * 0.65,
+        random() *
+          0.65,
 
       phase:
-        random() * TAU,
+        random() *
+        TAU,
     });
   }
 
@@ -385,7 +568,9 @@ const knotParticles =
 function OracleDnaSpine({
   memories,
   activeId,
+  phase,
   onSelect,
+  onAnchorChange,
 }: OracleDnaSpineProps) {
   const canvasRef =
     useRef<HTMLCanvasElement | null>(
@@ -397,11 +582,24 @@ function OracleDnaSpine({
       activeId,
     );
 
+  const previousActiveIdRef =
+    useRef<string | null>(
+      activeId,
+    );
+
+  const phaseRef =
+    useRef<OracleMemoryPhase>(
+      phase,
+    );
+
   const memoriesRef =
     useRef(memories);
 
   const onSelectRef =
     useRef(onSelect);
+
+  const onAnchorChangeRef =
+    useRef(onAnchorChange);
 
   const hoveredIdRef =
     useRef<string | null>(
@@ -413,10 +611,106 @@ function OracleDnaSpine({
       KnotScreenPosition[]
     >([]);
 
+  const frozenKnotRef =
+    useRef<FrozenKnot | null>(
+      null,
+    );
+
+  const releasedKnotRef =
+    useRef<ReleasedKnot | null>(
+      null,
+    );
+
+  const memorySignalRef =
+    useRef<MemorySignal | null>(
+      null,
+    );
+
   useEffect(() => {
+    const previous =
+      previousActiveIdRef.current;
+
+    if (
+      previous &&
+      activeId &&
+      previous !==
+        activeId
+    ) {
+      const previousMemory =
+        memoriesRef.current.find(
+          (memory) =>
+            memory.id ===
+            previous,
+        );
+
+      const nextMemory =
+        memoriesRef.current.find(
+          (memory) =>
+            memory.id ===
+            activeId,
+        );
+
+      if (
+        previousMemory &&
+        nextMemory
+      ) {
+        memorySignalRef.current =
+          {
+            fromProgress:
+              previousMemory.progress,
+
+            toProgress:
+              nextMemory.progress,
+
+            startedAt:
+              performance.now(),
+          };
+      }
+    }
+
+    if (
+      previous &&
+      previous !==
+        activeId &&
+      frozenKnotRef.current?.id ===
+        previous
+    ) {
+      releasedKnotRef.current =
+        {
+          id:
+            frozenKnotRef.current.id,
+
+          x:
+            frozenKnotRef.current.x,
+
+          y:
+            frozenKnotRef.current.y,
+
+          startedAt:
+            performance.now(),
+        };
+
+      frozenKnotRef.current =
+        null;
+    }
+
     activeIdRef.current =
       activeId;
+
+    previousActiveIdRef.current =
+      activeId;
+
+    if (!activeId) {
+      onAnchorChangeRef.current?.(
+        null,
+      );
+    }
   }, [activeId]);
+
+  useEffect(() => {
+    phaseRef.current =
+      phase;
+  }, [phase]);
 
   useEffect(() => {
     memoriesRef.current =
@@ -427,6 +721,11 @@ function OracleDnaSpine({
     onSelectRef.current =
       onSelect;
   }, [onSelect]);
+
+  useEffect(() => {
+    onAnchorChangeRef.current =
+      onAnchorChange;
+  }, [onAnchorChange]);
 
   useEffect(() => {
     const canvas =
@@ -456,13 +755,19 @@ function OracleDnaSpine({
     }
 
     const cyanSprite =
-      createSprite("cyan");
+      createSprite(
+        "cyan",
+      );
 
     const violetSprite =
-      createSprite("violet");
+      createSprite(
+        "violet",
+      );
 
     const whiteSprite =
-      createSprite("white");
+      createSprite(
+        "white",
+      );
 
     let width = 1;
     let height = 1;
@@ -473,56 +778,89 @@ function OracleDnaSpine({
     let visible =
       !document.hidden;
 
-    let bloomAmount = 0;
+    const publishFrozenAnchor =
+      () => {
+        const frozen =
+          frozenKnotRef.current;
 
-    let activeProgress =
-      0.5;
+        if (!frozen) {
+          return;
+        }
 
-    const resize = () => {
-      const rect =
-        parent.getBoundingClientRect();
+        const rect =
+          canvas.getBoundingClientRect();
 
-      width = Math.max(
-        1,
-        rect.width,
-      );
+        onAnchorChangeRef.current?.(
+          {
+            id:
+              frozen.id,
 
-      height = Math.max(
-        1,
-        rect.height,
-      );
+            clientX:
+              rect.left +
+              frozen.x,
 
-      dpr = Math.min(
-        window.devicePixelRatio ||
-          1,
-        MAX_DPR,
-      );
+            clientY:
+              rect.top +
+              frozen.y,
+          },
+        );
+      };
 
-      canvas.width =
-        Math.round(
-          width * dpr,
+    const resize =
+      () => {
+        const rect =
+          parent.getBoundingClientRect();
+
+        width =
+          Math.max(
+            1,
+            rect.width,
+          );
+
+        height =
+          Math.max(
+            1,
+            rect.height,
+          );
+
+        dpr =
+          Math.min(
+            window.devicePixelRatio ||
+              1,
+            MAX_DPR,
+          );
+
+        canvas.width =
+          Math.round(
+            width *
+              dpr,
+          );
+
+        canvas.height =
+          Math.round(
+            height *
+              dpr,
+          );
+
+        canvas.style.width =
+          `${width}px`;
+
+        canvas.style.height =
+          `${height}px`;
+
+        context.setTransform(
+          dpr,
+          0,
+          0,
+          dpr,
+          0,
+          0,
         );
 
-      canvas.height =
-        Math.round(
-          height * dpr,
+        window.requestAnimationFrame(
+          publishFrozenAnchor,
         );
-
-      canvas.style.width =
-        `${width}px`;
-
-      canvas.style.height =
-        `${height}px`;
-
-      context.setTransform(
-        dpr,
-        0,
-        0,
-        dpr,
-        0,
-        0,
-      );
-    };
+      };
 
     const drawSprite = (
       sprite:
@@ -533,7 +871,8 @@ function OracleDnaSpine({
       alpha: number,
     ) => {
       if (
-        alpha <= 0.006
+        alpha <=
+        0.006
       ) {
         return;
       }
@@ -541,7 +880,8 @@ function OracleDnaSpine({
       const renderSize =
         Math.max(
           1.8,
-          size * 7,
+          size *
+            7,
         );
 
       context.globalAlpha =
@@ -553,39 +893,13 @@ function OracleDnaSpine({
       context.drawImage(
         sprite,
         x -
-          renderSize / 2,
+          renderSize /
+            2,
         y -
-          renderSize / 2,
+          renderSize /
+            2,
         renderSize,
         renderSize,
-      );
-    };
-
-    const getInfluence = (
-      progress: number,
-      center: number,
-      radius = 0.095,
-    ) => {
-      const distance =
-        Math.abs(
-          progress - center,
-        );
-
-      if (
-        distance >= radius
-      ) {
-        return 0;
-      }
-
-      const value =
-        1 -
-        distance / radius;
-
-      return (
-        value *
-        value *
-        (3 -
-          2 * value)
       );
     };
 
@@ -637,10 +951,12 @@ function OracleDnaSpine({
         knotPositionsRef.current
       ) {
         const dx =
-          knot.x - x;
+          knot.x -
+          x;
 
         const dy =
-          knot.y - y;
+          knot.y -
+          y;
 
         const distance =
           Math.sqrt(
@@ -727,128 +1043,415 @@ function OracleDnaSpine({
       );
 
       const time =
-        timestamp * 0.001;
+        timestamp *
+        0.001;
 
       const centerX =
-        width * 0.48;
+        width *
+        0.48;
 
       const topPadding =
-        height * 0.025;
+        height *
+        0.025;
 
       const usableHeight =
-        height * 0.95;
+        height *
+        0.95;
 
       const amplitude =
         Math.min(
-          width * 0.175,
+          width *
+            0.175,
           52,
         );
 
       const motion =
-        time * 0.285;
+        time *
+        0.285;
 
-      const activeMemory =
-        memoriesRef.current.find(
-          (memory) =>
-            memory.id ===
-            activeIdRef.current,
-        );
+      const activeSignal =
+        memorySignalRef.current;
 
-      const targetBloom =
-        activeMemory
-          ? 1
-          : 0;
+      let signalRaw = 0;
 
-      bloomAmount +=
-        (targetBloom -
-          bloomAmount) *
-        0.085;
+      let signalTravel = 0;
 
-      if (activeMemory) {
-        activeProgress +=
-          (activeMemory.progress -
-            activeProgress) *
-          0.085;
+      let signalCurrentProgress =
+        0;
+
+      let signalMin = 0;
+      let signalMax = 0;
+
+      let signalVisualEnvelope =
+        0;
+
+      let signalMotionEnvelope =
+        0;
+
+      let signalWaveRadius =
+        0.01;
+
+      if (activeSignal) {
+        signalRaw =
+          clamp01(
+            (
+              timestamp -
+              activeSignal.startedAt
+            ) /
+              MEMORY_SIGNAL_DURATION_MS,
+          );
+
+        /*
+         * Important:
+         *
+         * The wave reaches the destination
+         * around 80% of the total animation.
+         *
+         * After that:
+         * its position DOES NOT move anymore.
+         * It only fades away.
+         */
+        signalTravel =
+          smootherStep(
+            (
+              signalRaw -
+              0.08
+            ) /
+              0.72,
+          );
+
+        signalCurrentProgress =
+          mix(
+            activeSignal.fromProgress,
+            activeSignal.toProgress,
+            signalTravel,
+          );
+
+        signalMin =
+          Math.min(
+            activeSignal.fromProgress,
+            activeSignal.toProgress,
+          );
+
+        signalMax =
+          Math.max(
+            activeSignal.fromProgress,
+            activeSignal.toProgress,
+          );
+
+        /*
+         * Visual envelope:
+         *
+         * born softly,
+         * stays visible,
+         * fades to zero after reaching destination.
+         */
+        const visualBirth =
+          smootherStep(
+            signalRaw /
+              0.2,
+          );
+
+        const visualDeath =
+          1 -
+          smootherStep(
+            (
+              signalRaw -
+              0.78
+            ) /
+              0.18,
+          );
+
+        signalVisualEnvelope =
+          visualBirth *
+          visualDeath;
+
+        /*
+         * Positional deformation ends earlier
+         * than the visible wave.
+         *
+         * This is what removes the visual recoil:
+         * by the time the signal is fading at B,
+         * DNA positional deformation is already
+         * almost completely neutral.
+         */
+        const motionBirth =
+          smootherStep(
+            signalRaw /
+              0.2,
+          );
+
+        const motionDeath =
+          1 -
+          smootherStep(
+            (
+              signalRaw -
+              0.64
+            ) /
+              0.2,
+          );
+
+        signalMotionEnvelope =
+          motionBirth *
+          motionDeath;
+
+        /*
+         * Wave radius grows softly,
+         * then collapses before disappearance.
+         */
+        const radiusBirth =
+          smootherStep(
+            signalRaw /
+              0.24,
+          );
+
+        const radiusDeath =
+          1 -
+          smootherStep(
+            (
+              signalRaw -
+              0.72
+            ) /
+              0.22,
+          );
+
+        signalWaveRadius =
+          mix(
+            0.012,
+            0.12,
+            radiusBirth *
+              radiusDeath,
+          );
       }
 
+      const getSignalProfile = (
+        progress: number,
+      ) => {
+        if (
+          !activeSignal
+        ) {
+          return 0;
+        }
+
+        if (
+          progress <
+            signalMin -
+              0.14 ||
+          progress >
+            signalMax +
+              0.14
+        ) {
+          return 0;
+        }
+
+        const distance =
+          Math.abs(
+            progress -
+              signalCurrentProgress,
+          );
+
+        if (
+          distance >=
+          signalWaveRadius
+        ) {
+          return 0;
+        }
+
+        const local =
+          1 -
+          distance /
+            signalWaveRadius;
+
+        return smootherStep(
+          local,
+        );
+      };
+
       /*
-       * Ambient Oracle dust.
+       * Ambient DNA dust.
        */
       for (
         const dust of
         dustParticles
       ) {
-        const influence =
-          getInfluence(
+        const signalProfile =
+          getSignalProfile(
             dust.progress,
-            activeProgress,
-            0.105,
-          ) *
-          bloomAmount;
+          );
+
+        const visualInfluence =
+          signalProfile *
+          signalVisualEnvelope;
+
+        const motionInfluence =
+          signalProfile *
+          signalMotionEnvelope;
+
+        const signalDirection =
+          activeSignal
+            ? activeSignal.toProgress >=
+              activeSignal.fromProgress
+              ? 1
+              : -1
+            : 0;
 
         const y =
           topPadding +
           dust.progress *
             usableHeight +
           Math.sin(
-            time * 0.26 +
+            time *
+              0.26 +
               dust.phase,
           ) *
-            3;
+            3 +
+          motionInfluence *
+            signalDirection *
+            5.5;
 
         const localWave =
           Math.sin(
             dust.progress *
               TAU *
               3.5 +
-              motion,
+              motion +
+              motionInfluence *
+                0.18,
           );
 
         const x =
           centerX +
           localWave *
             amplitude *
-            0.5 +
+            (
+              0.5 -
+              motionInfluence *
+                0.04
+            ) +
           dust.side *
             dust.spread +
-          dust.side *
-            influence *
-            14 +
           Math.cos(
-            time * 0.2 +
-              dust.phase,
+            time *
+              0.2 +
+              dust.phase +
+              motionInfluence *
+                1.2,
           ) *
-            2.2;
+            (
+              2.2 +
+              motionInfluence *
+                2.8
+            );
 
-        const pulse =
+        const basePulse =
           0.72 +
           Math.sin(
-            time * 0.9 +
+            time *
+              0.9 +
               dust.phase +
-              dust.progress * 6,
+              dust.progress *
+                6,
           ) *
             0.28;
+
+        /*
+         * Rare ambient twinkle.
+         *
+         * Only selected particles have
+         * twinkleStrength > 0.
+         *
+         * The threshold means most of the time
+         * nothing special happens.
+         */
+        const twinkleWave =
+          (
+            Math.sin(
+              time *
+                dust.twinkleSpeed +
+                dust.twinklePhase,
+            ) +
+            1
+          ) /
+          2;
+
+        const twinkle =
+          dust.twinkleStrength >
+          0
+            ? smootherStep(
+                (
+                  twinkleWave -
+                  0.76
+                ) /
+                  0.24,
+              ) *
+              dust.twinkleStrength
+            : 0;
+
+        const twinkleAlphaBoost =
+          1 +
+          twinkle *
+            1.35;
+
+        const twinkleSizeBoost =
+          1 +
+          twinkle *
+            0.22;
 
         drawSprite(
           cyanSprite,
           x,
           y,
           dust.size *
-            pulse,
+            basePulse *
+            twinkleSizeBoost *
+            (
+              1 +
+              visualInfluence *
+                0.18
+            ),
           dust.alpha *
-            pulse *
-            (1 +
-              influence *
-                0.95),
+            basePulse *
+            twinkleAlphaBoost *
+            (
+              1 +
+              visualInfluence *
+                0.6
+            ),
         );
 
+        /*
+         * A very small number of stronger twinkles
+         * get a tiny white core near peak brightness.
+         */
         if (
-          dust.size > 0.72 &&
-          (Math.sin(
-            dust.phase +
-              time * 0.45,
-          ) +
-            1) /
+          twinkle >
+            0.42 &&
+          dust.size >
+            0.42
+        ) {
+          drawSprite(
+            whiteSprite,
+            x,
+            y,
+            dust.size *
+              0.52,
+            dust.alpha *
+              twinkle *
+              0.72,
+          );
+        }
+
+        if (
+          dust.size >
+            0.72 &&
+          (
+            Math.sin(
+              dust.phase +
+                time *
+                  0.45,
+            ) +
+            1
+          ) /
             2 >
             0.82
         ) {
@@ -856,52 +1459,72 @@ function OracleDnaSpine({
             whiteSprite,
             x,
             y,
-            dust.size * 0.72,
-            dust.alpha * 0.42,
+            dust.size *
+              0.72,
+            dust.alpha *
+              0.42 *
+              (
+                1 +
+                visualInfluence *
+                  0.8
+              ),
           );
         }
       }
 
       /*
-       * Bridges.
+       * DNA bridges.
        */
       for (
         const bridge of
         bridgeParticles
       ) {
-        const influence =
-          getInfluence(
+        const signalProfile =
+          getSignalProfile(
             bridge.progress,
-            activeProgress,
-          ) *
-          bloomAmount;
+          );
 
-        const phase =
+        const visualInfluence =
+          signalProfile *
+          signalVisualEnvelope;
+
+        const motionInfluence =
+          signalProfile *
+          signalMotionEnvelope;
+
+        const phaseValue =
           bridge.progress *
             TAU *
             3.5 +
-          motion;
+          motion +
+          motionInfluence *
+            0.22;
+
+        const localAmplitude =
+          amplitude *
+          (
+            1 -
+            motionInfluence *
+              0.09
+          );
 
         const helixX =
-          Math.sin(phase) *
-          amplitude;
-
-        const opening =
-          influence * 34;
+          Math.sin(
+            phaseValue,
+          ) *
+          localAmplitude;
 
         const leftX =
           centerX -
           Math.abs(
             helixX,
-          ) -
-          opening;
+          );
 
         const rightX =
           centerX +
           Math.abs(
             helixX,
-          ) +
-          opening;
+          );
 
         const y =
           topPadding +
@@ -910,8 +1533,10 @@ function OracleDnaSpine({
 
         const x =
           leftX +
-          (rightX -
-            leftX) *
+          (
+            rightX -
+            leftX
+          ) *
             bridge.offset;
 
         const centerWeight =
@@ -920,23 +1545,59 @@ function OracleDnaSpine({
               Math.PI,
           );
 
-        const cavityFade =
-          1 -
-          influence * 0.94;
+        const pulse =
+          0.72 +
+          Math.sin(
+            time *
+              1.85 +
+              bridge.pulse +
+              bridge.progress *
+                5.8,
+          ) *
+            0.28;
+
+        const baseAlpha =
+          bridge.alpha *
+          centerWeight *
+          pulse *
+          1.35;
+
+        const cascadeBoost =
+          1 +
+          visualInfluence *
+            2.15;
+
+        const sizeBoost =
+          1 +
+          visualInfluence *
+            0.22;
 
         drawSprite(
           whiteSprite,
           x,
           y,
-          bridge.size,
-          bridge.alpha *
-            centerWeight *
-            cavityFade,
+          bridge.size *
+            1.06 *
+            sizeBoost,
+          baseAlpha *
+            cascadeBoost,
+        );
+
+        drawSprite(
+          cyanSprite,
+          x,
+          y,
+          bridge.size *
+            0.68 *
+            sizeBoost,
+          baseAlpha *
+            0.34 *
+            cascadeBoost,
         );
       }
 
       /*
-       * Main particle strands.
+       * Main DNA strands.
        */
       for (
         const particle of
@@ -945,25 +1606,36 @@ function OracleDnaSpine({
         const progress =
           particle.progress;
 
-        const influence =
-          getInfluence(
+        const signalProfile =
+          getSignalProfile(
             progress,
-            activeProgress,
-          ) *
-          bloomAmount;
+          );
 
-        const phase =
+        const visualInfluence =
+          signalProfile *
+          signalVisualEnvelope;
+
+        const motionInfluence =
+          signalProfile *
+          signalMotionEnvelope;
+
+        const phaseBoost =
+          motionInfluence *
+          0.34;
+
+        const phaseValue =
           progress *
             TAU *
             3.5 +
           motion +
-          particle.phaseNoise;
+          particle.phaseNoise +
+          phaseBoost;
 
         const strandPhase =
           particle.strand ===
           0
-            ? phase
-            : phase +
+            ? phaseValue
+            : phaseValue +
               Math.PI;
 
         const wave =
@@ -972,45 +1644,61 @@ function OracleDnaSpine({
           );
 
         const depth =
-          (Math.cos(
-            strandPhase,
-          ) +
-            1) /
+          (
+            Math.cos(
+              strandPhase,
+            ) +
+            1
+          ) /
           2;
 
-        const openingDirection =
-          particle.strand === 0
-            ? -1
-            : 1;
+        const localAmplitude =
+          amplitude *
+          (
+            1 -
+            motionInfluence *
+              0.11
+          );
 
-        const tearOffset =
-          influence *
-          openingDirection *
-          34;
+        const signalDirection =
+          activeSignal
+            ? activeSignal.toProgress >=
+              activeSignal.fromProgress
+              ? 1
+              : -1
+            : 0;
 
         const y =
           topPadding +
           progress *
             usableHeight +
-          particle.yNoise;
+          particle.yNoise +
+          motionInfluence *
+            signalDirection *
+            5.5;
 
         const baseX =
           centerX +
           wave *
-            amplitude +
-          tearOffset;
+            localAmplitude;
 
         const thickness =
           2.2 +
-          depth * 7.2;
+          depth *
+            7.2 +
+          motionInfluence *
+            1.5;
 
         const x =
           baseX +
           particle.clusterOffset *
             thickness +
           particle.sideNoise *
-            (0.2 +
-              depth * 0.5);
+            (
+              0.2 +
+              depth *
+                0.5
+            );
 
         const fadeTop =
           Math.min(
@@ -1022,8 +1710,10 @@ function OracleDnaSpine({
         const fadeBottom =
           Math.min(
             1,
-            (1 -
-              progress) /
+            (
+              1 -
+              progress
+            ) /
               0.09,
           );
 
@@ -1036,19 +1726,33 @@ function OracleDnaSpine({
         const alpha =
           edgeFade *
           particle.alphaNoise *
-          (0.15 +
-            depth * 0.7) *
-          (1 +
-            influence *
-              0.5);
+          (
+            0.15 +
+            depth *
+              0.7
+          ) *
+          (
+            1 +
+            visualInfluence *
+              0.72
+          );
 
         const size =
           particle.sizeNoise *
-          (0.29 +
-            depth * 0.86);
+          (
+            0.29 +
+            depth *
+              0.86
+          ) *
+          (
+            1 +
+            visualInfluence *
+              0.14
+          );
 
         drawSprite(
-          particle.strand === 0
+          particle.strand ===
+            0
             ? cyanSprite
             : violetSprite,
           x,
@@ -1059,10 +1763,322 @@ function OracleDnaSpine({
       }
 
       /*
+       * Subtle moving signal.
+       *
+       * Important:
+       * the tail no longer collapses/reverses
+       * during fade-out.
+       *
+       * Once the signal reaches B,
+       * its geometry stays fixed and simply fades.
+       */
+      if (
+        activeSignal
+      ) {
+        const signalAlpha =
+          signalVisualEnvelope;
+
+        const trailCount =
+          28;
+
+        const movingDown =
+          activeSignal.toProgress >=
+          activeSignal.fromProgress;
+
+        for (
+          let trailIndex = 0;
+          trailIndex <
+          trailCount;
+          trailIndex += 1
+        ) {
+          const normalizedTrail =
+            trailIndex /
+            (
+              trailCount -
+              1
+            );
+
+          const direction =
+            movingDown
+              ? -1
+              : 1;
+
+          /*
+           * Note:
+           * no signalMotionEnvelope multiplier here.
+           *
+           * This prevents the tail from shrinking
+           * toward the head and looking like
+           * it moves backward near the end.
+           */
+          const trailProgress =
+            clamp01(
+              signalCurrentProgress +
+                direction *
+                  normalizedTrail *
+                  0.11,
+            );
+
+          const localFade =
+            Math.pow(
+              1 -
+                normalizedTrail,
+              1.6,
+            );
+
+          for (
+            let strand = 0;
+            strand < 2;
+            strand += 1
+          ) {
+            const signalProfile =
+              getSignalProfile(
+                trailProgress,
+              );
+
+            const motionInfluence =
+              signalProfile *
+              signalMotionEnvelope;
+
+            const phaseValue =
+              trailProgress *
+                TAU *
+                3.5 +
+              motion +
+              motionInfluence *
+                0.34 +
+              (
+                strand === 0
+                  ? 0
+                  : Math.PI
+              );
+
+            const localAmplitude =
+              amplitude *
+              (
+                1 -
+                motionInfluence *
+                  0.11
+              );
+
+            const x =
+              centerX +
+              Math.sin(
+                phaseValue,
+              ) *
+                localAmplitude;
+
+            const y =
+              topPadding +
+              trailProgress *
+                usableHeight;
+
+            const sprite =
+              strand === 0
+                ? cyanSprite
+                : violetSprite;
+
+            drawSprite(
+              sprite,
+              x,
+              y,
+              0.58 +
+                localFade *
+                  0.18,
+              signalAlpha *
+                localFade *
+                0.34,
+            );
+
+            if (
+              trailIndex %
+                6 ===
+              0
+            ) {
+              drawSprite(
+                whiteSprite,
+                x,
+                y,
+                0.38,
+                signalAlpha *
+                  localFade *
+                  0.22,
+              );
+            }
+          }
+        }
+
+        /*
+         * Source birth.
+         */
+        if (
+          signalRaw <
+          0.24
+        ) {
+          const birthProgress =
+            smootherStep(
+              signalRaw /
+                0.24,
+            );
+
+          const birthPulse =
+            Math.sin(
+              birthProgress *
+                Math.PI,
+            );
+
+          const sourceProgress =
+            activeSignal.fromProgress;
+
+          const sourcePhase =
+            sourceProgress *
+              TAU *
+              3.5 +
+            motion;
+
+          const sourceX =
+            centerX +
+            Math.sin(
+              sourcePhase,
+            ) *
+              amplitude *
+              0.46;
+
+          const sourceY =
+            topPadding +
+            sourceProgress *
+              usableHeight;
+
+          drawSprite(
+            cyanSprite,
+            sourceX,
+            sourceY,
+            0.9 +
+              birthPulse *
+                0.42,
+            birthPulse *
+              0.16,
+          );
+
+          drawSprite(
+            whiteSprite,
+            sourceX,
+            sourceY,
+            0.44 +
+              birthPulse *
+                0.16,
+            birthPulse *
+              0.12,
+          );
+        }
+
+        /*
+         * Destination fade.
+         *
+         * No pulse that rises and falls after arrival.
+         *
+         * The glow rises while approaching,
+         * then simply fades away.
+         */
+        if (
+          signalRaw >
+          0.62
+        ) {
+          const arrivalIn =
+            smootherStep(
+              (
+                signalRaw -
+                0.62
+              ) /
+                0.16,
+            );
+
+          const arrivalOut =
+            1 -
+            smootherStep(
+              (
+                signalRaw -
+                0.8
+              ) /
+                0.16,
+            );
+
+          const arrivalGlow =
+            arrivalIn *
+            arrivalOut;
+
+          const targetProgress =
+            activeSignal.toProgress;
+
+          const targetPhase =
+            targetProgress *
+              TAU *
+              3.5 +
+            motion;
+
+          const targetFrozen =
+            frozenKnotRef.current;
+
+          const targetX =
+            targetFrozen
+              ? targetFrozen.x
+              : centerX +
+                Math.sin(
+                  targetPhase,
+                ) *
+                  amplitude *
+                  0.46;
+
+          const targetY =
+            targetFrozen
+              ? targetFrozen.y
+              : topPadding +
+                targetProgress *
+                  usableHeight;
+
+          drawSprite(
+            violetSprite,
+            targetX,
+            targetY,
+            1.08,
+            arrivalGlow *
+              0.18,
+          );
+
+          drawSprite(
+            whiteSprite,
+            targetX,
+            targetY,
+            0.52,
+            arrivalGlow *
+              0.14,
+          );
+        }
+
+        /*
+         * By ~96% everything is already invisible
+         * and positionally neutral.
+         *
+         * Remove the signal before another visible
+         * frame can reveal any reset.
+         */
+        if (
+          signalRaw >=
+          0.97
+        ) {
+          memorySignalRef.current =
+            null;
+        }
+      }
+
+      /*
        * Memory knots.
        */
       const knotPositions:
         KnotScreenPosition[] = [];
+
+      const activeIdNow =
+        activeIdRef.current;
 
       for (
         const memory of
@@ -1071,43 +2087,146 @@ function OracleDnaSpine({
         const progress =
           memory.progress;
 
-        const phase =
+        const phaseValue =
           progress *
             TAU *
             3.5 +
           motion;
 
         const strandWave =
-          Math.sin(phase);
+          Math.sin(
+            phaseValue,
+          );
 
-        const knotX =
+        const naturalX =
           centerX +
           strandWave *
             amplitude *
             0.46;
 
-        const knotY =
+        const naturalY =
           topPadding +
           progress *
             usableHeight;
 
+        let knotX =
+          naturalX;
+
+        let knotY =
+          naturalY;
+
+        const selected =
+          activeIdNow ===
+          memory.id;
+
+        if (selected) {
+          if (
+            !frozenKnotRef.current ||
+            frozenKnotRef.current.id !==
+              memory.id
+          ) {
+            frozenKnotRef.current =
+              {
+                id:
+                  memory.id,
+
+                x:
+                  naturalX,
+
+                y:
+                  naturalY,
+              };
+
+            const canvasRect =
+              canvas.getBoundingClientRect();
+
+            onAnchorChangeRef.current?.(
+              {
+                id:
+                  memory.id,
+
+                clientX:
+                  canvasRect.left +
+                  naturalX,
+
+                clientY:
+                  canvasRect.top +
+                  naturalY,
+              },
+            );
+          }
+
+          knotX =
+            frozenKnotRef.current.x;
+
+          knotY =
+            frozenKnotRef.current.y;
+        } else if (
+          releasedKnotRef.current?.id ===
+          memory.id
+        ) {
+          const release =
+            releasedKnotRef.current;
+
+          const elapsed =
+            timestamp -
+            release.startedAt;
+
+          const amount =
+            smoothStep(
+              elapsed /
+                RELEASE_DURATION_MS,
+            );
+
+          knotX =
+            release.x +
+            (
+              naturalX -
+              release.x
+            ) *
+              amount;
+
+          knotY =
+            release.y +
+            (
+              naturalY -
+              release.y
+            ) *
+              amount;
+
+          if (
+            amount >=
+            0.999
+          ) {
+            releasedKnotRef.current =
+              null;
+          }
+        }
+
         knotPositions.push({
-          id: memory.id,
-          x: knotX,
-          y: knotY,
+          id:
+            memory.id,
+
+          x:
+            knotX,
+
+          y:
+            knotY,
         });
 
         const hovered =
           hoveredIdRef.current ===
           memory.id;
 
-        const selected =
-          activeIdRef.current ===
-          memory.id;
+        const selectedStrength =
+          phaseRef.current ===
+            "closing"
+            ? 0.78
+            : 1;
 
         const charge =
           selected
-            ? 1
+            ? selectedStrength
             : hovered
               ? 0.74
               : 0.16;
@@ -1126,21 +2245,27 @@ function OracleDnaSpine({
           const orbit =
             knot.angle +
             time *
-              (0.08 +
-                (index %
-                  5) *
-                  0.006) +
+              (
+                0.08 +
+                (
+                  index %
+                  5
+                ) *
+                  0.006
+              ) +
             knot.phase;
 
           const organicRadius =
             knot.radius *
-            (1 +
+            (
+              1 +
               Math.sin(
                 time *
                   0.45 +
                   knot.phase,
               ) *
-                0.06);
+                0.06
+            );
 
           const x =
             knotX +
@@ -1172,13 +2297,17 @@ function OracleDnaSpine({
             x,
             y,
             knot.size *
-              (1 +
+              (
+                1 +
                 charge *
-                  0.22),
+                  0.22
+              ),
             knot.alpha *
-              (0.56 +
+              (
+                0.56 +
                 charge *
-                  0.62),
+                  0.62
+              ),
           );
         }
 
@@ -1209,89 +2338,8 @@ function OracleDnaSpine({
       knotPositionsRef.current =
         knotPositions;
 
-      /*
-       * Tear emission.
-       */
-      if (
-        activeMemory &&
-        bloomAmount >
-          0.05
-      ) {
-        const tearY =
-          topPadding +
-          activeProgress *
-            usableHeight;
-
-        const tearOriginX =
-          centerX +
-          amplitude *
-            0.15;
-
-        const streamLength =
-          Math.min(
-            width * 0.48,
-            132,
-          );
-
-        for (
-          let index = 0;
-          index < 34;
-          index += 1
-        ) {
-          const seed =
-            index / 34;
-
-          const travel =
-            (seed +
-              time *
-                0.19) %
-            1;
-
-          const envelope =
-            Math.sin(
-              travel *
-                Math.PI,
-            );
-
-          const x =
-            tearOriginX +
-            travel *
-              streamLength;
-
-          const y =
-            tearY +
-            Math.sin(
-              travel *
-                Math.PI *
-                3.2 +
-                index *
-                  1.7,
-            ) *
-              (10 *
-                (1 -
-                  travel));
-
-          drawSprite(
-            index %
-              7 ===
-              0
-              ? whiteSprite
-              : cyanSprite,
-            x,
-            y,
-            index %
-              7 ===
-              0
-              ? 0.72
-              : 0.46,
-            envelope *
-              bloomAmount *
-              0.48,
-          );
-        }
-      }
-
-      context.globalAlpha = 1;
+      context.globalAlpha =
+        1;
     };
 
     animationFrame =

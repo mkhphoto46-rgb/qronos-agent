@@ -1,4 +1,6 @@
 import {
+  useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,10 +14,13 @@ import type {
 import OracleDnaSpine from "./OracleDnaSpine";
 
 import type {
+  OracleMemoryAnchor,
   OracleMemoryNode,
+  OracleMemoryPhase,
 } from "./OracleDnaSpine";
 
 import "./ConversationSpine.css";
+import "./ConversationMemoryMotion.css";
 
 type ConversationRole =
   | "user"
@@ -29,34 +34,148 @@ type Conversation = {
   progress: number;
 };
 
+type MemoryPocketParticle = {
+  id: number;
+  targetX: number;
+  targetY: number;
+  size: number;
+  alpha: number;
+  delay: number;
+  returnDelay: number;
+  duration: number;
+  floatDelay: number;
+  driftX: number;
+  driftY: number;
+};
+
+type ParticleOrigin = {
+  x: number;
+  y: number;
+};
+
+const OPEN_DURATION = 760;
+const CLOSE_DURATION = 620;
+
 const conversations: Conversation[] = [
   {
     id: "conversation-3",
     role: "qronos",
     time: "19:34",
     text:
-      "DNA بخش Context باید از جنس Particleهای Oracle باشد و Memory Knot بخشی از خود ساختار DNA احساس شود، نه یک عنصر جدا که روی آن قرار گرفته باشد.",
+      "ساختار Context به شکل DNA طراحی شده تا هر گفت‌وگو به صورت یک Memory Node زنده داخل جریان حافظه دیده شود و بدون شلوغ کردن رابط کاربری، آخرین گفتگوها همیشه در دسترس باشند.",
     progress: 0.24,
   },
-
   {
     id: "conversation-2",
     role: "user",
     time: "19:21",
     text:
-      "وقتی Memory انتخاب می‌شود، DNA باید در همان نقطه باز شود و متن از دل این شکاف بیرون بیاید؛ نه اینکه یک Card مستقل روی صفحه ظاهر شود.",
+      "وقتی Memory انتخاب می‌شود، می‌خواهم نود مربوط به آن باز شود و متن گفتگو از همان نقطه ظاهر شود؛ نه این‌که یک کارت مستقل و جدا از ساختار DNA روی صفحه قرار بگیرد.",
     progress: 0.5,
   },
-
   {
     id: "conversation-1",
     role: "qronos",
     time: "19:06",
     text:
-      "فوکوس اصلی رابط همچنان روی Oracle مرکزی باقی می‌ماند. Memory Pocket فقط حافظه انتخاب‌شده را از دل DNA آشکار می‌کند و تاریخچه کامل در بخش Conversations قرار می‌گیرد.",
+      "ساختار اصلی رابط همان Oracle مرکزی باقی می‌ماند. Memory Pocket فقط حافظه انتخاب‌شده را از دل DNA آشکار می‌کند و تاریخچه کامل همچنان در بخش Conversations قرار می‌گیرد.",
     progress: 0.76,
   },
 ];
+
+function buildPocketParticles(): MemoryPocketParticle[] {
+  return Array.from(
+    {
+      length: 88,
+    },
+    (_, index) => {
+      const column =
+        index % 11;
+
+      const row =
+        Math.floor(
+          index / 11,
+        );
+
+      const waveA =
+        Math.sin(
+          index * 1.47,
+        );
+
+      const waveB =
+        Math.cos(
+          index * 2.07,
+        );
+
+      const waveC =
+        Math.sin(
+          index * 0.83,
+        );
+
+      return {
+        id: index,
+
+        targetX:
+          14 +
+          column * 22 +
+          waveA * 13,
+
+        targetY:
+          18 +
+          row * 23 +
+          waveB * 15,
+
+        size:
+          1.9 +
+          (index % 6) *
+            0.46,
+
+        alpha:
+          0.32 +
+          (index % 7) *
+            0.055,
+
+        /*
+         * Delays are deliberately very close together.
+         * This avoids the old "groups of particles"
+         * appearing in visible steps.
+         */
+        delay:
+          (index % 17) *
+          7,
+
+        returnDelay:
+          (index % 13) *
+          5,
+
+        duration:
+          5200 +
+          (index % 10) *
+            360,
+
+        floatDelay:
+          -(
+            (index % 16) *
+            290
+          ),
+
+        driftX:
+          2.5 +
+          (index % 6) *
+            1.05,
+
+        driftY:
+          -3.5 +
+          (index % 9) *
+            0.86 +
+          waveC * 0.7,
+      };
+    },
+  );
+}
+
+const pocketParticles =
+  buildPocketParticles();
 
 function getPocketPosition(
   progress: number,
@@ -66,21 +185,70 @@ function getPocketPosition(
 
   return Math.min(
     66,
-    Math.max(30, raw),
+    Math.max(
+      30,
+      raw,
+    ),
   );
 }
 
 function ConversationSpine() {
   const [
-    selectedId,
-    setSelectedId,
+    displayedId,
+    setDisplayedId,
   ] =
     useState<string | null>(
       "conversation-1",
     );
 
+  const [
+    memoryPhase,
+    setMemoryPhase,
+  ] =
+    useState<OracleMemoryPhase>(
+      "open",
+    );
+
+  const [
+    memoryAnchor,
+    setMemoryAnchor,
+  ] =
+    useState<OracleMemoryAnchor | null>(
+      null,
+    );
+
+  const [
+    particleOrigin,
+    setParticleOrigin,
+  ] =
+    useState<ParticleOrigin>({
+      x: 0,
+      y: 0,
+    });
+
+  const [
+    anchorReady,
+    setAnchorReady,
+  ] =
+    useState(false);
+
   const previewRef =
     useRef<HTMLDivElement | null>(
+      null,
+    );
+
+  const pocketRef =
+    useRef<HTMLElement | null>(
+      null,
+    );
+
+  const transitionTimerRef =
+    useRef<number | null>(
+      null,
+    );
+
+  const pendingIdRef =
+    useRef<string | null>(
       null,
     );
 
@@ -93,8 +261,10 @@ function ConversationSpine() {
           (conversation) => ({
             id:
               conversation.id,
+
             progress:
               conversation.progress,
+
             role:
               conversation.role,
           }),
@@ -102,15 +272,15 @@ function ConversationSpine() {
       [],
     );
 
-  const selectedConversation =
+  const displayedConversation =
     useMemo(
       () =>
         conversations.find(
           (conversation) =>
             conversation.id ===
-            selectedId,
+            displayedId,
         ) ?? null,
-      [selectedId],
+      [displayedId],
     );
 
   const pocketStyle =
@@ -118,7 +288,7 @@ function ConversationSpine() {
       CSSProperties
     >(() => {
       if (
-        !selectedConversation
+        !displayedConversation
       ) {
         return {};
       }
@@ -126,12 +296,243 @@ function ConversationSpine() {
       return {
         "--memory-pocket-top":
           `${getPocketPosition(
-            selectedConversation.progress,
+            displayedConversation.progress,
           )}%`,
+
+        "--memory-node-source-x":
+          `${particleOrigin.x}px`,
+
+        "--memory-node-source-y":
+          `${particleOrigin.y}px`,
       } as CSSProperties;
     }, [
-      selectedConversation,
+      displayedConversation,
+      particleOrigin,
     ]);
+
+  const clearTransitionTimer =
+    () => {
+      if (
+        transitionTimerRef.current ===
+        null
+      ) {
+        return;
+      }
+
+      window.clearTimeout(
+        transitionTimerRef.current,
+      );
+
+      transitionTimerRef.current =
+        null;
+    };
+
+  const resetAnchor =
+    () => {
+      setMemoryAnchor(
+        null,
+      );
+
+      setParticleOrigin({
+        x: 0,
+        y: 0,
+      });
+
+      setAnchorReady(
+        false,
+      );
+    };
+
+  const beginOpening = (
+    id: string,
+  ) => {
+    clearTransitionTimer();
+
+    pendingIdRef.current =
+      null;
+
+    resetAnchor();
+
+    setDisplayedId(
+      id,
+    );
+
+    setMemoryPhase(
+      "opening",
+    );
+  };
+
+  const beginClosing = (
+    nextId: string | null,
+  ) => {
+    clearTransitionTimer();
+
+    pendingIdRef.current =
+      nextId;
+
+    setMemoryPhase(
+      "closing",
+    );
+
+    transitionTimerRef.current =
+      window.setTimeout(
+        () => {
+          const next =
+            pendingIdRef.current;
+
+          pendingIdRef.current =
+            null;
+
+          if (next) {
+            resetAnchor();
+
+            setDisplayedId(
+              next,
+            );
+
+            setMemoryPhase(
+              "opening",
+            );
+
+            return;
+          }
+
+          setDisplayedId(
+            null,
+          );
+
+          setMemoryPhase(
+            "closed",
+          );
+
+          resetAnchor();
+
+          transitionTimerRef.current =
+            null;
+        },
+        CLOSE_DURATION,
+      );
+  };
+
+  /*
+   * Only the particle source follows
+   * the frozen DNA node.
+   *
+   * The chat geometry stays stable.
+   */
+  useLayoutEffect(() => {
+    if (
+      !memoryAnchor ||
+      !displayedId ||
+      memoryAnchor.id !==
+        displayedId
+    ) {
+      return;
+    }
+
+    const pocket =
+      pocketRef.current;
+
+    if (!pocket) {
+      return;
+    }
+
+    const pocketRect =
+      pocket.getBoundingClientRect();
+
+    setParticleOrigin({
+      x:
+        memoryAnchor.clientX -
+        pocketRect.left,
+
+      y:
+        memoryAnchor.clientY -
+        pocketRect.top,
+    });
+
+    setAnchorReady(
+      true,
+    );
+
+    if (
+      memoryPhase ===
+      "opening"
+    ) {
+      clearTransitionTimer();
+
+      transitionTimerRef.current =
+        window.setTimeout(
+          () => {
+            setMemoryPhase(
+              "open",
+            );
+
+            transitionTimerRef.current =
+              null;
+          },
+          OPEN_DURATION,
+        );
+    }
+  }, [
+    memoryAnchor,
+    displayedId,
+    memoryPhase,
+  ]);
+
+  useEffect(() => {
+    const handleResize =
+      () => {
+        if (
+          !memoryAnchor ||
+          !displayedId ||
+          memoryAnchor.id !==
+            displayedId
+        ) {
+          return;
+        }
+
+        const pocket =
+          pocketRef.current;
+
+        if (!pocket) {
+          return;
+        }
+
+        const pocketRect =
+          pocket.getBoundingClientRect();
+
+        setParticleOrigin({
+          x:
+            memoryAnchor.clientX -
+            pocketRect.left,
+
+          y:
+            memoryAnchor.clientY -
+            pocketRect.top,
+        });
+      };
+
+    window.addEventListener(
+      "resize",
+      handleResize,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "resize",
+        handleResize,
+      );
+    };
+  }, [
+    memoryAnchor,
+    displayedId,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      clearTransitionTimer();
+    };
+  }, []);
 
   const selectPreviewText =
     () => {
@@ -157,7 +558,10 @@ function ConversationSpine() {
       );
 
       selection.removeAllRanges();
-      selection.addRange(range);
+
+      selection.addRange(
+        range,
+      );
     };
 
   const handlePreviewKeyDown = (
@@ -170,31 +574,59 @@ function ConversationSpine() {
         "a"
     ) {
       event.preventDefault();
+
       selectPreviewText();
     }
 
     if (
       event.key === "Escape"
     ) {
-      setSelectedId(null);
+      beginClosing(
+        null,
+      );
     }
   };
 
   const handleMemorySelect = (
     id: string,
   ) => {
-    setSelectedId(
-      (current) =>
-        current === id
-          ? null
-          : id,
+    if (
+      memoryPhase ===
+      "closing"
+    ) {
+      pendingIdRef.current =
+        id;
+
+      return;
+    }
+
+    if (
+      displayedId === id
+    ) {
+      beginClosing(
+        null,
+      );
+
+      return;
+    }
+
+    if (displayedId) {
+      beginClosing(
+        id,
+      );
+
+      return;
+    }
+
+    beginOpening(
+      id,
     );
   };
 
   return (
     <aside
       className="conversation-spine"
-      aria-label="Recent conversations"
+      aria-label="گفتگوهای اخیر"
       dir="ltr"
     >
       <header className="conversation-spine-header">
@@ -207,19 +639,32 @@ function ConversationSpine() {
         <div className="conversation-dna-zone">
           <OracleDnaSpine
             memories={memoryNodes}
-            activeId={selectedId}
+            activeId={
+              displayedId
+            }
+            phase={
+              memoryPhase
+            }
             onSelect={
               handleMemorySelect
+            }
+            onAnchorChange={
+              setMemoryAnchor
             }
           />
         </div>
 
-        {selectedConversation && (
+        {displayedConversation && (
           <article
+            ref={pocketRef}
             key={
-              selectedConversation.id
+              displayedConversation.id
             }
-            className="memory-pocket"
+            className={`memory-pocket memory-pocket-${memoryPhase} ${
+              anchorReady
+                ? "memory-pocket-anchor-ready"
+                : "memory-pocket-anchor-pending"
+            }`}
             style={pocketStyle}
           >
             <div
@@ -244,26 +689,58 @@ function ConversationSpine() {
               className="memory-pocket-bloom"
               aria-hidden="true"
             >
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
+              {pocketParticles.map(
+                (
+                  particle,
+                ) => (
+                  <i
+                    key={
+                      particle.id
+                    }
+                    style={
+                      {
+                        "--memory-particle-target-x":
+                          `${particle.targetX}px`,
+
+                        "--memory-particle-target-y":
+                          `${particle.targetY}px`,
+
+                        "--memory-particle-size":
+                          `${particle.size}px`,
+
+                        "--memory-particle-alpha":
+                          particle.alpha,
+
+                        "--memory-particle-delay":
+                          `${particle.delay}ms`,
+
+                        "--memory-particle-return-delay":
+                          `${particle.returnDelay}ms`,
+
+                        "--memory-particle-duration":
+                          `${particle.duration}ms`,
+
+                        "--memory-particle-float-delay":
+                          `${particle.floatDelay}ms`,
+
+                        "--memory-particle-drift-x":
+                          `${particle.driftX}px`,
+
+                        "--memory-particle-drift-y":
+                          `${particle.driftY}px`,
+                      } as CSSProperties
+                    }
+                  />
+                ),
+              )}
             </div>
 
             <header className="memory-pocket-header">
               <div className="memory-pocket-identity">
                 <span
-                  className={`memory-pocket-role memory-pocket-role-${selectedConversation.role}`}
+                  className={`memory-pocket-role memory-pocket-role-${displayedConversation.role}`}
                 >
-                  {selectedConversation.role ===
+                  {displayedConversation.role ===
                   "user"
                     ? "YOU"
                     : "QRONOS"}
@@ -271,7 +748,7 @@ function ConversationSpine() {
 
                 <span className="memory-pocket-time">
                   {
-                    selectedConversation.time
+                    displayedConversation.time
                   }
                 </span>
               </div>
@@ -281,7 +758,7 @@ function ConversationSpine() {
                 className="memory-pocket-close"
                 aria-label="بستن گفتگو"
                 onClick={() =>
-                  setSelectedId(
+                  beginClosing(
                     null,
                   )
                 }
@@ -300,7 +777,7 @@ function ConversationSpine() {
             >
               <p>
                 {
-                  selectedConversation.text
+                  displayedConversation.text
                 }
               </p>
             </div>
