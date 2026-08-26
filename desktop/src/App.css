@@ -3980,3 +3980,109 @@ button {
       0.055
     );
 }
+
+
+/* =========================================================
+   NAVIGATION VIEW STATE / NOTIFICATION BADGE
+   ========================================================= */
+
+.bottom-nav {
+  z-index: 30;
+}
+
+.nav-notification-badge {
+  position: absolute;
+
+  top: 0;
+  right: 12px;
+
+  min-width: 16px;
+  height: 16px;
+
+  display: grid;
+
+  place-items: center;
+
+  padding: 0 4px;
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      242,
+      60,
+      78,
+      0.96
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.98
+    );
+
+  font-size: 8px;
+  font-weight: 850;
+
+  line-height: 1;
+
+  box-shadow:
+    0 0 10px
+      rgba(
+        242,
+        60,
+        78,
+        0.34
+      );
+
+  animation:
+    navNotificationPulse
+    2.3s
+    ease-in-out
+    infinite;
+}
+
+@keyframes navNotificationPulse {
+  0%,
+  100% {
+    transform:
+      scale(0.94);
+
+    box-shadow:
+      0 0 8px
+        rgba(
+          242,
+          60,
+          78,
+          0.24
+        );
+  }
+
+  50% {
+    transform:
+      scale(1.06);
+
+    box-shadow:
+      0 0 13px
+        rgba(
+          242,
+          60,
+          78,
+          0.44
+        );
+  }
+}
+
+
+/* =========================================================
+   VIEW TRANSITION NAV LOCK
+   ========================================================= */
+
+.app-view-entering-conversations
+  .bottom-nav,
+.app-view-leaving-conversations
+  .bottom-nav {
+  pointer-events: none;
+}

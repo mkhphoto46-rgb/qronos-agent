@@ -461,3 +461,13 @@
     transition: none;
   }
 }
+
+
+/* =========================================================
+   CONVERSATIONS NAV BADGE
+   ========================================================= */
+
+.nav-notification-badge {
+  transform-origin:
+    center center;
+}

@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -11,6 +12,7 @@ import type {
 import "./App.css";
 
 import ConversationSpine from "./components/ConversationSpine";
+import ConversationsView from "./components/ConversationsView";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
@@ -32,6 +34,12 @@ type DebugItem = {
   scenario: DebugScenario;
   label: string;
 };
+
+type ViewPhase =
+  | "home"
+  | "entering-conversations"
+  | "conversations"
+  | "leaving-conversations";
 
 const debugItems: DebugItem[] = [
   {
@@ -130,6 +138,98 @@ function App() {
   ] =
     useState(1);
 
+  const [
+    viewPhase,
+    setViewPhase,
+  ] =
+    useState<ViewPhase>(
+      "home",
+    );
+
+  const viewTransitionTimerRef =
+    useRef<number | null>(
+      null,
+    );
+
+  const clearViewTransitionTimer =
+    () => {
+      if (
+        viewTransitionTimerRef.current ===
+        null
+      ) {
+        return;
+      }
+
+      window.clearTimeout(
+        viewTransitionTimerRef.current,
+      );
+
+      viewTransitionTimerRef.current =
+        null;
+    };
+
+  const openConversations =
+    () => {
+      if (
+        viewPhase ===
+          "conversations" ||
+        viewPhase ===
+          "entering-conversations"
+      ) {
+        return;
+      }
+
+      clearViewTransitionTimer();
+
+      setViewPhase(
+        "entering-conversations",
+      );
+
+      viewTransitionTimerRef.current =
+        window.setTimeout(
+          () => {
+            setViewPhase(
+              "conversations",
+            );
+
+            viewTransitionTimerRef.current =
+              null;
+          },
+          1120,
+        );
+    };
+
+  const returnHome =
+    () => {
+      if (
+        viewPhase ===
+          "home" ||
+        viewPhase ===
+          "leaving-conversations"
+      ) {
+        return;
+      }
+
+      clearViewTransitionTimer();
+
+      setViewPhase(
+        "leaving-conversations",
+      );
+
+      viewTransitionTimerRef.current =
+        window.setTimeout(
+          () => {
+            setViewPhase(
+              "home",
+            );
+
+            viewTransitionTimerRef.current =
+              null;
+          },
+          1120,
+        );
+    };
+
   const orbState =
     useMemo(
       () =>
@@ -206,6 +306,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      clearViewTransitionTimer();
+    };
+  }, []);
+
+  useEffect(() => {
     const mapByKey: Record<
       string,
       DebugScenario
@@ -270,7 +376,7 @@ function App() {
 
   return (
     <main
-      className="app"
+      className={`app app-view-${viewPhase}`}
       dir="rtl"
       style={
         {
@@ -500,14 +606,33 @@ function App() {
         </div>
       </section>
 
+      <ConversationsView
+        phase={
+          viewPhase
+        }
+        onClose={
+          returnHome
+        }
+      />
+
       <nav
         className="bottom-nav"
         aria-label="ناوبری کرونوس"
       >
         <button
           type="button"
-          className="nav-item nav-item-active"
+          className={
+            viewPhase ===
+              "home" ||
+            viewPhase ===
+              "leaving-conversations"
+              ? "nav-item nav-item-active"
+              : "nav-item"
+          }
           aria-label="خانه"
+          onClick={
+            returnHome
+          }
         >
           <span className="nav-icon">
             <svg
@@ -540,8 +665,18 @@ function App() {
 
         <button
           type="button"
-          className="nav-item"
+          className={
+            viewPhase ===
+              "conversations" ||
+            viewPhase ===
+              "entering-conversations"
+              ? "nav-item nav-item-active"
+              : "nav-item"
+          }
           aria-label="گفتگوها"
+          onClick={
+            openConversations
+          }
         >
           <span className="nav-icon">
             <svg
@@ -556,6 +691,13 @@ function App() {
                 d="M9 13h1.4M13.3 13h1.4M17.6 13H19"
               />
             </svg>
+          </span>
+
+          <span
+            className="nav-notification-badge"
+            aria-label="3 اعلان جدید"
+          >
+            3
           </span>
 
           <span>

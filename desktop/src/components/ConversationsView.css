@@ -1,0 +1,1914 @@
+/* =========================================================
+   QRONOS CONVERSATIONS VIEW — V2
+   DNA disassembly / perimeter particle field / breathable stream
+   ========================================================= */
+
+.conversations-view {
+  position: absolute;
+  inset: 0;
+  z-index: 16;
+
+  pointer-events: none;
+
+  opacity: 0;
+  visibility: hidden;
+
+  overflow: hidden;
+
+  background:
+    radial-gradient(
+      circle at 50% 43%,
+      rgba(20, 54, 76, 0.1),
+      transparent 36%
+    );
+}
+
+.conversations-view-entering,
+.conversations-view-visible,
+.conversations-view-leaving {
+  visibility: visible;
+}
+
+.conversations-view-entering,
+.conversations-view-visible {
+  pointer-events: auto;
+}
+
+.conversations-view-entering {
+  animation:
+    conversationsViewFadeIn
+    360ms
+    160ms
+    ease-out
+    both;
+}
+
+.conversations-view-visible {
+  opacity: 1;
+}
+
+.conversations-view-leaving {
+  pointer-events: none;
+
+  animation:
+    conversationsViewFadeOut
+    760ms
+    150ms
+    ease-in
+    both;
+}
+
+@keyframes conversationsViewFadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes conversationsViewFadeOut {
+  0% {
+    opacity: 1;
+  }
+
+  64% {
+    opacity: 0.74;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+/* =========================================================
+   DNA PARTICLE TRANSITION FIELD — CANVAS
+   One canvas replaces hundreds of animated DOM nodes.
+   ========================================================= */
+
+.conversations-particle-canvas {
+  position: absolute;
+
+  z-index: 2;
+
+  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
+  display: block;
+
+  pointer-events: none;
+
+  opacity: 1;
+}
+
+.conversations-transition-field {
+  position: absolute;
+
+  z-index: 1;
+
+  inset: 0;
+
+  pointer-events: none;
+
+  overflow: hidden;
+}
+
+.conversations-transition-field::before {
+  content: "";
+
+  position: absolute;
+
+  left: -8%;
+  top: 4%;
+
+  width: 34%;
+  height: 88%;
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  pointer-events: none;
+
+  background:
+    radial-gradient(
+      ellipse at 40% 50%,
+      rgba(71, 218, 255, 0.14) 0%,
+      rgba(50, 158, 210, 0.055) 38%,
+      rgba(100, 92, 220, 0.022) 58%,
+      transparent 78%
+    );
+
+  filter: blur(28px);
+
+  transform:
+    scaleX(0.35);
+
+  transform-origin:
+    left center;
+}
+
+.conversations-view-entering
+  .conversations-transition-field::before {
+  animation:
+    conversationsDnaWake
+    920ms
+    ease-out
+    both;
+}
+
+.conversations-view-visible
+  .conversations-transition-field::before {
+  opacity: 0.12;
+
+  transform:
+    scaleX(2.15)
+    translateX(18%);
+}
+
+.conversations-view-leaving
+  .conversations-transition-field::before {
+  animation:
+    conversationsDnaWake
+    920ms
+    ease-in
+    reverse
+    both;
+}
+
+@keyframes conversationsDnaWake {
+  0% {
+    opacity: 0;
+
+    transform:
+      scaleX(0.24)
+      translateX(0);
+  }
+
+  30% {
+    opacity: 0.82;
+  }
+
+  66% {
+    opacity: 0.36;
+
+    transform:
+      scaleX(1.5)
+      translateX(11%);
+  }
+
+  100% {
+    opacity: 0.12;
+
+    transform:
+      scaleX(2.15)
+      translateX(18%);
+  }
+}
+
+/* =========================================================
+   GHOST ORACLE
+   ========================================================= */
+
+.conversations-oracle-presence {
+  position: absolute;
+
+  z-index: 1;
+
+  left: 50%;
+  top: 44%;
+
+  width: 260px;
+  height: 260px;
+
+  pointer-events: none;
+
+  opacity: 0;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scale(1.3);
+}
+
+.conversations-view-entering
+  .conversations-oracle-presence {
+  animation:
+    conversationsOracleEnter
+    980ms
+    260ms
+    ease-out
+    both;
+}
+
+.conversations-view-visible
+  .conversations-oracle-presence {
+  opacity: 0.13;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scale(0.76);
+}
+
+.conversations-view-leaving
+  .conversations-oracle-presence {
+  animation:
+    conversationsOracleEnter
+    820ms
+    ease-in
+    reverse
+    both;
+}
+
+.conversations-oracle-core,
+.conversations-oracle-ring {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  border-radius: 50%;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    );
+}
+
+.conversations-oracle-core {
+  width: 38px;
+  height: 38px;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(227, 253, 255, 0.42),
+      rgba(70, 209, 247, 0.11) 38%,
+      transparent 72%
+    );
+
+  filter: blur(2px);
+
+  box-shadow:
+    0 0 66px
+      rgba(
+        66,
+        202,
+        244,
+        0.12
+      );
+}
+
+.conversations-oracle-ring {
+  border:
+    1px solid
+    rgba(
+      80,
+      205,
+      244,
+      0.065
+    );
+}
+
+.conversations-oracle-ring-a {
+  width: 148px;
+  height: 148px;
+
+  animation:
+    conversationsOracleRingBreath
+    7s
+    ease-in-out
+    infinite;
+}
+
+.conversations-oracle-ring-b {
+  width: 224px;
+  height: 224px;
+
+  opacity: 0.58;
+
+  animation:
+    conversationsOracleRingBreath
+    9s
+    ease-in-out
+    infinite
+    reverse;
+}
+
+@keyframes conversationsOracleEnter {
+  from {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(1.36);
+  }
+
+  to {
+    opacity: 0.13;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(0.76);
+  }
+}
+
+@keyframes conversationsOracleRingBreath {
+  50% {
+    opacity: 0.42;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(1.04);
+  }
+}
+
+/* =========================================================
+   HEADER
+   ========================================================= */
+
+.conversations-header {
+  position: absolute;
+
+  z-index: 4;
+
+  top: 66px;
+  left: 50%;
+
+  width:
+    min(
+      1000px,
+      calc(
+        100vw -
+        220px
+      )
+    );
+
+  transform:
+    translateX(-50%);
+
+  display: grid;
+
+  grid-template-columns:
+    1fr
+    auto;
+
+  align-items: end;
+
+  gap: 18px;
+
+  opacity: 0;
+}
+
+.conversations-view-entering
+  .conversations-header {
+  animation:
+    conversationsHeaderIn
+    560ms
+    590ms
+    cubic-bezier(
+      0.18,
+      0.78,
+      0.2,
+      1
+    )
+    both;
+}
+
+.conversations-view-visible
+  .conversations-header {
+  opacity: 1;
+}
+
+.conversations-view-leaving
+  .conversations-header {
+  animation:
+    conversationsHeaderOut
+    360ms
+    ease-in
+    both;
+}
+
+.conversations-heading-copy {
+  justify-self: start;
+
+  text-align: right;
+}
+
+.conversations-kicker {
+  display: block;
+
+  margin-bottom: 5px;
+
+  color:
+    rgba(
+      83,
+      214,
+      252,
+      0.58
+    );
+
+  font-size: 8px;
+  font-weight: 700;
+
+  letter-spacing: 0.2em;
+}
+
+.conversations-heading-copy h1 {
+  margin: 0;
+
+  color:
+    rgba(
+      242,
+      250,
+      254,
+      0.98
+    );
+
+  font-size: 25px;
+  font-weight: 420;
+}
+
+.conversations-heading-copy p {
+  margin:
+    5px
+    0
+    0;
+
+  color:
+    rgba(
+      159,
+      194,
+      211,
+      0.56
+    );
+
+  font-size: 10px;
+}
+
+.conversations-header-meta {
+  display: flex;
+
+  align-items: center;
+
+  justify-content: flex-end;
+
+  gap: 8px;
+
+  margin-bottom: 3px;
+
+  direction: ltr;
+
+  color:
+    rgba(
+      124,
+      191,
+      214,
+      0.52
+    );
+
+  font-size: 7px;
+
+  letter-spacing: 0.12em;
+}
+
+.conversations-header-meta i {
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      73,
+      216,
+      255,
+      0.62
+    );
+}
+
+.conversations-close {
+  position: absolute;
+
+  left: 0;
+  top: 1px;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 7px;
+
+  padding:
+    5px
+    2px;
+
+  background: transparent;
+
+  color:
+    rgba(
+      130,
+      207,
+      231,
+      0.66
+    );
+
+  cursor: pointer;
+}
+
+.conversations-close:hover {
+  color:
+    rgba(
+      222,
+      247,
+      255,
+      0.96
+    );
+}
+
+.conversations-close span {
+  font-size: 9px;
+}
+
+.conversations-close svg {
+  width: 16px;
+  height: 16px;
+
+  fill: none;
+
+  stroke:
+    currentColor;
+
+  stroke-width: 1.4;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@keyframes conversationsHeaderIn {
+  from {
+    opacity: 0;
+
+    transform:
+      translateX(-50%)
+      translateY(-9px);
+
+    filter:
+      blur(1.6px);
+  }
+
+  to {
+    opacity: 1;
+
+    transform:
+      translateX(-50%)
+      translateY(0);
+
+    filter: blur(0);
+  }
+}
+
+@keyframes conversationsHeaderOut {
+  to {
+    opacity: 0;
+
+    transform:
+      translateX(-50%)
+      translateY(-8px);
+
+    filter:
+      blur(1.4px);
+  }
+}
+
+/* =========================================================
+   DAY DIVIDER
+   ========================================================= */
+
+.conversations-day-divider {
+  position: absolute;
+
+  z-index: 3;
+
+  top: 154px;
+  left: 50%;
+
+  width:
+    min(
+      760px,
+      calc(
+        100vw -
+        390px
+      )
+    );
+
+  transform:
+    translateX(-50%);
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 12px;
+
+  opacity: 0;
+}
+
+.conversations-view-entering
+  .conversations-day-divider {
+  animation:
+    conversationsContentIn
+    520ms
+    690ms
+    ease-out
+    both;
+}
+
+.conversations-view-visible
+  .conversations-day-divider {
+  opacity: 1;
+}
+
+.conversations-view-leaving
+  .conversations-day-divider {
+  animation:
+    conversationsContentOut
+    300ms
+    ease-in
+    both;
+}
+
+.conversations-day-divider span {
+  flex: 1;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        73,
+        188,
+        228,
+        0.13
+      ),
+      transparent
+    );
+}
+
+.conversations-day-divider strong {
+  color:
+    rgba(
+      147,
+      195,
+      214,
+      0.5
+    );
+
+  font-size: 8px;
+  font-weight: 500;
+}
+
+/* =========================================================
+   MESSAGE STREAM — MORE BREATHING / LESS LINEAR
+   ========================================================= */
+
+.conversations-stream {
+  position: absolute;
+
+  z-index: 3;
+
+  left: 50%;
+
+  top: 178px;
+  bottom: 104px;
+
+  width:
+    min(
+      900px,
+      calc(
+        100vw -
+        300px
+      )
+    );
+
+  transform:
+    translateX(-50%);
+
+  overflow-y: auto;
+  overflow-x: visible;
+
+  padding:
+    18px
+    48px
+    64px;
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 20px;
+
+  scrollbar-width: thin;
+
+  scrollbar-color:
+    rgba(
+      66,
+      183,
+      226,
+      0.13
+    )
+    transparent;
+
+  opacity: 0;
+
+  mask-image:
+    linear-gradient(
+      180deg,
+      transparent 0%,
+      #000 5%,
+      #000 91%,
+      transparent 100%
+    );
+
+  -webkit-mask-image:
+    linear-gradient(
+      180deg,
+      transparent 0%,
+      #000 5%,
+      #000 91%,
+      transparent 100%
+    );
+}
+
+.conversations-view-entering
+  .conversations-stream {
+  animation:
+    conversationsContentIn
+    680ms
+    720ms
+    ease-out
+    both;
+}
+
+.conversations-view-visible
+  .conversations-stream {
+  opacity: 1;
+}
+
+.conversations-view-leaving
+  .conversations-stream {
+  animation:
+    conversationsContentOut
+    420ms
+    ease-in
+    both;
+}
+
+.conversations-stream::-webkit-scrollbar {
+  width: 3px;
+}
+
+.conversations-stream::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+
+  background:
+    rgba(
+      66,
+      183,
+      226,
+      0.14
+    );
+}
+
+@keyframes conversationsContentIn {
+  from {
+    opacity: 0;
+
+    filter:
+      blur(2px);
+
+    transform:
+      translateX(-50%)
+      translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+
+    filter: blur(0);
+
+    transform:
+      translateX(-50%)
+      translateY(0);
+  }
+}
+
+@keyframes conversationsContentOut {
+  to {
+    opacity: 0;
+
+    filter:
+      blur(1.6px);
+
+    transform:
+      translateX(-50%)
+      translateY(7px);
+  }
+}
+
+.conversation-message-bubble {
+  position: relative;
+
+  width:
+    fit-content;
+
+  min-width: 240px;
+
+  max-width:
+    min(
+      64%,
+      610px
+    );
+
+  padding:
+    13px
+    17px
+    15px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(
+        8,
+        25,
+        35,
+        0.45
+      ),
+      rgba(
+        4,
+        14,
+        21,
+        0.22
+      )
+    );
+
+  backdrop-filter:
+    blur(14px);
+
+  -webkit-backdrop-filter:
+    blur(14px);
+
+  box-shadow:
+    0 0 28px
+      rgba(
+        0,
+        0,
+        0,
+        0.07
+      );
+}
+
+.conversation-message-role-shift {
+  margin-top: 15px;
+}
+
+.conversation-message-user {
+  align-self: flex-end;
+
+  margin-right:
+    clamp(
+      0px,
+      4vw,
+      46px
+    );
+
+  border-right:
+    1px solid
+    rgba(
+      81,
+      221,
+      255,
+      0.2
+    );
+
+  border-radius:
+    17px
+    5px
+    17px
+    17px;
+}
+
+.conversation-message-qronos {
+  align-self: flex-start;
+
+  margin-left:
+    clamp(
+      0px,
+      3.2vw,
+      38px
+    );
+
+  border-left:
+    1px solid
+    rgba(
+      171,
+      147,
+      255,
+      0.17
+    );
+
+  border-radius:
+    5px
+    17px
+    17px
+    17px;
+}
+
+.conversation-message-bubble:nth-child(4n + 1) {
+  transform:
+    translateX(-8px);
+}
+
+.conversation-message-bubble:nth-child(4n + 2) {
+  transform:
+    translateX(11px);
+}
+
+.conversation-message-bubble:nth-child(4n + 3) {
+  transform:
+    translateX(-2px);
+}
+
+.conversation-message-bubble:nth-child(4n) {
+  transform:
+    translateX(6px);
+}
+
+.conversation-message-head {
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  gap: 12px;
+
+  margin-bottom: 9px;
+
+  direction: ltr;
+}
+
+.conversation-message-role {
+  font-size: 8px;
+  font-weight: 800;
+
+  letter-spacing: 0.15em;
+}
+
+.conversation-message-user
+  .conversation-message-role {
+  color:
+    rgba(
+      98,
+      226,
+      255,
+      0.88
+    );
+}
+
+.conversation-message-qronos
+  .conversation-message-role {
+  color:
+    rgba(
+      188,
+      168,
+      255,
+      0.9
+    );
+}
+
+.conversation-message-head time {
+  color:
+    rgba(
+      139,
+      174,
+      191,
+      0.5
+    );
+
+  font-size: 7px;
+}
+
+.conversation-message-text {
+  margin: 0;
+
+  color:
+    rgba(
+      235,
+      247,
+      252,
+      0.94
+    );
+
+  font-size: 13px;
+  font-weight: 420;
+
+  line-height: 1.92;
+
+  text-align: right;
+
+  overflow-wrap: anywhere;
+
+  user-select: text;
+
+  -webkit-user-select: text;
+}
+
+/* =========================================================
+   ATTACHMENTS — BETTER PROPORTIONS
+   ========================================================= */
+
+.conversation-attachments {
+  margin-top: 13px;
+
+  display: flex;
+
+  flex-wrap: wrap;
+
+  gap: 8px;
+}
+
+.conversation-attachment {
+  position: relative;
+
+  width:
+    min(
+      238px,
+      100%
+    );
+
+  min-height: 50px;
+
+  display: grid;
+
+  grid-template-columns:
+    31px
+    minmax(
+      0,
+      1fr
+    );
+
+  align-items: center;
+
+  gap: 9px;
+
+  padding:
+    7px
+    10px;
+
+  border: 0;
+
+  border-radius: 10px;
+
+  background:
+    rgba(
+      12,
+      37,
+      48,
+      0.4
+    );
+
+  color:
+    rgba(
+      226,
+      245,
+      251,
+      0.92
+    );
+
+  text-decoration: none;
+
+  text-align: left;
+
+  cursor: pointer;
+
+  overflow: hidden;
+
+  transition:
+    background 170ms ease,
+    filter 170ms ease,
+    transform 170ms ease;
+}
+
+.conversation-attachment:hover {
+  background:
+    rgba(
+      19,
+      55,
+      70,
+      0.56
+    );
+
+  filter:
+    brightness(1.1);
+
+  transform:
+    translateY(-1px);
+}
+
+.conversation-attachment-icon {
+  position: relative;
+
+  z-index: 2;
+
+  width: 30px;
+  height: 30px;
+
+  display: grid;
+
+  place-items: center;
+
+  border-radius: 8px;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(
+        12,
+        52,
+        68,
+        0.68
+      ),
+      rgba(
+        4,
+        17,
+        25,
+        0.68
+      )
+    );
+}
+
+.conversation-attachment-icon svg {
+  width: 17px;
+  height: 17px;
+
+  fill: none;
+
+  stroke:
+    rgba(
+      93,
+      226,
+      255,
+      0.92
+    );
+
+  stroke-width: 1.5;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.conversation-attachment-copy {
+  position: relative;
+
+  z-index: 2;
+
+  min-width: 0;
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 3px;
+}
+
+.conversation-attachment-copy strong {
+  overflow: hidden;
+
+  color:
+    rgba(
+      242,
+      251,
+      254,
+      0.96
+    );
+
+  font-size: 8.5px;
+  font-weight: 700;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+}
+
+.conversation-attachment-copy small {
+  overflow: hidden;
+
+  color:
+    rgba(
+      137,
+      190,
+      207,
+      0.56
+    );
+
+  font-size: 6px;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+}
+
+.conversation-attachment-unread {
+  position: absolute;
+
+  z-index: 4;
+
+  right: 7px;
+  top: 7px;
+
+  width: 5px;
+  height: 5px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      255,
+      72,
+      87,
+      0.96
+    );
+
+  box-shadow:
+    0 0 8px
+      rgba(
+        255,
+        72,
+        87,
+        0.46
+      );
+
+  animation:
+    conversationUnreadPulse
+    1.8s
+    ease-in-out
+    infinite;
+}
+
+@keyframes conversationUnreadPulse {
+  50% {
+    opacity: 0.5;
+
+    transform:
+      scale(1.35);
+  }
+}
+
+.conversation-image-preview {
+  position: absolute;
+
+  inset: 0;
+
+  pointer-events: none;
+
+  opacity: 0.15;
+
+  background:
+    radial-gradient(
+      circle at 28% 36%,
+      rgba(
+        103,
+        224,
+        255,
+        0.48
+      ),
+      transparent 24%
+    ),
+    radial-gradient(
+      circle at 72% 64%,
+      rgba(
+        163,
+        145,
+        255,
+        0.38
+      ),
+      transparent 28%
+    );
+}
+
+.conversation-image-preview i {
+  position: absolute;
+
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      222,
+      252,
+      255,
+      0.9
+    );
+}
+
+.conversation-image-preview i:nth-child(1) {
+  left: 24%;
+  top: 34%;
+}
+
+.conversation-image-preview i:nth-child(2) {
+  left: 61%;
+  top: 46%;
+}
+
+.conversation-image-preview i:nth-child(3) {
+  left: 74%;
+  top: 68%;
+}
+
+/* =========================================================
+   HOME COMPONENT TRANSITIONS — BOTH DIRECTIONS
+   ========================================================= */
+
+.app-view-entering-conversations
+  .conversation-spine {
+  pointer-events: none;
+
+  animation:
+    homeDnaDisassemble
+    820ms
+    cubic-bezier(
+      0.18,
+      0.78,
+      0.2,
+      1
+    )
+    both;
+}
+
+.app-view-conversations
+  .conversation-spine {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-view-leaving-conversations
+  .conversation-spine {
+  pointer-events: none;
+
+  animation:
+    homeDnaReturn
+    940ms
+    110ms
+    cubic-bezier(
+      0.18,
+      0.78,
+      0.2,
+      1
+    )
+    both;
+}
+
+.app-view-entering-conversations
+  .qrt-panel,
+.app-view-entering-conversations
+  .debug-panel {
+  pointer-events: none;
+
+  animation:
+    homeSideOut
+    440ms
+    ease-in
+    both;
+}
+
+.app-view-conversations
+  .qrt-panel,
+.app-view-conversations
+  .debug-panel {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-view-leaving-conversations
+  .qrt-panel,
+.app-view-leaving-conversations
+  .debug-panel {
+  pointer-events: none;
+
+  animation:
+    homeSideIn
+    560ms
+    470ms
+    ease-out
+    both;
+}
+
+.app-view-entering-conversations
+  .core-zone {
+  pointer-events: none;
+
+  animation:
+    homeOracleOut
+    720ms
+    ease-in-out
+    both;
+}
+
+.app-view-conversations
+  .core-zone {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-view-leaving-conversations
+  .core-zone {
+  pointer-events: none;
+
+  animation:
+    homeOracleIn
+    720ms
+    330ms
+    ease-out
+    both;
+}
+
+.app-view-entering-conversations
+  .orb-status,
+.app-view-entering-conversations
+  .command-dock {
+  pointer-events: none;
+
+  animation:
+    homeBottomOut
+    360ms
+    ease-in
+    both;
+}
+
+.app-view-conversations
+  .orb-status,
+.app-view-conversations
+  .command-dock {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-view-leaving-conversations
+  .orb-status,
+.app-view-leaving-conversations
+  .command-dock {
+  pointer-events: none;
+
+  animation:
+    homeBottomIn
+    520ms
+    510ms
+    ease-out
+    both;
+}
+
+@keyframes homeDnaDisassemble {
+  0% {
+    opacity: 1;
+
+    filter:
+      blur(0);
+
+    transform:
+      translateY(-50%)
+      scale(
+        var(
+          --qronos-ui-scale
+        )
+      );
+  }
+
+  38% {
+    opacity: 0.78;
+
+    filter:
+      blur(0.35px);
+  }
+
+  100% {
+    opacity: 0;
+
+    filter:
+      blur(2.2px);
+
+    transform:
+      translateY(-50%)
+      scale(
+        calc(
+          var(
+            --qronos-ui-scale
+          ) *
+          1.04
+        )
+      )
+      translateX(
+        92px
+      );
+  }
+}
+
+@keyframes homeDnaReturn {
+  0% {
+    opacity: 0;
+
+    filter:
+      blur(2.2px);
+
+    transform:
+      translateY(-50%)
+      scale(
+        calc(
+          var(
+            --qronos-ui-scale
+          ) *
+          1.04
+        )
+      )
+      translateX(
+        92px
+      );
+  }
+
+  44% {
+    opacity: 0.48;
+
+    filter:
+      blur(1px);
+  }
+
+  100% {
+    opacity: 1;
+
+    filter:
+      blur(0);
+
+    transform:
+      translateY(-50%)
+      scale(
+        var(
+          --qronos-ui-scale
+        )
+      )
+      translateX(
+        0
+      );
+  }
+}
+
+@keyframes homeSideOut {
+  to {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.6px
+      );
+  }
+}
+
+@keyframes homeSideIn {
+  from {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.5px
+      );
+  }
+
+  to {
+    opacity: 1;
+
+    filter:
+      blur(
+        0
+      );
+  }
+}
+
+@keyframes homeOracleOut {
+  0% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(0.68);
+  }
+}
+
+@keyframes homeOracleIn {
+  0% {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(0.68);
+  }
+
+  100% {
+    opacity: 1;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(1);
+  }
+}
+
+@keyframes homeBottomOut {
+  to {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.1px
+      );
+  }
+}
+
+@keyframes homeBottomIn {
+  from {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.1px
+      );
+  }
+
+  to {
+    opacity: 1;
+
+    filter:
+      blur(
+        0
+      );
+  }
+}
+
+/* =========================================================
+   RESPONSIVE
+   ========================================================= */
+
+@media (
+  max-width:
+  1180px
+) {
+  .conversations-header {
+    width:
+      calc(
+        100vw -
+        120px
+      );
+  }
+
+  .conversations-stream {
+    width:
+      calc(
+        100vw -
+        150px
+      );
+
+    padding-left:
+      30px;
+
+    padding-right:
+      30px;
+  }
+
+  .conversations-day-divider {
+    width:
+      calc(
+        100vw -
+        190px
+      );
+  }
+
+  .conversation-message-bubble {
+    max-width: 70%;
+  }
+}
+
+@media (
+  max-height:
+  720px
+) {
+  .conversations-header {
+    top: 46px;
+  }
+
+  .conversations-day-divider {
+    top: 128px;
+  }
+
+  .conversations-stream {
+    top: 148px;
+    bottom: 92px;
+
+    gap: 16px;
+
+    padding-top: 12px;
+  }
+}
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .conversations-view,
+  .conversations-transition-field::before,
+  .conversations-particle-canvas,
+  .conversations-oracle-presence,
+  .conversations-header,
+  .conversations-day-divider,
+  .conversations-stream,
+  .conversation-spine,
+  .qrt-panel,
+  .core-zone,
+  .orb-status,
+  .command-dock,
+  .debug-panel {
+    animation-duration:
+      0.001ms !important;
+
+    animation-iteration-count:
+      1 !important;
+  }
+}
+
+
+/* =========================================================
+   CONVERSATION SIDE CORRECTION
+   User = right, Qronos = left.
+   The stream itself uses LTR cross-axis so flex-start/end
+   map to physical left/right regardless of page RTL.
+   ========================================================= */
+
+.conversations-stream {
+  direction: ltr;
+}
+
+.conversation-message-bubble {
+  direction: rtl;
+}
+
+.conversation-message-user {
+  align-self: flex-end !important;
+
+  margin-left: 0 !important;
+
+  margin-right:
+    clamp(
+      0px,
+      4vw,
+      46px
+    ) !important;
+}
+
+.conversation-message-qronos {
+  align-self: flex-start !important;
+
+  margin-right: 0 !important;
+
+  margin-left:
+    clamp(
+      0px,
+      3.2vw,
+      38px
+    ) !important;
+}
+
+/* =========================================================
+   PARTICLE FIELD PERFORMANCE
+   Keep the canvas crisp, not cloudy.
+   ========================================================= */
+
+.conversations-particle-canvas {
+  image-rendering: auto;
+  filter: none;
+}
+
+
+/* =========================================================
+   PER-BUBBLE TEXT SELECTION
+   Click/focus one message, then Ctrl/Cmd+A selects only it.
+   ========================================================= */
+
+.conversation-message-bubble {
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.conversation-message-bubble:focus-visible {
+  filter:
+    brightness(1.055);
+
+  box-shadow:
+    0 0 22px
+      rgba(
+        66,
+        192,
+        232,
+        0.055
+      );
+}
+
+.conversation-message-bubble ::selection {
+  color:
+    rgba(
+      252,
+      255,
+      255,
+      1
+    );
+
+  background:
+    rgba(
+      64,
+      187,
+      225,
+      0.34
+    );
+}
