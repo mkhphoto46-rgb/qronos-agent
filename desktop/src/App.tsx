@@ -9,6 +9,10 @@ import type {
   CSSProperties,
 } from "react";
 
+import {
+  getCurrentWindow,
+} from "@tauri-apps/api/window";
+
 import "./App.css";
 
 import ConversationSpine from "./components/ConversationSpine";
@@ -617,6 +621,26 @@ function App() {
         );
     };
 
+  const toggleFullscreen =
+    async () => {
+      try {
+        const appWindow =
+          getCurrentWindow();
+
+        const isFullscreen =
+          await appWindow.isFullscreen();
+
+        await appWindow.setFullscreen(
+          !isFullscreen,
+        );
+      } catch (error) {
+        console.error(
+          "Failed to toggle fullscreen:",
+          error,
+        );
+      }
+    };
+
   const orbState =
     useMemo(
       () =>
@@ -715,6 +739,18 @@ function App() {
     const handleKeyDown = (
       event: KeyboardEvent,
     ) => {
+      if (
+        event.key ===
+        "F11"
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        void toggleFullscreen();
+
+        return;
+      }
+
       const target =
         event.target as
           | HTMLElement
