@@ -50,6 +50,8 @@ struct TelemetrySnapshot {
     physical_cores: usize,
     logical_cores: usize,
 
+    gpu_percent: Option<f32>,
+
     memory_percent: f32,
     memory_used_bytes: u64,
     memory_total_bytes: u64,
@@ -68,6 +70,12 @@ struct TelemetryState {
 struct DeviceCache {
     last_refresh: Option<Instant>,
     devices: Vec<DeviceSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GpuTelemetry {
+    utilization_percent: Option<f32>,
+    temperature_c: Option<f32>,
 }
 
 impl TelemetryState {
@@ -205,6 +213,159 @@ fn read_disks() -> Vec<DiskSnapshot> {
             },
         )
         .collect()
+}
+
+
+#[cfg(target_os = "windows")]
+fn read_nvidia_gpu() -> Option<GpuTelemetry> {
+    const NVIDIA_SMI_CANDIDATES: [&str; 3] = [
+        "nvidia-smi.exe",
+        r"C:\Windows\System32\nvidia-smi.exe",
+        r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+    ];
+
+    let mut output = None;
+
+    for executable in NVIDIA_SMI_CANDIDATES {
+        let result =
+            Command::new(
+                executable,
+            )
+            .args([
+                "--query-gpu=utilization.gpu,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ])
+            .creation_flags(
+                CREATE_NO_WINDOW,
+            )
+            .output();
+
+        match result {
+            Ok(value)
+                if value.status.success() =>
+            {
+                output =
+                    Some(
+                        value,
+                    );
+
+                break;
+            }
+
+            _ => {}
+        }
+    }
+
+    let output =
+        output?;
+
+    let text =
+        String::from_utf8_lossy(
+            &output.stdout,
+        );
+
+    let mut utilization_values =
+        Vec::<f32>::new();
+
+    let mut temperature_values =
+        Vec::<f32>::new();
+
+    for line in text.lines() {
+        let mut parts =
+            line.split(',');
+
+        let utilization =
+            parts
+                .next()
+                .map(str::trim)
+                .and_then(
+                    |value| {
+                        value.parse::<f32>()
+                            .ok()
+                    },
+                )
+                .filter(
+                    |value| {
+                        value.is_finite()
+                            && *value >= 0.0
+                            && *value <= 100.0
+                    },
+                );
+
+        let temperature =
+            parts
+                .next()
+                .map(str::trim)
+                .and_then(
+                    |value| {
+                        value.parse::<f32>()
+                            .ok()
+                    },
+                )
+                .filter(
+                    |value| {
+                        value.is_finite()
+                            && *value > 0.0
+                            && *value < 130.0
+                    },
+                );
+
+        if let Some(value) =
+            utilization
+        {
+            utilization_values.push(
+                value,
+            );
+        }
+
+        if let Some(value) =
+            temperature
+        {
+            temperature_values.push(
+                value,
+            );
+        }
+    }
+
+    if utilization_values.is_empty()
+        && temperature_values.is_empty()
+    {
+        return None;
+    }
+
+    let utilization_percent =
+        if utilization_values.is_empty()
+        {
+            None
+        } else {
+            Some(
+                utilization_values
+                    .iter()
+                    .sum::<f32>()
+                    / utilization_values
+                        .len()
+                        as f32,
+            )
+        };
+
+    let temperature_c =
+        temperature_values
+            .into_iter()
+            .reduce(
+                f32::max,
+            );
+
+    Some(
+        GpuTelemetry {
+            utilization_percent,
+            temperature_c,
+        },
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_nvidia_gpu() -> Option<GpuTelemetry> {
+    None
 }
 
 fn read_temperature() -> Option<f32> {
@@ -556,12 +717,46 @@ fn get_system_snapshot(
         )
     };
 
+    let gpu =
+        read_nvidia_gpu();
+
+    let gpu_percent =
+        gpu
+            .and_then(
+                |value| {
+                    value
+                        .utilization_percent
+                },
+            )
+            .map(
+                |value| {
+                    value.clamp(
+                        0.0,
+                        100.0,
+                    )
+                },
+            );
+
+    let temperature_c =
+        gpu
+            .and_then(
+                |value| {
+                    value
+                        .temperature_c
+                },
+            )
+            .or_else(
+                read_temperature,
+            );
+
     Ok(
         TelemetrySnapshot {
             cpu_percent,
             cpu_brand,
             physical_cores,
             logical_cores,
+
+            gpu_percent,
 
             memory_percent:
                 memory_percent.clamp(
@@ -572,8 +767,7 @@ fn get_system_snapshot(
             memory_used_bytes,
             memory_total_bytes,
 
-            temperature_c:
-                read_temperature(),
+            temperature_c,
 
             disks:
                 read_disks(),

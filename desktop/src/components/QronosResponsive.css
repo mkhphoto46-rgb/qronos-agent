@@ -1,979 +1,462 @@
 /* =========================================================
-   QRONOS RESPONSIVE LAYOUT CONTROLLER
-   Stable composition for desktop windows.
-   Minimum supported window: 1000 x 650
+   QRONOS UNIFIED RESPONSIVE COORDINATOR
+   ---------------------------------------------------------
+   Goal:
+   - Preserve the approved large-window composition.
+   - Scale major UI regions from ONE shared factor.
+   - Stop independent breakpoint drift.
+   - Minimum supported desktop window: ~1000 × 650.
    ========================================================= */
 
 :root {
-  --qronos-edge: clamp(12px, 1.5vw, 26px);
+  --qronos-ui-scale: 1;
 }
 
 /* =========================================================
-   CORE
+   ORACLE / CORE
+   The core itself is resized, not transform-scaled.
+   This keeps the Orb canvas renderer stable.
    ========================================================= */
 
 .core-zone {
-  top: 45%;
+  top: 45% !important;
 
   width:
-    min(
-      42vw,
-      56vh,
-      520px
-    );
+    calc(
+      520px *
+      var(--qronos-ui-scale)
+    ) !important;
 
   height:
-    min(
-      42vw,
-      56vh,
-      520px
-    );
+    calc(
+      520px *
+      var(--qronos-ui-scale)
+    ) !important;
 }
 
 /* =========================================================
-   MEMORY / DNA
+   LEFT MEMORY / DNA
+   Scale the whole approved composition as one unit.
    ========================================================= */
 
 .conversation-spine {
-  left: var(--qronos-edge);
-  top: 50%;
+  display: flex !important;
 
-  width:
-    clamp(
-      380px,
-      33vw,
-      560px
-    );
+  left:
+    calc(
+      42px *
+      var(--qronos-ui-scale)
+    ) !important;
 
-  /*
-   * Keep the DNA vertically dominant.
-   * It should remain a tall living structure rather
-   * than collapsing into the center of the interface.
-   */
-  height:
-    min(
-      94vh,
-      940px
-    );
+  top: 50% !important;
+
+  width: 590px !important;
+  height: 940px !important;
 
   transform:
-    translateY(-50%);
+    translateY(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
 
-  display: flex;
-
-  overflow: visible;
+  transform-origin:
+    left center !important;
 }
 
-.conversation-spine-stage {
-  position: relative;
-
-  flex: 1;
-
-  min-height: 0;
-
-  overflow: visible;
-}
-
-/*
- * DNA deliberately extends above and below the normal
- * stage boundaries. This gives it visual continuity while
- * keeping the full structure centered around the Orb.
- */
 .conversation-dna-zone {
-  left: 0;
+  left: -18px !important;
+  top: -1% !important;
 
-  top: -5%;
+  width: 385px !important;
+  height: 103% !important;
+}
 
-  width:
-    clamp(
-      220px,
-      17vw,
-      320px
-    );
-
-  height: 110%;
-
-  overflow: visible;
+.conversation-spine-header,
+.conversation-spine-footer {
+  width: 270px !important;
 }
 
 .memory-pocket {
-  left:
-    clamp(
-      156px,
-      12.2vw,
-      205px
-    );
+  left: 190px !important;
 
-  width:
-    clamp(
-      250px,
-      19vw,
-      330px
-    );
-
-  min-height:
-    clamp(
-      150px,
-      18vh,
-      210px
-    );
+  width: 355px !important;
+  min-height: 225px !important;
 
   padding:
     10px
     10px
     10px
-    25px;
-
-  pointer-events: none;
-}
-
-.memory-pocket-fog,
-.memory-pocket-slit,
-.memory-pocket-bloom {
-  pointer-events: none;
-}
-
-.memory-pocket-header,
-.memory-pocket-copy-zone,
-.memory-pocket-footer,
-.memory-pocket-close {
-  pointer-events: auto;
+    28px !important;
 }
 
 .memory-pocket-copy-zone p {
-  font-size:
-    clamp(
-      14px,
-      1.05vw,
-      19px
-    );
-
-  line-height: 1.76;
+  font-size: 21px !important;
+  line-height: 1.92 !important;
 }
 
-.memory-pocket-slit {
-  left: -15px;
+.memory-pocket-role {
+  font-size: 15px !important;
 }
 
-.memory-pocket-bloom {
-  left: -30px;
-
-  width: 105px;
-
-  opacity: 1;
+.memory-pocket-time {
+  font-size: 13px !important;
 }
 
 /* =========================================================
-   SYSTEM / STORAGE
+   RIGHT TELEMETRY
+   Keep its internal approved geometry intact, then scale
+   the whole panel with the exact same factor as DNA.
    ========================================================= */
 
-.system-constellation {
-  right: var(--qronos-edge);
-  top: 50%;
+.qrt-panel {
+  top:
+    calc(
+      76px *
+      var(--qronos-ui-scale)
+    ) !important;
 
-  width:
-    clamp(
-      240px,
-      20vw,
-      320px
-    );
+  right:
+    calc(
+      74px *
+      var(--qronos-ui-scale)
+    ) !important;
 
-  height:
-    min(
-      70vh,
-      660px
-    );
+  bottom: auto !important;
+
+  width: 298px !important;
+
+  max-height:
+    calc(
+      100vh -
+      (
+        86px *
+        var(--qronos-ui-scale)
+      )
+    ) !important;
+
+  overflow: visible !important;
 
   transform:
-    translateY(-50%);
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform-origin:
+    top right !important;
 }
 
-.system-grid,
-.storage-grid {
+/* Canonical compact telemetry geometry.
+   These declarations intentionally neutralize the old
+   max-width/max-height component breakpoints. */
+
+.qrt-heading {
+  height: 21px !important;
+  padding:
+    0
+    2px
+    4px !important;
+}
+
+.qrt-system-block {
+  width: 246px !important;
+
+  transform:
+    translateX(
+      9px
+    ) !important;
+
+  gap: 4px !important;
+}
+
+.qrt-system-grid {
+  gap: 4px !important;
+}
+
+.qrt-metric {
+  height: 38px !important;
+
   grid-template-columns:
+    38px
+    38px
+    54px
+    51px !important;
+
+  column-gap: 3px !important;
+}
+
+.qrt-metric-icon {
+  width: 35px !important;
+  height: 35px !important;
+}
+
+.qrt-metric-icon svg {
+  width: 21px !important;
+  height: 21px !important;
+}
+
+.qrt-metric-wave,
+.qrt-metric-graph {
+  width: 54px !important;
+  height: 16px !important;
+}
+
+.qrt-status-slot {
+  width: 246px !important;
+  height: 31px !important;
+
+  margin-top: 3px !important;
+}
+
+.qrt-status-emitter {
+  width: 15px !important;
+  height: 15px !important;
+  flex-basis: 15px !important;
+}
+
+.qrt-storage-block {
+  margin-top: 17px !important;
+  gap: 5px !important;
+}
+
+.qrt-storage-row {
+  min-height: 43px !important;
+
+  grid-template-columns:
+    42px
+    minmax(
+      118px,
+      1fr
+    )
+    62px
+    43px !important;
+
+  column-gap: 3px !important;
+}
+
+.qrt-storage-row-pinned {
+  min-height: 51px !important;
+}
+
+.qrt-storage-icon {
+  width: 39px !important;
+  height: 39px !important;
+}
+
+.qrt-storage-track {
+  width: 62px !important;
+}
+
+.qrt-drive-scroll {
+  gap: 5px !important;
+
+  max-height: 212px !important;
+}
+
+.qrt-devices-block {
+  margin-top: 8px !important;
+  gap: 5px !important;
+}
+
+.qrt-device-scroll {
+  display: grid !important;
+
+  grid-template-rows:
     repeat(
       2,
-      minmax(0, 1fr)
-    );
-}
+      76px
+    ) !important;
 
-.system-metric {
-  min-width: 0;
+  grid-auto-flow:
+    column !important;
 
-  min-height:
-    clamp(
-      72px,
-      8.6vh,
-      94px
-    );
-}
-
-.volume-node {
-  min-width: 0;
-
-  grid-template-columns:
-    clamp(
-      40px,
-      3.5vw,
-      50px
-    )
-    minmax(0, 1fr);
+  grid-auto-columns:
+    92px !important;
 
   gap:
-    clamp(
-      6px,
-      0.6vw,
-      9px
-    );
+    6px
+    7px !important;
+
+  max-height: none !important;
+
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
 }
 
-.volume-orbit,
-.qronos-storage-orbit,
-.volume-orbit svg,
-.qronos-storage-orbit svg {
-  width:
-    clamp(
-      40px,
-      3.5vw,
-      50px
-    );
+.qrt-device {
+  width: 92px !important;
+  height: 76px !important;
+  min-height: 0 !important;
+}
 
-  height:
-    clamp(
-      40px,
-      3.5vw,
-      50px
-    );
+.qrt-device-icon {
+  width: 42px !important;
+  height: 42px !important;
 }
 
 /* =========================================================
-   STATUS / COMMAND / NAV
+   CENTER STATUS
    ========================================================= */
 
 .orb-status {
   top:
     calc(
       45% +
-      min(
-        25vw,
-        28vh,
-        255px
+      (
+        255px *
+        var(--qronos-ui-scale)
       )
-    );
+    ) !important;
 
-  width:
-    clamp(
-      250px,
-      38vw,
-      600px
-    );
+  width: 600px !important;
+
+  transform:
+    translateX(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform-origin:
+    center top !important;
 }
+
+/* =========================================================
+   COMMAND DOCK
+   Preserve the compact approved command design.
+   ========================================================= */
 
 .command-dock {
-  width:
-    min(
-      50vw,
-      700px
-    );
+  width: 225px !important;
 
   bottom:
-    clamp(
-      58px,
-      8vh,
-      86px
-    );
+    calc(
+      86px *
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform:
+    translateX(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform-origin:
+    center bottom !important;
 }
+
+.command-shell {
+  height: auto !important;
+  min-height: 48px !important;
+  max-height: 148px !important;
+}
+
+/* =========================================================
+   BOTTOM NAV
+   ========================================================= */
 
 .bottom-nav {
-  max-width:
+  bottom:
     calc(
-      100vw - 20px
-    );
+      20px *
+      var(--qronos-ui-scale)
+    ) !important;
+
+  width: auto !important;
+
+  max-width: none !important;
+
+  gap: 38px !important;
+
+  transform:
+    translateX(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform-origin:
+    center bottom !important;
+}
+
+.nav-item {
+  min-width: 82px !important;
+}
+
+.nav-icon {
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.nav-item > span:last-child {
+  font-size: 14px !important;
 }
 
 /* =========================================================
-   MEDIUM DESKTOP
+   BRAND
    ========================================================= */
 
-@media (max-width: 1180px) {
-  :root {
-    --qronos-edge: 18px;
-  }
+.brand {
+  top:
+    calc(
+      34px *
+      var(--qronos-ui-scale)
+    ) !important;
 
-  .core-zone {
-    width:
-      min(
-        33vw,
-        51vh,
-        405px
-      );
+  transform:
+    translateX(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
 
-    height:
-      min(
-        33vw,
-        51vh,
-        405px
-      );
-  }
+  transform-origin:
+    center top !important;
+}
 
-  .conversation-spine {
-    left: 18px;
+.brand-name {
+  font-size: 14px !important;
+  letter-spacing: 11px !important;
+  padding-left: 11px !important;
+}
 
-    width: 350px;
-
-    /*
-     * Do not shorten DNA aggressively.
-     */
-    height:
-      min(
-        92vh,
-        820px
-      );
-  }
-
-  .conversation-dna-zone {
-    top: -6%;
-
-    width: 210px;
-
-    height: 112%;
-  }
-
-  .conversation-spine-header,
-  .conversation-spine-footer {
-    width: 180px;
-  }
-
-  .memory-pocket {
-    left: 132px;
-
-    width: 205px;
-
-    min-height: 145px;
-
-    padding:
-      9px
-      8px
-      9px
-      22px;
-  }
-
-  .memory-pocket-copy-zone p {
-    font-size: 13px;
-
-    line-height: 1.68;
-  }
-
-  .memory-pocket-role {
-    font-size: 11px;
-  }
-
-  .memory-pocket-time {
-    font-size: 10px;
-  }
-
-  .system-constellation {
-    right: 34px;
-
-    width: 245px;
-
-    height:
-      min(
-        72vh,
-        620px
-      );
-  }
-
-  .system-grid {
-    gap: 8px;
-  }
-
-  .storage-grid {
-    gap: 6px;
-  }
-
-  .system-metric {
-    min-height: 72px;
-
-    padding:
-      8px
-      7px;
-  }
-
-  .metric-label {
-    font-size: 8px;
-  }
-
-  .metric-main strong {
-    font-size: 18px;
-  }
-
-  .metric-detail {
-    font-size: 7px;
-  }
-
-  .volume-node {
-    grid-template-columns:
-      38px
-      minmax(0, 1fr);
-
-    min-height: 64px;
-
-    gap: 6px;
-  }
-
-  .volume-orbit,
-  .qronos-storage-orbit,
-  .volume-orbit svg,
-  .qronos-storage-orbit svg {
-    width: 38px;
-    height: 38px;
-  }
-
-  .volume-title-row strong {
-    font-size: 12px;
-  }
-
-  .volume-title-row > span {
-    font-size: 9px;
-  }
-
-  .volume-info small {
-    font-size: 7px;
-  }
-
-  .volume-name,
-  .qronos-storage-health {
-    font-size: 6px;
-  }
-
-  .command-dock {
-    width: 54vw;
-  }
+.brand-beam {
+  width: 286px !important;
 }
 
 /* =========================================================
-   MINIMUM SUPPORTED WIDTH AREA
+   DEBUG PANEL
    ========================================================= */
 
-@media (max-width: 1040px) {
-  .core-zone {
-    top: 44%;
-
-    width:
-      min(
-        35vw,
-        48vh,
-        360px
-      );
-
-    height:
-      min(
-        35vw,
-        48vh,
-        360px
-      );
-  }
-
-  /* -------------------------
-     MEMORY / DNA
-     ------------------------- */
-
-  .conversation-spine {
-    left: 18px;
-
-    top: 50%;
-
-    width: 300px;
-
-    /*
-     * Even at the minimum 1000px window,
-     * preserve a long vertical DNA silhouette.
-     */
-    height:
-      min(
-        92vh,
-        720px
-      );
-
-    transform:
-      translateY(-50%);
-  }
-
-  .conversation-spine-header {
-    width: 165px;
-
-    height: 28px;
-  }
-
-  .conversation-spine-title {
-    font-size: 9px;
-  }
-
-  .conversation-dna-zone {
-    left: 0;
-
-    top: -8%;
-
-    width: 180px;
-
-    height: 116%;
-  }
-
-  .conversation-spine-footer {
-    width: 165px;
-
-    height: 28px;
-
-    font-size: 7px;
-  }
-
-  .memory-pocket {
-    left: 122px;
-
-    width: 176px;
-
-    min-height: 132px;
-
-    padding:
-      8px
-      7px
-      8px
-      19px;
-  }
-
-  .memory-pocket-role {
-    font-size: 10px;
-  }
-
-  .memory-pocket-time {
-    font-size: 9px;
-  }
-
-  .memory-pocket-close {
-    width: 22px;
-
-    height: 22px;
-
-    font-size: 15px;
-  }
-
-  .memory-pocket-copy-zone {
-    margin-top: 8px;
-  }
-
-  .memory-pocket-copy-zone p {
-    font-size: 12px;
-
-    line-height: 1.6;
-  }
-
-  .memory-pocket-footer {
-    margin-top: 8px;
-
-    font-size: 7px;
-  }
-
-  .memory-pocket-slit {
-    left: -13px;
-
-    height: 108px;
-  }
-
-  .memory-pocket-bloom {
-    left: -27px;
-
-    width: 96px;
-
-    height: 130px;
-  }
-
-  /* -------------------------
-     SYSTEM / STORAGE
-     ------------------------- */
-
-  .system-constellation {
-    right: 34px;
-
-    top: 47%;
-
-    width: 220px;
-
-    height:
-      min(
-        76vh,
-        620px
-      );
-
-    transform:
-      translateY(-50%);
-
-    justify-content: center;
-  }
-
-  .constellation-header,
-  .storage-header {
-    min-height: 25px;
-  }
-
-  .constellation-kicker {
-    font-size: 8px;
-
-    letter-spacing: 0.18em;
-  }
-
-  .system-live-signal {
-    gap: 4px;
-  }
-
-  .system-grid {
-    margin-top: 7px;
-
-    gap: 7px;
-  }
-
-  .system-metric {
-    min-height: 68px;
-
-    padding:
-      7px
-      6px;
-  }
-
-  .metric-label {
-    font-size: 7px;
-
-    letter-spacing: 0.12em;
-  }
-
-  .metric-main {
-    gap: 5px;
-  }
-
-  .metric-main strong {
-    font-size: 17px;
-  }
-
-  .metric-detail {
-    display: block;
-
-    margin-top: 5px;
-
-    font-size: 6px;
-  }
-
-  .metric-energy {
-    left: 6px;
-
-    right: 6px;
-
-    bottom: 3px;
-  }
-
-  .system-status {
-    gap: 7px;
-
-    margin-top: 7px;
-
-    font-size: 7px;
-  }
-
-  .system-status-core {
-    width: 14px;
-
-    height: 14px;
-  }
-
-  .system-status-core i {
-    left: 4px;
-
-    top: 4px;
-
-    width: 4px;
-
-    height: 4px;
-  }
-
-  .constellation-separator {
-    height: 18px;
-
-    gap: 5px;
-  }
-
-  .storage-grid {
-    margin-top: 6px;
-
-    gap: 5px;
-  }
-
-  .volume-node {
-    grid-template-columns:
-      34px
-      minmax(0, 1fr);
-
-    min-height: 57px;
-
-    gap: 5px;
-
-    padding:
-      3px
-      1px;
-  }
-
-  .volume-orbit,
-  .qronos-storage-orbit,
-  .volume-orbit svg,
-  .qronos-storage-orbit svg {
-    width: 34px;
-
-    height: 34px;
-  }
-
-  .volume-title-row {
-    gap: 4px;
-  }
-
-  .volume-title-row strong {
-    font-size: 11px;
-  }
-
-  .volume-title-row > span {
-    font-size: 8px;
-  }
-
-  .volume-info small {
-    display: block;
-
-    margin-top: 2px;
-
-    font-size: 6px;
-  }
-
-  .volume-name {
-    display: block;
-
-    margin-top: 2px;
-
-    font-size: 6px;
-  }
-
-  .volume-kind {
-    display: block;
-
-    font-size: 5px;
-  }
-
-  .qronos-storage-health {
-    display: flex;
-
-    margin-top: 2px;
-
-    font-size: 6px;
-  }
-
-  /* -------------------------
-     CENTER LOWER UI
-     ------------------------- */
-
-  .orb-status {
-    top:
-      calc(
-        44% +
-        min(
-          22vw,
-          23vh,
-          165px
-        )
-      );
-
-    width: 38vw;
-
-    min-width: 270px;
-  }
-
-  .status-label {
-    font-size: 11px;
-  }
-
-  .status-subtitle {
-    font-size: 6px;
-  }
-
-  .command-dock {
-    width:
-      min(
-        56vw,
-        560px
-      );
-
-    bottom: 55px;
-  }
-
-  .bottom-nav {
-    bottom: 7px;
-
-    width:
-      calc(
-        100vw - 28px
-      );
-
-    gap:
-      clamp(
-        5px,
-        1.2vw,
-        12px
-      );
-  }
-
-  .nav-item {
-    min-width: 55px;
-  }
-
-  .nav-icon {
-    width: 19px;
-
-    height: 19px;
-  }
-
-  .nav-item > span:last-child {
-    font-size: 8px;
-  }
+.debug-panel {
+  left:
+    calc(
+      24px *
+      var(--qronos-ui-scale)
+    ) !important;
+
+  top:
+    calc(
+      88px *
+      var(--qronos-ui-scale)
+    ) !important;
+
+  width: 420px !important;
+
+  transform:
+    scale(
+      var(--qronos-ui-scale)
+    ) !important;
+
+  transform-origin:
+    left top !important;
 }
 
 /* =========================================================
-   SHORT WINDOWS
-   Minimum supported height is 650px.
-   DNA height is intentionally preserved.
+   No independent size breakpoints.
+   Only motion accessibility stays responsive.
    ========================================================= */
 
-@media (max-height: 720px) {
-  /*
-   * Previous design reduced this to ~72-76vh.
-   * That is exactly what made the DNA look compressed.
-   */
-  .conversation-spine {
-    top: 50%;
-
-    height: 91vh;
-  }
-
-  .conversation-dna-zone {
-    top: -8%;
-
-    height: 116%;
-  }
-
-  .system-constellation {
-    height: 76vh;
-  }
-
-  .core-zone {
-    top: 43%;
-
-    width:
-      min(
-        35vw,
-        46vh,
-        360px
-      );
-
-    height:
-      min(
-        35vw,
-        46vh,
-        360px
-      );
-  }
-
-  .orb-status {
-    top:
-      calc(
-        43% +
-        min(
-          20vw,
-          21vh,
-          145px
-        )
-      );
-  }
-
-  .command-dock {
-    bottom: 50px;
-  }
-
-  .bottom-nav {
-    bottom: 5px;
-  }
-}
-
-@media (max-height: 670px) {
-  /*
-   * 650px is our physical minimum window height.
-   * At that size DNA still occupies almost the entire
-   * usable vertical canvas.
-   */
-  .conversation-spine {
-    top: 49%;
-
-    height: 90vh;
-  }
-
-  .conversation-dna-zone {
-    top: -9%;
-
-    height: 118%;
-  }
-
-  .system-constellation {
-    top: 45%;
-
-    height: 74vh;
-  }
-
-  .core-zone {
-    top: 42%;
-
-    width:
-      min(
-        35vw,
-        44vh,
-        350px
-      );
-
-    height:
-      min(
-        35vw,
-        44vh,
-        350px
-      );
-  }
-
-  .orb-status {
-    top:
-      calc(
-        42% +
-        min(
-          19vw,
-          19vh,
-          125px
-        )
-      );
-  }
-
-  .command-dock {
-    bottom: 46px;
-  }
-
-  .bottom-nav {
-    bottom: 3px;
-  }
-}
-
-/* =========================================================
-   REDUCED MOTION
-   ========================================================= */
-
-@media (prefers-reduced-motion: reduce) {
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
   .memory-pocket {
     transition: none;
   }

@@ -17,11 +17,11 @@
   position: absolute;
   z-index: 13;
 
-  left: clamp(26px, 2.5vw, 42px);
+  left: clamp(26px, 48px, 42px);
   top: 50%;
 
-  width: clamp(470px, 34vw, 590px);
-  height: min(96vh, 940px);
+  width: clamp(470px, 652.8px, 590px);
+  height: min(1036.8px, 940px);
 
   transform: translateY(-50%);
 
@@ -41,8 +41,8 @@
   position: relative;
   z-index: 20;
 
-  width: clamp(210px, 18vw, 270px);
-  height: clamp(34px, 4vh, 42px);
+  width: clamp(210px, 345.6px, 270px);
+  height: clamp(34px, 43.2px, 42px);
 
   display: flex;
   align-items: center;
@@ -53,7 +53,7 @@
 
 .conversation-spine-title {
   color: rgba(94, 218, 253, 0.84);
-  font-size: clamp(10px, 0.72vw, 12px);
+  font-size: clamp(10px, 13.824px, 12px);
   font-weight: 500;
   letter-spacing: 0.25em;
 }
@@ -77,7 +77,7 @@
 
   top: -1%;
 
-  width: clamp(315px, 24vw, 385px);
+  width: clamp(315px, 460.8px, 385px);
   height: 103%;
 
   overflow: visible;
@@ -111,12 +111,12 @@
    * Pocket moved only slightly right.
    * Keep the visual connection with DNA.
    */
-  left: clamp(150px, 11.2vw, 190px);
+  left: clamp(150px, 215.04px, 190px);
 
   top: var(--memory-pocket-top);
 
-  width: clamp(290px, 22vw, 355px);
-  min-height: clamp(180px, 18.5vh, 225px);
+  width: clamp(290px, 422.4px, 355px);
+  min-height: clamp(180px, 199.8px, 225px);
 
   padding: 10px 10px 10px 28px;
 
@@ -420,7 +420,7 @@
 }
 
 .memory-pocket-role {
-  font-size: clamp(13px, 0.9vw, 15px);
+  font-size: clamp(13px, 17.28px, 15px);
   font-weight: 560;
   letter-spacing: 0.18em;
 }
@@ -435,7 +435,7 @@
 
 .memory-pocket-time {
   color: rgba(184, 214, 225, 0.8);
-  font-size: clamp(11px, 0.72vw, 13px);
+  font-size: clamp(11px, 13.824px, 13px);
   font-weight: 450;
 }
 
@@ -511,7 +511,7 @@
   margin: 0;
   color: rgba(243, 251, 254, 0.99);
 
-  font-size: clamp(18px, 1.24vw, 21px);
+  font-size: clamp(18px, 23.808px, 21px);
   line-height: 1.92;
   font-weight: 430;
 }
@@ -538,7 +538,7 @@
   direction: ltr;
 
   color: rgba(151, 206, 223, 0.68);
-  font-size: clamp(8px, 0.57vw, 10px);
+  font-size: clamp(8px, 10.944px, 10px);
   font-weight: 460;
   letter-spacing: 0.13em;
 }
@@ -596,8 +596,8 @@
   position: relative;
   z-index: 20;
 
-  width: clamp(210px, 18vw, 270px);
-  height: clamp(32px, 3.8vh, 40px);
+  width: clamp(210px, 345.6px, 270px);
+  height: clamp(32px, 41.04px, 40px);
 
   display: flex;
   align-items: center;
@@ -606,7 +606,7 @@
   padding-left: 10px;
 
   color: rgba(138, 197, 215, 0.58);
-  font-size: clamp(8px, 0.52vw, 10px);
+  font-size: clamp(8px, 9.984px, 10px);
   letter-spacing: 0.14em;
 
   direction: ltr;
@@ -662,61 +662,17 @@
    RESPONSIVE
    ========================================= */
 
-@media (max-width: 1180px) {
-  .conversation-spine {
-    left: 16px;
-    width: clamp(420px, 32vw, 520px);
-  }
 
-  .conversation-dna-zone {
-    left: -15px;
+/* breakpoint removed: unified proportional scaling owns window resize */
 
-    width: clamp(280px, 22vw, 340px);
-  }
 
-  .memory-pocket {
-    left: clamp(138px, 10.5vw, 171px);
-    width: clamp(260px, 20vw, 320px);
-  }
-}
 
-@media (max-width: 920px) {
-  .conversation-spine {
-    width: 390px;
-  }
+/* breakpoint removed: unified proportional scaling owns window resize */
 
-  .conversation-dna-zone {
-    left: -12px;
 
-    width: 250px;
-  }
 
-  .memory-pocket {
-    left: 128px;
-    width: 250px;
-    min-height: 160px;
-    padding: 8px 8px 8px 24px;
-  }
+/* breakpoint removed: unified proportional scaling owns window resize */
 
-  .memory-pocket-copy-zone p {
-    font-size: 15px;
-    line-height: 1.86;
-  }
-
-  .memory-pocket-role {
-    font-size: 11px;
-  }
-
-  .memory-pocket-time {
-    font-size: 10px;
-  }
-}
-
-@media (max-width: 760px) {
-  .conversation-spine {
-    display: none;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .memory-pocket,

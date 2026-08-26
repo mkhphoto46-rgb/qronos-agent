@@ -4,14 +4,19 @@ import {
   useState,
 } from "react";
 
+import type {
+  CSSProperties,
+} from "react";
+
 import "./App.css";
-import "./components/QronosResponsive.css";
 
 import ConversationSpine from "./components/ConversationSpine";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
 import type { OrbState } from "./components/OrbState";
+
+import "./components/QronosResponsive.css";
 
 type DebugScenario =
   | "idle"
@@ -119,6 +124,12 @@ function App() {
       "idle",
     );
 
+  const [
+    uiScale,
+    setUiScale,
+  ] =
+    useState(1);
+
   const orbState =
     useMemo(
       () =>
@@ -145,6 +156,54 @@ function App() {
         ],
       [scenario],
     );
+
+  useEffect(() => {
+    const updateScale =
+      () => {
+        /*
+         * Single shared desktop scale.
+         * 1600 × 900 is the reference composition.
+         * Every major UI region consumes this same value.
+         */
+        const widthScale =
+          window.innerWidth /
+          1600;
+
+        const heightScale =
+          window.innerHeight /
+          900;
+
+        const next =
+          Math.max(
+            0.62,
+            Math.min(
+              1,
+              widthScale,
+              heightScale,
+            ),
+          );
+
+        setUiScale(
+          Number(
+            next.toFixed(4),
+          ),
+        );
+      };
+
+    updateScale();
+
+    window.addEventListener(
+      "resize",
+      updateScale,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "resize",
+        updateScale,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     const mapByKey: Record<
@@ -213,6 +272,12 @@ function App() {
     <main
       className="app"
       dir="rtl"
+      style={
+        {
+          "--qronos-ui-scale":
+            uiScale,
+        } as CSSProperties
+      }
     >
       <div className="ambient ambient-cyan" />
       <div className="ambient ambient-violet" />
@@ -284,6 +349,7 @@ function App() {
       </section>
 
       <ConversationSpine />
+
 
       <RightTelemetryPanel />
 
@@ -359,11 +425,32 @@ function App() {
             </svg>
           </button>
 
-          <input
+          <textarea
             className="command-input"
-            type="text"
+            rows={1}
             placeholder="از کرونوس بپرس..."
             aria-label="دستور کرونوس"
+            onInput={(
+              event,
+            ) => {
+              const element =
+                event.currentTarget;
+
+              element.style.height =
+                "0px";
+
+              const nextHeight =
+                Math.min(
+                  element.scrollHeight,
+                  116,
+                );
+
+              element.style.height =
+                `${Math.max(
+                  24,
+                  nextHeight,
+                )}px`;
+            }}
           />
 
           <button

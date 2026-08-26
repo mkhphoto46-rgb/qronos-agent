@@ -5,6 +5,11 @@ import {
   useState,
 } from "react";
 
+import type {
+  CSSProperties,
+  MouseEvent,
+} from "react";
+
 import {
   invoke,
 } from "@tauri-apps/api/core";
@@ -46,6 +51,10 @@ type TelemetrySnapshot = {
   physicalCores: number;
   logicalCores: number;
 
+  gpuPercent:
+    | number
+    | null;
+
   memoryPercent: number;
   memoryUsedBytes: number;
   memoryTotalBytes: number;
@@ -67,6 +76,171 @@ type LiveMetric = {
   tone: MetricTone;
   points: number[];
 };
+
+type ClickBurstParticle = {
+  id: number;
+  x: number;
+  y: number;
+  dx: number;
+  dy: number;
+  size: number;
+  alpha: number;
+  duration: number;
+  delay: number;
+  blur: number;
+  tint:
+    | "cyan"
+    | "white"
+    | "violet";
+};
+
+function makeClickBurst(
+  x: number,
+  y: number,
+) {
+  const count =
+    42 +
+    Math.floor(
+      Math.random() * 19,
+    );
+
+  return Array.from(
+    {
+      length: count,
+    },
+    (_, index) => {
+      const angle =
+        Math.random() *
+        Math.PI *
+        2;
+
+      const distance =
+        20 +
+        Math.pow(
+          Math.random(),
+          0.78,
+        ) *
+          88;
+
+      const verticalBias =
+        0.78 +
+        Math.random() *
+          0.5;
+
+      const tintRoll =
+        Math.random();
+
+      return {
+        id:
+          Date.now() * 100 +
+          index,
+
+        x,
+        y,
+
+        dx:
+          Math.cos(
+            angle,
+          ) *
+          distance,
+
+        dy:
+          Math.sin(
+            angle,
+          ) *
+          distance *
+          verticalBias,
+
+        size:
+          0.9 +
+          Math.random() *
+            2.15,
+
+        alpha:
+          0.46 +
+          Math.random() *
+            0.5,
+
+        duration:
+          680 +
+          Math.random() *
+            620,
+
+        delay:
+          Math.random() *
+          120,
+
+        blur:
+          Math.random() *
+          1.25,
+
+        tint:
+          tintRoll > 0.9
+            ? "violet"
+            : tintRoll > 0.73
+              ? "white"
+              : "cyan",
+      } satisfies ClickBurstParticle;
+    },
+  );
+}
+
+function BurstParticles({
+  particles,
+}: {
+  particles:
+    ClickBurstParticle[];
+}) {
+  return (
+    <span
+      className="qrt-click-burst"
+      aria-hidden="true"
+    >
+      {particles.map(
+        (
+          particle,
+        ) => (
+          <i
+            key={
+              particle.id
+            }
+            className={`qrt-click-burst-particle qrt-click-burst-${particle.tint}`}
+            style={
+              {
+                left:
+                  `${particle.x}px`,
+
+                top:
+                  `${particle.y}px`,
+
+                "--qrt-burst-dx":
+                  `${particle.dx}px`,
+
+                "--qrt-burst-dy":
+                  `${particle.dy}px`,
+
+                "--qrt-burst-size":
+                  `${particle.size}px`,
+
+                "--qrt-burst-alpha":
+                  particle.alpha,
+
+                "--qrt-burst-duration":
+                  `${particle.duration}ms`,
+
+                "--qrt-burst-delay":
+                  `${particle.delay}ms`,
+
+                "--qrt-burst-blur":
+                  `${particle.blur}px`,
+              } as CSSProperties
+            }
+          />
+        ),
+      )}
+    </span>
+  );
+}
 
 const HISTORY_LENGTH = 36;
 
@@ -746,16 +920,143 @@ function RealStorageRow({
       disk,
     );
 
+  const [
+    burstParticles,
+    setBurstParticles,
+  ] =
+    useState<
+      ClickBurstParticle[]
+    >([]);
+
+  const clearBurstTimerRef =
+    useRef<number | null>(
+      null,
+    );
+
+  useEffect(() => {
+    return () => {
+      if (
+        clearBurstTimerRef.current !==
+        null
+      ) {
+        window.clearTimeout(
+          clearBurstTimerRef.current,
+        );
+      }
+    };
+  }, []);
+
+  const triggerBurst = (
+    event:
+      MouseEvent<HTMLElement>,
+  ) => {
+    const rect =
+      event.currentTarget
+        .getBoundingClientRect();
+
+    const x =
+      event.clientX -
+      rect.left;
+
+    const y =
+      event.clientY -
+      rect.top;
+
+    setBurstParticles(
+      makeClickBurst(
+        x,
+        y,
+      ),
+    );
+
+    if (
+      clearBurstTimerRef.current !==
+      null
+    ) {
+      window.clearTimeout(
+        clearBurstTimerRef.current,
+      );
+    }
+
+    clearBurstTimerRef.current =
+      window.setTimeout(
+        () => {
+          setBurstParticles(
+            [],
+          );
+
+          clearBurstTimerRef.current =
+            null;
+        },
+        1520,
+      );
+  };
+
+  const activateStorage =
+    (
+      event:
+        MouseEvent<HTMLElement>,
+    ) => {
+      triggerBurst(
+        event,
+      );
+
+      void openStorage(
+        disk,
+      );
+    };
+
+  const activateStorageFromKeyboard =
+    (
+      element:
+        HTMLElement,
+    ) => {
+      const rect =
+        element
+          .getBoundingClientRect();
+
+      setBurstParticles(
+        makeClickBurst(
+          rect.width * 0.5,
+          rect.height * 0.5,
+        ),
+      );
+
+      if (
+        clearBurstTimerRef.current !==
+        null
+      ) {
+        window.clearTimeout(
+          clearBurstTimerRef.current,
+        );
+      }
+
+      clearBurstTimerRef.current =
+        window.setTimeout(
+          () => {
+            setBurstParticles(
+              [],
+            );
+
+            clearBurstTimerRef.current =
+              null;
+          },
+          1520,
+        );
+
+      void openStorage(
+        disk,
+      );
+    };
+
   return (
     <article
-      className="qrt-storage-row"
+      className="qrt-storage-row qrt-interactive-item"
       role="button"
       tabIndex={0}
-      onClick={() => {
-        void openStorage(
-          disk,
-        );
-      }}
+      onClick={
+        activateStorage
+      }
       onKeyDown={(
         event,
       ) => {
@@ -767,12 +1068,18 @@ function RealStorageRow({
         ) {
           event.preventDefault();
 
-          void openStorage(
-            disk,
+          activateStorageFromKeyboard(
+            event.currentTarget,
           );
         }
       }}
     >
+      <BurstParticles
+        particles={
+          burstParticles
+        }
+      />
+
       <div className="qrt-storage-icon">
         <StorageIcon
           removable={
@@ -843,6 +1150,330 @@ function RealStorageRow({
   );
 }
 
+function RealDeviceItem({
+  device,
+}: {
+  device: DeviceSnapshot;
+}) {
+  const [
+    burstParticles,
+    setBurstParticles,
+  ] =
+    useState<
+      ClickBurstParticle[]
+    >([]);
+
+  const clearBurstTimerRef =
+    useRef<number | null>(
+      null,
+    );
+
+  useEffect(() => {
+    return () => {
+      if (
+        clearBurstTimerRef.current !==
+        null
+      ) {
+        window.clearTimeout(
+          clearBurstTimerRef.current,
+        );
+      }
+    };
+  }, []);
+
+  const triggerBurst = (
+    event:
+      MouseEvent<HTMLElement>,
+  ) => {
+    const rect =
+      event.currentTarget
+        .getBoundingClientRect();
+
+    setBurstParticles(
+      makeClickBurst(
+        event.clientX -
+          rect.left,
+
+        event.clientY -
+          rect.top,
+      ),
+    );
+
+    if (
+      clearBurstTimerRef.current !==
+      null
+    ) {
+      window.clearTimeout(
+        clearBurstTimerRef.current,
+      );
+    }
+
+    clearBurstTimerRef.current =
+      window.setTimeout(
+        () => {
+          setBurstParticles(
+            [],
+          );
+
+          clearBurstTimerRef.current =
+            null;
+        },
+        1520,
+      );
+  };
+
+  const activateDevice =
+    (
+      event:
+        MouseEvent<HTMLElement>,
+    ) => {
+      triggerBurst(
+        event,
+      );
+
+      void openDevice(
+        device,
+      );
+    };
+
+  const activateDeviceFromKeyboard =
+    (
+      element:
+        HTMLElement,
+    ) => {
+      const rect =
+        element
+          .getBoundingClientRect();
+
+      setBurstParticles(
+        makeClickBurst(
+          rect.width * 0.5,
+          rect.height * 0.5,
+        ),
+      );
+
+      if (
+        clearBurstTimerRef.current !==
+        null
+      ) {
+        window.clearTimeout(
+          clearBurstTimerRef.current,
+        );
+      }
+
+      clearBurstTimerRef.current =
+        window.setTimeout(
+          () => {
+            setBurstParticles(
+              [],
+            );
+
+            clearBurstTimerRef.current =
+              null;
+          },
+          1520,
+        );
+
+      void openDevice(
+        device,
+      );
+    };
+
+  return (
+    <article
+      className="qrt-device qrt-interactive-item"
+      role="button"
+      tabIndex={0}
+      onClick={
+        activateDevice
+      }
+      onKeyDown={(
+        event,
+      ) => {
+        if (
+          event.key ===
+            "Enter" ||
+          event.key ===
+            " "
+        ) {
+          event.preventDefault();
+
+          activateDeviceFromKeyboard(
+            event.currentTarget,
+          );
+        }
+      }}
+    >
+      <BurstParticles
+        particles={
+          burstParticles
+        }
+      />
+
+      <div className="qrt-device-icon">
+        <DeviceIcon
+          type={
+            deviceIconType(
+              device.className,
+            )
+          }
+        />
+
+        <span className="qrt-device-state qrt-device-state-online" />
+
+        <span className="qrt-icon-energy-pulse" />
+      </div>
+
+      <div className="qrt-device-copy">
+        <span
+          className="qrt-device-name"
+          title={
+            device.name
+          }
+        >
+          {
+            device.name
+          }
+        </span>
+
+        <span className="qrt-device-type">
+          {
+            device.className
+          }
+        </span>
+      </div>
+    </article>
+  );
+}
+
+
+/* Replaced by the canvas-based OracleStorageFlow overlay. */
+/*
+function OracleTelemetryBridge() {
+  const particleLanes = [
+    ["M0 88 H112 L145 56 H278 L320 88 H510", "4.7s", "0s", 2.1],
+    ["M0 88 H112 L145 56 H278 L320 88 H510", "4.7s", "-1.6s", 1.2],
+    ["M18 111 H155 L188 84 H300 L340 111 H500", "5.3s", "-2.4s", 1.8],
+    ["M18 111 H155 L188 84 H300 L340 111 H500", "5.3s", "-4.2s", 1.1],
+    ["M34 76 H156 L188 48 H292 L338 76 H506", "4.3s", "-0.8s", 1.6],
+    ["M34 76 H156 L188 48 H292 L338 76 H506", "4.3s", "-3.1s", 1],
+    ["M44 124 H176 L212 98 H308 L352 124 H492", "5.9s", "-3.6s", 1.7],
+    ["M74 63 H190 L220 37 H304 L354 63 H496", "5.1s", "-1.9s", 1.4],
+    ["M92 137 H210 L244 112 H326 L370 137 H482", "6.1s", "-5.1s", 1.5],
+    ["M0 99 H134 L168 70 H286 L326 99 H505", "4.9s", "-2.8s", 1.2],
+    ["M0 99 H134 L168 70 H286 L326 99 H505", "4.9s", "-4.4s", 1.9],
+    ["M18 111 H155 L188 84 H300 L340 111 H500", "5.3s", "-0.7s", 1],
+  ] as const;
+
+  return (
+    <div
+      className="qrt-oracle-data-bridge"
+      aria-hidden="true"
+    >
+      <svg
+        viewBox="0 0 520 180"
+        preserveAspectRatio="none"
+      >
+        <defs>
+          <linearGradient
+            id="qrt-bridge-gradient"
+            x1="0"
+            y1="0"
+            x2="1"
+            y2="0"
+          >
+            <stop offset="0%" stopColor="rgba(56,214,255,0)" />
+            <stop offset="18%" stopColor="rgba(56,214,255,0.16)" />
+            <stop offset="58%" stopColor="rgba(66,228,255,0.74)" />
+            <stop offset="84%" stopColor="rgba(124,240,255,0.94)" />
+            <stop offset="100%" stopColor="rgba(232,253,255,0.98)" />
+          </linearGradient>
+
+          <filter
+            id="qrt-bridge-glow"
+            x="-40%"
+            y="-100%"
+            width="180%"
+            height="300%"
+          >
+            <feGaussianBlur
+              stdDeviation="2.3"
+              result="blur"
+            />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+
+        <g
+          className="qrt-oracle-bridge-lines"
+          transform="translate(280 0) scale(0.52 1)"
+        >
+          <path d="M0 88 H112 L145 56 H278 L320 88 H462" />
+          <path d="M0 99 H134 L168 70 H286 L326 99 H450" />
+          <path d="M18 111 H155 L188 84 H300 L340 111 H438" />
+          <path d="M44 124 H176 L212 98 H308 L352 124 H426" />
+          <path d="M34 76 H156 L188 48 H292 L338 76 H446" />
+          <path d="M74 63 H190 L220 37 H304 L354 63 H430" />
+          <path d="M92 137 H210 L244 112 H326 L370 137 H416" />
+        </g>
+
+        <g
+          className="qrt-oracle-bridge-nodes"
+          transform="translate(280 0) scale(0.52 1)"
+        >
+          <circle cx="145" cy="56" r="2.2" />
+          <circle cx="188" cy="84" r="1.8" />
+          <circle cx="220" cy="37" r="1.9" />
+          <circle cx="244" cy="112" r="1.8" />
+          <circle cx="320" cy="88" r="2.4" />
+          <circle cx="352" cy="124" r="1.7" />
+          <circle cx="370" cy="137" r="1.7" />
+        </g>
+
+        <g
+          className="qrt-oracle-bridge-particles"
+          transform="translate(280 0) scale(0.52 1)"
+        >
+          {particleLanes.flatMap(
+            ([path, duration, begin, radius]) =>
+              [-0.72, 0, 0.72].map(
+                (offset) => [
+                  path,
+                  duration,
+                  `${Number.parseFloat(begin) + offset}s`,
+                  radius,
+                ] as const,
+              ),
+          ).map(
+            ([path, duration, begin, radius]) => (
+              <circle key={`${path}-${begin}`} r={radius}>
+                <animateMotion
+                  dur={duration}
+                  begin={begin}
+                  repeatCount="indefinite"
+                  path={path}
+                />
+                <animate
+                  attributeName="opacity"
+                  values="0;0.95;0.78;0"
+                  keyTimes="0;0.1;0.68;1"
+                  dur={duration}
+                  begin={begin}
+                  repeatCount="indefinite"
+                />
+              </circle>
+            ),
+          )}
+        </g>
+      </svg>
+    </div>
+  );
+}
+*/
+
 function RightTelemetryPanel() {
   const [
     snapshot,
@@ -855,6 +1486,15 @@ function RightTelemetryPanel() {
   const [
     cpuHistory,
     setCpuHistory,
+  ] =
+    useState<number[]>(
+      () =>
+        initialHistory(),
+    );
+
+  const [
+    gpuHistory,
+    setGpuHistory,
   ] =
     useState<number[]>(
       () =>
@@ -922,6 +1562,20 @@ function RightTelemetryPanel() {
                 next.cpuPercent,
               ),
           );
+
+          if (
+            next.gpuPercent !==
+            null
+          ) {
+            setGpuHistory(
+              (current) =>
+                pushHistory(
+                  current,
+                  next.gpuPercent ??
+                    0,
+                ),
+            );
+          }
 
           setRamHistory(
             (current) =>
@@ -1038,6 +1692,11 @@ function RightTelemetryPanel() {
             ?.cpuPercent ??
           0;
 
+        const gpu =
+          snapshot
+            ?.gpuPercent ??
+          null;
+
         const ram =
           snapshot
             ?.memoryPercent ??
@@ -1076,16 +1735,20 @@ function RightTelemetryPanel() {
             label:
               "GPU",
             value:
-              "--",
+              gpu !== null
+                ? `${Math.round(
+                    gpu,
+                  )}%`
+                : "--",
             meta:
-              "NATIVE NEXT",
+              gpu !== null
+                ? "NVIDIA LIVE"
+                : "UNAVAILABLE",
             tone:
               "cyan",
             points:
               normalizeHistory(
-                initialHistory(
-                  0,
-                ),
+                gpuHistory,
               ),
           },
 
@@ -1144,6 +1807,7 @@ function RightTelemetryPanel() {
       [
         snapshot,
         cpuHistory,
+        gpuHistory,
         ramHistory,
       ],
     );
@@ -1359,68 +2023,14 @@ function RightTelemetryPanel() {
             (
               device,
             ) => (
-              <article
+              <RealDeviceItem
                 key={
                   device.id
                 }
-                className="qrt-device"
-                role="button"
-                tabIndex={0}
-                onClick={() => {
-                  void openDevice(
-                    device,
-                  );
-                }}
-                onKeyDown={(
-                  event,
-                ) => {
-                  if (
-                    event.key ===
-                      "Enter" ||
-                    event.key ===
-                      " "
-                  ) {
-                    event.preventDefault();
-
-                    void openDevice(
-                      device,
-                    );
-                  }
-                }}
-              >
-                <div className="qrt-device-icon">
-                  <DeviceIcon
-                    type={
-                      deviceIconType(
-                        device.className,
-                      )
-                    }
-                  />
-
-                  <span className="qrt-device-state qrt-device-state-online" />
-
-                  <span className="qrt-icon-energy-pulse" />
-                </div>
-
-                <div className="qrt-device-copy">
-                  <span
-                    className="qrt-device-name"
-                    title={
-                      device.name
-                    }
-                  >
-                    {
-                      device.name
-                    }
-                  </span>
-
-                  <span className="qrt-device-type">
-                    {
-                      device.className
-                    }
-                  </span>
-                </div>
-              </article>
+                device={
+                  device
+                }
+              />
             ),
           )}
         </div>

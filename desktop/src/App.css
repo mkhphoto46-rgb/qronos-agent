@@ -30,7 +30,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -151,10 +152,10 @@ button {
 }
 
 .ambient-cyan {
-  width: 36vw;
-  height: 36vw;
-  left: -3vw;
-  top: 10vh;
+  width: 691.2px;
+  height: 691.2px;
+  left: -57.6px;
+  top: 108px;
 
   background:
     rgba(
@@ -173,10 +174,10 @@ button {
 }
 
 .ambient-violet {
-  width: 34vw;
-  height: 34vw;
-  right: -1vw;
-  top: 8vh;
+  width: 652.8px;
+  height: 652.8px;
+  right: -19.2px;
+  top: 86.4px;
 
   background:
     rgba(
@@ -198,8 +199,8 @@ button {
   from {
     transform:
       translate3d(
-        -3vw,
-        -1vh,
+        -57.6px,
+        -10.8px,
         0
       )
       scale(0.95);
@@ -208,8 +209,8 @@ button {
   to {
     transform:
       translate3d(
-        7vw,
-        7vh,
+        134.4px,
+        75.6px,
         0
       )
       scale(1.06);
@@ -220,8 +221,8 @@ button {
   from {
     transform:
       translate3d(
-        4vw,
-        -2vh,
+        76.8px,
+        -21.6px,
         0
       )
       scale(1.03);
@@ -230,8 +231,8 @@ button {
   to {
     transform:
       translate3d(
-        -7vw,
-        8vh,
+        -134.4px,
+        86.4px,
         0
       )
       scale(0.95);
@@ -334,7 +335,7 @@ button {
   top:
     clamp(
       14px,
-      3.2vh,
+      34.56px,
       34px
     );
 
@@ -364,7 +365,7 @@ button {
   font-size:
     clamp(
       8px,
-      0.9vw,
+      17.28px,
       14px
     );
 
@@ -373,14 +374,14 @@ button {
   letter-spacing:
     clamp(
       4px,
-      0.72vw,
+      13.824px,
       11px
     );
 
   padding-left:
     clamp(
       4px,
-      0.72vw,
+      13.824px,
       11px
     );
 
@@ -393,7 +394,7 @@ button {
   width:
     clamp(
       122px,
-      18vw,
+      345.6px,
       286px
     );
 
@@ -534,21 +535,21 @@ button {
   left:
     clamp(
       12px,
-      1.5vw,
+      28.8px,
       24px
     );
 
   top:
     clamp(
       58px,
-      9vh,
+      97.2px,
       88px
     );
 
   width:
     min(
       420px,
-      92vw
+      1766.4px
     );
 
   padding:
@@ -775,15 +776,15 @@ button {
 
   width:
     min(
-      58vw,
-      58vh,
+      1113.6px,
+      626.4px,
       560px
     );
 
   height:
     min(
-      58vw,
-      58vh,
+      1113.6px,
+      626.4px,
       560px
     );
 
@@ -904,7 +905,7 @@ button {
   left:
     clamp(
       14px,
-      3.2vw,
+      61.44px,
       56px
     );
 
@@ -918,14 +919,14 @@ button {
   width:
     clamp(
       170px,
-      17vw,
+      326.4px,
       265px
     );
 
   padding:
     clamp(
       12px,
-      1.4vw,
+      26.88px,
       20px
     );
 
@@ -1051,7 +1052,7 @@ button {
   font-size:
     clamp(
       7px,
-      0.65vw,
+      12.48px,
       10px
     );
 
@@ -1072,7 +1073,7 @@ button {
   font-size:
     clamp(
       12px,
-      1.05vw,
+      20.16px,
       17px
     );
 
@@ -1086,7 +1087,7 @@ button {
   gap:
     clamp(
       7px,
-      0.8vw,
+      15.36px,
       10px
     );
 }
@@ -1095,7 +1096,7 @@ button {
   padding:
     clamp(
       8px,
-      0.9vw,
+      17.28px,
       13px
     );
 
@@ -1138,7 +1139,7 @@ button {
   margin-right:
     clamp(
       5px,
-      1vw,
+      19.2px,
       18px
     );
 
@@ -1173,7 +1174,7 @@ button {
   font-size:
     clamp(
       7px,
-      0.68vw,
+      13.056px,
       10px
     );
 }
@@ -1192,7 +1193,7 @@ button {
   font-size:
     clamp(
       8px,
-      0.78vw,
+      14.976px,
       12px
     );
 
@@ -1258,7 +1259,7 @@ button {
   font-size:
     clamp(
       7px,
-      0.65vw,
+      12.48px,
       10px
     );
 }
@@ -1307,7 +1308,7 @@ button {
   right:
     clamp(
       14px,
-      2.8vw,
+      53.76px,
       50px
     );
 
@@ -1319,20 +1320,20 @@ button {
   width:
     clamp(
       230px,
-      22vw,
+      422.4px,
       340px
     );
 
   max-height:
     min(
-      74vh,
+      799.2px,
       720px
     );
 
   padding:
     clamp(
       10px,
-      1vw,
+      19.2px,
       16px
     );
 
@@ -1436,7 +1437,7 @@ button {
   font-size:
     clamp(
       7px,
-      0.58vw,
+      11.136px,
       9px
     );
 
@@ -1458,7 +1459,7 @@ button {
   font-size:
     clamp(
       11px,
-      0.95vw,
+      18.24px,
       15px
     );
 
@@ -1475,7 +1476,7 @@ button {
   width:
     clamp(
       54px,
-      4.5vw,
+      86.4px,
       72px
     );
 
@@ -1586,7 +1587,7 @@ button {
   gap:
     clamp(
       7px,
-      0.7vw,
+      13.44px,
       10px
     );
 }
@@ -1633,14 +1634,14 @@ button {
   min-height:
     clamp(
       68px,
-      7.5vh,
+      81px,
       86px
     );
 
   padding:
     clamp(
       8px,
-      0.75vw,
+      14.4px,
       11px
     );
 
@@ -1792,7 +1793,7 @@ button {
   font-size:
     clamp(
       7px,
-      0.55vw,
+      10.56px,
       9px
     );
 
@@ -1811,7 +1812,7 @@ button {
   font-size:
     clamp(
       13px,
-      1.15vw,
+      22.08px,
       18px
     );
 
@@ -1836,7 +1837,7 @@ button {
   font-size:
     clamp(
       6px,
-      0.48vw,
+      9.216px,
       8px
     );
 }
@@ -1974,7 +1975,7 @@ button {
   font-size:
     clamp(
       6px,
-      0.5vw,
+      9.6px,
       8px
     );
 }
@@ -2367,7 +2368,7 @@ button {
   font-size:
     clamp(
       10px,
-      0.8vw,
+      15.36px,
       13px
     );
 
@@ -2390,7 +2391,7 @@ button {
   font-size:
     clamp(
       5px,
-      0.45vw,
+      8.64px,
       7px
     );
 
@@ -2409,7 +2410,7 @@ button {
   font-size:
     clamp(
       9px,
-      0.78vw,
+      14.976px,
       12px
     );
 }
@@ -2514,7 +2515,7 @@ button {
   font-size:
     clamp(
       5px,
-      0.43vw,
+      8.256px,
       7px
     );
 }
@@ -2683,7 +2684,7 @@ button {
   font-size:
     clamp(
       8px,
-      0.7vw,
+      13.44px,
       11px
     );
 
@@ -2962,7 +2963,7 @@ button {
   font-size:
     clamp(
       6px,
-      0.5vw,
+      9.6px,
       8px
     );
 
@@ -2985,7 +2986,7 @@ button {
   font-size:
     clamp(
       10px,
-      0.83vw,
+      15.936px,
       13px
     );
 
@@ -3216,9 +3217,9 @@ button {
 
   top:
     min(
-      74vh,
+      799.2px,
       calc(
-        45.5% + 31vh
+        45.5% + 334.8px
       )
     );
 
@@ -3228,7 +3229,7 @@ button {
   width:
     clamp(
       270px,
-      42vw,
+      806.4px,
       660px
     );
 
@@ -3238,7 +3239,7 @@ button {
   gap:
     clamp(
       10px,
-      1.6vw,
+      30.72px,
       24px
     );
 
@@ -3286,7 +3287,7 @@ button {
   min-width:
     clamp(
       110px,
-      13vw,
+      249.6px,
       180px
     );
 }
@@ -3337,7 +3338,7 @@ button {
   font-size:
     clamp(
       10px,
-      1.03vw,
+      19.776px,
       15px
     );
 }
@@ -3358,7 +3359,7 @@ button {
   font-size:
     clamp(
       5px,
-      0.5vw,
+      9.6px,
       8px
     );
 
@@ -3393,7 +3394,7 @@ button {
   bottom:
     clamp(
       58px,
-      8.7vh,
+      93.96px,
       92px
     );
 
@@ -3402,34 +3403,30 @@ button {
 
   width:
     min(
-      52vw,
-      720px
+      307.2px,
+      225px
     );
 }
 
 .command-shell {
   position: relative;
 
-  height:
-    clamp(
-      44px,
-      5.9vh,
-      60px
-    );
+  min-height: 48px;
+  max-height: 148px;
 
   display: grid;
 
   grid-template-columns:
     auto
-    1fr
+    minmax(0, 1fr)
     auto;
 
-  align-items: center;
+  align-items: end;
 
-  gap: 6px;
-  padding: 5px;
+  gap: 4px;
+  padding: 6px 5px;
 
-  overflow: hidden;
+  overflow: visible;
 
   border:
     1px solid
@@ -3489,61 +3486,11 @@ button {
 }
 
 .command-stream {
-  position: absolute;
-
-  left: 78px;
-  right: 78px;
-
-  top: 50%;
-
-  height: 18px;
-
-  transform:
-    translateY(-50%);
-
-  pointer-events: none;
-
-  overflow: hidden;
-
-  z-index: 1;
-
-  opacity: 0.72;
+  display: none;
 }
 
 .command-stream-dot {
-  position: absolute;
-
-  top: 50%;
-
-  width: 5px;
-  height: 5px;
-
-  border-radius: 50%;
-
-  background:
-    rgba(
-      98,
-      223,
-      255,
-      0.88
-    );
-
-  box-shadow:
-    0
-    0
-    8px
-    rgba(
-      89,
-      209,
-      255,
-      0.38
-    );
-
-  animation:
-    streamFlow
-    4.2s
-    linear
-    infinite;
+  display: none;
 }
 
 .command-stream .dot-2 {
@@ -3595,19 +3542,29 @@ button {
   z-index: 2;
 
   width: 100%;
-  height: 100%;
-
   min-width: 0;
 
+  height: 24px;
+  min-height: 24px;
+  max-height: 116px;
+
   padding:
-    0
+    2px
     10px;
 
   border: 0;
   outline: 0;
 
+  resize: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+
   direction: rtl;
   text-align: right;
+
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 
   background: transparent;
 
@@ -3630,8 +3587,40 @@ button {
   font-size:
     clamp(
       10px,
-      0.92vw,
+      17.664px,
       14px
+    );
+
+  line-height: 1.55;
+
+  scrollbar-width: thin;
+  scrollbar-color:
+    rgba(
+      73,
+      201,
+      242,
+      0.2
+    )
+    transparent;
+}
+
+.command-input::-webkit-scrollbar {
+  width: 3px;
+}
+
+.command-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.command-input::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+
+  background:
+    rgba(
+      73,
+      201,
+      242,
+      0.22
     );
 }
 
@@ -3647,37 +3636,29 @@ button {
 
 .command-action {
   position: relative;
-
   z-index: 3;
 
   width:
     clamp(
-      32px,
-      4vh,
-      42px
+      24px,
+      32.4px,
+      30px
     );
 
   height:
     clamp(
-      32px,
-      4vh,
-      42px
+      24px,
+      32.4px,
+      30px
     );
 
   display: flex;
-
   align-items: center;
   justify-content: center;
 
-  border-radius: 50%;
+  border-radius: 0;
 
-  background:
-    rgba(
-      14,
-      48,
-      63,
-      0.22
-    );
+  background: transparent;
 
   color:
     rgba(
@@ -3691,8 +3672,8 @@ button {
 }
 
 .command-action svg {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
 }
 
 .command-action-send {
@@ -3704,13 +3685,7 @@ button {
       0.94
     );
 
-  background:
-    rgba(
-      30,
-      116,
-      150,
-      0.26
-    );
+  background: transparent;
 }
 
 .command-hint {
@@ -3733,7 +3708,7 @@ button {
   font-size:
     clamp(
       6px,
-      0.55vw,
+      10.56px,
       8px
     );
 }
@@ -3766,7 +3741,7 @@ button {
   bottom:
     clamp(
       10px,
-      1.8vh,
+      19.44px,
       20px
     );
 
@@ -3780,7 +3755,7 @@ button {
   gap:
     clamp(
       17px,
-      2.5vw,
+      48px,
       38px
     );
 
@@ -3793,7 +3768,7 @@ button {
   min-width:
     clamp(
       58px,
-      5.5vw,
+      105.6px,
       82px
     );
 
@@ -3806,7 +3781,7 @@ button {
   gap:
     clamp(
       4px,
-      0.55vw,
+      10.56px,
       7px
     );
 
@@ -3890,14 +3865,14 @@ button {
   width:
     clamp(
       20px,
-      1.8vw,
+      34.56px,
       28px
     );
 
   height:
     clamp(
       20px,
-      1.8vw,
+      34.56px,
       28px
     );
 
@@ -3935,7 +3910,7 @@ button {
   font-size:
     clamp(
       10px,
-      0.9vw,
+      17.28px,
       14px
     );
 
@@ -3948,384 +3923,60 @@ button {
    RESPONSIVE
    ========================================= */
 
-@media (
-  max-width: 1180px
-) {
-  .telemetry-field {
-    width:
-      clamp(
-        210px,
-        22vw,
-        275px
-      );
 
-    right: 14px;
-  }
+/* breakpoint removed: unified proportional scaling owns window resize */
 
-  .context-rail {
-    width:
-      clamp(
-        155px,
-        17vw,
-        215px
-      );
 
-    left: 14px;
-  }
 
-  .debug-panel {
-    width: 360px;
-  }
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+/* =========================================================
+   MULTILINE COMMAND COMPOSER
+   ========================================================= */
+
+.command-action {
+  align-self: end;
+  margin-bottom: 1px;
 }
 
-@media (
-  max-width: 940px
-) {
-  .core-zone {
-    width:
-      min(
-        54vw,
-        55vh,
-        490px
-      );
-
-    height:
-      min(
-        54vw,
-        55vh,
-        490px
-      );
-  }
-
-  .telemetry-field {
-    width: 200px;
-  }
-
-  .metric-field {
-    gap: 5px;
-  }
-
-  .metric-node {
-    min-height: 64px;
-  }
-
-  .context-rail {
-    width: 150px;
-  }
-
-  .context-message {
-    padding:
-      7px
-      8px;
-  }
-
-  .context-message p {
-    font-size: 8px;
-  }
-
-  .debug-panel {
-    width: 300px;
-  }
-
-  .debug-controls {
-    grid-template-columns:
-      repeat(
-        2,
-        1fr
-      );
-  }
-
-  .command-dock {
-    width: 64vw;
-  }
-}
-
-@media (
-  max-width: 760px
-) {
-  .debug-panel {
-    left: 50%;
-
-    top: 54px;
-
-    transform:
-      translateX(-50%);
-
-    width:
-      min(
-        92vw,
-        390px
-      );
-  }
-
-  .core-zone {
-    top: 44%;
-
-    width:
-      min(
-        64vw,
-        52vh
-      );
-
-    height:
-      min(
-        64vw,
-        52vh
-      );
-  }
-
-  .context-rail {
-    display: none;
-  }
-
-  .telemetry-field {
-    top: 19%;
-
-    right: 8px;
-
-    transform: none;
-
-    width: 180px;
-
-    max-height: 48vh;
-  }
-
-  .metric-field {
-    grid-template-columns: 1fr;
-  }
-
-  .metric-node:nth-child(n + 3) {
-    display: none;
-  }
-
-  .storage-field {
-    margin-top: 2px;
-  }
-
-  .drive-node:nth-child(n + 3) {
-    display: none;
-  }
-
-  .orb-status {
-    top: 70vh;
-
-    width: 68vw;
-  }
-
-  .command-dock {
-    width: 78vw;
-  }
-
-  .bottom-nav {
-    gap: 5px;
-  }
-
-  .nav-item {
-    min-width: 48px;
-  }
-}
-
-@media (
-  max-width: 560px
-) {
-  .telemetry-field {
-    width: 145px;
-
-    padding: 5px;
-  }
-
-  .telemetry-section-header strong,
-  .storage-header strong {
-    display: none;
-  }
-
-  .telemetry-heartbeat {
-    width: 44px;
-  }
-
-  .metric-node {
-    min-height: 54px;
-
-    padding:
-      7px
-      8px;
-  }
-
-  .drive-meta {
-    display: none;
-  }
-
-  .qronos-storage-state {
-    display: none;
-  }
-
-  .core-zone {
-    top: 43%;
-
-    width:
-      min(
-        70vw,
-        48vh
-      );
-
-    height:
-      min(
-        70vw,
-        48vh
-      );
-  }
-
-  .orb-status {
-    top: 67vh;
-
-    width: 76vw;
-  }
-
-  .command-dock {
-    width:
-      calc(
-        100vw - 28px
-      );
-  }
-
-  .command-hint {
-    display: none;
-  }
-
-  .bottom-nav {
-    width:
-      calc(
-        100vw - 20px
-      );
-
-    justify-content:
-      space-between;
-
-    gap: 1px;
-  }
-
-  .nav-item {
-    min-width: 0;
-
-    flex: 1;
-
-    padding:
-      4px
-      2px;
-  }
-
-  .nav-icon {
-    width: 18px;
-    height: 18px;
-  }
-
-  .nav-item
-    > span:last-child {
-    font-size: 8px;
-  }
-}
-
-@media (
-  max-height: 720px
-) {
-  .telemetry-field {
-    max-height: 64vh;
-  }
-
-  .metric-node {
-    min-height: 59px;
-  }
-
-  .drive-node {
-    padding:
-      6px
-      8px;
-  }
-
-  .context-rail {
-    max-height: 62vh;
-
-    overflow: hidden;
-  }
-}
-
-@media (
-  max-height: 620px
-) {
-  .brand {
-    top: 8px;
-  }
-
-  .debug-panel {
-    top: 40px;
-
-    transform:
-      scale(0.86);
-
-    transform-origin:
-      left top;
-  }
-
-  .core-zone {
-    top: 42.5%;
-
-    width:
-      min(
-        48vw,
-        49vh
-      );
-
-    height:
-      min(
-        48vw,
-        49vh
-      );
-  }
-
-  .telemetry-field {
-    top: 45%;
-
-    max-height: 60vh;
-  }
-
-  .orb-status {
-    top: 65vh;
-  }
-
-  .command-dock {
-    bottom: 48px;
-  }
-
-  .bottom-nav {
-    bottom: 6px;
-  }
-}
-
-@media (
-  max-height: 500px
-) {
-  .debug-panel {
-    display: none;
-  }
-
-  .context-thread,
-  .context-foot {
-    display: none;
-  }
-
-  .telemetry-field {
-    max-height: 54vh;
-  }
-
-  .storage-field {
-    display: none;
-  }
-
-  .orb-status {
-    top: 63vh;
-  }
-
-  .command-dock {
-    bottom: 40px;
-  }
+.command-shell:focus-within {
+  border-color:
+    rgba(
+      91,
+      215,
+      250,
+      0.36
+    );
+
+  box-shadow:
+    0
+    0
+    18px
+    rgba(
+      42,
+      183,
+      231,
+      0.055
+    );
 }

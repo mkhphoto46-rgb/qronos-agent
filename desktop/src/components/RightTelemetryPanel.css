@@ -7,17 +7,17 @@
   position: absolute;
   z-index: 12;
 
-  top: clamp(58px, 7vh, 76px);
-  right: clamp(52px, 5.4vw, 74px);
+  top: clamp(58px, 75.6px, 76px);
+  right: clamp(52px, 103.68px, 74px);
 
-  width: clamp(270px, 22vw, 298px);
+  width: clamp(270px, 422.4px, 298px);
 
   display: flex;
   flex-direction: column;
 
   gap: 0;
 
-  max-height: calc(100vh - 86px);
+  max-height: calc(1080px - 86px);
 
   box-sizing: border-box;
 
@@ -1663,203 +1663,1171 @@
    RESPONSIVE
    ========================================================= */
 
-@media (max-width: 1180px) {
-  .qrt-panel {
-    right: 44px;
 
-    width: 280px;
-  }
+/* breakpoint removed: unified proportional scaling owns window resize */
 
-  .qrt-system-block {
-    width: 238px;
 
-    transform: translateX(8px);
-  }
 
-  .qrt-status-slot {
-    width: 238px;
-  }
+/* breakpoint removed: unified proportional scaling owns window resize */
 
-  .qrt-metric {
-    grid-template-columns:
-      37px
-      36px
-      51px
-      49px;
-  }
-
-  .qrt-metric-wave {
-    width: 51px;
-  }
-
-  .qrt-storage-row {
-    grid-template-columns:
-      40px
-      minmax(108px, 1fr)
-      58px
-      40px;
-  }
-
-  .qrt-storage-track {
-    width: 58px;
-  }
-
-  .qrt-device-scroll {
-    grid-auto-columns: 87px;
-  }
-
-  .qrt-device {
-    width: 87px;
-  }
-}
-
-@media (max-width: 1040px) {
-  .qrt-panel {
-    top: 54px;
-
-    right: 34px;
-
-    width: 266px;
-
-    max-height:
-      calc(100vh - 70px);
-  }
-
-  .qrt-system-block {
-    width: 228px;
-
-    transform: translateX(7px);
-  }
-
-  .qrt-status-slot {
-    width: 228px;
-  }
-
-  .qrt-metric {
-    grid-template-columns:
-      35px
-      34px
-      47px
-      47px;
-  }
-
-  .qrt-metric-icon {
-    width: 33px;
-    height: 33px;
-  }
-
-  .qrt-metric-wave {
-    width: 47px;
-  }
-
-  .qrt-storage-block {
-    margin-top: 12px;
-  }
-
-  .qrt-storage-row {
-    grid-template-columns:
-      39px
-      minmax(99px, 1fr)
-      53px
-      37px;
-  }
-
-  .qrt-storage-track {
-    width: 53px;
-  }
-
-  .qrt-storage-meter {
-    transform: translateX(-6px);
-  }
-
-  .qrt-device-scroll {
-    grid-auto-columns: 82px;
-  }
-
-  .qrt-device {
-    width: 82px;
-  }
-
-  .qrt-device-name {
-    font-size: 9px;
-  }
-
-  .qrt-device-type {
-    font-size: 6.7px;
-  }
-}
 
 /*
  * Protect system from leaving top of app.
  */
 
-@media (max-height: 720px) {
-  .qrt-panel {
-    top: 48px;
-    bottom: 14px;
 
-    max-height: none;
+/* breakpoint removed: unified proportional scaling owns window resize */
 
-    overflow-y: auto;
+/* =========================================================
+   QRONOS TELEMETRY - ORACLE DATA BRIDGE PASS
+   Single central feed near Storage.
+   ========================================================= */
 
-    scrollbar-width: none;
+.qrt-panel {
+  overflow: visible;
+}
+
+.qrt-panel::before {
+  content: "";
+  position: absolute;
+  left: -270px;
+  top: 122px;
+  width: 280px;
+  height: 430px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(
+      circle at 100% 50%,
+      rgba(67, 223, 255, 0.16) 0%,
+      rgba(67, 223, 255, 0.08) 18%,
+      rgba(67, 223, 255, 0.03) 34%,
+      transparent 70%
+    );
+  filter: blur(24px);
+  opacity: 0.78;
+  animation:
+    qrtDataAmbientBreath
+    8.6s
+    ease-in-out
+    infinite;
+}
+
+.qrt-system-block,
+.qrt-storage-block,
+.qrt-devices-block {
+  position: relative;
+  overflow: visible;
+}
+
+.qrt-system-block > *,
+.qrt-storage-block > *,
+.qrt-devices-block > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* Keep the accepted soft system glow. */
+
+.qrt-metric-graph-glow {
+  opacity: 0.58;
+  filter: blur(2.8px);
+  animation:
+    qrtMetricGlowBreath
+    2.6s
+    ease-in-out
+    infinite;
+}
+
+.qrt-metric-graph-line {
+  stroke-dasharray: 4.6 2.2;
+  animation:
+    qrtMetricLineShift
+    3.2s
+    linear
+    infinite;
+}
+
+/* Small receiver light beside System / Storage / Devices. */
+
+.qrt-system-heading::before,
+.qrt-storage-block > .qrt-heading::before,
+.qrt-devices-block > .qrt-heading::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  pointer-events: none;
+  background: rgba(93, 228, 255, 0.96);
+  box-shadow:
+    0 0 5px rgba(93, 228, 255, 0.82),
+    0 0 11px rgba(93, 228, 255, 0.34);
+  animation:
+    qrtReceiverDot
+    3.5s
+    ease-in-out
+    infinite;
+}
+
+.qrt-storage-block > .qrt-heading::before {
+  animation-delay: -1.15s;
+}
+
+.qrt-devices-block > .qrt-heading::before {
+  animation-delay: -2.25s;
+}
+
+/* Remove repeated orbiting dust from every icon. */
+
+.qrt-metric-icon::after,
+.qrt-storage-icon::after,
+.qrt-device-icon::after,
+.qrt-qronos-storage-icon::after {
+  content: none !important;
+  display: none !important;
+  animation: none !important;
+}
+
+/* Single Oracle -> telemetry bridge, only at Storage. */
+
+.qrt-oracle-data-bridge {
+  position: absolute;
+  z-index: 1;
+  right: calc(100% - 7px);
+  top: -9px;
+  width: clamp(250px, 595.2px, 520px);
+  height: 150px;
+  pointer-events: none;
+  overflow: visible;
+  opacity: 0.93;
+  -webkit-mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(0, 0, 0, 0.3) 7%,
+      #000 21%,
+      #000 67%,
+      rgba(0, 0, 0, 0.4) 78%,
+      transparent 92%
+    );
+  mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(0, 0, 0, 0.3) 7%,
+      #000 24%,
+      #000 92%,
+      transparent 100%
+    );
+}
+
+.qrt-oracle-data-bridge::before {
+  content: "";
+  position: absolute;
+  left: 65%;
+  top: 61px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      circle,
+      rgba(239, 255, 255, 0.95) 0%,
+      rgba(93, 231, 255, 0.66) 18%,
+      rgba(71, 222, 255, 0.18) 46%,
+      transparent 74%
+    );
+  filter: blur(0.4px);
+  opacity: 0.58;
+  animation:
+    qrtBridgeIntakePulse
+    2.9s
+    ease-in-out
+    infinite;
+}
+
+.qrt-oracle-data-bridge svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+
+.qrt-oracle-bridge-lines path {
+  fill: none;
+  stroke: rgba(51, 203, 239, 0.14);
+  stroke-width: 0.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.qrt-oracle-bridge-lines path:nth-child(2n) {
+  stroke: rgba(69, 218, 247, 0.09);
+}
+
+.qrt-oracle-bridge-energy path {
+  fill: none;
+  stroke: url(#qrt-bridge-gradient);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 22 42;
+  vector-effect: non-scaling-stroke;
+  filter: url(#qrt-bridge-glow);
+  animation:
+    qrtBridgeEnergyRun
+    4.8s
+    linear
+    infinite;
+}
+
+.qrt-oracle-bridge-energy path:nth-child(2) {
+  animation-delay: -1.35s;
+}
+
+.qrt-oracle-bridge-energy path:nth-child(3) {
+  animation-delay: -2.7s;
+}
+
+.qrt-oracle-bridge-energy path:nth-child(4) {
+  animation-delay: -3.75s;
+}
+
+.qrt-oracle-bridge-nodes circle {
+  fill: rgba(134, 239, 255, 0.88);
+  filter: url(#qrt-bridge-glow);
+  animation:
+    qrtBridgeNodePulse
+    3.1s
+    ease-in-out
+    infinite;
+}
+
+.qrt-oracle-bridge-nodes circle:nth-child(2n) {
+  animation-delay: -1.1s;
+}
+
+.qrt-oracle-bridge-nodes circle:nth-child(3n) {
+  animation-delay: -2.05s;
+}
+
+.qrt-oracle-bridge-particles circle {
+  fill: rgba(230, 253, 255, 0.98);
+  filter: url(#qrt-bridge-glow);
+  opacity: 0;
+}
+
+.qrt-oracle-bridge-particles circle:nth-child(2n) {
+  fill: rgba(82, 226, 255, 0.98);
+}
+
+.qrt-oracle-bridge-particles circle:nth-child(3n) {
+  fill: rgba(170, 149, 255, 0.9);
+}
+
+.qrt-oracle-data-bridge::after {
+  content: "";
+  position: absolute;
+  left: 63%;
+  top: 29%;
+  width: 29%;
+  height: 52%;
+  pointer-events: none;
+  opacity: 0.56;
+  background:
+    radial-gradient(circle at 8% 42%, rgba(224, 253, 255, 0.86) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 19% 67%, rgba(67, 222, 255, 0.72) 0 1px, transparent 1.7px),
+    radial-gradient(circle at 31% 28%, rgba(67, 222, 255, 0.58) 0 0.9px, transparent 1.6px),
+    radial-gradient(circle at 43% 73%, rgba(234, 254, 255, 0.78) 0 1.1px, transparent 1.8px),
+    radial-gradient(circle at 56% 35%, rgba(83, 229, 255, 0.72) 0 1px, transparent 1.7px),
+    radial-gradient(circle at 68% 61%, rgba(169, 150, 255, 0.52) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 81% 24%, rgba(232, 253, 255, 0.82) 0 1.1px, transparent 1.8px),
+    radial-gradient(circle at 91% 69%, rgba(73, 225, 255, 0.66) 0 1px, transparent 1.7px);
+  filter: blur(0.15px);
+  animation:
+    qrtBridgeDustDrift
+    7.8s
+    ease-in-out
+    infinite;
+}
+
+@keyframes qrtDataAmbientBreath {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: translate3d(0, 0, 0) scaleY(0.98);
   }
 
-  .qrt-panel::-webkit-scrollbar {
-    width: 0;
-    height: 0;
+  50% {
+    opacity: 0.9;
+    transform: translate3d(10px, 0, 0) scaleY(1.04);
+  }
+}
+
+@keyframes qrtMetricGlowBreath {
+  0%,
+  100% {
+    opacity: 0.42;
   }
 
-  .qrt-system-grid {
-    gap: 2px;
+  50% {
+    opacity: 0.82;
+  }
+}
+
+@keyframes qrtMetricLineShift {
+  from {
+    stroke-dashoffset: 0;
   }
 
-  .qrt-metric {
-    height: 34px;
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+@keyframes qrtReceiverDot {
+  0%,
+  100% {
+    opacity: 0.34;
+    transform: translateY(-50%) scale(0.72);
   }
 
-  .qrt-metric-icon {
-    width: 31px;
-    height: 31px;
+  48% {
+    opacity: 1;
+    transform: translateY(-50%) scale(1.22);
   }
 
-  .qrt-metric-icon svg {
-    width: 19px;
-    height: 19px;
+  70% {
+    opacity: 0.58;
+    transform: translateY(-50%) scale(0.92);
+  }
+}
+
+@keyframes qrtBridgeEnergyRun {
+  from {
+    stroke-dashoffset: 0;
+    opacity: 0.36;
   }
 
-  .qrt-status-slot {
-    height: 26px;
-
-    margin-top: 1px;
+  42% {
+    opacity: 0.98;
   }
 
-  .qrt-storage-block {
-    margin-top: 9px;
+  to {
+    stroke-dashoffset: -128;
+    opacity: 0.44;
+  }
+}
+
+@keyframes qrtBridgeNodePulse {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.74);
+    transform-box: fill-box;
+    transform-origin: center;
   }
 
-  .qrt-drive-scroll {
-    max-height: 145px;
+  48% {
+    opacity: 1;
+    transform: scale(1.18);
+  }
+}
+
+@keyframes qrtBridgeIntakePulse {
+  0%,
+  100% {
+    opacity: 0.38;
+    transform: scale(0.86);
   }
 
-  .qrt-storage-row {
-    min-height: 38px;
+  50% {
+    opacity: 0.88;
+    transform: scale(1.16);
+  }
+}
+
+@keyframes qrtBridgeDustDrift {
+  0%,
+  100% {
+    opacity: 0.34;
+    transform: translate3d(-8px, 2px, 0) scale(0.98);
   }
 
-  .qrt-storage-row-pinned {
-    min-height: 44px;
+  45% {
+    opacity: 0.7;
+    transform: translate3d(8px, -3px, 0) scale(1.04);
   }
 
-  .qrt-devices-block {
-    margin-top: 5px;
+  72% {
+    opacity: 0.48;
+    transform: translate3d(14px, 1px, 0) scale(1);
+  }
+}
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+@media (prefers-reduced-motion: reduce) {
+  .qrt-oracle-bridge-energy path,
+  .qrt-oracle-bridge-nodes circle,
+  .qrt-oracle-data-bridge::before,
+  .qrt-oracle-data-bridge::after,
+  .qrt-system-heading::before,
+  .qrt-storage-block > .qrt-heading::before,
+  .qrt-devices-block > .qrt-heading::before,
+  .qrt-metric-graph-glow,
+  .qrt-metric-graph-line {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* =========================================================
+   TALL TELEMETRY CONSOLE — REFERENCE LAYOUT PASS
+
+   Keeps the live data and controls, while matching the taller
+   SYSTEM / STORAGE / DEVICES hierarchy of the approved visual.
+   ========================================================= */
+
+.qrt-panel {
+  top: clamp(34px, 51.84px, 62px);
+  right: clamp(28px, 65.28px, 64px);
+  width: clamp(310px, 480px, 390px);
+  max-height: calc(1080px - 52px);
+}
+
+.qrt-heading {
+  height: 30px;
+  padding: 0 4px 8px;
+}
+
+.qrt-heading > span {
+  font-size: clamp(10px, 13.824px, 13px);
+  letter-spacing: 0.3em;
+}
+
+.qrt-heading > small {
+  font-size: 7px;
+}
+
+.qrt-system-block {
+  width: 88%;
+  transform: translateX(4px);
+  gap: 7px;
+}
+
+.qrt-system-grid {
+  gap: 7px;
+}
+
+.qrt-metric {
+  height: clamp(48px, 62.64px, 64px);
+  grid-template-columns:
+    clamp(48px, 69.12px, 58px)
+    clamp(42px, 63.36px, 54px)
+    minmax(62px, 1fr)
+    clamp(58px, 86.4px, 72px);
+  column-gap: 6px;
+}
+
+.qrt-metric-icon {
+  width: clamp(45px, 65.28px, 56px);
+  height: clamp(45px, 65.28px, 56px);
+  border-radius: 15px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(10, 56, 78, 0.72), rgba(3, 17, 28, 0.88));
+  box-shadow:
+    inset 0 0 0 1px rgba(36, 190, 235, 0.28),
+    inset 0 0 22px rgba(0, 173, 224, 0.08),
+    0 0 18px rgba(18, 184, 230, 0.05);
+}
+
+.qrt-metric-icon svg {
+  width: clamp(25px, 38.4px, 32px);
+  height: clamp(25px, 38.4px, 32px);
+}
+
+.qrt-metric-label {
+  font-size: clamp(11px, 16.128px, 14px);
+  letter-spacing: 0.02em;
+}
+
+.qrt-metric-wave {
+  width: 100%;
+  height: 22px;
+}
+
+.qrt-metric-graph {
+  height: 22px;
+}
+
+.qrt-metric-reading strong {
+  font-size: clamp(14px, 20.16px, 18px);
+}
+
+.qrt-metric-reading span {
+  font-size: clamp(6px, 8.832px, 8px);
+  letter-spacing: 0.04em;
+}
+
+.qrt-status-slot {
+  width: 100%;
+  height: 43px;
+  margin-top: 5px;
+}
+
+.qrt-status-preview {
+  gap: 9px;
+  padding-left: 8px;
+}
+
+.qrt-status-emitter {
+  width: 26px;
+  height: 26px;
+  flex-basis: 26px;
+}
+
+.qrt-status-label {
+  font-size: clamp(8px, 11.136px, 10px);
+}
+
+.qrt-storage-block,
+.qrt-devices-block {
+  margin-top: clamp(10px, 19.44px, 22px);
+  gap: 8px;
+}
+
+.qrt-storage-row {
+  min-height: clamp(53px, 65.88px, 68px);
+  grid-template-columns:
+    clamp(48px, 72.96px, 60px)
+    minmax(112px, 1fr)
+    clamp(62px, 96px, 82px)
+    clamp(36px, 53.76px, 46px);
+  column-gap: 8px;
+}
+
+.qrt-storage-icon {
+  width: clamp(45px, 67.2px, 58px);
+  height: clamp(45px, 67.2px, 58px);
+  border-radius: 14px;
+}
+
+.qrt-storage-icon svg {
+  width: clamp(25px, 40.32px, 34px);
+  height: clamp(25px, 40.32px, 34px);
+}
+
+.qrt-qronos-glyph {
+  width: clamp(30px, 45.12px, 38px) !important;
+  height: clamp(30px, 45.12px, 38px) !important;
+}
+
+.qrt-storage-name,
+.qrt-storage-drive-name {
+  font-size: clamp(11px, 15.744px, 14px);
+}
+
+.qrt-storage-drive-letter {
+  font-size: clamp(16px, 22.656px, 20px);
+}
+
+.qrt-storage-meta,
+.qrt-storage-detail {
+  font-size: clamp(7px, 10.368px, 9px);
+}
+
+.qrt-storage-percent {
+  font-size: clamp(13px, 19.2px, 17px);
+}
+
+.qrt-storage-track {
+  width: 100%;
+}
+
+.qrt-drive-scroll {
+  gap: 7px;
+  max-height: clamp(168px, 248.4px, 306px);
+  padding-right: 5px;
+}
+
+.qrt-device-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: clamp(126px, 205.2px, 230px);
+  padding: 2px 6px 5px 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scroll-snap-type: y proximity;
+}
+
+.qrt-device-scroll::-webkit-scrollbar {
+  width: 3px;
+  height: auto;
+}
+
+.qrt-device {
+  width: 100%;
+  min-height: clamp(60px, 76.68px, 76px);
+  display: grid;
+  grid-template-columns: clamp(52px, 80.64px, 66px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding: 0 4px;
+  text-align: left;
+  scroll-snap-align: start;
+}
+
+.qrt-device-icon {
+  width: clamp(48px, 72.96px, 60px);
+  height: clamp(48px, 72.96px, 60px);
+}
+
+.qrt-device-icon svg {
+  width: clamp(27px, 43.2px, 36px);
+  height: clamp(27px, 43.2px, 36px);
+}
+
+.qrt-device-copy {
+  width: auto;
+  min-width: 0;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.qrt-device-name {
+  font-size: clamp(10px, 15.744px, 14px);
+  text-align: left;
+}
+
+.qrt-device-type {
+  font-size: clamp(7px, 11.136px, 10px);
+  text-align: left;
+}
+
+.qrt-device-provider {
+  max-width: 72px;
+  overflow: hidden;
+  color: rgba(114, 194, 224, 0.72);
+  font-size: clamp(7px, 10.368px, 9px);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+/* Restore the original compact telemetry scale. The Oracle-to-Storage bridge
+   above intentionally remains the only new visual treatment. */
+.qrt-panel { top: clamp(58px, 75.6px, 76px); right: clamp(52px, 103.68px, 74px); width: clamp(270px, 422.4px, 298px); max-height: calc(1080px - 86px); }
+.qrt-heading { height: 21px; padding: 0 2px 4px; }
+.qrt-heading > span { font-size: 9px; letter-spacing: .24em; }
+.qrt-heading > small { font-size: 6px; }
+.qrt-system-block { width: 246px; transform: translateX(9px); gap: 4px; }
+.qrt-system-grid { gap: 4px; }
+.qrt-metric { height: 38px; grid-template-columns: 38px 38px 54px 51px; column-gap: 3px; }
+.qrt-metric-icon { width: 35px; height: 35px; border-radius: 9px; }
+.qrt-metric-icon svg { width: 21px; height: 21px; }
+.qrt-metric-label { font-size: 10px; letter-spacing: normal; }
+.qrt-metric-wave, .qrt-metric-graph { width: 54px; height: 16px; }
+.qrt-metric-reading strong { font-size: 15px; }
+.qrt-metric-reading span { font-size: 5.5px; letter-spacing: normal; }
+.qrt-status-slot { width: 246px; height: 31px; margin-top: 3px; }
+.qrt-status-preview { gap: 5px; padding-left: 4px; }
+.qrt-status-emitter { width: 15px; height: 15px; flex-basis: 15px; }
+.qrt-status-label { font-size: 6.5px; }
+.qrt-storage-block { margin-top: 17px; gap: 5px; }
+.qrt-devices-block { margin-top: 8px; gap: 5px; }
+.qrt-storage-row { min-height: 43px; grid-template-columns: 42px minmax(118px, 1fr) 62px 43px; column-gap: 3px; }
+.qrt-storage-row-pinned { min-height: 51px; }
+.qrt-storage-icon { width: 39px; height: 39px; border-radius: 9px; }
+.qrt-storage-icon svg { width: 23px; height: 23px; }
+.qrt-qronos-glyph { width: 29px !important; height: 29px !important; }
+.qrt-storage-name { font-size: 10.8px; }
+.qrt-storage-drive-letter { font-size: 14.5px; }
+.qrt-storage-drive-name { font-size: 9.8px; }
+.qrt-storage-meta { font-size: 7.6px; }
+.qrt-storage-detail { font-size: 8px; }
+.qrt-storage-percent { font-size: 13.5px; }
+.qrt-storage-track { width: 62px; }
+.qrt-drive-scroll { gap: 5px; max-height: 212px; padding-right: 2px; }
+.qrt-device-scroll { display: grid; grid-template-rows: repeat(2, 76px); grid-auto-flow: column; grid-auto-columns: 92px; gap: 6px 7px; max-height: none; padding: 1px 2px 5px; overflow-x: auto; overflow-y: hidden; scroll-snap-type: none; }
+.qrt-device-scroll::-webkit-scrollbar { width: auto; height: 4px; }
+.qrt-device { width: 92px; min-height: 0; height: 76px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 3px; padding: 0; text-align: initial; }
+.qrt-device-icon { width: 42px; height: 42px; }
+.qrt-device-icon svg { width: 27px; height: 27px; }
+.qrt-device-copy { width: 100%; align-items: center; text-align: center; }
+.qrt-device-name { font-size: 9.6px; text-align: center; }
+.qrt-device-type { font-size: 7.2px; text-align: center; }
+
+/* breakpoint removed: unified proportional scaling owns window resize */
+
+
+/* =========================================================
+   STORAGE / DEVICE INTERACTION FEEDBACK
+   Hover = whole item brightens.
+   Click = irregular particle burst from exact click point.
+   ========================================================= */
+
+.qrt-interactive-item {
+  position: relative;
+
+  isolation: isolate;
+
+  cursor: pointer;
+
+  outline: none;
+
+  overflow: visible;
+
+  transition:
+    filter 180ms ease,
+    transform 180ms ease;
+}
+
+.qrt-interactive-item::after {
+  content: "";
+
+  position: absolute;
+
+  z-index: -1;
+
+  inset: -4px -8px;
+
+  pointer-events: none;
+
+  border-radius: 12px;
+
+  opacity: 0;
+
+  transform:
+    scale(0.965);
+
+  background:
+    radial-gradient(
+      ellipse at 34% 50%,
+      rgba(77, 224, 255, 0.22) 0%,
+      rgba(51, 180, 226, 0.09) 44%,
+      transparent 82%
+    );
+
+  box-shadow: none;
+
+  transition:
+    opacity 180ms ease,
+    transform 220ms ease;
+}
+
+.qrt-device.qrt-interactive-item::after {
+  inset: -5px -4px;
+
+  border-radius: 10px;
+
+  background:
+    radial-gradient(
+      ellipse at 50% 38%,
+      rgba(77, 224, 255, 0.24) 0%,
+      rgba(51, 180, 226, 0.085) 50%,
+      transparent 84%
+    );
+}
+
+.qrt-interactive-item:hover {
+  filter:
+    brightness(1.12);
+}
+
+.qrt-interactive-item:hover::after {
+  opacity: 0.78;
+
+  transform:
+    scale(1);
+
+  box-shadow: none;
+}
+
+.qrt-interactive-item:hover
+  .qrt-storage-icon,
+.qrt-interactive-item:hover
+  .qrt-device-icon {
+  filter:
+    brightness(1.24)
+    drop-shadow(
+      0 0 5px
+      rgba(
+        76,
+        222,
+        255,
+        0.2
+      )
+    );
+}
+
+.qrt-interactive-item:hover
+  .qrt-storage-drive-letter,
+.qrt-interactive-item:hover
+  .qrt-storage-drive-colon,
+.qrt-interactive-item:hover
+  .qrt-storage-drive-name,
+.qrt-interactive-item:hover
+  .qrt-storage-meta,
+.qrt-interactive-item:hover
+  .qrt-storage-detail,
+.qrt-interactive-item:hover
+  .qrt-storage-percent,
+.qrt-interactive-item:hover
+  .qrt-device-name,
+.qrt-interactive-item:hover
+  .qrt-device-type {
+  filter:
+    brightness(1.18);
+}
+
+.qrt-interactive-item:focus-visible::after {
+  opacity: 0.82;
+
+  transform:
+    scale(1);
+
+  box-shadow: none;
+}
+
+/* -------------------------
+   Click particle burst
+   ------------------------- */
+
+.qrt-click-burst {
+  position: absolute;
+
+  inset: 0;
+
+  z-index: 30;
+
+  pointer-events: none;
+
+  overflow: visible;
+}
+
+.qrt-click-burst-particle {
+  position: absolute;
+
+  width:
+    var(
+      --qrt-burst-size,
+      2px
+    );
+
+  height:
+    var(
+      --qrt-burst-size,
+      2px
+    );
+
+  margin:
+    calc(
+      var(
+        --qrt-burst-size,
+        2px
+      ) /
+      -2
+    );
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(0.3);
+
+  filter:
+    blur(
+      var(
+        --qrt-burst-blur,
+        0px
+      )
+    );
+
+  will-change:
+    transform,
+    opacity;
+
+  animation:
+    qrtClickParticleBurst
+    var(
+      --qrt-burst-duration,
+      720ms
+    )
+    cubic-bezier(
+      0.16,
+      0.72,
+      0.18,
+      1
+    )
+    var(
+      --qrt-burst-delay,
+      0ms
+    )
+    both;
+}
+
+.qrt-click-burst-cyan {
+  background:
+    rgba(
+      94,
+      231,
+      255,
+      1
+    );
+
+  box-shadow:
+    0 0 5px
+      rgba(
+        94,
+        231,
+        255,
+        0.72
+      ),
+    0 0 12px
+      rgba(
+        43,
+        189,
+        240,
+        0.3
+      );
+}
+
+.qrt-click-burst-white {
+  background:
+    rgba(
+      247,
+      255,
+      255,
+      1
+    );
+
+  box-shadow:
+    0 0 6px
+      rgba(
+        247,
+        255,
+        255,
+        0.82
+      ),
+    0 0 14px
+      rgba(
+        133,
+        236,
+        255,
+        0.38
+      );
+}
+
+.qrt-click-burst-violet {
+  background:
+    rgba(
+      189,
+      164,
+      255,
+      1
+    );
+
+  box-shadow:
+    0 0 6px
+      rgba(
+        189,
+        164,
+        255,
+        0.72
+      ),
+    0 0 13px
+      rgba(
+        120,
+        88,
+        255,
+        0.32
+      );
+}
+
+@keyframes qrtClickParticleBurst {
+  0% {
+    opacity: 0;
+
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      )
+      scale(0.22);
   }
 
-  .qrt-device-scroll {
-    grid-template-rows:
-      repeat(2, 70px);
+  12% {
+    opacity:
+      var(
+        --qrt-burst-alpha,
+        0.82
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --qrt-burst-dx
+          ) *
+          0.06
+        ),
+        calc(
+          var(
+            --qrt-burst-dy
+          ) *
+          0.06
+        ),
+        0
+      )
+      scale(1.18);
   }
 
-  .qrt-device {
-    height: 70px;
+  34% {
+    opacity:
+      calc(
+        var(
+          --qrt-burst-alpha,
+          0.82
+        ) *
+        0.94
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --qrt-burst-dx
+          ) *
+          0.28
+        ),
+        calc(
+          var(
+            --qrt-burst-dy
+          ) *
+          0.28
+        ),
+        0
+      )
+      scale(1.02);
+  }
+
+  62% {
+    opacity:
+      calc(
+        var(
+          --qrt-burst-alpha,
+          0.82
+        ) *
+        0.62
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --qrt-burst-dx
+          ) *
+          0.64
+        ),
+        calc(
+          var(
+            --qrt-burst-dy
+          ) *
+          0.64
+        ),
+        0
+      )
+      scale(0.82);
+  }
+
+  84% {
+    opacity:
+      calc(
+        var(
+          --qrt-burst-alpha,
+          0.82
+        ) *
+        0.24
+      );
+
+    transform:
+      translate3d(
+        calc(
+          var(
+            --qrt-burst-dx
+          ) *
+          0.88
+        ),
+        calc(
+          var(
+            --qrt-burst-dy
+          ) *
+          0.88
+        ),
+        0
+      )
+      scale(0.6);
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translate3d(
+        var(
+          --qrt-burst-dx
+        ),
+        var(
+          --qrt-burst-dy
+        ),
+        0
+      )
+      scale(0.38);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qrt-click-burst-particle {
+    animation-duration:
+      0.001ms !important;
+
+    animation-iteration-count:
+      1 !important;
   }
 }

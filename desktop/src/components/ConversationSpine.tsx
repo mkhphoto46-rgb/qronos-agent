@@ -429,14 +429,38 @@ function ConversationSpine() {
     const pocketRect =
       pocket.getBoundingClientRect();
 
+    const pocketScaleX =
+      pocket.offsetWidth > 0
+        ? pocketRect.width /
+          pocket.offsetWidth
+        : 1;
+
+    const pocketScaleY =
+      pocket.offsetHeight > 0
+        ? pocketRect.height /
+          pocket.offsetHeight
+        : 1;
+
     setParticleOrigin({
       x:
-        memoryAnchor.clientX -
-        pocketRect.left,
+        (
+          memoryAnchor.clientX -
+          pocketRect.left
+        ) /
+        Math.max(
+          0.001,
+          pocketScaleX,
+        ),
 
       y:
-        memoryAnchor.clientY -
-        pocketRect.top,
+        (
+          memoryAnchor.clientY -
+          pocketRect.top
+        ) /
+        Math.max(
+          0.001,
+          pocketScaleY,
+        ),
     });
 
     setAnchorReady(

@@ -790,6 +790,18 @@ function OracleDnaSpine({
         const rect =
           canvas.getBoundingClientRect();
 
+        const scaleX =
+          width > 0
+            ? rect.width /
+              width
+            : 1;
+
+        const scaleY =
+          height > 0
+            ? rect.height /
+              height
+            : 1;
+
         onAnchorChangeRef.current?.(
           {
             id:
@@ -797,30 +809,29 @@ function OracleDnaSpine({
 
             clientX:
               rect.left +
-              frozen.x,
+              frozen.x *
+                scaleX,
 
             clientY:
               rect.top +
-              frozen.y,
+              frozen.y *
+                scaleY,
           },
         );
       };
 
     const resize =
       () => {
-        const rect =
-          parent.getBoundingClientRect();
-
         width =
           Math.max(
             1,
-            rect.width,
+            parent.clientWidth,
           );
 
         height =
           Math.max(
             1,
-            rect.height,
+            parent.clientHeight,
           );
 
         dpr =
@@ -931,13 +942,37 @@ function OracleDnaSpine({
       const rect =
         canvas.getBoundingClientRect();
 
+      const scaleX =
+        width > 0
+          ? rect.width /
+            width
+          : 1;
+
+      const scaleY =
+        height > 0
+          ? rect.height /
+            height
+          : 1;
+
       const x =
-        event.clientX -
-        rect.left;
+        (
+          event.clientX -
+          rect.left
+        ) /
+        Math.max(
+          0.001,
+          scaleX,
+        );
 
       const y =
-        event.clientY -
-        rect.top;
+        (
+          event.clientY -
+          rect.top
+        ) /
+        Math.max(
+          0.001,
+          scaleY,
+        );
 
       let nearest:
         | string
@@ -2140,6 +2175,18 @@ function OracleDnaSpine({
             const canvasRect =
               canvas.getBoundingClientRect();
 
+            const scaleX =
+              width > 0
+                ? canvasRect.width /
+                  width
+                : 1;
+
+            const scaleY =
+              height > 0
+                ? canvasRect.height /
+                  height
+                : 1;
+
             onAnchorChangeRef.current?.(
               {
                 id:
@@ -2147,11 +2194,13 @@ function OracleDnaSpine({
 
                 clientX:
                   canvasRect.left +
-                  naturalX,
+                  naturalX *
+                    scaleX,
 
                 clientY:
                   canvasRect.top +
-                  naturalY,
+                  naturalY *
+                    scaleY,
               },
             );
           }

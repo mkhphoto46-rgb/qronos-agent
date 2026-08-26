@@ -530,16 +530,19 @@ function QronosOrb({
         return;
       }
 
-      const rect =
-        parent.getBoundingClientRect();
+      const logicalWidth =
+        parent.clientWidth;
+
+      const logicalHeight =
+        parent.clientHeight;
 
       renderSize =
         Math.max(
           40,
           Math.min(
             size,
-            rect.width,
-            rect.height,
+            logicalWidth,
+            logicalHeight,
           ),
         );
 
