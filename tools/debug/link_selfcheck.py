@@ -1,4 +1,6 @@
 """
+DEBUG TOOL - not part of Qronos. See tools/debug/debug_marker.py.
+
 Does the device link work on this machine?
 
 Run this first, on the PC, before trying anything from a phone. It answers the
@@ -9,7 +11,7 @@ Everything happens on this machine over loopback. Nothing listens on the
 network, nothing is written to disk, and no phone is involved. It either prints
 PASS at the end or tells you exactly what failed.
 
-    python tools\\link_selfcheck.py
+    python tools\\debug\\link_selfcheck.py
 """
 
 from __future__ import annotations
@@ -21,8 +23,15 @@ import traceback
 from pathlib import Path
 
 
-# Allow running this file directly from the repository root.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Run directly rather than imported, so it puts the repository root on the
+# path itself.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from tools.debug.debug_marker import (  # noqa: E402
+    QRONOS_DEBUG_TOOL,
+    banner,
+    require_debug_context,
+)
 
 from core.link_audit import AuditLog  # noqa: E402
 from core.link_capability import LinkOp, LinkScope, scope_for_peer  # noqa: E402
@@ -59,9 +68,12 @@ def heading(text: str) -> None:
 
 
 def main() -> int:
+    require_debug_context("link_selfcheck")
+
     print("=" * 68)
     print("  Qronos device link - self check")
     print("=" * 68)
+    banner("link_selfcheck - runs the real link on loopback")
 
     heading("1. This machine")
 
@@ -220,7 +232,7 @@ def main() -> int:
     print(f"  All {len(results)} checks passed.")
     print()
     print("  The link works on this machine.")
-    print("  Next: run tools/link_reachability.py so a phone can be tested.")
+    print("  Next: run tools/debug/link_reachability.py to test a phone.")
 
     return 0
 
