@@ -11,6 +11,7 @@ Everything binds port 0 and lives for one test.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Callable
 
 from core.link_audit import AuditLog
@@ -22,6 +23,37 @@ from core.link_server import Handler, LinkServer, LinkSettings
 
 
 CLIENT_TIMEOUT = 5.0
+
+
+def wait_for(
+    predicate: Callable[[], bool],
+    timeout: float = 3.0,
+    interval: float = 0.005,
+) -> bool:
+    """
+    Wait for something the server's own thread is about to do.
+
+    A client can learn that a connection failed before the server has finished
+    recording why. The TLS alert that makes the client's handshake raise is sent
+    from inside OpenSSL, before any of this project's code runs, so a test that
+    asserts on the audit log the instant the client raises is racing the server
+    thread.
+
+    That race failed once in CI and passed everywhere else, which is the worst
+    way for it to behave. Waiting for the condition removes it without making
+    the tests slower in the normal case, because the predicate is almost always
+    already true on the first check.
+    """
+
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+
+        time.sleep(interval)
+
+    return predicate()
 
 
 def ok_handler(session, request):

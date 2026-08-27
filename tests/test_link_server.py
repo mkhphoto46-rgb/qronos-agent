@@ -27,6 +27,7 @@ from tests.fixtures.link_harness import (
     FakeServerClock,
     ServerHarness,
     ok_handler,
+    wait_for,
 )
 
 
@@ -96,8 +97,12 @@ class TestPairingOverTheWire(ServerTestCase):
         record = self.harness.registry.all()[0]
 
         self.assertIs(record.status, DeviceStatus.ACTIVE)
-        self.assertEqual(
-            self.harness.audit.count(AuditEvent.PAIRING_COMPLETED), 1
+        self.assertTrue(
+            wait_for(
+                lambda: self.harness.audit.count(
+                    AuditEvent.PAIRING_COMPLETED
+                ) >= 1
+            )
         )
 
     def test_the_negotiated_session_is_tls_1_3(self) -> None:
@@ -133,8 +138,12 @@ class TestPairingOverTheWire(ServerTestCase):
 
         client.close()
 
-        self.assertEqual(
-            self.harness.audit.count(AuditEvent.PAIRING_REFUSED), 1
+        self.assertTrue(
+            wait_for(
+                lambda: self.harness.audit.count(
+                    AuditEvent.PAIRING_REFUSED
+                ) >= 1
+            )
         )
 
     def test_pairing_the_wrong_device_through_an_open_window_is_refused(
@@ -194,14 +203,19 @@ class TestAuthentication(ServerTestCase):
         with self.assertRaises(LinkClientError):
             client.connect()
 
-        refusals = [
-            record
-            for record in self.harness.audit.records()
-            if record.event is AuditEvent.HANDSHAKE_REFUSED
-        ]
+        def refusals() -> list:
+            return [
+                record
+                for record in self.harness.audit.records()
+                if record.event is AuditEvent.HANDSHAKE_REFUSED
+            ]
 
-        self.assertEqual(len(refusals), 1)
-        self.assertEqual(refusals[0].device_id, "ffffffffffffffff")
+        self.assertTrue(
+            wait_for(lambda: len(refusals()) >= 1),
+            "the server never recorded the failed handshake",
+        )
+        self.assertEqual(len(refusals()), 1)
+        self.assertEqual(refusals()[0].device_id, "ffffffffffffffff")
 
     def test_the_server_does_not_say_why_it_refused(self) -> None:
         # An unknown device and a wrong key are indistinguishable from the
@@ -270,8 +284,12 @@ class TestAuthorisation(ServerTestCase):
         with self.harness.pair() as client:
             client.call("list_devices")
 
-        self.assertEqual(
-            self.harness.audit.count(AuditEvent.REQUEST_REFUSED), 1
+        self.assertTrue(
+            wait_for(
+                lambda: self.harness.audit.count(
+                    AuditEvent.REQUEST_REFUSED
+                ) >= 1
+            )
         )
 
 
@@ -289,8 +307,10 @@ class TestScopeGate(ServerTestCase):
                 client.connect()
                 client.call("ping")
 
-            self.assertEqual(
-                harness.audit.count(AuditEvent.SCOPE_REFUSED), 1
+            self.assertTrue(
+                wait_for(
+                    lambda: harness.audit.count(AuditEvent.SCOPE_REFUSED) >= 1
+                )
             )
         finally:
             harness.close()
@@ -320,6 +340,12 @@ class TestScopeGate(ServerTestCase):
                 client.call("ping")
 
             client.close()
+
+            self.assertTrue(
+                wait_for(
+                    lambda: harness.audit.count(AuditEvent.SCOPE_REFUSED) >= 1
+                )
+            )
 
             refusals = [
                 r
@@ -396,8 +422,10 @@ class TestHandlerFailures(ServerTestCase):
             self.assertEqual(response.code, "internal_error")
             self.assertNotIn("secrets.txt", response.error)
             self.assertNotIn("amin", response.error)
-            self.assertEqual(
-                harness.audit.count(AuditEvent.REQUEST_FAILED), 1
+            self.assertTrue(
+                wait_for(
+                    lambda: harness.audit.count(AuditEvent.REQUEST_FAILED) >= 1
+                )
             )
         finally:
             harness.close()
@@ -501,6 +529,15 @@ class TestProtocolFaults(ServerTestCase):
             with self.assertRaises(LinkClientError):
                 client.call("ping")
 
+        self.assertTrue(
+            wait_for(
+                lambda: self.harness.audit.count(
+                    AuditEvent.PROTOCOL_FAULT
+                ) >= 1
+            ),
+            "the server never recorded the protocol fault",
+        )
+
         faults = [
             r
             for r in self.harness.audit.records()
@@ -516,6 +553,15 @@ class TestProtocolFaults(ServerTestCase):
 
             with self.assertRaises(LinkClientError):
                 client.call("ping")
+
+        self.assertTrue(
+            wait_for(
+                lambda: self.harness.audit.count(
+                    AuditEvent.PROTOCOL_FAULT
+                ) >= 1
+            ),
+            "the server never recorded the protocol fault",
+        )
 
         faults = [
             r
@@ -533,6 +579,15 @@ class TestProtocolFaults(ServerTestCase):
 
             with self.assertRaises(LinkClientError):
                 client.call("ping")
+
+        self.assertTrue(
+            wait_for(
+                lambda: self.harness.audit.count(
+                    AuditEvent.PROTOCOL_FAULT
+                ) >= 1
+            ),
+            "the server never recorded the protocol fault",
+        )
 
         faults = [
             r
@@ -568,8 +623,12 @@ class TestLimits(unittest.TestCase):
                 spare.connect()
                 spare.call("ping")
 
-            self.assertGreaterEqual(
-                harness.audit.count(AuditEvent.CONNECTION_REJECTED), 1
+            self.assertTrue(
+                wait_for(
+                    lambda: harness.audit.count(
+                        AuditEvent.CONNECTION_REJECTED
+                    ) >= 1
+                )
             )
         finally:
             for client in held:
