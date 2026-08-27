@@ -21,11 +21,11 @@ Qronos is **under development** and is not yet an installable application.
 | Stage | Prototype |
 | Progress against full scope | ~20% |
 | Installable release | None |
-| Tests on `main` | 131, all passing |
+| Tests on `main` | 1,146, all passing |
 
 These are engineering estimates, not a release date. A tested module is not a finished feature — a feature is finished when it is connected end to end, packaged, secured, and validated on a clean Windows machine.
 
-**Important:** `main` lags behind `feature/mvp-runtime-foundation`. The newer work (speech-to-text, VAD, voice pipeline, desktop shell) lives on that branch and has not been reviewed or merged yet.
+**Important:** `main` and `feature/mvp-runtime-foundation` have each moved on and neither has been merged into the other. `main` carries the storage manager, the web research layer and the device link. The branch carries speech-to-text, VAD, the voice pipeline and the desktop shell.
 
 ---
 
@@ -69,9 +69,12 @@ Qronos **does not write, analyse or run code**. That is a deliberate boundary, n
 | Fast Brain / Heavy Brain | Quick chat + deeper reasoning | 🔶 Integrated, not benchmarked on real hardware |
 | App / file / browser control | Typed actions with undo | ❌ Interfaces and folders only |
 | Desktop UI and system tray | Polished Windows experience | 🔶 Tauri shell on branch, not connected to the backend |
+| Web research | Answers from the web, no cloud AI | ✅ Implemented and tested, not benchmarked with a real model |
+| Storage manager | Never fill the user's disk | ✅ Implemented and tested |
+| Device link, PC side | Encrypted phone-to-PC channel | ✅ Implemented and tested, verified on Windows |
 | Mobile app (push-to-talk) | Secure remote, not a second cloud | ❌ Does not exist |
 | Signed installer and updates | Installable product | ❌ Does not exist |
-| Audit log and undo | Failure is never silent | ❌ Designed, not built |
+| Audit log and undo | Failure is never silent | 🔶 The device link has one; everything else is designed, not built |
 
 ### About the wake word
 
@@ -137,7 +140,7 @@ Hard architectural rules:
 - The model can never override permission policy.
 - The phone is only a remote; reasoning and computer control stay on the PC.
 
-Full detail in `docs/qronos_product_architecture.md`.
+Full detail in `docs/qronos_project_context.md`. The phone link has its own document: `docs/QRONOS_DEVICE_LINK.md`.
 
 ---
 
@@ -175,7 +178,7 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-Unit tests require none of the following: a real microphone, an audio device, Ollama, or internet access. All audio input is simulated.
+Unit tests require none of the following: a real microphone, an audio device, Ollama, a language model, or internet access. All audio input is simulated. The device link's tests do open sockets, but only on loopback.
 
 ### Live tests (manual)
 
@@ -186,6 +189,20 @@ python tools/test_qronos_wake_word_live.py    # needs a microphone
 python tools/wake_word_recorder.py            # record training samples
 ```
 
+### Diagnostics (manual)
+
+Scripts in `tools/debug/` are diagnostics, not product. They are listed in
+`release-exclude.txt` and refuse to run if they detect a release build.
+
+```bash
+python tools/debug/link_selfcheck.py      # does the device link work here?
+python tools/debug/link_reachability.py   # can a phone on this network reach us?
+```
+
+The second one serves a plain HTTP page for a few minutes so a phone's browser
+can prove it can open a connection. It stops itself, and it is not the link — a
+browser cannot speak that protocol.
+
 ---
 
 ## Project layout
@@ -194,27 +211,50 @@ python tools/wake_word_recorder.py            # record training samples
 core/
   main.py                 Entry point (currently echo only — does not start the pipeline yet)
   config.py               Paths and security defaults
-  voice_trigger.py        Wake-word state machine
-  openwakeword_engine.py  openWakeWord / ONNX adapter
-  audio_input.py          Microphone access
-  activity_guard.py       Gaming / creator detection + resource pressure
-  resource_guard.py       Read CPU / RAM / GPU / VRAM
-  resource_policy.py      Thresholds and allow / warn / block decision
-  protection_engine.py    Resource protection level
-  model_registry.py       Fast and Heavy Brain profiles
-  model_manager.py        Resource-aware model selection
-  ollama_controller.py    Local Ollama control
-  task_router.py          Request routing
-  task_plan.py            Multi-step execution plan
-  orchestrator.py         Resource-aware plan execution
+
+  Wake word and audio
+    voice_trigger.py        Wake-word state machine
+    openwakeword_engine.py  openWakeWord / ONNX adapter
+    audio_input.py          Microphone access
+
+  Resources and models
+    activity_guard.py       Gaming / creator detection + resource pressure
+    resource_guard.py       Read CPU / RAM / GPU / VRAM
+    resource_policy.py      Thresholds and allow / warn / block decision
+    protection_engine.py    Resource protection level
+    model_registry.py       Fast and Heavy Brain profiles
+    model_manager.py        Resource-aware model selection
+    ollama_controller.py    Local Ollama control
+
+  Task execution
+    task_router.py          Request routing
+    task_plan.py            Multi-step execution plan
+    orchestrator.py         Resource-aware plan execution
+
+  Storage manager         storage_*.py, artifact_ownership.py, model_store.py,
+                          ollama_models.py — budgets, cleanup, ownership.
+                          Only storage_janitor.py ever deletes anything.
+
+  Web research            web_*.py, persian_text.py — search, page fetch,
+                          evidence fencing, citation validation. No cloud AI.
+
+  Device link             link_*.py — phone to PC on the local network, TLS 1.3
+                          with a pre-shared key. See docs/QRONOS_DEVICE_LINK.md
 
 security/
   permissions.py          Risk levels and permission decisions
 
-docs/                     Specifications and architecture
-tests/                    Unit tests (no hardware required)
-tools/                    Live scripts and audio recording
+docs/
+  QRONOS_DEVICE_LINK.md     Phone link, Layer 1 and Layer 2
+  qronos_project_context.md Product direction and constraints
+  qronos_wake_word_spec.md  Wake-word specification
+  voice_trigger_spec.md     Voice trigger specification
+
+tests/                    Unit tests (no hardware, no network, no model)
+tools/                    Live scripts that need real hardware
+tools/debug/              Diagnostics — never shipped, see release-exclude.txt
 models/wake_word/         Threshold settings (no model files stored)
+release-exclude.txt       What a release build must leave out
 ```
 
 ---
@@ -245,7 +285,8 @@ Assumes one primary developer, fixed requirements and no hardware blockers. Part
 
 Rules that must not be broken:
 
-- Microphone, camera, remote access and external AI are **off by default**.
+- Microphone, camera, the device link, remote access and external AI are **off by default**.
+- The device link's pairing keys live in `data/`, which is outside version control.
 - Raw microphone audio is never sent to an external service.
 - No recording file is created without an explicit request and user approval.
 - State-changing actions require approval; destructive actions are denied by default.
