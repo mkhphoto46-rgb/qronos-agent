@@ -1,4 +1,9 @@
 """
+DEBUG TOOL - not part of Qronos. See tools/debug/debug_marker.py.
+
+This one opens an unauthenticated HTTP socket on the local network, which is
+exactly why it must never ship. It refuses to run in a release build.
+
 Can a phone on this network actually reach this PC?
 
 This is NOT the device link. It is a plain HTTP page, with no encryption and no
@@ -25,8 +30,8 @@ verified yet:
 The server stops on its own after a few minutes. Run it, do the test, let it
 close.
 
-    python tools\\link_reachability.py
-    python tools\\link_reachability.py --minutes 20 --port 47711
+    python tools\\debug\\link_reachability.py
+    python tools\\debug\\link_reachability.py --minutes 20 --port 47711
 """
 
 from __future__ import annotations
@@ -40,7 +45,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from tools.debug.debug_marker import (  # noqa: E402
+    QRONOS_DEBUG_TOOL,
+    banner,
+    require_debug_context,
+)
 
 from core.link_capability import LinkScope, scope_for_peer  # noqa: E402
 from core.link_pairing import DEFAULT_PORT, local_address  # noqa: E402
@@ -218,6 +229,8 @@ def main() -> int:
     )
     arguments = parser.parse_args()
 
+    require_debug_context("link_reachability")
+
     address = local_address()
 
     if address == "127.0.0.1":
@@ -239,6 +252,7 @@ def main() -> int:
     print("=" * 68)
     print("  Qronos reachability test")
     print("=" * 68)
+    banner("link_reachability - plain HTTP, stops itself, safe to delete")
     print()
     print("  On the phone, on the SAME Wi-Fi, open a browser and go to:")
     print()

@@ -1,0 +1,34 @@
+# Paths that must not be included in a Qronos release build.
+#
+# One path per line, relative to the repository root. A trailing slash means a
+# directory and everything under it. Blank lines and lines starting with # are
+# ignored. Any packaging step can read this file, whatever it is written in.
+#
+# tests/test_release_hygiene.py checks this file against the repository on every
+# test run: it fails if an entry no longer exists, if a file marked as a debug
+# tool is not covered here, or if product code imports from tools. So this list
+# cannot quietly fall out of step with the code.
+
+
+# ---------------------------------------------------------------------------
+# Test and debug code. This section is a safety requirement, not tidiness.
+#
+# tools/debug/link_reachability.py opens an unauthenticated HTTP socket on the
+# local network. It is fine on a developer's machine for ten minutes and is not
+# fine in software a user installs. It also refuses to run if it detects a
+# release build, so a mistake here is inert rather than exploitable.
+# ---------------------------------------------------------------------------
+
+tests/
+tools/debug/
+tools/test_qronos_wake_word_live.py
+
+
+# ---------------------------------------------------------------------------
+# Development files. No reason to ship them, no harm if they slip through.
+# ---------------------------------------------------------------------------
+
+.github/
+AGENTS.md
+AGENTS.override.md
+release-exclude.txt

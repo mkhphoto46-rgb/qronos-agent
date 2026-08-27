@@ -4,7 +4,7 @@
 
 | Layer | Name | State |
 |---|---|---|
-| Layer 1 | Local Link — phone and PC on the same network | Implemented, tested |
+| Layer 1 | Local Link — phone and PC on the same network | Implemented; verified on Windows 11 |
 | Layer 2 | Relay Link — phone reaches the PC over the internet | Proposed, not built |
 
 Layer 1 ships first and is useful on its own. Layer 2 is a transport change on
@@ -45,9 +45,32 @@ The consequence, which drives the whole of Layer 2: **the phone must never claim
 a VPN interface.** It speaks ordinary TLS to an ordinary port. Whatever VPN is
 running carries that traffic without knowing what it is.
 
-Layer 1 is not affected by this directly, but it inherits a related hazard: a
-full-tunnel VPN configured with `0.0.0.0/0` and no private-range exception will
-capture traffic to `192.168.x.x` as well, and break local access. See §4.10.
+Layer 1 inherits a related hazard, and it is no longer a hypothesis.
+
+**Measured on 27 August 2026, on a phone in Iran: the local network path works
+with the VPN off and fails with the VPN on.** The phone reached the PC at
+`192.168.0.3:47711` in 13 ms with the VPN disconnected, and could not reach it
+at all with the VPN connected. The VPN is capturing traffic to `192.168.0.0/16`.
+
+**What that result does and does not settle.** It was measured through a mobile
+browser, and a browser has no say in which network interface its sockets use. A
+native app does. On Android an app can ask for the Wi-Fi network specifically —
+`NetworkRequest` with `TRANSPORT_WIFI`, then `Network.bindSocket` or
+`Network.getSocketFactory` — and that socket then uses Wi-Fi even while a VPN
+holds the default route. So the browser failure is evidence about browsers, not a
+verdict on the phone app.
+
+Two caveats on that route, both worth knowing before relying on it:
+
+- Android's always-on VPN with "block connections without VPN" (lockdown mode)
+  does defeat it. A user in that configuration cannot reach the LAN from any app.
+- The iOS equivalent is `NWParameters.requiredInterfaceType = .wifi`, plus the
+  local-network permission prompt. Whether it bypasses an active VPN there is
+  **unverified**, and iOS is the stricter platform of the two.
+
+So the honest position: Layer 1 over a browser is blocked by a VPN, Layer 1 from
+a native Android app probably is not, and nobody has tested the second because
+the app does not exist yet. §7 carries this forward.
 
 ---
 
@@ -324,12 +347,19 @@ Two scripts under `tools/` exist to verify a real deployment:
 
 | Script | What it answers |
 |---|---|
-| `tools/link_selfcheck.py` | Does the link work on this machine at all? Runs the real server and client over loopback and reports the TLS-PSK verdict first. |
-| `tools/link_reachability.py` | Can a phone on this network reach this PC on the link's port, with the user's VPN running as it normally does? Plain HTTP, because a browser cannot speak the link protocol. |
+| `tools/debug/link_selfcheck.py` | Does the link work on this machine at all? Runs the real server and client over loopback and reports the TLS-PSK verdict first. |
+| `tools/debug/link_reachability.py` | Can a phone on this network reach this PC on the link's port, with the user's VPN running as it normally does? Plain HTTP, because a browser cannot speak the link protocol. |
 
-The second is the one that answers the open question in §4.10 about VPN
-interference, and it reports its verdict using the link's own peer classifier,
-so the answer is the real decision the link would make about that phone.
+The second is the one that answered the VPN question in §2, and it reports its
+verdict using the link's own peer classifier, so the answer is the real decision
+the link would make about that phone.
+
+Both live under `tools/debug/`, are listed in `release-exclude.txt`, and refuse
+to run if they detect a release build. The reachability tool opens an
+unauthenticated HTTP socket, which is fine on a developer's machine for ten
+minutes and is not fine in software a user installs, so
+`tests/test_release_hygiene.py` fails the suite if that marking ever falls out of
+step with the code.
 
 ### 4.9 Deliberately excluded from Layer 1
 
@@ -386,11 +416,25 @@ Two things cannot be verified from here.
    is unknown. **If it fails, Layer 1's transport has to become mutual TLS with
    certificates, which means adding `cryptography` as a dependency.** This is
    the single highest-value check on the list.
-2. **Does the LAN path survive the VPN the users actually run?** A full-tunnel
-   configuration with no private-range exception will break local access
-   entirely. Worth testing before the phone app is written, because if it fails,
-   Layer 1's usefulness for the real audience is much smaller than it looks and
-   Layer 2 becomes urgent rather than optional.
+2. **Does the LAN path survive the VPN the users actually run?** Partly
+   answered. Through a mobile browser, no — measured on a phone in Iran, see §2.
+   From a native app, unknown and probably yes, because an app can pin its
+   socket to the Wi-Fi network and a browser cannot.
+
+   Two cheap tests remain, neither needing the finished app:
+
+   - A VPN client's own bypass-LAN or split-tunnelling setting. One toggle, one
+     reload of the same test page. If it works, users keep their VPN and Layer 1
+     works today.
+   - A throwaway Android build that requests `TRANSPORT_WIFI` and connects to
+     the link. This is the one that actually settles it, and it is the first
+     thing the phone app should prove.
+
+Item 1 has been answered too. Windows 11, Python 3.14.7, OpenSSL 3.5.7: all
+thirteen self-check checks pass, and the handshake negotiates
+`TLSv1.3 / TLS_CHACHA20_POLY1305_SHA256` on a different OpenSSL build than the
+one used during development. **TLS-PSK works on Windows.** No fallback to
+certificates, and no `cryptography` dependency.
 
 ### 4.11 Trade-offs accepted
 
@@ -502,7 +546,8 @@ the protocol changes.
 |---|---|---|
 | Python older than 3.13 | Layer 1 cannot start | Probed at startup; verified to refuse cleanly on 3.12 |
 | Windows Python lacks TLS-PSK | Layer 1 cannot start | Probed at startup, clear message; fallback is certificate-based mTLS |
-| User's VPN captures the private range | LAN link unreachable | Not detectable from the PC side; needs a diagnostic in the phone app |
+| User's VPN captures the private range | LAN link unreachable **from a browser** — measured. From a native app, unproven | The app pins its socket to the Wi-Fi network (`TRANSPORT_WIFI`). Defeated only by Android lockdown mode |
+| PC has a VPN adapter holding the default route | The QR code advertises an address the phone cannot reach; pairing fails with nothing on screen to explain it | **Open defect.** `local_address()` returned two different addresses on the same machine minutes apart |
 | Registry file corrupted | Cannot authenticate any device | Raises rather than starting empty; user re-pairs deliberately |
 | Registry file deleted | All devices unpaired | Re-pair; the failure is safe in the right direction |
 | Phone lost | Attacker holds a valid key | Revoke at the PC; enforced at the next handshake |
@@ -517,10 +562,36 @@ the protocol changes.
 
 ## 7. Recommendation and confidence
 
-**Layer 1 as specified: build it, high confidence.** The transport primitive is
-measured rather than assumed, the failure modes are enumerated, and it is useful
-on its own with no external dependency and no server to run. The one open risk
-is Windows PSK support, which is cheap to check and has a known fallback.
+**Revised 27 August 2026, after testing on real hardware in Iran.**
+
+**Layer 1 is correct and it works.** The transport is sound — measured on
+Windows, forward-secret, no dependencies — and every failure mode enumerated here
+behaves as designed. Build the phone app on it.
+
+**One question is open, and it belongs to the phone app rather than to this
+layer.** A mobile browser cannot reach the PC while a VPN is running, because a
+browser cannot choose its network interface. A native Android app can, so this is
+very likely an artefact of how it was tested rather than a limit on the design —
+but it is not yet proven, and the platform that could prove it does not exist
+yet.
+
+What follows:
+
+- **Make interface selection the phone app's first milestone.** Before any voice
+  handling, before any UI: request `TRANSPORT_WIFI`, bind the socket, connect to
+  the link with the VPN running. That is a day of work and it answers the last
+  real question about Layer 1.
+- **Try the VPN client's bypass-LAN setting in the meantime.** One toggle and a
+  page reload, using the test tooling that already exists. A positive result
+  means Layer 1 works for those users today, with no app changes.
+- **Fix `local_address()` before a phone app parses the payload.** A PC with a
+  VPN adapter can put an address in the QR code that the phone cannot reach, and
+  pairing then fails with nothing on screen to explain it. Carrying every
+  candidate address and letting the client try each removes the guess; the format
+  change is free now and will not be once an app ships.
+- **Layer 2 remains the answer for reaching the PC from outside the house.** It
+  is not a workaround for the VPN problem, and this result neither raises nor
+  lowers its priority.
 
 **Layer 2 as specified: the shape is right, the operational questions are open.**
 Outbound-only through an untrusted relay is the correct answer to the constraint
