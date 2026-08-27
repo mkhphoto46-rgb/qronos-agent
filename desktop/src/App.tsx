@@ -12,6 +12,8 @@ import type {
 import {
   getCurrentWindow,
 } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import "./App.css";
 
@@ -57,6 +59,29 @@ type ViewPhase =
   | "entering-settings"
   | "settings"
   | "leaving-settings";
+
+type HotkeyBinding = {
+  actionId: string;
+  accelerator: string | null;
+  scope: "global" | "inApp";
+  enabled: boolean;
+};
+
+type HotkeySettings = {
+  bindings: HotkeyBinding[];
+};
+
+function eventMatchesShortcut(event: KeyboardEvent, accelerator: string) {
+  const parts = accelerator.toLowerCase().split("+").map((part) => part.trim());
+  const keyPart = parts.find((part) => !["ctrl", "control", "alt", "shift", "super", "meta", "command", "commandorcontrol"].includes(part));
+  const eventKey = event.key === " " ? "space" : event.key.toLowerCase();
+  return Boolean(keyPart)
+    && eventKey === keyPart
+    && event.ctrlKey === parts.some((part) => ["ctrl", "control", "commandorcontrol"].includes(part))
+    && event.altKey === parts.includes("alt")
+    && event.shiftKey === parts.includes("shift")
+    && event.metaKey === parts.some((part) => ["super", "meta", "command"].includes(part));
+}
 
 const debugItems: DebugItem[] = [
   {
@@ -779,6 +804,46 @@ function App() {
           1120,
         );
     };
+
+  useEffect(() => {
+    let disposed = false;
+    let inAppBindings: HotkeyBinding[] = [];
+    const executeAction = (actionId: string) => {
+      if (actionId === "navigation.home") returnHome();
+      else if (actionId === "navigation.conversations") openConversations();
+      else if (actionId === "navigation.library") openLibrary();
+      else if (actionId === "navigation.permissions") openPermissions();
+      else if (actionId === "navigation.settings") openSettings();
+      else if (actionId === "qronos.focus_command") {
+        document.querySelector<HTMLInputElement>(".command-input")?.focus();
+      } else {
+        window.dispatchEvent(new CustomEvent("qronos:hotkey-action", { detail: { actionId } }));
+      }
+    };
+    const applySettings = (settings: HotkeySettings) => {
+      inAppBindings = settings.bindings.filter((item) => item.scope === "inApp" && item.enabled && item.accelerator);
+    };
+    invoke<HotkeySettings>("get_hotkey_settings").then(applySettings).catch(() => undefined);
+    const keyHandler = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".settings-hotkey-capture")) return;
+      const binding = inAppBindings.find((item) => item.accelerator && eventMatchesShortcut(event, item.accelerator));
+      if (!binding) return;
+      event.preventDefault();
+      executeAction(binding.actionId);
+    };
+    window.addEventListener("keydown", keyHandler);
+    const unlisteners = Promise.all([
+      listen<{ actionId: string }>("qronos://hotkey", (event) => executeAction(event.payload.actionId)),
+      listen<HotkeySettings>("qronos://hotkeys-updated", (event) => applySettings(event.payload)),
+    ]);
+    return () => {
+      disposed = true;
+      window.removeEventListener("keydown", keyHandler);
+      void unlisteners.then((items) => { if (disposed) items.forEach((unlisten) => unlisten()); });
+    };
+  }, [viewPhase]);
 
   const toggleFullscreen =
     async () => {

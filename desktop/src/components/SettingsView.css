@@ -987,3 +987,47 @@
   from { opacity: 1; filter: blur(0); transform: scale(1); }
   to { opacity: 0; filter: blur(5px); transform: scale(0.992); }
 }
+
+/* HOTKEYS & SHORTCUTS */
+.settings-hotkey-list { display: grid; }
+.settings-hotkey-row { min-height: 76px; display: grid; grid-template-columns: minmax(210px, 1fr) auto; align-items: center; gap: 22px; padding: 13px 17px; border-bottom: 1px solid rgba(77, 194, 231, 0.1); }
+.settings-hotkey-row:last-child { border-bottom: 0; }
+.settings-hotkey-copy { display: grid; gap: 3px; min-width: 0; }
+.settings-hotkey-copy strong { color: rgba(235, 250, 255, 0.96); font-size: 13px; font-weight: 650; }
+.settings-hotkey-copy span { color: rgba(67, 214, 247, 0.76); font-size: 8px; letter-spacing: 0.1em; text-transform: uppercase; }
+.settings-hotkey-copy small { color: rgba(194, 221, 231, 0.72); font-size: 11px; line-height: 1.65; }
+.settings-hotkey-controls { display: flex; align-items: center; justify-content: flex-end; gap: 9px; direction: ltr; }
+.settings-hotkey-controls kbd,
+.settings-hotkey-capture kbd { min-width: 126px; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; padding: 0 13px; border: 1px solid rgba(71, 217, 247, 0.25); border-radius: 8px; background: linear-gradient(180deg, rgba(10, 28, 40, 0.96), rgba(4, 14, 23, 0.96)); box-shadow: inset 0 1px 0 rgba(196, 244, 255, 0.07), 0 0 18px rgba(33, 191, 232, 0.06); color: rgba(226, 248, 255, 0.94); font: 650 11px/1 monospace; letter-spacing: 0.04em; }
+.settings-hotkey-controls > button,
+.settings-hotkey-footer > button,
+.settings-hotkey-capture footer button { min-height: 34px; padding: 0 13px; border: 1px solid rgba(57, 206, 240, 0.2); border-radius: 7px; background: rgba(8, 25, 35, 0.8); color: rgba(106, 222, 246, 0.9); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; cursor: pointer; }
+.settings-hotkey-controls > button:hover,
+.settings-hotkey-footer > button:hover,
+.settings-hotkey-capture footer button:hover { border-color: rgba(73, 222, 251, 0.54); background: rgba(12, 42, 55, 0.92); color: #e7fbff; }
+.settings-hotkey-status { min-width: 67px; font-size: 8px; font-weight: 700; letter-spacing: 0.09em; text-align: center; }
+.settings-hotkey-status.status-active { color: #50e8a4; }
+.settings-hotkey-status.status-conflict { color: #ff728c; }
+.settings-hotkey-status.status-unassigned,
+.settings-hotkey-status.status-disabled { color: rgba(181, 207, 217, 0.55); }
+.settings-hotkey-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 18px; border: 1px solid rgba(67, 211, 241, 0.14); border-radius: 10px; background: linear-gradient(135deg, rgba(6, 25, 36, 0.84), rgba(5, 17, 27, 0.72)); }
+.settings-hotkey-footer > div { display: grid; gap: 5px; }
+.settings-hotkey-footer span { color: rgba(76, 224, 249, 0.84); font-size: 8px; letter-spacing: 0.13em; }
+.settings-hotkey-footer strong { color: rgba(214, 239, 247, 0.82); font-size: 11px; font-weight: 500; }
+.settings-hotkey-loading { padding: 28px; color: rgba(86, 214, 242, 0.66); font-size: 9px; letter-spacing: 0.12em; text-align: center; }
+.settings-hotkey-capture-backdrop { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 24px; background: rgba(1, 7, 12, 0.72); backdrop-filter: blur(7px); animation: settingsCaptureBackdropIn 180ms ease-out both; }
+.settings-hotkey-capture { width: min(430px, calc(100vw - 48px)); display: grid; justify-items: center; gap: 12px; padding: 27px; outline: none; border: 1px solid rgba(62, 218, 249, 0.32); border-radius: 14px; background: radial-gradient(circle at 50% 0%, rgba(22, 84, 105, 0.38), transparent 48%), rgba(3, 14, 23, 0.98); box-shadow: 0 30px 90px rgba(0, 0, 0, 0.56), 0 0 36px rgba(22, 193, 231, 0.12); animation: settingsCaptureIn 240ms cubic-bezier(0.18, 0.78, 0.2, 1) both; }
+.settings-hotkey-capture > span { color: rgba(68, 221, 249, 0.8); font-size: 8px; letter-spacing: 0.16em; }
+.settings-hotkey-capture h3 { margin: 0; color: rgba(237, 251, 255, 0.96); font-size: 17px; }
+.settings-hotkey-capture kbd { width: min(280px, 100%); min-height: 48px; font-size: 13px; }
+.settings-hotkey-capture p { margin: 0; color: rgba(182, 213, 223, 0.65); font-size: 10px; }
+.settings-hotkey-capture footer { display: flex; gap: 9px; margin-top: 6px; }
+.settings-hotkey-capture footer button.primary { border-color: rgba(63, 224, 248, 0.5); background: rgba(18, 105, 125, 0.45); color: #e8fcff; }
+.settings-hotkey-capture footer button:disabled { opacity: 0.35; cursor: not-allowed; }
+@keyframes settingsCaptureBackdropIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes settingsCaptureIn { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+@media (max-width: 1080px) {
+  .settings-hotkey-row { grid-template-columns: 1fr; gap: 10px; }
+  .settings-hotkey-controls { justify-content: flex-start; flex-wrap: wrap; }
+}

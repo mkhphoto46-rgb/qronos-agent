@@ -1,7 +1,11 @@
 import {
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
+
+import { invoke } from "@tauri-apps/api/core";
 
 import "./SettingsView.css";
 
@@ -19,6 +23,7 @@ type SettingsViewProps = {
 
 type SectionId =
   | "general"
+  | "hotkeys"
   | "voice"
   | "behavior"
   | "memory"
@@ -38,14 +43,31 @@ type SectionDefinition = {
 
 const sections: SectionDefinition[] = [
   { id: "general", group: "GENERAL", label: "عمومی", english: "General", icon: "01", keywords: ["theme", "language", "startup", "update", "ظاهر", "زبان", "شروع"] },
-  { id: "voice", group: "QRONOS", label: "صدا و Wake Word", english: "Voice & Wake Word", icon: "02", keywords: ["voice", "wake", "microphone", "sensitivity", "صدا", "میکروفون", "حساسیت"] },
-  { id: "behavior", group: "QRONOS", label: "رفتار و شخصی‌سازی", english: "Behavior", icon: "03", keywords: ["response", "thinking", "instructions", "پاسخ", "رفتار", "دستور"] },
-  { id: "memory", group: "QRONOS", label: "حافظه", english: "Memory", icon: "04", keywords: ["memory", "remember", "حافظه", "یادآوری"] },
-  { id: "performance", group: "SYSTEM", label: "عملکرد", english: "Performance", icon: "05", keywords: ["eco", "balanced", "performance", "priority", "عملکرد", "منابع"] },
-  { id: "web", group: "SYSTEM", label: "وب و جست‌وجو", english: "Web & Search", icon: "06", keywords: ["web", "search", "sources", "citation", "وب", "جستجو", "منابع"] },
-  { id: "notifications", group: "SYSTEM", label: "اعلان‌ها", english: "Notifications", icon: "07", keywords: ["notification", "warning", "sound", "اعلان", "هشدار", "صدا"] },
-  { id: "data", group: "DATA", label: "داده و پشتیبان‌گیری", english: "Data & Backup", icon: "08", keywords: ["data", "backup", "export", "restore", "داده", "پشتیبان", "خروجی"] },
+  { id: "hotkeys", group: "GENERAL", label: "کلیدهای میانبر", english: "Hotkeys & Shortcuts", icon: "02", keywords: ["hotkey", "shortcut", "keyboard", "کلید", "میانبر", "کیبورد"] },
+  { id: "voice", group: "QRONOS", label: "صدا و Wake Word", english: "Voice & Wake Word", icon: "03", keywords: ["voice", "wake", "microphone", "sensitivity", "صدا", "میکروفون", "حساسیت"] },
+  { id: "behavior", group: "QRONOS", label: "رفتار و شخصی‌سازی", english: "Behavior", icon: "04", keywords: ["response", "thinking", "instructions", "پاسخ", "رفتار", "دستور"] },
+  { id: "memory", group: "QRONOS", label: "حافظه", english: "Memory", icon: "05", keywords: ["memory", "remember", "حافظه", "یادآوری"] },
+  { id: "performance", group: "SYSTEM", label: "عملکرد", english: "Performance", icon: "06", keywords: ["eco", "balanced", "performance", "priority", "عملکرد", "منابع"] },
+  { id: "web", group: "SYSTEM", label: "وب و جست‌وجو", english: "Web & Search", icon: "07", keywords: ["web", "search", "sources", "citation", "وب", "جستجو", "منابع"] },
+  { id: "notifications", group: "SYSTEM", label: "اعلان‌ها", english: "Notifications", icon: "08", keywords: ["notification", "warning", "sound", "اعلان", "هشدار", "صدا"] },
+  { id: "data", group: "DATA", label: "داده و پشتیبان‌گیری", english: "Data & Backup", icon: "09", keywords: ["data", "backup", "export", "restore", "داده", "پشتیبان", "خروجی"] },
 ];
+
+type HotkeyBinding = {
+  actionId: string;
+  title: string;
+  english: string;
+  description: string;
+  accelerator: string | null;
+  defaultAccelerator: string | null;
+  scope: "global" | "inApp";
+  enabled: boolean;
+  status: string;
+};
+
+type HotkeySettings = { schemaVersion: number; bindings: HotkeyBinding[] };
+
+const fallbackHotkeys: HotkeySettings = { schemaVersion: 1, bindings: [] };
 
 const groups = ["GENERAL", "QRONOS", "SYSTEM", "DATA"] as const;
 const particles = Array.from({ length: 34 }, (_, index) => index);
@@ -125,6 +147,22 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
   const [searchDepth, setSearchDepth] = useState("Balanced");
   const [instructions, setInstructions] = useState("");
   const [toast, setToast] = useState("");
+  const [hotkeys, setHotkeys] = useState<HotkeySettings>(fallbackHotkeys);
+  const [hotkeysLoading, setHotkeysLoading] = useState(true);
+  const [capturingAction, setCapturingAction] = useState<string | null>(null);
+  const [capturedShortcut, setCapturedShortcut] = useState("");
+  const captureRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    invoke<HotkeySettings>("get_hotkey_settings")
+      .then(setHotkeys)
+      .catch(() => setHotkeys(fallbackHotkeys))
+      .finally(() => setHotkeysLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (capturingAction) captureRef.current?.focus();
+  }, [capturingAction]);
 
   const visibleSections = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -233,6 +271,89 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     </>
   );
 
+  const shortcutFromEvent = (event: React.KeyboardEvent) => {
+    const ignored = ["Control", "Shift", "Alt", "Meta"];
+    if (ignored.includes(event.key)) return "";
+    const parts: string[] = [];
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.altKey) parts.push("Alt");
+    if (event.shiftKey) parts.push("Shift");
+    if (event.metaKey) parts.push("Super");
+    const key = event.key === " " ? "Space" : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+    parts.push(key);
+    return parts.join("+");
+  };
+
+  const saveCapturedHotkey = async () => {
+    if (!capturingAction || !capturedShortcut) return;
+    try {
+      await invoke("validate_hotkey", { actionId: capturingAction, accelerator: capturedShortcut });
+      const next = await invoke<HotkeySettings>("update_hotkey", { actionId: capturingAction, accelerator: capturedShortcut });
+      setHotkeys(next);
+      setCapturingAction(null);
+      setCapturedShortcut("");
+      showToast("میانبر جدید ثبت شد.");
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+
+  const clearHotkey = async () => {
+    if (!capturingAction) return;
+    try {
+      const next = await invoke<HotkeySettings>("update_hotkey", { actionId: capturingAction, accelerator: null });
+      setHotkeys(next);
+      setCapturingAction(null);
+      setCapturedShortcut("");
+      showToast("میانبر پاک شد.");
+    } catch (error) { showToast(String(error)); }
+  };
+
+  const toggleHotkey = async (actionId: string, enabled: boolean) => {
+    try {
+      setHotkeys(await invoke<HotkeySettings>("set_hotkey_enabled", { actionId, enabled }));
+    } catch (error) { showToast(String(error)); }
+  };
+
+  const resetAllHotkeys = async () => {
+    try {
+      setHotkeys(await invoke<HotkeySettings>("reset_hotkeys"));
+      showToast("همه میانبرها به حالت پیش‌فرض برگشتند.");
+    } catch (error) { showToast(String(error)); }
+  };
+
+  const renderHotkeyRows = (scope: "global" | "inApp") => {
+    const items = hotkeys.bindings.filter((item) => item.scope === scope);
+    if (hotkeysLoading) return <div className="settings-hotkey-loading">LOADING HOTKEY REGISTRY...</div>;
+    if (!items.length) return <div className="settings-hotkey-loading">HOTKEY BACKEND IS NOT AVAILABLE</div>;
+    return <div className="settings-hotkey-list">{items.map((item) => (
+      <div className="settings-hotkey-row" key={item.actionId}>
+        <div className="settings-hotkey-copy"><strong>{item.title}</strong><span>{item.english}</span><small>{item.description}</small></div>
+        <div className="settings-hotkey-controls">
+          <span className={`settings-hotkey-status status-${item.status.toLowerCase()}`}>{item.status}</span>
+          <kbd>{item.accelerator || "UNASSIGNED"}</kbd>
+          <button type="button" onClick={() => { setCapturingAction(item.actionId); setCapturedShortcut(item.accelerator || ""); }}>CHANGE</button>
+          {scope === "global" && <Toggle checked={item.enabled} onChange={(next) => toggleHotkey(item.actionId, next)} label={item.english} />}
+        </div>
+      </div>
+    ))}</div>;
+  };
+
+  const renderHotkeys = () => (
+    <>
+      <SectionHeader kicker="INPUT CONTROL" title="کلیدهای میانبر" description="دسترسی سریع به Qronos و بخش‌های اصلی را مدیریت کنید." />
+      <SettingGroup title="GLOBAL HOTKEYS" index="01">{renderHotkeyRows("global")}</SettingGroup>
+      <SettingGroup title="IN-APP SHORTCUTS" index="02">{renderHotkeyRows("inApp")}</SettingGroup>
+      <div className="settings-hotkey-footer"><div><span>SAFE SHORTCUT REGISTRY</span><strong>میانبرها فقط Actionهای تأییدشده Qronos را اجرا می‌کنند.</strong></div><button type="button" onClick={resetAllHotkeys}>RESET TO DEFAULTS</button></div>
+      {capturingAction && <div className="settings-hotkey-capture-backdrop">
+        <div className="settings-hotkey-capture" ref={captureRef} tabIndex={0} onKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (event.key === "Escape") { setCapturingAction(null); setCapturedShortcut(""); return; } const value = shortcutFromEvent(event); if (value) setCapturedShortcut(value); }}>
+          <span>PRESS NEW SHORTCUT</span><h3>میانبر جدید را فشار دهید</h3><kbd>{capturedShortcut || "WAITING FOR INPUT..."}</kbd><p>برای لغو، کلید Escape را فشار دهید.</p>
+          <footer><button type="button" onClick={() => { setCapturingAction(null); setCapturedShortcut(""); }}>CANCEL</button><button type="button" onClick={clearHotkey}>CLEAR</button><button type="button" className="primary" disabled={!capturedShortcut} onClick={saveCapturedHotkey}>SAVE</button></footer>
+        </div>
+      </div>}
+    </>
+  );
+
   const renderBehavior = () => (
     <>
       <SectionHeader kicker="INTERACTION PROFILE" title="رفتار و شخصی‌سازی" description="سبک همکاری را شخصی‌سازی کنید؛ هسته تحلیلی Qronos ثابت می‌ماند." />
@@ -325,6 +446,7 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
 
   const contentBySection: Record<SectionId, () => React.ReactNode> = {
     general: renderGeneral,
+    hotkeys: renderHotkeys,
     voice: renderVoice,
     behavior: renderBehavior,
     memory: renderMemory,
