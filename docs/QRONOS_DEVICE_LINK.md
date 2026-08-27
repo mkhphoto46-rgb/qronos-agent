@@ -320,6 +320,17 @@ enums over string literals, pure decision functions where the decision can be
 separated from the effect, injected clocks and dependencies so tests need no
 sockets, no timers and no network.
 
+Two scripts under `tools/` exist to verify a real deployment:
+
+| Script | What it answers |
+|---|---|
+| `tools/link_selfcheck.py` | Does the link work on this machine at all? Runs the real server and client over loopback and reports the TLS-PSK verdict first. |
+| `tools/link_reachability.py` | Can a phone on this network reach this PC on the link's port, with the user's VPN running as it normally does? Plain HTTP, because a browser cannot speak the link protocol. |
+
+The second is the one that answers the open question in §4.10 about VPN
+interference, and it reports its verdict using the link's own peer classifier,
+so the answer is the real decision the link would make about that phone.
+
 ### 4.9 Deliberately excluded from Layer 1
 
 **Network discovery.** The phone needs the PC's address. The options are mDNS,
@@ -358,13 +369,21 @@ the answer inside it, so the phone received an empty source list while the
 rendered text claimed a source. The stub in the test encoded the same wrong
 assumption, which is why it passed. The stub now mirrors the real shape.
 
+**Python 3.13 or newer is required.** `ssl.SSLContext.set_psk_server_callback`
+does not exist before then. Measured here: Python 3.12.5 has neither the
+callbacks nor `ssl.HAS_PSK`, and 3.9.6 likewise. The probe was run under 3.12
+and refuses cleanly, naming exactly what is missing and what the fallback is, so
+an older interpreter produces an actionable message rather than a confusing
+handshake failure. This is a real deployment constraint: nothing else in the
+project needs 3.13.
+
 Two things cannot be verified from here.
 
-1. **Does Windows Python support TLS-PSK?** The support depends on how the
-   OpenSSL that CPython links was built. The code probes `ssl.HAS_PSK` and TLS
-   1.3 at startup and refuses to start with a clear message rather than failing
-   obscurely mid-handshake — but whether it passes on the reference PC is
-   unknown. **If it fails, Layer 1's transport has to become mutual TLS with
+1. **Does Windows Python support TLS-PSK?** Even on 3.13+, support depends on
+   how the OpenSSL that CPython links was built. The code probes `ssl.HAS_PSK`
+   and TLS 1.3 at startup and refuses to start with a clear message rather than
+   failing obscurely mid-handshake — but whether it passes on the reference PC
+   is unknown. **If it fails, Layer 1's transport has to become mutual TLS with
    certificates, which means adding `cryptography` as a dependency.** This is
    the single highest-value check on the list.
 2. **Does the LAN path survive the VPN the users actually run?** A full-tunnel
@@ -481,6 +500,7 @@ the protocol changes.
 
 | Failure | Effect | Handling |
 |---|---|---|
+| Python older than 3.13 | Layer 1 cannot start | Probed at startup; verified to refuse cleanly on 3.12 |
 | Windows Python lacks TLS-PSK | Layer 1 cannot start | Probed at startup, clear message; fallback is certificate-based mTLS |
 | User's VPN captures the private range | LAN link unreachable | Not detectable from the PC side; needs a diagnostic in the phone app |
 | Registry file corrupted | Cannot authenticate any device | Raises rather than starting empty; user re-pairs deliberately |
