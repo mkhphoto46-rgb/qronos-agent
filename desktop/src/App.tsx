@@ -19,6 +19,7 @@ import ConversationSpine from "./components/ConversationSpine";
 import ConversationsView from "./components/ConversationsView";
 import LibraryView from "./components/LibraryView";
 import PermissionsView from "./components/PermissionsView";
+import SettingsView from "./components/SettingsView";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QronosOrb from "./components/QronosOrb";
@@ -52,7 +53,10 @@ type ViewPhase =
   | "leaving-library"
   | "entering-permissions"
   | "permissions"
-  | "leaving-permissions";
+  | "leaving-permissions"
+  | "entering-settings"
+  | "settings"
+  | "leaving-settings";
 
 const debugItems: DebugItem[] = [
   {
@@ -189,6 +193,26 @@ function App() {
       | null
     >(null);
 
+  const [
+    settingsExitTarget,
+    setSettingsExitTarget,
+  ] = useState<
+    | "conversations"
+    | "library"
+    | "permissions"
+    | null
+  >(null);
+
+  const [
+    settingsEntrySource,
+    setSettingsEntrySource,
+  ] = useState<
+    | "conversations"
+    | "library"
+    | "permissions"
+    | null
+  >(null);
+
   const viewTransitionTimerRef =
     useRef<number | null>(
       null,
@@ -223,6 +247,25 @@ function App() {
       }
 
       clearViewTransitionTimer();
+
+      if (
+        viewPhase === "settings" ||
+        viewPhase === "entering-settings" ||
+        viewPhase === "leaving-settings"
+      ) {
+        setCrossViewTarget(null);
+        setPermissionsExitTarget(null);
+        setPermissionsEntrySource(null);
+        setSettingsEntrySource(null);
+        setSettingsExitTarget("conversations");
+        setViewPhase("entering-conversations");
+        viewTransitionTimerRef.current = window.setTimeout(() => {
+          setViewPhase("conversations");
+          setSettingsExitTarget(null);
+          viewTransitionTimerRef.current = null;
+        }, 620);
+        return;
+      }
 
       if (
         viewPhase ===
@@ -341,6 +384,25 @@ function App() {
       clearViewTransitionTimer();
 
       if (
+        viewPhase === "settings" ||
+        viewPhase === "entering-settings" ||
+        viewPhase === "leaving-settings"
+      ) {
+        setCrossViewTarget(null);
+        setPermissionsExitTarget(null);
+        setPermissionsEntrySource(null);
+        setSettingsEntrySource(null);
+        setSettingsExitTarget("library");
+        setViewPhase("entering-library");
+        viewTransitionTimerRef.current = window.setTimeout(() => {
+          setViewPhase("library");
+          setSettingsExitTarget(null);
+          viewTransitionTimerRef.current = null;
+        }, 620);
+        return;
+      }
+
+      if (
         viewPhase ===
           "permissions" ||
         viewPhase ===
@@ -456,6 +518,25 @@ function App() {
 
       clearViewTransitionTimer();
 
+      if (
+        viewPhase === "settings" ||
+        viewPhase === "entering-settings" ||
+        viewPhase === "leaving-settings"
+      ) {
+        setPermissionsExitTarget(null);
+        setPermissionsEntrySource(null);
+        setCrossViewTarget(null);
+        setSettingsEntrySource(null);
+        setSettingsExitTarget("permissions");
+        setViewPhase("entering-permissions");
+        viewTransitionTimerRef.current = window.setTimeout(() => {
+          setViewPhase("permissions");
+          setSettingsExitTarget(null);
+          viewTransitionTimerRef.current = null;
+        }, 620);
+        return;
+      }
+
       setPermissionsExitTarget(
         null,
       );
@@ -554,6 +635,73 @@ function App() {
         );
     };
 
+  const openSettings =
+    () => {
+      if (
+        viewPhase ===
+          "settings" ||
+        viewPhase ===
+          "entering-settings"
+      ) {
+        return;
+      }
+
+      clearViewTransitionTimer();
+
+      if (viewPhase !== "home") {
+        setCrossViewTarget(null);
+        setPermissionsExitTarget(null);
+        setPermissionsEntrySource(null);
+        setSettingsExitTarget(null);
+        setSettingsEntrySource(
+          viewPhase.includes("library")
+            ? "library"
+            : viewPhase.includes("permissions")
+              ? "permissions"
+              : "conversations",
+        );
+        setViewPhase("entering-settings");
+        viewTransitionTimerRef.current = window.setTimeout(() => {
+          setViewPhase("settings");
+          setSettingsEntrySource(null);
+          viewTransitionTimerRef.current = null;
+        }, 820);
+        return;
+      }
+
+      setCrossViewTarget(
+        null,
+      );
+
+      setSettingsExitTarget(null);
+      setSettingsEntrySource(null);
+
+      setPermissionsExitTarget(
+        null,
+      );
+
+      setPermissionsEntrySource(
+        null,
+      );
+
+      setViewPhase(
+        "entering-settings",
+      );
+
+      viewTransitionTimerRef.current =
+        window.setTimeout(
+          () => {
+            setViewPhase(
+              "settings",
+            );
+
+            viewTransitionTimerRef.current =
+              null;
+          },
+          820,
+        );
+    };
+
   const returnHome =
     () => {
       if (
@@ -565,6 +713,8 @@ function App() {
           "leaving-library" ||
         viewPhase ===
           "leaving-permissions"
+        || viewPhase ===
+          "leaving-settings"
       ) {
         return;
       }
@@ -600,6 +750,15 @@ function App() {
       ) {
         setViewPhase(
           "leaving-permissions",
+        );
+      } else if (
+        viewPhase ===
+          "settings" ||
+        viewPhase ===
+          "entering-settings"
+      ) {
+        setViewPhase(
+          "leaving-settings",
         );
       } else {
         setViewPhase(
@@ -810,6 +969,14 @@ function App() {
       } ${
         permissionsEntrySource
           ? `app-permissions-direct-from-${permissionsEntrySource}`
+          : ""
+      } ${
+        settingsExitTarget
+          ? `app-settings-direct-to-${settingsExitTarget}`
+          : ""
+      } ${
+        settingsEntrySource
+          ? `app-settings-direct-from-${settingsEntrySource}`
           : ""
       }`}
       dir="rtl"
@@ -1049,7 +1216,10 @@ function App() {
 
       <ConversationsView
         phase={
-          permissionsEntrySource ===
+          settingsEntrySource === "conversations" &&
+          viewPhase === "entering-settings"
+            ? "conversations"
+            : permissionsEntrySource ===
             "conversations" &&
           viewPhase ===
             "entering-permissions"
@@ -1065,7 +1235,13 @@ function App() {
                 viewPhase ===
                   "permissions" ||
                 viewPhase ===
-                  "leaving-permissions"
+                  "leaving-permissions" ||
+                viewPhase ===
+                  "entering-settings" ||
+                viewPhase ===
+                  "settings" ||
+                viewPhase ===
+                  "leaving-settings"
               ? "home"
               : viewPhase
         }
@@ -1076,7 +1252,10 @@ function App() {
 
       <LibraryView
         phase={
-          permissionsEntrySource ===
+          settingsEntrySource === "library" &&
+          viewPhase === "entering-settings"
+            ? "library"
+            : permissionsEntrySource ===
             "library" &&
           viewPhase ===
             "entering-permissions"
@@ -1086,7 +1265,13 @@ function App() {
                 viewPhase ===
                   "permissions" ||
                 viewPhase ===
-                  "leaving-permissions"
+                  "leaving-permissions" ||
+                viewPhase ===
+                  "entering-settings" ||
+                viewPhase ===
+                  "settings" ||
+                viewPhase ===
+                  "leaving-settings"
               ? "home"
               : viewPhase
         }
@@ -1097,12 +1282,43 @@ function App() {
 
       <PermissionsView
         phase={
-          permissionsExitTarget
+          settingsEntrySource === "permissions" &&
+          viewPhase === "entering-settings"
+            ? "permissions"
+            : permissionsExitTarget
             ? "leaving-permissions"
-            : viewPhase
+            : viewPhase ===
+                  "entering-settings" ||
+                viewPhase ===
+                  "settings" ||
+                viewPhase ===
+                  "leaving-settings"
+              ? "home"
+              : viewPhase
         }
         onClose={
           returnHome
+        }
+      />
+
+      <SettingsView
+        phase={
+          settingsExitTarget
+            ? "leaving-settings"
+            : viewPhase ===
+              "entering-settings" ||
+            viewPhase ===
+              "settings" ||
+            viewPhase ===
+              "leaving-settings"
+            ? viewPhase
+            : "home"
+        }
+        onClose={
+          returnHome
+        }
+        onOpenPermissions={
+          openPermissions
         }
       />
 
@@ -1121,6 +1337,8 @@ function App() {
               "leaving-library" ||
             viewPhase ===
               "leaving-permissions"
+            || viewPhase ===
+              "leaving-settings"
               ? "nav-item nav-item-active"
               : "nav-item"
           }
@@ -1280,8 +1498,18 @@ function App() {
 
         <button
           type="button"
-          className="nav-item"
+          className={
+            viewPhase ===
+                "settings" ||
+              viewPhase ===
+                "entering-settings"
+              ? "nav-item nav-item-active"
+              : "nav-item"
+          }
           aria-label="تنظیمات"
+          onClick={
+            openSettings
+          }
         >
           <span className="nav-icon">
             <svg
