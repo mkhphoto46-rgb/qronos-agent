@@ -25,6 +25,14 @@ class QronosSecurityConfig:
 
     camera_enabled: bool = False
     microphone_enabled: bool = False
+
+    # The device link, Layer 1: a phone on the same network. Off until the user
+    # turns it on, and nothing in the link starts by itself.
+    link_enabled: bool = False
+
+    # The device link, Layer 2: reaching the PC from the internet through a
+    # relay. This is the global switch; each device also has to be opted in
+    # individually, so turning this on does not expose every paired phone.
     remote_access_enabled: bool = False
     external_ai_enabled: bool = False
     destructive_actions_require_approval: bool = True
