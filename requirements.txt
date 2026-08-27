@@ -1,6 +1,10 @@
 certifi==2026.7.22
 charset-normalizer==3.5.1
+courlan==1.4.0
+htmldate==1.10.0
 idna==3.19
+justext==3.0.2
+lxml==6.1.2
 numpy==2.5.2
 onnxruntime==1.29.0
 openwakeword==0.6.0; platform_system == "Windows"
@@ -10,4 +14,5 @@ scikit-learn==1.9.0
 scipy==1.18.0
 sounddevice==0.5.6
 tqdm==4.70.0
+trafilatura==2.2.0
 urllib3==2.7.0
