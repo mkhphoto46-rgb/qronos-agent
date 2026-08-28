@@ -205,6 +205,7 @@ class OllamaController(BrainRuntime):
         messages: Sequence[BrainMessage] | None = None,
         think: bool = False,
         num_predict: Optional[int] = None,
+        num_ctx: Optional[int] = None,
         keep_alive: str = "5m",
     ) -> str:
         """
@@ -220,6 +221,13 @@ class OllamaController(BrainRuntime):
             options["num_predict"] = (
                 num_predict
             )
+
+        # Without this the server picks its own context, which for these
+        # models is 262144 tokens and costs more than ten gigabytes of key
+        # and value cache — for a 2.3 GB model. Left unset, Qronos fills the
+        # card and then refuses its own next request.
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
 
         ollama_messages = (
             self._build_messages(

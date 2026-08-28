@@ -269,6 +269,9 @@ class Orchestrator:
                     is TaskClass.HEAVY
                     else 256
                 ),
+                num_ctx=(
+                    selection.model.context_tokens
+                ),
                 keep_alive=(
                     "10m"
                     if selection.keep_loaded

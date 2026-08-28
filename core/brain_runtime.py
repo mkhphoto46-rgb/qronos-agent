@@ -81,6 +81,7 @@ class BrainRuntime(ABC):
         messages: Sequence[BrainMessage] | None = None,
         think: bool = False,
         num_predict: int | None = None,
+        num_ctx: int | None = None,
         keep_alive: str = "5m",
     ) -> str:
         """
