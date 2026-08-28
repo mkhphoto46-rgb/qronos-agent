@@ -26,14 +26,13 @@ Two smaller decisions worth naming:
 
 from __future__ import annotations
 
-import json
-import os
 import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from core.append_only_log import AppendOnlyLog
 from core.config import CONFIG
 from core.link_capability import LinkOp, LinkScope
 from core.link_devices import is_valid_device_id
@@ -174,10 +173,17 @@ class AuditLog:
         clock: Clock | None = None,
         max_bytes: int = MAX_AUDIT_BYTES,
     ) -> None:
-        self.path = None if path is None else Path(path)
+        self._file = AppendOnlyLog(path, max_bytes=max_bytes)
         self.clock: Clock = clock if clock is not None else time.time
-        self.max_bytes = max_bytes
         self._memory: list[AuditRecord] = []
+
+    @property
+    def path(self) -> Path | None:
+        return self._file.path
+
+    @property
+    def max_bytes(self) -> int:
+        return self._file.max_bytes
 
     def record(
         self,
@@ -222,41 +228,12 @@ class AuditLog:
     # ------------------------------------------------------------- the file
 
     def _append(self, record: AuditRecord) -> None:
-        if self.path is None:
-            return
-
-        line = json.dumps(record.to_json(), ensure_ascii=False) + "\n"
-        encoded = line.encode("utf-8")
-
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._rotate_if_needed(len(encoded))
-
-            with self.path.open("ab") as handle:
-                handle.write(encoded)
-        except OSError:
-            # A link that cannot write its log should still work. The record is
-            # already in memory, and losing an audit line is preferable to
-            # dropping the user's connection over a full disk.
-            return
-
-    def _rotate_if_needed(self, incoming: int) -> None:
-        try:
-            current = self.path.stat().st_size  # type: ignore[union-attr]
-        except OSError:
-            return
-
-        if current + incoming <= self.max_bytes:
-            return
-
-        previous = self.path.with_suffix(  # type: ignore[union-attr]
-            self.path.suffix + ".1"  # type: ignore[union-attr]
-        )
-
-        try:
-            os.replace(self.path, previous)  # type: ignore[arg-type]
-        except OSError:
-            return
+        # A link that cannot write its log should still work. The record is
+        # already in memory, and losing an audit line is preferable to
+        # dropping the user's connection over a full disk. AppendOnlyLog
+        # holds that rule, and the rotation with it, so this module keeps
+        # only the part that is about the link.
+        self._file.append(record.to_json())
 
     # ------------------------------------------------------------- reading
 
