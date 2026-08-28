@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "qronos-desktop",
+        "title": "Qronos",
         "width": 1280,
         "height": 800,
         "minWidth": 1000,
@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420"
     }
   },
   "bundle": {
