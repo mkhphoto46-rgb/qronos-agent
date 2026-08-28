@@ -22,10 +22,20 @@ a session.
 
 Two things this module deliberately does not do.
 
-It does not throttle per address. The key is 256 bits, so repeated attempts are
-a way to waste CPU, not a way to guess a key. The controls are sized for that:
-a connection cap, a pause after a failure, and an idle timeout. A per-address
-token bucket would look thorough and defend against nothing that matters.
+It does not rate-limit per address as an authentication control. The key is 256
+bits, so repeated attempts are a way to waste CPU, not a way to guess a key, and
+a token bucket sold as key protection would defend against nothing that matters.
+The controls are sized for CPU: a connection cap, a pause after a failure, and an
+idle timeout.
+
+The pause is nonetheless kept *per peer*, and that is an availability decision
+rather than an authentication one. A single global pause was measured letting any
+machine that can reach the port lock the owner out of pairing their own phone:
+one failed handshake every half second held the pause permanently in the future,
+and five of five legitimate pairing attempts failed until the attacker stopped.
+Scoping the pause to the address that earned it costs the same CPU protection and
+removes that. The map of paused peers is capped, so an attacker cycling addresses
+cannot grow it without bound.
 
 It does not report internal errors to the phone. A traceback or an exception
 message can carry a file path or a fragment of the user's data, so a handler
@@ -33,6 +43,8 @@ that fails returns a fixed code and the detail stays in the log on the machine.
 """
 
 from __future__ import annotations
+
+from collections import OrderedDict
 
 import selectors
 import socket
@@ -86,8 +98,13 @@ DEFAULT_BIND_HOST = "0.0.0.0"
 # A phone, a tablet, and headroom.
 MAX_CONNECTIONS = 4
 
-# How long a failed handshake makes the next one wait.
+# How long a failed handshake makes the next one from that peer wait.
 FAILURE_PAUSE_SECONDS = 1.0
+
+# How many recently-failed peers are remembered. Bounded so an attacker cycling
+# source addresses cannot grow the map; the oldest entry is dropped when full,
+# which at worst forgives a peer early and costs one more handshake attempt.
+MAX_PAUSED_PEERS = 256
 
 # How long the accept loop waits before doing its housekeeping — closing an
 # expired pairing window that nothing ever connected to. Stopping does not wait
@@ -234,7 +251,10 @@ class LinkServer:
 
         self._state_lock = threading.Lock()
         self._active = 0
-        self._next_handshake_at = 0.0
+
+        # peer address -> the time it may try again. Ordered, so the oldest
+        # entry is the one evicted when the map is full.
+        self._paused_peers: OrderedDict[str, float] = OrderedDict()
 
         self._sessions_served = 0
 
@@ -464,7 +484,7 @@ class LinkServer:
 
             return
 
-        if not self._handshake_permitted():
+        if not self._handshake_permitted(peer):
             self.audit.record(
                 AuditEvent.CONNECTION_REJECTED,
                 peer=peer,
@@ -480,7 +500,7 @@ class LinkServer:
         try:
             tls = context.wrap_socket(raw, server_side=True)
         except (ssl.SSLError, OSError, TimeoutError):
-            self._penalise_failure()
+            self._penalise_failure(peer)
             self.audit.record(
                 AuditEvent.HANDSHAKE_REFUSED,
                 device_id=seen.identity or "",
@@ -781,15 +801,40 @@ class LinkServer:
         with self._state_lock:
             self._active = max(0, self._active - 1)
 
-    def _handshake_permitted(self) -> bool:
+    def _handshake_permitted(self, peer: str) -> bool:
+        """Whether this peer may attempt a handshake yet."""
         with self._state_lock:
-            return self.clock() >= self._next_handshake_at
+            now = self.clock()
+            until = self._paused_peers.get(peer)
 
-    def _penalise_failure(self) -> None:
+            if until is None:
+                return True
+
+            if now >= until:
+                # Served its pause. Forget it rather than letting the map
+                # fill with peers that are no longer paused.
+                del self._paused_peers[peer]
+
+                return True
+
+            return False
+
+    def _penalise_failure(self, peer: str) -> None:
+        """
+        Make this peer wait before trying again.
+
+        Per peer, not global. A global pause means one hostile machine on the
+        network stops the owner pairing their own phone, which was measured
+        rather than supposed.
+        """
         with self._state_lock:
-            self._next_handshake_at = (
+            self._paused_peers.pop(peer, None)
+            self._paused_peers[peer] = (
                 self.clock() + self.settings.failure_pause
             )
+
+            while len(self._paused_peers) > MAX_PAUSED_PEERS:
+                self._paused_peers.popitem(last=False)
 
     @staticmethod
     def _shutdown(connection: socket.socket) -> None:

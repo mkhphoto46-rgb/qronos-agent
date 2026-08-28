@@ -18,6 +18,7 @@ from core.link_client import LinkClient, LinkClientError
 from core.link_devices import DeviceRegistry, DeviceStatus, new_secret
 from core.link_protocol import Response, encode_frame
 from core.link_server import (
+    MAX_PAUSED_PEERS,
     LinkOperationError,
     LinkServer,
     LinkSettings,
@@ -639,6 +640,10 @@ class TestLimits(unittest.TestCase):
     def test_a_failed_handshake_pauses_the_next_attempt(self) -> None:
         # Denial-of-service protection, not authentication hardening: the key
         # is 256 bits, so repeated attempts cannot guess it.
+        #
+        # Both clients here come from loopback, so they are the same peer and
+        # the pause applies. TestFailurePauseIsPerPeer covers the case where
+        # they are not.
         clock = FakeServerClock()
         harness = ServerHarness(
             settings=LinkSettings(failure_pause=60.0),
@@ -679,6 +684,91 @@ class TestLimits(unittest.TestCase):
                 self.assertTrue(client.call("ping").ok)
         finally:
             harness.close()
+
+
+class TestFailurePauseIsPerPeer(unittest.TestCase):
+    """
+    One machine's failures must not lock another machine out.
+
+    The pause was global. Measured against a running server, that let any
+    machine which could reach the port stop the owner pairing their own
+    phone: a bad handshake every half second held the pause permanently in
+    the future, and five of five legitimate attempts failed until the
+    attacker gave up.
+
+    The pause is still the right control — it caps the CPU a stranger can
+    waste — so it is kept, scoped to the address that earned it. These test
+    the decision function directly, because every client on loopback shares
+    an address and cannot demonstrate two peers.
+    """
+
+    def setUp(self) -> None:
+        self.clock = FakeServerClock()
+        self.harness = ServerHarness(
+            settings=LinkSettings(failure_pause=60.0),
+            handlers={LinkOp.PING: ok_handler},
+            clock=self.clock,
+        )
+        self.server = self.harness.server
+
+    def tearDown(self) -> None:
+        self.harness.close()
+
+    def test_a_peer_that_failed_is_paused(self) -> None:
+        self.server._penalise_failure("192.168.0.50")
+
+        self.assertFalse(self.server._handshake_permitted("192.168.0.50"))
+
+    def test_another_peer_is_not_paused(self) -> None:
+        # The whole point. The attacker is 192.168.0.50; the owner's phone
+        # is 192.168.0.51 and has done nothing wrong.
+        self.server._penalise_failure("192.168.0.50")
+
+        self.assertTrue(self.server._handshake_permitted("192.168.0.51"))
+
+    def test_a_sustained_attacker_does_not_lock_anyone_else_out(
+        self,
+    ) -> None:
+        for _ in range(50):
+            self.server._penalise_failure("192.168.0.50")
+            self.clock.advance(0.5)
+
+        self.assertFalse(self.server._handshake_permitted("192.168.0.50"))
+        self.assertTrue(self.server._handshake_permitted("192.168.0.51"))
+
+    def test_the_pause_expires_for_the_peer_that_earned_it(self) -> None:
+        self.server._penalise_failure("192.168.0.50")
+        self.clock.advance(61.0)
+
+        self.assertTrue(self.server._handshake_permitted("192.168.0.50"))
+
+    def test_an_expired_pause_is_forgotten(self) -> None:
+        # Otherwise the map fills with peers that are no longer paused.
+        self.server._penalise_failure("192.168.0.50")
+        self.clock.advance(61.0)
+        self.server._handshake_permitted("192.168.0.50")
+
+        self.assertNotIn(
+            "192.168.0.50",
+            self.server._paused_peers,
+        )
+
+    def test_the_map_cannot_grow_without_bound(self) -> None:
+        # An attacker cycling source addresses must not be able to grow it.
+        for index in range(MAX_PAUSED_PEERS * 3):
+            self.server._penalise_failure(f"10.0.{index // 256}.{index % 256}")
+
+        self.assertLessEqual(
+            len(self.server._paused_peers),
+            MAX_PAUSED_PEERS,
+        )
+
+    def test_the_most_recent_offenders_are_the_ones_kept(self) -> None:
+        for index in range(MAX_PAUSED_PEERS + 10):
+            self.server._penalise_failure(f"10.0.0.{index % 256}")
+
+        self.assertFalse(self.server._handshake_permitted("10.0.0.9"))
+
 
     def test_an_idle_session_is_closed(self) -> None:
         harness = ServerHarness(
