@@ -315,6 +315,15 @@ class LinkServer:
             except OSError:
                 pass
 
+        # The accept thread is joined *before* the listener is closed. It
+        # exits on its own via the wake socket, and closing a socket that a
+        # selector is still watching leaves the selector holding a dead file
+        # descriptor — which surfaced in CI as the accept thread dying with
+        # "ValueError: Invalid file descriptor: -1" during shutdown.
+        if self._accept_thread is not None:
+            self._accept_thread.join(timeout=timeout)
+            self._accept_thread = None
+
         listener, self._listener = self._listener, None
 
         if listener is not None:
@@ -322,10 +331,6 @@ class LinkServer:
                 listener.close()
             except OSError:
                 pass
-
-        if self._accept_thread is not None:
-            self._accept_thread.join(timeout=timeout)
-            self._accept_thread = None
 
         for worker in tuple(self._workers):
             worker.join(timeout=timeout)
@@ -361,8 +366,14 @@ class LinkServer:
             return
 
         selector = selectors.DefaultSelector()
-        selector.register(listener, selectors.EVENT_READ)
-        selector.register(wake, selectors.EVENT_READ)
+
+        try:
+            selector.register(listener, selectors.EVENT_READ)
+            selector.register(wake, selectors.EVENT_READ)
+        except (OSError, ValueError):  # pragma: no cover - stopped mid-start
+            selector.close()
+
+            return
 
         try:
             self._select_loop(selector, listener, wake)
@@ -383,7 +394,10 @@ class LinkServer:
 
             try:
                 ready = selector.select(timeout=HOUSEKEEPING_SECONDS)
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError, not just OSError: a selector whose socket has
+                # been closed underneath it reports a file descriptor of -1
+                # rather than an operating-system error.
                 return
 
             if self._stopping.is_set():
@@ -400,7 +414,7 @@ class LinkServer:
                 raw, address = listener.accept()
             except (TimeoutError, socket.timeout):
                 continue
-            except OSError:
+            except (OSError, ValueError):
                 return
 
             peer = str(address[0])
