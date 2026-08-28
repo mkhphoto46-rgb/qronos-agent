@@ -1,0 +1,287 @@
+{
+  "recorded": "2026-08-28",
+  "machine": "NVIDIA RTX 5080, 16303 MiB, Windows 11",
+  "note": "The user was working normally: ComfyUI holding most of the card, Chrome and a WebView active. Sampled every 2 seconds through the same readers core/load_signal.py uses.",
+  "interval_seconds": 2.0,
+  "samples": [
+    {
+      "at": 0.045,
+      "cpu_percent": 16.7,
+      "ram_percent": 43.4,
+      "gpu_utilization_percent": 3,
+      "vram_used_mb": 15288,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 45
+    },
+    {
+      "at": 2.081,
+      "cpu_percent": 25.4,
+      "ram_percent": 43.4,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15280,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 51
+    },
+    {
+      "at": 4.122,
+      "cpu_percent": 25.0,
+      "ram_percent": 43.4,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15283,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 45
+    },
+    {
+      "at": 6.166,
+      "cpu_percent": 24.4,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15279,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 54
+    },
+    {
+      "at": 8.214,
+      "cpu_percent": 23.7,
+      "ram_percent": 43.4,
+      "gpu_utilization_percent": 4,
+      "vram_used_mb": 15276,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 45
+    },
+    {
+      "at": 10.259,
+      "cpu_percent": 25.1,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15266,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 53
+    },
+    {
+      "at": 12.303,
+      "cpu_percent": 25.0,
+      "ram_percent": 43.6,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15278,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 45
+    },
+    {
+      "at": 14.345,
+      "cpu_percent": 25.3,
+      "ram_percent": 43.4,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15230,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 55
+    },
+    {
+      "at": 16.381,
+      "cpu_percent": 21.1,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15321,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 45
+    },
+    {
+      "at": 18.42,
+      "cpu_percent": 27.1,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15338,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 54
+    },
+    {
+      "at": 20.463,
+      "cpu_percent": 24.0,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15310,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 44
+    },
+    {
+      "at": 22.497,
+      "cpu_percent": 25.7,
+      "ram_percent": 43.6,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15274,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 55
+    },
+    {
+      "at": 24.53,
+      "cpu_percent": 24.7,
+      "ram_percent": 43.6,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15228,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 44
+    },
+    {
+      "at": 26.575,
+      "cpu_percent": 26.2,
+      "ram_percent": 43.6,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15286,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 56
+    },
+    {
+      "at": 28.623,
+      "cpu_percent": 25.5,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 2,
+      "vram_used_mb": 15239,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 44
+    },
+    {
+      "at": 30.664,
+      "cpu_percent": 26.2,
+      "ram_percent": 43.6,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15361,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 54
+    },
+    {
+      "at": 32.709,
+      "cpu_percent": 22.9,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 2,
+      "vram_used_mb": 15344,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 44
+    },
+    {
+      "at": 34.749,
+      "cpu_percent": 23.8,
+      "ram_percent": 43.6,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15276,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 55
+    },
+    {
+      "at": 36.789,
+      "cpu_percent": 21.2,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15218,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 43
+    },
+    {
+      "at": 38.837,
+      "cpu_percent": 24.0,
+      "ram_percent": 43.6,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15274,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 55
+    },
+    {
+      "at": 40.877,
+      "cpu_percent": 18.7,
+      "ram_percent": 43.5,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15274,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 43
+    },
+    {
+      "at": 42.91,
+      "cpu_percent": 21.8,
+      "ram_percent": 42.5,
+      "gpu_utilization_percent": 26,
+      "vram_used_mb": 15189,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 48
+    },
+    {
+      "at": 44.947,
+      "cpu_percent": 19.3,
+      "ram_percent": 42.5,
+      "gpu_utilization_percent": 100,
+      "vram_used_mb": 15189,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 54
+    },
+    {
+      "at": 46.992,
+      "cpu_percent": 16.0,
+      "ram_percent": 42.5,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15189,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 44
+    },
+    {
+      "at": 49.034,
+      "cpu_percent": 19.1,
+      "ram_percent": 42.4,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15189,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 44
+    },
+    {
+      "at": 51.082,
+      "cpu_percent": 24.7,
+      "ram_percent": 42.5,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15189,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 47
+    },
+    {
+      "at": 53.131,
+      "cpu_percent": 17.3,
+      "ram_percent": 42.6,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15210,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 43
+    },
+    {
+      "at": 55.164,
+      "cpu_percent": 15.9,
+      "ram_percent": 42.5,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15219,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 45
+    },
+    {
+      "at": 57.209,
+      "cpu_percent": 20.4,
+      "ram_percent": 42.5,
+      "gpu_utilization_percent": 99,
+      "vram_used_mb": 15219,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 55
+    },
+    {
+      "at": 59.255,
+      "cpu_percent": 15.6,
+      "ram_percent": 42.6,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15207,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 44
+    },
+    {
+      "at": 61.29,
+      "cpu_percent": 19.9,
+      "ram_percent": 42.6,
+      "gpu_utilization_percent": 1,
+      "vram_used_mb": 15207,
+      "vram_total_mb": 16303,
+      "gpu_temperature_c": 45
+    }
+  ]
+}
