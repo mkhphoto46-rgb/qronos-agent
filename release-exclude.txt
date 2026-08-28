@@ -20,8 +20,17 @@
 # ---------------------------------------------------------------------------
 
 tests/
-tools/debug/
-tools/test_qronos_wake_word_live.py
+
+# The whole tools directory, not only tools/debug. The other scripts here
+# are live harnesses a developer runs by hand: they open microphones, talk
+# to a local model server and write audio files. None of it is product,
+# and test_release_hygiene.py asserts that product code never imports from
+# tools, so excluding the lot is safe as well as correct.
+#
+# Adding tools/ to .gitignore did not achieve this. Ignore rules have no
+# effect on files Git already tracks, so all of these were still in the
+# repository and would still have shipped.
+tools/
 
 
 # ---------------------------------------------------------------------------

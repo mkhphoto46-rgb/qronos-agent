@@ -121,6 +121,25 @@ class TestManifestMatchesTheRepository(unittest.TestCase):
     def test_the_debug_directory_is_excluded(self) -> None:
         self.assertTrue(is_excluded(DEBUG_DIRECTORY, manifest_entries()))
 
+    def test_the_whole_tools_directory_is_excluded(self) -> None:
+        # Not only tools/debug. Eleven live harnesses sat outside it —
+        # unmarked, unlisted, and therefore invisible to every check in this
+        # file — and would have shipped: scripts that open the microphone,
+        # talk to the local model server and write audio to disk.
+        #
+        # Adding tools/ to .gitignore did not fix it. Ignore rules do not
+        # affect files Git already tracks.
+        entries = manifest_entries()
+
+        for path in sorted((ROOT / "tools").rglob("*.py")):
+            relative = path.relative_to(ROOT).as_posix()
+
+            with self.subTest(path=relative):
+                self.assertTrue(
+                    is_excluded(relative, entries),
+                    f"{relative} would ship",
+                )
+
 
 class TestDebugToolsAreCovered(unittest.TestCase):
     def test_every_file_in_the_debug_directory_is_excluded(self) -> None:
