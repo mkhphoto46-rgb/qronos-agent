@@ -10,6 +10,7 @@ from core.storage_guard import (
     VolumeStatus,
     bytes_to_gb,
     gb_to_bytes,
+    is_nameable,
     read_storage_status,
     read_volume_status,
     resolve_measurable_path,
@@ -208,6 +209,25 @@ class TestReadStorageStatus(unittest.TestCase):
             )
 
             self.assertEqual(len(status.volumes), 1)
+
+    def test_a_malformed_path_is_not_measured_as_another_volume(self) -> None:
+        # The failure this guards against is quieter than a crash. On Windows a
+        # malformed path resolves against the working directory, so walking up
+        # to the nearest existing ancestor lands on a real drive and reports
+        # its free space under the malformed name. A caller would see a plain
+        # reading with no sign that it answered a different question.
+        status = read_storage_status((Path("\0invalid"),))
+
+        self.assertEqual(status.volumes, ())
+
+    def test_control_characters_are_not_nameable(self) -> None:
+        for text in ("\0invalid", "bad\x01name", "tab\tseparated"):
+            with self.subTest(text=text):
+                self.assertFalse(is_nameable(text))
+
+    def test_an_ordinary_path_is_nameable(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            self.assertTrue(is_nameable(Path(name)))
 
     def test_reads_multiple_paths(self) -> None:
         with tempfile.TemporaryDirectory() as first:

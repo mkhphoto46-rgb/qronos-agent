@@ -145,6 +145,20 @@ class StorageStatus:
         return tuple(unique)
 
 
+def is_nameable(path: str | Path) -> bool:
+    """
+    False when the text cannot be a path on any platform.
+
+    A control character, the null byte included, is not a legal part of a file
+    name anywhere. Checking the text directly is deliberate: the platforms do
+    not agree on what happens otherwise. POSIX raises ``ValueError`` from
+    ``Path.resolve``, which the caller can catch. Windows resolves the string
+    without complaint, produces a path that simply does not exist, and leaves
+    the caller to discover that on its own.
+    """
+    return not any(ch < " " for ch in str(path))
+
+
 def resolve_measurable_path(path: str | Path) -> Path | None:
     """
     Return the nearest existing directory at or above ``path``.
@@ -153,13 +167,20 @@ def resolve_measurable_path(path: str | Path) -> Path | None:
     directories in :mod:`core.config` before they are created, so the reading
     walks upwards until it finds something real. Returns None when nothing in
     the chain exists or the path cannot be resolved at all.
+
+    A path that cannot be named is rejected before the walk begins. Without
+    that, a malformed path on Windows resolves against the working directory
+    and the walk climbs out of the nonsense into a real ancestor, so a caller
+    asking about garbage would be handed a genuine reading for an unrelated
+    volume.
     """
+    if not is_nameable(path):
+        return None
+
     try:
         candidate = Path(path).expanduser().resolve()
     except (OSError, ValueError):
-        # ValueError covers malformed paths, such as an embedded null byte,
-        # which Path.resolve raises rather than OSError. A path Qronos cannot
-        # even name is not a path it can measure.
+        # A path Qronos cannot even name is not a path it can measure.
         return None
 
     # Path.parents stops at the anchor, so this terminates on every platform.

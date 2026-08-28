@@ -15,7 +15,7 @@ from core.storage_budget import (
     classify_usage,
     resolve_trigger,
 )
-from core.storage_guard import bytes_to_gb
+from core.storage_guard import bytes_to_gb, is_nameable
 
 
 class DeleteReason(Enum):
@@ -425,8 +425,10 @@ class StorageJanitor:
         Apply every safety rule to one path.
 
         Returns the reason to skip, or None when the path may be deleted. The
-        order matters: ownership is checked before anything else, so a
-        user-owned file is refused even if it is also missing or malformed.
+        order matters: ownership is checked before every rule about the file
+        itself, so a user-owned file is refused even if it is also missing.
+        Only the check that the path can be named at all comes first, because
+        nothing can meaningfully own a name the filesystem would reject.
 
         The whole body is guarded. Any error naming, resolving or inspecting a
         path yields ``UNREADABLE``, which means "do not delete". A path Qronos
@@ -434,6 +436,15 @@ class StorageJanitor:
         this function is always inaction.
         """
         try:
+            # Before anything reasons about the path, establish that it is a
+            # path at all. POSIX would raise on the first call that touches the
+            # filesystem and land in the handler below; Windows would not, and
+            # would instead resolve the nonsense against the working directory
+            # and refuse it as OUTSIDE_ROOT. Both refuse, which is what
+            # matters, but the reason should not depend on the platform.
+            if not is_nameable(path):
+                return SkipReason.UNREADABLE
+
             if self.registry.is_user_owned(path):
                 return SkipReason.USER_OWNED
 
