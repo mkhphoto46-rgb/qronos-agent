@@ -212,6 +212,68 @@ class TestAuditSink(unittest.TestCase):
         self.assertEqual(len(seen), 1)
 
 
+class TestTheDefaultSink(unittest.TestCase):
+    """
+    Recording must not depend on every caller remembering an argument.
+
+    Driving a real action through the seam showed the hole: a call made
+    without the audit argument produced no record, and the absence looked
+    exactly like a call that was never made. For an audit trail that is the
+    worst possible failure, because it is invisible in the artefact whose whole
+    job is to be the record.
+    """
+
+    def setUp(self) -> None:
+        self.seen: list[Verdict] = []
+        self.previous = gate.set_default_audit_sink(self.seen.append)
+
+    def tearDown(self) -> None:
+        gate.set_default_audit_sink(self.previous)
+
+    def test_a_call_with_no_sink_is_still_recorded(self) -> None:
+        evaluate(a_request(ActionCategory.CONVERSATION))
+
+        self.assertEqual(len(self.seen), 1)
+
+    def test_the_strict_form_is_recorded_too(self) -> None:
+        with self.assertRaises(ActionRefused):
+            require(a_request(category_at(PermissionLevel.FORBIDDEN)))
+
+        self.assertEqual(len(self.seen), 1)
+
+    def test_an_explicit_sink_wins(self) -> None:
+        # A caller that wants its own trail gets it, and does not also write to
+        # the default, which would double every record.
+        mine: list[Verdict] = []
+
+        evaluate(a_request(ActionCategory.CONVERSATION), audit=mine.append)
+
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(self.seen, [])
+
+    def test_setting_none_turns_it_off_again(self) -> None:
+        gate.set_default_audit_sink(None)
+
+        evaluate(a_request(ActionCategory.CONVERSATION))
+
+        self.assertEqual(self.seen, [])
+
+    def test_the_previous_sink_is_returned_for_restoring(self) -> None:
+        # Compared by equality rather than identity: attribute access on a
+        # bound method builds a new object every time, so `is` would fail
+        # against the very sink that was installed.
+        replaced = gate.set_default_audit_sink(None)
+
+        self.assertEqual(replaced, self.seen.append)
+
+    def test_the_default_is_nothing_until_it_is_set(self) -> None:
+        # Nothing is assumed at import about where records should go. The
+        # application says, and until it does the behaviour is the old one.
+        gate.set_default_audit_sink(None)
+
+        self.assertIsNone(gate._sink_for(None))
+
+
 class TestVerdictShape(unittest.TestCase):
     def test_a_verdict_carries_the_request_it_judged(self) -> None:
         request = a_request(ActionCategory.CONVERSATION)

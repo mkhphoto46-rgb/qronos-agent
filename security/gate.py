@@ -24,7 +24,8 @@ Three rules:
     flag: the outcome is a different value.
 
     Every decision is recorded, including the refusals. A denied action is the
-    more interesting audit event, not the less.
+    more interesting audit event, not the less. Recording is not left to each
+    caller remembering an argument — see :func:`set_default_audit_sink`.
 """
 
 from __future__ import annotations
@@ -65,6 +66,39 @@ _OUTCOME_FOR_DECISION: dict[PermissionDecision, ActionOutcome] = {
 # callable rather than an interface so a caller can pass a bound method, a
 # lambda in a test, or nothing at all.
 AuditSink = Callable[["Verdict"], None]
+
+
+#: Used when a caller passes no sink of its own. None means no default, which
+#: is the state at import: nothing is assumed about where audit records should
+#: go until the application says.
+_default_audit_sink: AuditSink | None = None
+
+
+def set_default_audit_sink(sink: AuditSink | None) -> AuditSink | None:
+    """
+    Install the sink used when a caller passes none. Returns the previous one.
+
+    The audit argument on :func:`evaluate` started out optional, which made
+    "every decision is recorded" a claim about discipline rather than about the
+    code: an executor that forgot the argument produced no trail, silently, and
+    the omission looked exactly like a call that was never made.
+
+    Wiring it once at startup makes recording the default and forgetting the
+    exception. It is a module-level setting rather than a hidden global because
+    the previous value comes back, so a test can install a sink and restore
+    what was there.
+    """
+    global _default_audit_sink
+
+    previous = _default_audit_sink
+    _default_audit_sink = sink
+
+    return previous
+
+
+def _sink_for(audit: AuditSink | None) -> AuditSink | None:
+    """An explicit sink wins; otherwise whatever the application installed."""
+    return audit if audit is not None else _default_audit_sink
 
 
 class ActionRefused(Exception):
@@ -173,8 +207,10 @@ def evaluate(
                 policy=policy,
             )
 
-    if audit is not None:
-        audit(verdict)
+    sink = _sink_for(audit)
+
+    if sink is not None:
+        sink(verdict)
 
     return verdict
 
