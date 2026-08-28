@@ -454,3 +454,107 @@ class TestMeasureComponent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReparsePointsAreNotWalked(unittest.TestCase):
+    """
+    A junction inside a Qronos directory must not import the user's files.
+
+    ``measure_component`` documented that symlinks are never followed, because
+    "following them would allow a link inside a Qronos directory to make user
+    data appear to belong to a Qronos quota, and later to be selected for
+    deletion". Exactly right, and it did not hold on Windows.
+
+    A junction is a reparse point but not a symlink: ``is_symlink`` answers
+    False, ``os.walk(followlinks=False)`` descends into it anyway, and the
+    files behind it are ordinary files that no per-file check would catch.
+    Junctions also need no privileges, unlike symlinks, so this is the easier
+    of the two to create by accident or on purpose.
+
+    Measured before the fix: a junction pointing at a documents folder added
+    1.2 MB of the user's files to a 250 KB Qronos quota. Nothing was deleted —
+    containment held — but the component then looked permanently over its cap,
+    so cleanup would keep removing genuine scratch data chasing a limit it
+    could never reach.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.work = Path(self.directory.name)
+        self.root = self.work / "component"
+        self.elsewhere = self.work / "elsewhere"
+        self.root.mkdir()
+        self.elsewhere.mkdir()
+
+        (self.root / "scratch.bin").write_bytes(b"x" * 1_000)
+        (self.elsewhere / "the_users_file.bin").write_bytes(b"y" * 50_000)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def _budget(self) -> ComponentBudget:
+        return ComponentBudget(
+            component=BudgetComponent.VISION_TEMP,
+            root=self.root,
+            soft_cap_bytes=10_000,
+            hard_cap_bytes=20_000,
+        )
+
+    def _make_junction(self) -> bool:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "cmd", "/c", "mklink", "/J",
+                str(self.root / "looks_ordinary"),
+                str(self.elsewhere),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        return result.returncode == 0
+
+    @unittest.skipUnless(os.name == "nt", "junctions are a Windows thing")
+    def test_a_junction_does_not_add_to_the_quota(self) -> None:
+        if not self._make_junction():
+            self.skipTest("this machine would not create a junction")
+
+        usage = measure_component(self._budget())
+
+        self.assertEqual(usage.total_bytes, 1_000)
+        self.assertEqual(usage.file_count, 1)
+
+    @unittest.skipUnless(os.name == "nt", "junctions are a Windows thing")
+    def test_nothing_behind_a_junction_becomes_an_entry(self) -> None:
+        if not self._make_junction():
+            self.skipTest("this machine would not create a junction")
+
+        names = {entry.path.name for entry in measure_component(
+            self._budget()
+        ).entries}
+
+        self.assertNotIn("the_users_file.bin", names)
+
+    def test_a_symlinked_directory_is_not_walked_either(self) -> None:
+        # The case the docstring already claimed. Skipped where the platform
+        # will not create one, which on Windows is most machines.
+        try:
+            (self.root / "linked").symlink_to(
+                self.elsewhere, target_is_directory=True
+            )
+        except (OSError, NotImplementedError):
+            self.skipTest("this machine would not create a symlink")
+
+        self.assertEqual(measure_component(self._budget()).total_bytes, 1_000)
+
+    def test_an_ordinary_subdirectory_is_still_walked(self) -> None:
+        # The fix must not stop the measurement seeing real nested files.
+        nested = self.root / "real_subdirectory"
+        nested.mkdir()
+        (nested / "more_scratch.bin").write_bytes(b"z" * 2_000)
+
+        usage = measure_component(self._budget())
+
+        self.assertEqual(usage.total_bytes, 3_000)
+        self.assertEqual(usage.file_count, 2)

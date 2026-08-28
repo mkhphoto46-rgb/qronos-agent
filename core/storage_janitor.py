@@ -15,7 +15,11 @@ from core.storage_budget import (
     classify_usage,
     resolve_trigger,
 )
-from core.storage_guard import bytes_to_gb, is_nameable
+from core.storage_guard import (
+    bytes_to_gb,
+    is_nameable,
+    is_reparse_point,
+)
 
 
 class DeleteReason(Enum):
@@ -453,7 +457,7 @@ class StorageJanitor:
             # the link and would answer for the target instead. Refusing here
             # also means the janitor never reasons about a link's target at
             # all, whether that target is inside the root or outside it.
-            if path.is_symlink():
+            if is_reparse_point(path):
                 return SkipReason.SYMLINK
 
             # Containment is checked on the resolved path so that a traversal

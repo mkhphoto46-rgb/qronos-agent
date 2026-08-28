@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,6 +145,47 @@ class StorageStatus:
             unique.append(volume)
 
         return tuple(unique)
+
+
+def is_reparse_point(path: str | Path) -> bool:
+    """
+    True for a symlink, a junction, or any other reparse point.
+
+    ``Path.is_symlink`` is not enough on Windows, which is the only platform
+    Qronos ships on. A *junction* is a reparse point but not a symlink, so
+    ``is_symlink`` answers False for one, and ``stat`` follows it. Junctions
+    also need no privileges: any program running as the user can create one
+    with ``mklink /J``, while a symlink needs Developer Mode or an
+    administrator.
+
+    Measured before this existed: a junction placed inside a Qronos directory
+    and pointing at a folder of documents made 1.2 MB of the user's files count
+    toward a 250 KB Qronos quota. Nothing was deleted — containment held — but
+    the component then looked permanently over its cap, so cleanup would keep
+    removing real scratch data trying to reach a limit it could never reach.
+
+    A path that is not there answers False. It is not a reparse point, it is
+    absent, and saying otherwise makes a caller report a missing file as a
+    link — which is what the janitor's own tests caught the first time this
+    was written.
+
+    Any other unreadable path answers True. Not being able to tell what
+    something is, is a reason to leave it alone rather than to walk into it.
+    """
+    try:
+        if os.path.islink(path):
+            return True
+
+        if os.path.isjunction(path):
+            return True
+
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, AttributeError):
+        return True
 
 
 def is_nameable(path: str | Path) -> bool:

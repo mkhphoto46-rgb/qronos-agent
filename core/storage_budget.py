@@ -6,7 +6,11 @@ from enum import Enum
 from pathlib import Path
 
 from core.config import CONFIG
-from core.storage_guard import bytes_to_gb, gb_to_bytes
+from core.storage_guard import (
+    bytes_to_gb,
+    gb_to_bytes,
+    is_reparse_point,
+)
 
 
 # Qronos-managed data lives under directories derived from the paths already
@@ -293,15 +297,33 @@ def measure_component(
     total = 0
     partial = False
 
-    for directory, _subdirectories, filenames in os.walk(
+    for directory, subdirectories, filenames in os.walk(
         root,
         followlinks=follow_symlinks,
     ):
+        if not follow_symlinks:
+            # Prune reparse points from the walk itself, in place, which
+            # is the only thing os.walk honours. followlinks=False covers
+            # symlinks and nothing else, so a Windows junction is still
+            # descended into — and the files behind it are ordinary files,
+            # so checking each one individually would not catch them.
+            # Measured: a junction pointing at a documents folder added
+            # 1.2 MB of the user's files to a 250 KB Qronos quota.
+            subdirectories[:] = [
+                name
+                for name in subdirectories
+                if not is_reparse_point(Path(directory) / name)
+            ]
+
         for filename in filenames:
             candidate = Path(directory) / filename
 
             try:
-                if candidate.is_symlink():
+                # Reparse points rather than symlinks: a Windows junction
+                # is not a symlink, needs no privileges to create, and
+                # would otherwise make a folder of the user's documents
+                # count toward a Qronos quota.
+                if is_reparse_point(candidate):
                     continue
 
                 stat_result = candidate.stat()
