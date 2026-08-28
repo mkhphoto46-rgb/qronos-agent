@@ -122,7 +122,7 @@
          │      هسته تصمیم‌گیری           │
          │  Task Router                   │
          │   ├── Deterministic (بدون LLM) │
-         │   ├── Fast Brain  (warm)       │
+         │   ├── Fast Brain  (on-demand)  │
          │   └── Heavy Brain (on-demand)  │
          │  Planner · Orchestrator        │
          └────────────────┬───────────────┘

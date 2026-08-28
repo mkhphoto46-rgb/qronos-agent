@@ -122,9 +122,18 @@ must benchmark cold load, warm load, first-token latency, generation speed,
 unload time, and Fast-Brain recovery time on the development machine.
 
 The 8 GB development GPU cannot keep both selected models fully resident in
-VRAM. Fast Brain should remain warm when possible. Heavy Brain should use
-partial CPU/RAM offload and remain on demand. The UI design must tolerate real
-measured latency instead of promising an instant switch.
+VRAM. Neither brain is kept resident: both are unloaded as soon as they have
+answered, so Qronos holds no VRAM between turns. Heavy Brain should use
+partial CPU/RAM offload. The UI design must tolerate real measured latency
+instead of promising an instant switch.
+
+An earlier revision of this document asked for Fast Brain to remain warm.
+Measured on a 16 GB card on 2026-08-28, that costs 3,442 MiB held permanently
+and saves about 1.7 seconds on a turn that otherwise takes 4.2 seconds from
+cold. The card is the user's, not ours, so the model is loaded on demand and
+released immediately. Peak usage, which is reached the moment a model finishes
+loading rather than as its context fills, is 3,442 MiB for Fast Brain at 8,192
+tokens and 10,220 MiB for Heavy Brain at 16,384.
 
 ## Five-Level Permission Model
 

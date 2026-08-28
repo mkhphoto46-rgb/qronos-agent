@@ -272,17 +272,17 @@ class Orchestrator:
                 num_ctx=(
                     selection.model.context_tokens
                 ),
-                keep_alive=(
-                    "10m"
-                    if selection.keep_loaded
-                    else "0"
-                ),
+                # Nothing is kept warm. Both brains are unloaded the moment
+                # they have answered, so Qronos holds no VRAM between turns.
+                # The cost is roughly 1.7 s on a Fast turn and under a second
+                # on a Heavy one; the saving is 3.4 GB and 10.2 GB of somebody
+                # else's graphics card. See core/model_manager.py.
+                keep_alive="0",
             )
 
-            if not selection.keep_loaded:
-                self.runtime.stop_model(
-                    selection.model.name
-                )
+            self.runtime.stop_model(
+                selection.model.name
+            )
 
             return StepResult(
                 order=step.order,
