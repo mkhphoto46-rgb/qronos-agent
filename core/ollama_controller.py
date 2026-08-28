@@ -207,6 +207,7 @@ class OllamaController(BrainRuntime):
         num_predict: Optional[int] = None,
         num_ctx: Optional[int] = None,
         keep_alive: str = "5m",
+        response_format: Optional[dict] = None,
     ) -> str:
         """
         Send one chat request through the Ollama development runtime.
@@ -236,7 +237,7 @@ class OllamaController(BrainRuntime):
             )
         )
 
-        payload = {
+        payload: dict = {
             "model": model_name,
             "messages": ollama_messages,
             "think": think,
@@ -244,6 +245,13 @@ class OllamaController(BrainRuntime):
             "keep_alive": keep_alive,
             "options": options,
         }
+
+        # Structured output. A caller that needs a particular shape back
+        # can constrain generation to it rather than describing it in the
+        # prompt and hoping — which is how the web research layer came to
+        # discard every answer it produced.
+        if response_format is not None:
+            payload["format"] = response_format
 
         try:
             response = requests.post(

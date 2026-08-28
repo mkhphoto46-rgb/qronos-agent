@@ -83,6 +83,7 @@ class BrainRuntime(ABC):
         num_predict: int | None = None,
         num_ctx: int | None = None,
         keep_alive: str = "5m",
+        response_format: dict | None = None,
     ) -> str:
         """
         Generate a response with the requested brain.
