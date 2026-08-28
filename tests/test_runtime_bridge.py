@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
+from core import runtime_bridge
 from core.command_recorder import CommandRecordingResult
 from core.conversation_session import ConversationSession
 from core.orchestrator import StepResult
@@ -663,6 +665,93 @@ class TestRoutingIsReported(unittest.TestCase):
         captured_events(runtime.push_to_talk)
 
         self.assertEqual(orchestrator.plans[0].goal, "یک عکس بگیر")
+
+
+
+class TestTheQueueDoesNotLeakOntoStderr(unittest.TestCase):
+    """
+    Two guarantees the subprocess tests cannot actually pin down.
+
+    Closing stdin does end the bridge and does leave stderr clean, and there
+    are subprocess tests asserting both. But they pass whether or not the
+    protections below exist, because the pump is a daemon thread and the
+    interpreter kills it on the way out before it can lose the race. Removing
+    both protections and re-running them proved exactly that: still green.
+
+    So the protections are tested directly here instead. What is being
+    defended is a late write from the pump thread turning into a traceback on
+    stderr, which the desktop reads as a crash and shows to the user as one.
+    """
+
+    def test_emitting_to_a_closed_stdout_does_not_raise(self) -> None:
+        original = sys.stdout
+
+        class ClosedStream:
+            closed = True
+
+            def write(self, _: str) -> int:  # pragma: no cover - must not run
+                raise ValueError("I/O operation on closed file")
+
+            def flush(self) -> None:  # pragma: no cover - must not run
+                raise ValueError("I/O operation on closed file")
+
+        sys.stdout = ClosedStream()  # type: ignore[assignment]
+
+        try:
+            runtime_bridge.emit("queue_changed", "ready", "{}")
+        finally:
+            sys.stdout = original
+
+    def test_closing_the_runtime_stops_the_pump(self) -> None:
+        # The ordering that matters: the scheduler is stopped first, and
+        # before anything else in close() that might raise and skip it.
+        with redirect_stdout(io.StringIO()):
+            runtime = runtime_bridge.QronosRuntime()
+            scheduler = runtime.ensure_scheduler()
+
+            self.assertTrue(scheduler.running)
+
+            runtime.close()
+
+        self.assertFalse(scheduler.running)
+
+    def test_closing_twice_is_harmless(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            runtime = runtime_bridge.QronosRuntime()
+            runtime.ensure_scheduler()
+
+            runtime.close()
+            runtime.close()
+
+    def test_a_runtime_that_never_queued_anything_closes_cleanly(self) -> None:
+        runtime_bridge.QronosRuntime().close()
+
+
+class TestTheSchedulerIsBuiltOnceAndOnlyWhenAsked(unittest.TestCase):
+    def test_it_does_not_exist_until_something_needs_it(self) -> None:
+        # A sampler thread launching nvidia-smi every two seconds is a side
+        # effect, and a bridge nobody has spoken to must have none.
+        self.assertIsNone(runtime_bridge.QronosRuntime().scheduler)
+
+    def test_asking_twice_gives_the_same_one(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            runtime = runtime_bridge.QronosRuntime()
+
+            try:
+                self.assertIs(
+                    runtime.ensure_scheduler(),
+                    runtime.ensure_scheduler(),
+                )
+            finally:
+                runtime.close()
+
+    def test_one_supplied_from_outside_is_used_as_is(self) -> None:
+        # The injection point that lets a test drive the bridge without a
+        # real sampler or a real thread.
+        sentinel = object()
+        runtime = runtime_bridge.QronosRuntime(scheduler=sentinel)
+
+        self.assertIs(runtime.ensure_scheduler(), sentinel)
 
 
 if __name__ == "__main__":

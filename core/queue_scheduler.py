@@ -115,6 +115,11 @@ _POLITENESS_HOLDS = frozenset(
 
 
 class QueueEventType(Enum):
+    #: Something about the queue is different from a moment ago. Carries no
+    #: detail of its own: the listener re-reads ``view()``, which is whole
+    #: state rather than a delta and therefore cannot drift out of step.
+    CHANGED = "changed"
+
     QUEUED = "queued"
     STARTED = "started"
     FINISHED = "finished"
@@ -425,6 +430,8 @@ class QueueScheduler:
         what happens in some state builds that state, calls this once, and
         looks.
         """
+        before = self._current_revision
+
         sample = self.monitor.observe()
         level = self.monitor.snapshot().level
 
@@ -433,14 +440,18 @@ class QueueScheduler:
 
         if self._paused:
             self._hold_everything(HoldReason.PAUSED, "The queue is paused.")
-            return
+        else:
+            candidate = self._next_admissible(level, sample)
 
-        candidate = self._next_admissible(level, sample)
+            if candidate is not None:
+                self._start(candidate, level)
 
-        if candidate is None:
-            return
-
-        self._start(candidate, level)
+        # Only when something actually moved. A hold whose reason changed —
+        # "working out how busy you are" becoming "your machine is busy" — is
+        # a change the interface has to hear about, and it emits no event of
+        # its own.
+        if self._current_revision != before:
+            self._emit(QueueEventType.CHANGED)
 
     def _next_admissible(
         self,
