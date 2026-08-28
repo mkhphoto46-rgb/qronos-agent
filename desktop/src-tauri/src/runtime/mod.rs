@@ -36,36 +36,67 @@ struct RuntimeProcess {
 
 pub struct RuntimeManagerState {
     process: Mutex<Option<RuntimeProcess>>,
-    project_root: PathBuf,
+
+    /// None when there is no source checkout to run the Python side from,
+    /// which is every installed copy until the runtime is packaged.
+    project_root: Option<PathBuf>,
 }
 
 impl RuntimeManagerState {
-    pub fn new(project_root: PathBuf) -> Self {
+    pub fn new(project_root: Option<PathBuf>) -> Self {
         Self {
             process: Mutex::new(None),
             project_root,
         }
     }
+
+    /// The checkout, or a message explaining why there is not one.
+    fn require_root(&self) -> Result<&Path, String> {
+        self.project_root
+            .as_deref()
+            .ok_or_else(|| "The Qronos voice runtime is not available in this build. It runs from a source checkout, and this copy was installed without the Python side packaged alongside it.".to_string())
+    }
 }
 
-fn find_project_root() -> Result<PathBuf, String> {
-    let current = std::env::current_dir()
-        .map_err(|error| format!("Could not read current directory: {error}"))?;
+/// Locate the source checkout the Python runtime lives in.
+///
+/// A development-mode mechanism, and only that. An installed Qronos has no
+/// `core/` beside its executable, so this returns None there and the runtime
+/// reports itself unavailable — the truth, until the Python side is packaged
+/// with the application.
+///
+/// The compile-time CARGO_MANIFEST_DIR fallback is behind debug_assertions
+/// deliberately. In a release build it embedded the build machine's absolute
+/// path in the shipped binary, so the developer's Windows username travelled
+/// inside the installer, and the application appeared to work when run from
+/// anywhere on that one machine while failing on every other. A bug that
+/// reproduces nowhere except the developer's own computer is the expensive
+/// kind.
+fn find_project_root() -> Option<PathBuf> {
+    fn looks_like_the_checkout(candidate: &Path) -> bool {
+        candidate.join("core").is_dir() && candidate.join("desktop").is_dir()
+    }
 
-    for candidate in current.ancestors() {
-        if candidate.join("core").is_dir() && candidate.join("desktop").is_dir() {
-            return Ok(candidate.to_path_buf());
+    if let Ok(current) = std::env::current_dir() {
+        if let Some(found) =
+            current.ancestors().find(|c| looks_like_the_checkout(c))
+        {
+            return Some(found.to_path_buf());
         }
     }
 
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate in manifest_dir.ancestors() {
-        if candidate.join("core").is_dir() && candidate.join("desktop").is_dir() {
-            return Ok(candidate.to_path_buf());
+    #[cfg(debug_assertions)]
+    {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+        if let Some(found) =
+            manifest.ancestors().find(|c| looks_like_the_checkout(c))
+        {
+            return Some(found.to_path_buf());
         }
     }
 
-    Err("Qronos project root could not be located.".to_string())
+    None
 }
 
 fn python_candidates(project_root: &Path) -> Vec<PathBuf> {
@@ -176,10 +207,11 @@ fn write_runtime_command(
 }
 
 pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let project_root = find_project_root()
-        .map_err(std::io::Error::other)?;
-
-    app.manage(RuntimeManagerState::new(project_root));
+    // Never fails now. A missing checkout used to abort setup, which Tauri
+    // turns into a panic before the window appears: an installed Qronos
+    // would not start at all, and with no message anybody could act on. It
+    // starts, and says so when the voice runtime is actually asked for.
+    app.manage(RuntimeManagerState::new(find_project_root()));
 
     Ok(())
 }
@@ -248,7 +280,8 @@ pub fn start_runtime(
         *guard = None;
     }
 
-    let script = runtime_script(&state.project_root);
+    let project_root = state.require_root()?;
+    let script = runtime_script(project_root);
 
     if !script.is_file() {
         return Err(format!(
@@ -257,14 +290,14 @@ pub fn start_runtime(
         ));
     }
 
-    let python = resolve_python(&state.project_root)?;
+    let python = resolve_python(project_root)?;
 
     let mut command = Command::new(python);
     command
         .arg("-u")
         .arg("-m")
         .arg("core.runtime_bridge")
-        .current_dir(&state.project_root)
+        .current_dir(project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
