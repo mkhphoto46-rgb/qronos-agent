@@ -144,6 +144,41 @@ class QronosRuntime:
             "Qronos voice runtime is ready.",
         )
 
+    def _require_prepared(self) -> None:
+        """
+        Fail loudly when a collaborator is missing.
+
+        These were ``assert`` statements. Python removes ``assert`` entirely
+        under ``-O``, so in an optimised run the guard disappeared and the very
+        next line dereferenced ``None`` — a raw AttributeError from inside the
+        voice path rather than a message the user could act on. An explicit
+        check survives the flag, and the caller already turns a RuntimeError
+        into a ``runtime_error`` event the desktop displays.
+
+        This should be unreachable: ``prepare`` assigns all seven or raises.
+        It stays because the cost of being wrong is a crash mid-utterance.
+        """
+        missing = [
+            name
+            for name in (
+                "audio_input",
+                "vad_runtime",
+                "command_recorder",
+                "speech_runtime",
+                "task_router",
+                "orchestrator",
+                "conversation_session",
+            )
+            if getattr(self, name) is None
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "Qronos voice runtime is not prepared: "
+                + ", ".join(missing)
+                + " missing."
+            )
+
     def push_to_talk(self) -> None:
         if self.is_busy:
             emit(
@@ -157,13 +192,7 @@ class QronosRuntime:
 
         try:
             self.prepare()
-
-            assert self.audio_input is not None
-            assert self.command_recorder is not None
-            assert self.speech_runtime is not None
-            assert self.task_router is not None
-            assert self.orchestrator is not None
-            assert self.conversation_session is not None
+            self._require_prepared()
 
             emit(
                 "voice_listening",
