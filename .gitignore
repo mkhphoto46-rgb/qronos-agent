@@ -66,7 +66,7 @@ desktop/npm
 
 .cache/
 cache/
-runtime/cache/
+/runtime/cache/
 
 # ----------------------------------------------------------
 # AI model files
@@ -96,8 +96,14 @@ models/**
 # produces a CMake tree — caches, object files, generated projects, vendored
 # ggml sources — several hundred files that the earlier per-subdirectory
 # rules did not cover. None of it belongs in the repository, and every path
-# under runtime/ is either a downloaded model or something a build produced.
-runtime/
+# under it is either a downloaded model or something a build produced.
+#
+# Anchored with a leading slash: unanchored, `runtime/` matches a directory
+# of that name at any depth, which silently swallowed
+# desktop/src-tauri/src/runtime/ — real Rust source. Files already tracked
+# there were unaffected, but a new one would never have been added, and
+# nothing would have said so.
+/runtime/
 
 # ----------------------------------------------------------
 # Local databases
