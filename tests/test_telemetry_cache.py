@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 
 from core.resource_guard import GpuStatus, SystemStatus
@@ -202,6 +203,128 @@ class TestFailureIsSurvivable(unittest.TestCase):
 
         self.assertFalse(recovered.stale)
         self.assertEqual(recovered.system.cpu_usage_percent, 55.0)
+
+
+class TestASlowReaderDoesNotDefeatTheCache(unittest.TestCase):
+    """
+    The defect a fake clock could not show.
+
+    The first version of this module stamped a snapshot with the time taken
+    *before* the read, and defaulted to a reader that blocks for half a second
+    inside psutil.cpu_percent. Every snapshot was therefore born older than the
+    375 ms window and the cache refreshed on every single call — 51 reads for
+    51 calls, on a real machine, while every unit test passed. The fake clock
+    never advanced, so the age was always zero.
+    """
+
+    def test_a_reading_is_stamped_after_the_read_not_before(self) -> None:
+        clock = FakeClock()
+
+        def slow_system() -> SystemStatus:
+            # Stands in for psutil.cpu_percent(interval=0.5).
+            clock.advance(0.5)
+
+            return SystemStatus(
+                cpu_usage_percent=10.0,
+                ram_usage_percent=30.0,
+                ram_used_gb=9.0,
+                ram_total_gb=31.9,
+            )
+
+        instance = TelemetryCache(
+            read_system=slow_system,
+            read_gpu=lambda: None,
+            max_age_seconds=DEFAULT_MAX_AGE_SECONDS,
+            clock=clock,
+        )
+
+        snapshot = instance.current()
+
+        # Stamped before, this would already be 0.5 s old and instantly stale.
+        self.assertEqual(snapshot.age(clock()), 0.0)
+
+    def test_a_slow_reader_is_still_cached(self) -> None:
+        clock = FakeClock()
+        calls = {"count": 0}
+
+        def slow_system() -> SystemStatus:
+            calls["count"] += 1
+            clock.advance(0.5)
+
+            return SystemStatus(
+                cpu_usage_percent=10.0,
+                ram_usage_percent=30.0,
+                ram_used_gb=9.0,
+                ram_total_gb=31.9,
+            )
+
+        instance = TelemetryCache(
+            read_system=slow_system,
+            read_gpu=lambda: None,
+            max_age_seconds=DEFAULT_MAX_AGE_SECONDS,
+            clock=clock,
+        )
+
+        for _ in range(10):
+            instance.current()
+
+        # Priming plus one real read. Not eleven.
+        self.assertLessEqual(calls["count"], 2)
+
+
+class TestTheDefaultReaderIsCheap(unittest.TestCase):
+    def test_the_default_system_reader_does_not_block(self) -> None:
+        # A cache whose window is shorter than the cost of filling it is not a
+        # cache. This asserts the default reader is the non-blocking one, so a
+        # later change back to read_system_status fails here rather than
+        # silently making every call hit the operating system again.
+        from core.resource_guard import read_system_status_since_last_call
+        from core.telemetry_cache import TelemetryCache as Subject
+
+        instance = Subject.__new__(Subject)
+        Subject.__init__(instance)
+
+        self.assertIs(
+            instance.read_system,
+            read_system_status_since_last_call,
+        )
+
+    def test_the_first_real_reading_is_not_a_meaningless_zero(self) -> None:
+        # The cheap reader's first answer is 0.0 because it has nothing to
+        # measure against, and 0% CPU reads as an idle machine — so the
+        # governor would grant heavy work on a pegged one. Wrong in the
+        # dangerous direction, which is why the first read is the accurate one.
+        instance = TelemetryCache()
+
+        first = instance.current()
+
+        self.assertGreater(first.system.cpu_usage_percent, 0.0)
+        self.assertGreater(first.system.ram_usage_percent, 0.0)
+
+    def test_invalidating_does_not_pay_for_accuracy_again(self) -> None:
+        # invalidate() also empties the snapshot, so keying the accurate read
+        # off "no snapshot" would put a blocking half-second on every one.
+        instance = TelemetryCache()
+        instance.current()
+        instance.invalidate()
+
+        started = time.perf_counter()
+        instance.current()
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.4)
+
+    def test_a_real_burst_costs_one_read(self) -> None:
+        # End to end against the real machine, with the real clock. This is the
+        # check that actually failed when it mattered.
+        instance = TelemetryCache()
+        instance.current()
+        before = instance.reads
+
+        for _ in range(50):
+            instance.current()
+
+        self.assertEqual(instance.reads, before)
 
 
 class TestSnapshotAge(unittest.TestCase):

@@ -40,6 +40,7 @@ from core.resource_guard import (
     SystemStatus,
     read_gpu_status,
     read_system_status,
+    read_system_status_since_last_call,
 )
 
 
@@ -55,6 +56,13 @@ GpuReader = Callable[[], Optional[GpuStatus]]
 # The middle of the range the architecture specifies. Short enough that a
 # reading still describes now, long enough that a burst of callers within one
 # voice turn costs one trip to the operating system rather than a dozen.
+#
+# This window is only achievable because the default system reader does not
+# block. ``read_system_status`` samples the CPU over half a second, so a cache
+# built on it would hand back readings that were already 500 ms old and
+# refresh on every single call — a cache that never hits, which is what the
+# first version of this module did. Measured on this machine: 501 ms for the
+# blocking reader against 0.2 ms for the one used here.
 DEFAULT_MAX_AGE_SECONDS = 0.375
 
 
@@ -90,7 +98,9 @@ class TelemetryCache:
         max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
         clock: Clock | None = None,
     ) -> None:
-        self.read_system: SystemReader = read_system or read_system_status
+        self.read_system: SystemReader = (
+            read_system or read_system_status_since_last_call
+        )
         self.read_gpu: GpuReader = read_gpu or read_gpu_status
         self.max_age_seconds = max_age_seconds
         self.clock: Clock = clock or time.time
@@ -98,6 +108,29 @@ class TelemetryCache:
         self._lock = threading.Lock()
         self._snapshot: Snapshot | None = None
         self._reads = 0
+
+        # Distinct from ``_snapshot is None``, which invalidate() also
+        # produces. Only the genuinely first read pays for accuracy; an
+        # invalidated cache has already primed the counter, so making it
+        # block again would put half a second on every invalidate.
+        self._ever_read = False
+
+        # The very first reading is taken with the accurate reader, and every
+        # one after it with the cheap one.
+        #
+        # The cheap reader reports CPU use since the previous call, so its
+        # first answer has nothing to measure against and comes back as 0.0.
+        # That is not merely imprecise, it is wrong in the dangerous
+        # direction: 0% reads as an idle machine, and the governor grants
+        # heavy work on it. One blocking half-second at startup buys a first
+        # answer that is true, and it also primes the counter so every later
+        # reading is both cheap and correct.
+        #
+        # Only applies to the default reader. An injected one belongs to the
+        # caller, who knows what it does.
+        self._first_read: SystemReader = (
+            read_system_status if read_system is None else self.read_system
+        )
 
     @property
     def reads(self) -> int:
@@ -141,9 +174,23 @@ class TelemetryCache:
             self._snapshot = None
 
     def _refresh(self, now: float) -> Snapshot:
-        """Read the machine. Called with the lock held."""
+        """
+        Read the machine. Called with the lock held.
+
+        ``now`` is ignored in favour of the time after the read. Stamping
+        before means a reading is born as old as the read took, so a slow
+        reader produces snapshots that are already stale on arrival and the
+        cache refreshes on every call. That is not hypothetical; it is what
+        this module did until a real run showed 51 reads for 51 calls.
+        """
+        reader = (
+            self.read_system
+            if self._ever_read
+            else self._first_read
+        )
+
         try:
-            system = self.read_system()
+            system = reader()
             gpu = self.read_gpu()
         except Exception:
             # Serve the last good reading rather than propagating. A voice turn
@@ -162,7 +209,12 @@ class TelemetryCache:
             raise
 
         self._reads += 1
-        snapshot = Snapshot(system=system, gpu=gpu, taken_at=now)
+        self._ever_read = True
+        snapshot = Snapshot(
+            system=system,
+            gpu=gpu,
+            taken_at=self.clock(),
+        )
         self._snapshot = snapshot
 
         return snapshot

@@ -95,6 +95,33 @@ def read_system_status() -> SystemStatus:
     )
 
 
+def read_system_status_since_last_call() -> SystemStatus:
+    """
+    Read CPU and RAM without blocking.
+
+    :func:`read_system_status` samples the CPU over half a second, which is
+    the right way to answer "what is the CPU doing" from a standing start
+    and the wrong way to answer it repeatedly. psutil can instead report the
+    average since the previous call, which costs nothing and is more
+    accurate for a caller that asks regularly: the gap between two calls is
+    a real measurement window rather than an artificial one.
+
+    The catch is the first call, which has no previous call to measure from
+    and returns 0.0. A caller that samples repeatedly — which is the only
+    caller this is for — should prime it once and discard that reading.
+    """
+    cpu_usage_percent = psutil.cpu_percent(interval=None)
+
+    memory = psutil.virtual_memory()
+
+    return SystemStatus(
+        cpu_usage_percent=cpu_usage_percent,
+        ram_usage_percent=memory.percent,
+        ram_used_gb=memory.used / (1024 ** 3),
+        ram_total_gb=memory.total / (1024 ** 3),
+    )
+
+
 def main() -> None:
     """Display the current Qronos resource status."""
     system = read_system_status()
