@@ -39,11 +39,6 @@ type DebugScenario =
   | "userVoice"
   | "qronosVoice";
 
-type DebugItem = {
-  key: string;
-  scenario: DebugScenario;
-  label: string;
-};
 
 type ViewPhase =
   | "home"
@@ -83,43 +78,6 @@ function eventMatchesShortcut(event: KeyboardEvent, accelerator: string) {
     && event.metaKey === parts.some((part) => ["super", "meta", "command"].includes(part));
 }
 
-const debugItems: DebugItem[] = [
-  {
-    key: "1",
-    scenario: "idle",
-    label: "IDLE",
-  },
-  {
-    key: "2",
-    scenario: "listening",
-    label: "LISTENING",
-  },
-  {
-    key: "3",
-    scenario: "thinking",
-    label: "THINKING",
-  },
-  {
-    key: "4",
-    scenario: "responding",
-    label: "RESPONDING",
-  },
-  {
-    key: "5",
-    scenario: "chat",
-    label: "CHAT",
-  },
-  {
-    key: "6",
-    scenario: "userVoice",
-    label: "USER VOICE",
-  },
-  {
-    key: "7",
-    scenario: "qronosVoice",
-    label: "QRONOS VOICE",
-  },
-];
 
 const orbStateByScenario: Record<
   DebugScenario,
@@ -173,6 +131,20 @@ function App() {
     useState<DebugScenario>(
       "idle",
     );
+
+  const [
+    audioFrame,
+    setAudioFrame,
+  ] = useState<{
+    level: number;
+    bands: number[];
+  }>({
+    level: 0,
+    bands: Array.from(
+      { length: 32 },
+      () => 0,
+    ),
+  });
 
   const [
     uiScale,
@@ -845,6 +817,239 @@ function App() {
     };
   }, [viewPhase]);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlistenRuntime:
+      | (() => void)
+      | undefined;
+
+    const connectRuntimeActions = async () => {
+      type RuntimeEvent = {
+        eventType: string;
+        status: string;
+        message: string;
+      };
+
+      type RuntimeStatus = {
+        running: boolean;
+        status: string;
+        message: string;
+      };
+
+      unlistenRuntime =
+        await listen<RuntimeEvent>(
+          "qronos://runtime-event",
+          (event) => {
+            console.info(
+              "[Qronos Runtime]",
+              event.payload,
+            );
+
+            switch (
+              event.payload.eventType
+            ) {
+              case "voice_audio_spectrum": {
+                try {
+                  const parsed = JSON.parse(
+                    event.payload.message,
+                  ) as {
+                    level?: unknown;
+                    bands?: unknown;
+                  };
+
+                  const level =
+                    typeof parsed.level === "number"
+                      ? Math.max(
+                          0,
+                          Math.min(
+                            1,
+                            parsed.level,
+                          ),
+                        )
+                      : 0;
+
+                  const bands =
+                    Array.isArray(parsed.bands)
+                      ? parsed.bands
+                          .slice(0, 32)
+                          .map((value) =>
+                            typeof value === "number"
+                              ? Math.max(
+                                  0,
+                                  Math.min(
+                                    1,
+                                    value,
+                                  ),
+                                )
+                              : 0,
+                          )
+                      : [];
+
+                  while (bands.length < 32) {
+                    bands.push(0);
+                  }
+
+                  setAudioFrame({
+                    level,
+                    bands,
+                  });
+                } catch {
+                  setAudioFrame({
+                    level: 0,
+                    bands: Array.from(
+                      { length: 32 },
+                      () => 0,
+                    ),
+                  });
+                }
+                break;
+              }
+
+              case "voice_listening":
+                setScenario(
+                  "listening",
+                );
+                break;
+
+              case "voice_transcribing":
+                setAudioFrame({
+                  level: 0,
+                  bands: Array.from(
+                    { length: 32 },
+                    () => 0,
+                  ),
+                });
+                setScenario(
+                  "thinking",
+                );
+                break;
+
+              case "voice_transcript":
+              case "voice_routed":
+                setScenario(
+                  "thinking",
+                );
+                break;
+
+              case "voice_response":
+                setScenario(
+                  "responding",
+                );
+                break;
+
+              case "runtime_error":
+                setAudioFrame({
+                  level: 0,
+                  bands: Array.from(
+                    { length: 32 },
+                    () => 0,
+                  ),
+                });
+                setScenario(
+                  "idle",
+                );
+                break;
+
+              case "voice_turn_complete":
+                window.setTimeout(
+                  () => {
+                    setScenario(
+                      "idle",
+                    );
+                  },
+                  2200,
+                );
+                break;
+
+              default:
+                break;
+            }
+          },
+        );
+
+      const handleRuntimeAction = async (
+        event: Event,
+      ) => {
+        const customEvent =
+          event as CustomEvent<{
+            actionId?: string;
+          }>;
+
+        const actionId =
+          customEvent.detail?.actionId?.trim();
+
+        if (!actionId) {
+          return;
+        }
+
+        if (
+          actionId !==
+          "qronos.push_to_talk"
+        ) {
+          return;
+        }
+
+        try {
+          const status =
+            await invoke<RuntimeStatus>(
+              "get_runtime_status",
+            );
+
+          if (!status.running) {
+            await invoke<RuntimeStatus>(
+              "start_runtime",
+            );
+          }
+
+          await invoke(
+            "send_runtime_action",
+            {
+              actionId,
+            },
+          );
+        } catch (error) {
+          console.error(
+            "[Qronos Runtime] action failed:",
+            error,
+          );
+        }
+      };
+
+      window.addEventListener(
+        "qronos:hotkey-action",
+        handleRuntimeAction,
+      );
+
+      return () => {
+        window.removeEventListener(
+          "qronos:hotkey-action",
+          handleRuntimeAction,
+        );
+      };
+    };
+
+    let removeWindowListener:
+      | (() => void)
+      | undefined;
+
+    void connectRuntimeActions()
+      .then((cleanup) => {
+        if (disposed) {
+          cleanup();
+          unlistenRuntime?.();
+          return;
+        }
+
+        removeWindowListener = cleanup;
+      });
+
+    return () => {
+      disposed = true;
+      removeWindowListener?.();
+      unlistenRuntime?.();
+    };
+  }, []);
+
   const toggleFullscreen =
     async () => {
       try {
@@ -947,19 +1152,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const mapByKey: Record<
-      string,
-      DebugScenario
-    > = {
-      "1": "idle",
-      "2": "listening",
-      "3": "thinking",
-      "4": "responding",
-      "5": "chat",
-      "6": "userVoice",
-      "7": "qronosVoice",
-    };
-
     const handleKeyDown = (
       event: KeyboardEvent,
     ) => {
@@ -971,40 +1163,6 @@ function App() {
         event.stopPropagation();
 
         void toggleFullscreen();
-
-        return;
-      }
-
-      const target =
-        event.target as
-          | HTMLElement
-          | null;
-
-      if (
-        target?.tagName ===
-          "INPUT" ||
-        target?.tagName ===
-          "TEXTAREA"
-      ) {
-        return;
-      }
-
-      const nextScenario =
-        mapByKey[event.key];
-
-      if (nextScenario) {
-        setScenario(
-          nextScenario,
-        );
-      }
-
-      if (
-        event.key ===
-        "Escape"
-      ) {
-        setScenario(
-          "idle",
-        );
       }
     };
 
@@ -1020,6 +1178,7 @@ function App() {
       );
     };
   }, []);
+
 
   return (
     <main
@@ -1067,59 +1226,6 @@ function App() {
         </div>
       </header>
 
-      <section
-        className="debug-panel"
-        dir="ltr"
-        aria-label="Qronos debug controls"
-      >
-        <div className="debug-panel-head">
-          <span className="debug-live-dot" />
-
-          <span className="debug-title">
-            DEV MODE
-          </span>
-
-          <span className="debug-current">
-            {scenario.toUpperCase()}
-          </span>
-        </div>
-
-        <div className="debug-controls">
-          {debugItems.map(
-            (item) => (
-              <button
-                key={
-                  item.scenario
-                }
-                type="button"
-                className={
-                  scenario ===
-                  item.scenario
-                    ? "debug-button debug-button-active"
-                    : "debug-button"
-                }
-                onClick={() =>
-                  setScenario(
-                    item.scenario,
-                  )
-                }
-              >
-                <span className="debug-key">
-                  {item.key}
-                </span>
-
-                <span>
-                  {item.label}
-                </span>
-              </button>
-            ),
-          )}
-        </div>
-
-        <div className="debug-hint">
-          ESC → IDLE
-        </div>
-      </section>
 
       <ConversationSpine />
 
@@ -1134,6 +1240,8 @@ function App() {
           <QronosOrb
             size={460}
             state={orbState}
+            audioLevel={audioFrame.level}
+            audioSpectrum={audioFrame.bands}
           />
 
           <OrbTaskRenderer

@@ -52,6 +52,16 @@ type CachedRoamingPoint = {
   glow: number;
 };
 
+type AudioSpectrumParticle = {
+  angle: number;
+  bandIndex: number;
+  radialJitter: number;
+  size: number;
+  alpha: number;
+  phase: number;
+  violetMix: number;
+};
+
 type VisualState = {
   baseLuminosity: number;
 
@@ -113,6 +123,8 @@ type StatePresence = {
 type QronosOrbProps = {
   size?: number;
   state?: OrbState;
+  audioLevel?: number;
+  audioSpectrum?: number[];
 };
 
 const MAX_DPR = 1.5;
@@ -338,6 +350,8 @@ function clamp01(value: number) {
 function QronosOrb({
   size = 460,
   state = "idle",
+  audioLevel = 0,
+  audioSpectrum = [],
 }: QronosOrbProps) {
   const coreCanvasRef =
     useRef<HTMLCanvasElement | null>(null);
@@ -351,9 +365,25 @@ function QronosOrb({
   const stateRef =
     useRef<OrbState>(state);
 
+  const audioLevelRef =
+    useRef(audioLevel);
+
+  const audioSpectrumRef =
+    useRef<number[]>(audioSpectrum);
+
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    audioLevelRef.current =
+      clamp01(audioLevel);
+  }, [audioLevel]);
+
+  useEffect(() => {
+    audioSpectrumRef.current =
+      audioSpectrum;
+  }, [audioSpectrum]);
 
   useEffect(() => {
     const coreCanvas =
@@ -676,6 +706,90 @@ function QronosOrb({
 
     const burstSparks: BurstSpark[] =
       [];
+
+    /*
+     * AUDIO-REACTIVE PARTICLE SPECTRUM
+     *
+     * This is a separate effects-layer system. It never changes the Oracle
+     * core geometry, base particles, rotation, color model, or core canvas.
+     */
+    const audioSpectrumParticles:
+      AudioSpectrumParticle[] = [];
+
+    const audioParticleCount = 640;
+    const audioBandCount = 32;
+
+    for (
+      let index = 0;
+      index < audioParticleCount;
+      index += 1
+    ) {
+      const normalized =
+        index / audioParticleCount;
+
+      const seedA =
+        Math.sin(
+          index * 17.173,
+        ) * 17317.31;
+
+      const seedB =
+        Math.sin(
+          index * 41.731,
+        ) * 27113.17;
+
+      const seedC =
+        Math.sin(
+          index * 73.117,
+        ) * 11731.73;
+
+      const mirrored =
+        normalized <= 0.5
+          ? normalized * 2
+          : (1 - normalized) * 2;
+
+      audioSpectrumParticles.push({
+        angle:
+          normalized *
+            Math.PI * 2 +
+          Math.sin(seedA) * 0.008,
+
+        bandIndex:
+          Math.min(
+            audioBandCount - 1,
+            Math.floor(
+              mirrored *
+                audioBandCount,
+            ),
+          ),
+
+        radialJitter:
+          Math.sin(seedB) * 4.2,
+
+        size:
+          0.18 +
+          ((Math.cos(seedA) + 1) / 2) *
+            0.46,
+
+        alpha:
+          0.26 +
+          ((Math.sin(seedC) + 1) / 2) *
+            0.58,
+
+        phase:
+          ((Math.cos(seedB) + 1) / 2) *
+          Math.PI * 2,
+
+        violetMix:
+          (Math.sin(seedC * 0.71) + 1) / 2,
+      });
+    }
+
+    let audioLevelVisual = 0;
+    const audioBandVisual =
+      Array.from(
+        { length: audioBandCount },
+        () => 0,
+      );
 
     const latitudeBands = 60;
     const equatorBands = 220;
@@ -2572,6 +2686,72 @@ function QronosOrb({
           amount,
         );
 
+      const audioStateActive =
+        currentState === "listening" ||
+        currentState === "responding";
+
+      const targetAudioLevel =
+        audioStateActive
+          ? clamp01(
+              audioLevelRef.current,
+            )
+          : 0;
+
+      const audioAttack =
+        targetAudioLevel > audioLevelVisual
+          ? 13
+          : 6.2;
+
+      const audioAmount =
+        1 -
+        Math.exp(
+          -deltaSeconds * audioAttack,
+        );
+
+      audioLevelVisual =
+        lerp(
+          audioLevelVisual,
+          targetAudioLevel,
+          audioAmount,
+        );
+
+      const incomingBands =
+        audioSpectrumRef.current;
+
+      for (
+        let bandIndex = 0;
+        bandIndex < audioBandVisual.length;
+        bandIndex += 1
+      ) {
+        const targetBand =
+          audioStateActive
+            ? clamp01(
+                incomingBands[
+                  bandIndex
+                ] ?? 0,
+              )
+            : 0;
+
+        const bandRate =
+          targetBand >
+          audioBandVisual[bandIndex]
+            ? 15
+            : 7.4;
+
+        const bandAmount =
+          1 -
+          Math.exp(
+            -deltaSeconds * bandRate,
+          );
+
+        audioBandVisual[bandIndex] =
+          lerp(
+            audioBandVisual[bandIndex],
+            targetBand,
+            bandAmount,
+          );
+      }
+
       const transitionProgress =
         clamp01(
           transitionAge /
@@ -3945,6 +4125,229 @@ function QronosOrb({
                   : 0.45
               ),
           );
+        }
+      }
+
+      /*
+       * Circular particle audio spectrum.
+       *
+       * IMPORTANT:
+       * - Effects canvas only.
+       * - Oracle core geometry and palette stay unchanged.
+       * - The live FFT controls radial spread.
+       * - Overall microphone level controls envelope/intensity.
+       */
+      if (
+        audioLevelVisual > 0.003
+      ) {
+        let strongestBand = 0.001;
+
+        for (
+          let bandIndex = 0;
+          bandIndex < audioBandVisual.length;
+          bandIndex += 1
+        ) {
+          strongestBand =
+            Math.max(
+              strongestBand,
+              audioBandVisual[bandIndex],
+            );
+        }
+
+        const levelEnvelope =
+          clamp01(
+            audioLevelVisual * 2.35,
+          );
+
+        const spectrumBaseRadius =
+          baseRadius * 1.18 +
+          geometryScale * 7;
+
+        for (
+          let index = 0;
+          index < audioSpectrumParticles.length;
+          index += 1
+        ) {
+          const particle =
+            audioSpectrumParticles[index];
+
+          const bandEnergy =
+            audioBandVisual[
+              particle.bandIndex
+            ] ?? 0;
+
+          /*
+           * Relative normalization makes the spectral shape readable
+           * even when the microphone level is naturally low.
+           * The real level still controls the total expansion.
+           */
+          const normalizedBand =
+            clamp01(
+              bandEnergy /
+                Math.max(
+                  0.055,
+                  strongestBand,
+                ),
+            );
+
+          const activity =
+            clamp01(
+              normalizedBand * 0.72 +
+              levelEnvelope * 0.46,
+            );
+
+          if (activity < 0.025) {
+            continue;
+          }
+
+          /*
+           * Multiple tiny particles live at different depths for every
+           * angular band, producing a dust-cloud spectrum instead of bars.
+           */
+          const radialLayer =
+            0.18 +
+            (
+              (
+                index * 7
+              ) %
+              19
+            ) /
+              18 *
+              0.82;
+
+          /*
+           * Medium-speed shimmer: clearly alive, never strobe-like.
+           */
+          const twinkle =
+            0.68 +
+            0.32 *
+              (
+                (
+                  Math.sin(
+                    time * 2.65 +
+                    particle.phase,
+                  ) +
+                  1
+                ) /
+                2
+              );
+
+          const secondaryWave =
+            Math.sin(
+              time * 1.8 +
+              particle.angle * 3.4 +
+              particle.phase,
+            ) *
+            geometryScale *
+            (
+              1.4 +
+              activity * 2.8
+            );
+
+          const radialTravel =
+            geometryScale *
+            (
+              5 +
+              levelEnvelope * 8 +
+              normalizedBand *
+                (
+                  20 +
+                  levelEnvelope * 72
+                ) *
+                radialLayer
+            );
+
+          const radius =
+            spectrumBaseRadius +
+            radialTravel +
+            particle.radialJitter *
+              geometryScale *
+              0.72 +
+            secondaryWave;
+
+          const x =
+            appCenterX +
+            Math.cos(
+              particle.angle,
+            ) *
+              radius;
+
+          const y =
+            appCenterY +
+            Math.sin(
+              particle.angle,
+            ) *
+              radius *
+              0.94;
+
+          const alpha =
+            Math.min(
+              0.98,
+              particle.alpha *
+                (
+                  0.32 +
+                  activity * 0.82
+                ) *
+                twinkle,
+            );
+
+          const particleSize =
+            Math.max(
+              0.24,
+              particle.size *
+                geometryScale *
+                (
+                  1.18 +
+                  activity * 1.02
+                ),
+            );
+
+          /*
+           * Keep the existing Qronos palette.
+           * Violet is only a sparse accent; cyan remains dominant.
+           */
+          const accent =
+            particle.violetMix > 0.9 &&
+            index % 7 === 0;
+
+          frontCtx.fillStyle =
+            accent
+              ? `rgba(167,142,255,${alpha * 0.86})`
+              : `rgba(108,229,255,${alpha})`;
+
+          frontCtx.beginPath();
+          frontCtx.arc(
+            x,
+            y,
+            particleSize,
+            0,
+            Math.PI * 2,
+          );
+          frontCtx.fill();
+
+          /*
+           * Selected high-energy grains receive the same existing
+           * cyan/violet glow sprites used elsewhere in Qronos.
+           */
+          if (
+            activity > 0.34 &&
+            index % 9 === 0
+          ) {
+            drawGlowSprite(
+              frontCtx,
+              accent
+                ? violetGlowSprite
+                : cyanGlowSprite,
+              x,
+              y,
+              particleSize,
+              Math.min(
+                0.66,
+                0.18 +
+                  activity * 0.42,
+              ),
+            );
+          }
         }
       }
 

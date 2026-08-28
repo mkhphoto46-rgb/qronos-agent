@@ -7,6 +7,7 @@
 # ----------------------------------------------------------
 
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -55,12 +56,17 @@ desktop/backups/
 # Accidental local command/file artifact.
 desktop/npm
 
+# Local manual backups / archives.
+*.bak
+*.rar
+
 # ----------------------------------------------------------
 # Local caches
 # ----------------------------------------------------------
 
 .cache/
 cache/
+runtime/cache/
 
 # ----------------------------------------------------------
 # AI model files
@@ -75,13 +81,19 @@ models/**
 *.bin
 
 # ----------------------------------------------------------
-# Bundled third-party runtime binaries
+# Local runtime assets
 # ----------------------------------------------------------
 #
-# These remain on the development machine.
-# They will later be included through the
-# Qronos installer/build packaging pipeline.
+# Runtime binaries, downloaded models, development virtual
+# environments, generated audio samples and third-party
+# runtime repositories remain local during development.
+#
+# Production packaging will include approved runtime assets
+# through the installer/build pipeline rather than Git.
 # ----------------------------------------------------------
+
+runtime/ffmpeg/
+runtime/tts/
 
 runtime/whisper/bin/
 runtime/whisper/models/
@@ -103,4 +115,9 @@ runtime/whisper/*.zip
 .idea/
 .DS_Store
 Thumbs.db
+
+# ----------------------------------------------------------
+# Local tools
+# ----------------------------------------------------------
+
 tools/

@@ -11,6 +11,7 @@ use sysinfo::{
 };
 
 mod hotkeys;
+mod runtime;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -885,37 +886,60 @@ fn open_device_properties(
     tauri::mobile_entry_point
 )]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, shortcut, event| {
-                    hotkeys::handle_global_shortcut(app, shortcut, event);
-                })
-                .build(),
-        )
-        .plugin(
-            tauri_plugin_opener::init(),
-        )
-        .manage(
-            TelemetryState::new(),
-        )
-        .setup(|app| hotkeys::initialize(app))
-        .invoke_handler(
-            tauri::generate_handler![
-                get_system_snapshot,
-                open_storage_path,
-                open_device_properties,
-                hotkeys::get_hotkey_settings,
-                hotkeys::validate_hotkey,
-                hotkeys::update_hotkey,
-                hotkeys::set_hotkey_enabled,
-                hotkeys::reset_hotkeys
-            ],
-        )
-        .run(
-            tauri::generate_context!(),
-        )
-        .expect(
-            "error while running Qronos desktop application",
-        );
+    let app =
+        tauri::Builder::default()
+            .plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(|app, shortcut, event| {
+                        hotkeys::handle_global_shortcut(app, shortcut, event);
+                    })
+                    .build(),
+            )
+            .plugin(
+                tauri_plugin_opener::init(),
+            )
+            .manage(
+                TelemetryState::new(),
+            )
+            .setup(|app| {
+                hotkeys::initialize(app)?;
+                runtime::initialize(app)?;
+                Ok(())
+            })
+            .invoke_handler(
+                tauri::generate_handler![
+                    get_system_snapshot,
+                    open_storage_path,
+                    open_device_properties,
+                    hotkeys::get_hotkey_settings,
+                    hotkeys::validate_hotkey,
+                    hotkeys::update_hotkey,
+                    hotkeys::set_hotkey_enabled,
+                    hotkeys::reset_hotkeys,
+                    runtime::get_runtime_status,
+                    runtime::start_runtime,
+                    runtime::ping_runtime,
+                    runtime::send_runtime_action,
+                    runtime::stop_runtime
+                ],
+            )
+            .build(
+                tauri::generate_context!(),
+            )
+            .expect(
+                "error while building Qronos desktop application",
+            );
+
+    app.run(
+        |app_handle, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::Exit
+            ) {
+                runtime::shutdown(
+                    app_handle,
+                );
+            }
+        },
+    );
 }

@@ -5,9 +5,18 @@ import wave
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
+
+import numpy as np
 
 from core.audio_input import AudioInput
 from core.vad_runtime import VADRuntime
+
+
+AudioSpectrumCallback = Callable[
+    [float, tuple[float, ...]],
+    None,
+]
 
 
 @dataclass(frozen=True)
@@ -198,9 +207,130 @@ class CommandRecorder:
             probabilities
         )
 
+    @staticmethod
+    def _analyze_audio_frame(
+        frame: bytes,
+        sample_rate: int,
+        band_count: int = 32,
+    ) -> tuple[float, tuple[float, ...]]:
+        """
+        Build a lightweight real audio spectrum from one PCM16 frame.
+
+        This analysis is visual-only. It never participates in VAD or
+        recording decisions, so a visualization failure cannot change the
+        speech-capture behavior.
+        """
+        samples = np.frombuffer(
+            frame,
+            dtype=np.int16,
+        ).astype(np.float32)
+
+        if samples.size == 0:
+            return 0.0, tuple(
+                0.0 for _ in range(band_count)
+            )
+
+        normalized = samples / 32768.0
+
+        rms = float(
+            np.sqrt(
+                np.mean(
+                    normalized * normalized
+                )
+            )
+        )
+
+        # Practical microphone envelope. The small floor suppresses room
+        # noise while the exponent keeps normal speech visually expressive.
+        level = float(
+            np.clip(
+                (rms - 0.0045) / 0.115,
+                0.0,
+                1.0,
+            )
+        )
+        level = level ** 0.62
+
+        if level <= 0.0005:
+            return 0.0, tuple(
+                0.0 for _ in range(band_count)
+            )
+
+        window = np.hanning(
+            samples.size
+        ).astype(np.float32)
+
+        spectrum = np.abs(
+            np.fft.rfft(
+                normalized * window
+            )
+        )
+
+        frequencies = np.fft.rfftfreq(
+            samples.size,
+            d=1.0 / sample_rate,
+        )
+
+        minimum_hz = 70.0
+        maximum_hz = min(
+            7600.0,
+            sample_rate / 2 - 1.0,
+        )
+
+        edges = np.geomspace(
+            minimum_hz,
+            maximum_hz,
+            band_count + 1,
+        )
+
+        raw_bands: list[float] = []
+
+        for index in range(band_count):
+            mask = (
+                (frequencies >= edges[index])
+                & (frequencies < edges[index + 1])
+            )
+
+            values = spectrum[mask]
+
+            if values.size == 0:
+                raw_bands.append(0.0)
+            else:
+                raw_bands.append(
+                    float(
+                        np.sqrt(
+                            np.mean(
+                                values * values
+                            )
+                        )
+                    )
+                )
+
+        peak = max(raw_bands, default=0.0)
+
+        if peak <= 1e-9:
+            return level, tuple(
+                0.0 for _ in range(band_count)
+            )
+
+        bands = tuple(
+            float(
+                np.clip(
+                    (value / peak) ** 0.58
+                    * level,
+                    0.0,
+                    1.0,
+                )
+            )
+            for value in raw_bands
+        )
+
+        return level, bands
+
     def record_to_file(
         self,
         output_path: str | Path,
+        on_audio_spectrum: AudioSpectrumCallback | None = None,
     ) -> CommandRecordingResult:
         destination = Path(
             output_path
@@ -289,6 +419,22 @@ class CommandRecorder:
                 frame = (
                     self.audio_input.read_frame()
                 )
+
+                if on_audio_spectrum is not None:
+                    try:
+                        level, bands = (
+                            self._analyze_audio_frame(
+                                frame,
+                                self.audio_input.config.sample_rate,
+                            )
+                        )
+                        on_audio_spectrum(
+                            level,
+                            bands,
+                        )
+                    except Exception:
+                        # Visualization must never interrupt voice capture.
+                        pass
 
                 probabilities = (
                     self.vad_runtime.process_pcm16(
