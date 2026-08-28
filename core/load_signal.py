@@ -174,7 +174,35 @@ class LoadSnapshot:
     sample_count: int
     loaded_fraction: float
 
+    @property
+    def reason(self) -> str:
+        """
+        Why, in a sentence that does not change while the answer has not.
+
+        Deliberately carries no elapsed time and no percentage. Both of those
+        move every couple of seconds, and anything that reads this to decide
+        whether something has changed would conclude that everything changes
+        constantly — which is exactly what happened: the queue emitted an
+        update on every single tick, because the number of seconds in its own
+        explanation had gone up by two.
+
+        How long it has been this way is on the snapshot as ``since``, and in
+        the queue as ``holdingSince``, where a display can read it without
+        anything mistaking it for news.
+        """
+        if self.level is LoadLevel.UNKNOWN:
+            return "Qronos is still working out how busy the machine is."
+
+        if self.level is LoadLevel.BUSY:
+            return (
+                "Your machine has been busy, so this is waiting for it to "
+                "free up."
+            )
+
+        return "The machine is free."
+
     def describe(self) -> str:
+        """The same thing with the numbers in, for logs and harnesses."""
         if self.level is LoadLevel.UNKNOWN:
             return "Not enough readings yet to say whether the machine is busy."
 
@@ -252,6 +280,24 @@ class SustainedLoadMonitor:
             self._samples.append(sample)
             self._trim(sample.at)
             self._judge(sample.at)
+
+    def reset(self) -> None:
+        """
+        Forget every reading and go back to knowing nothing.
+
+        The verdict returns to UNKNOWN, which every caller treats as busy, so
+        forgetting is safe in the direction that matters.
+
+        This exists because appending readings can only ever add to what the
+        monitor has already seen. Something that wants the monitor to hold a
+        *different* view — a demonstration, or a test walking through a day —
+        has to be able to clear the window first, or its readings merely join
+        the argument rather than settling it.
+        """
+        with self._lock:
+            self._samples.clear()
+            self._level = LoadLevel.UNKNOWN
+            self._changed_at = None
 
     def prime(self) -> None:
         """

@@ -24,7 +24,7 @@ from core.audio_input import AudioInput
 from core.command_recorder import CommandRecorder
 from core.conversation_session import ConversationSession
 from core.hard_floor import required_vram_mb
-from core.load_signal import SustainedLoadMonitor
+from core.load_signal import LoadSample, SustainedLoadMonitor
 from core.model_registry import MODELS
 from core.orchestrator import Orchestrator
 from core.queue_scheduler import (
@@ -35,6 +35,7 @@ from core.queue_scheduler import (
     SchedulerConfig,
 )
 from core.resource_governor import ResourceGovernor, Weight
+from core.resource_policy import ResourceDecision
 from core.safe_queue import SafeQueue
 from core.task_plan import TaskPlan
 from core.task_router import TaskRouter
@@ -621,6 +622,19 @@ def handle_action(
 #: else's memory to spend.
 MAX_SUMMARY_LENGTH = 200
 
+#: Larger than any card Qronos targets. A bound rather than a meaningful
+#: limit: the number arrives over a pipe and is used in arithmetic.
+MAX_REQUIRED_VRAM_MB = 1_048_576
+
+#: Set to "1" to enable the commands that only exist for demonstrating the
+#: queue. Off by default, and off in anything a user installs, so a line
+#: arriving on stdin cannot reach them.
+DEMO_VARIABLE = "QRONOS_QUEUE_DEMO"
+
+
+def _demo_is_enabled() -> bool:
+    return os.environ.get(DEMO_VARIABLE, "").strip() == "1"
+
 #: Overrides the pump's interval. Not a user-facing setting and not part of the
 #: protocol — the tick rate is an implementation detail. It exists so a test
 #: can make the pump genuinely busy in a second rather than in a minute, which
@@ -695,12 +709,26 @@ def handle_queue_submit(
         )
 
     profile = MODELS["heavy" if weight is Weight.HEAVY else "fast"]
+    needs = payload.get("requiredVramMb")
+
+    if needs is None:
+        # A task that did not say assumes it will load the brain its weight
+        # implies, which is the only kind of work the queue exists for.
+        needed_mb = required_vram_mb(profile.estimated_vram_gb)
+    elif isinstance(needs, bool) or not isinstance(needs, int):
+        raise ValueError("requiredVramMb must be a whole number of megabytes.")
+    elif not 0 <= needs <= MAX_REQUIRED_VRAM_MB:
+        raise ValueError(
+            f"requiredVramMb must be between 0 and {MAX_REQUIRED_VRAM_MB}."
+        )
+    else:
+        needed_mb = needs
 
     runtime.ensure_scheduler().submit(
         work=_DemonstrationWork(summary),
         weight=weight,
         summary=summary,
-        required_vram_mb=required_vram_mb(profile.estimated_vram_gb),
+        required_vram_mb=needed_mb,
     )
 
 
@@ -737,7 +765,91 @@ def handle_queue_set_paused(
     runtime.ensure_scheduler().set_paused(paused)
 
 
+def handle_queue_debug_load(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    """
+    Tell the monitor what to think the machine is doing.
+
+    This exists for one reason. Demonstrating that Qronos *holds* work needs
+    only a busy machine, and a busy machine is easy to come by. Demonstrating
+    that it *releases* work needs a machine that stops being busy, and the only
+    honest ways to arrange that are to wait an unbounded amount of time or to
+    close something of the user's — and closing something of the user's is the
+    exact thing this whole feature exists to avoid.
+
+    So the sensor is substituted rather than the machine. Everything downstream
+    is real: the same monitor, dwell, scheduler, governor, floor, protocol and
+    interface. Only the readings are supplied rather than measured, and any
+    write-up of a demonstration using this has to say so.
+
+    Off unless QRONOS_QUEUE_DEMO is set to 1.
+    """
+    if not _demo_is_enabled():
+        raise ValueError(
+            "queue_debug_load is only available when "
+            f"{DEMO_VARIABLE}=1."
+        )
+
+    state = str(payload.get("state", "")).strip().lower()
+
+    if state not in ("free", "busy"):
+        raise ValueError("queue_debug_load needs state to be free or busy.")
+
+    scheduler = runtime.ensure_scheduler()
+    monitor = scheduler.monitor
+    loaded = state == "busy"
+
+    # Replace what the monitor believes rather than adding to it. Appending
+    # alone does not work: readings from an earlier call are still inside the
+    # window, so a later "free" and an earlier "busy" simply argue with each
+    # other and the verdict sits in the hysteresis band. Observed exactly that
+    # way before this line existed.
+    monitor.reset()
+
+    # Enough readings to satisfy the longer of the two dwells, so the verdict
+    # actually moves. Dated backwards from now, never forwards: a reading
+    # stamped in the future outlives every real one taken after it.
+    span = max(
+        monitor.config.busy_dwell_seconds,
+        monitor.config.free_dwell_seconds,
+    )
+    interval = monitor.config.sample_interval_seconds
+    count = int(span / interval) + 2
+    now = monitor.clock()
+
+    for index in range(count):
+        monitor.offer(
+            LoadSample(
+                at=now - (count - 1 - index) * interval,
+                decision=(
+                    ResourceDecision.BLOCK
+                    if loaded
+                    else ResourceDecision.ALLOW
+                ),
+                cpu_percent=95.0 if loaded else 5.0,
+                ram_percent=43.0,
+                vram_free_mb=256 if loaded else 15_000,
+                gpu_utilization_percent=99 if loaded else 1,
+                gpu_temperature_c=45,
+            )
+        )
+
+    emit(
+        "queue_hold_state",
+        "busy" if loaded else "ready",
+        _compact(
+            {
+                "level": monitor.snapshot().level.value,
+                "simulated": True,
+            }
+        ),
+    )
+
+
 QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
+    "queue_debug_load": handle_queue_debug_load,
     "queue_list": handle_queue_list,
     "queue_submit": handle_queue_submit,
     "queue_cancel": handle_queue_cancel,

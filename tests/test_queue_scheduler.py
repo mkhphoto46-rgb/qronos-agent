@@ -79,6 +79,11 @@ class Machine:
         self.gpu_temperature_c = gpu_temperature_c
         self.observations = 0
 
+        # When this state began, so that "how long has it been like this"
+        # actually advances. It used to be a constant, which quietly made the
+        # fake unable to express the very thing one of these tests is about.
+        self.since_time = clock()
+
     def _sample(self) -> LoadSample:
         return LoadSample(
             at=self.clock(),
@@ -102,7 +107,7 @@ class Machine:
 
         return LoadSnapshot(
             level=self.level,
-            since=30.0,
+            since=self.clock() - self.since_time,
             latest=self._sample(),
             sample_count=30,
             loaded_fraction=0.0 if self.level is LoadLevel.FREE else 1.0,
@@ -521,6 +526,187 @@ class TestOneAtATime(SchedulerTestCase):
         self.assertEqual((heavy.runs, light.runs), (0, 1))
 
 
+class TestOneStuckTaskDoesNotStallTheRest(SchedulerTestCase):
+    """
+    Found end to end, and the reason it was worth running end to end.
+
+    A task the safety floor refuses sits at the front of the queue forever,
+    because the floor will go on refusing it. If the scheduler gives up for
+    that tick, everything behind it waits for a condition that will never
+    change. safe_queue.py already argues this case for heavy work — "letting
+    one heavy task at the front stall every light task behind it would make
+    the queue worse than no queue" — and it is just as true here.
+    """
+
+    def test_work_behind_a_floor_blocked_task_still_runs(self) -> None:
+        blocked = Work()
+        behind = Work()
+
+        self.scheduler.submit(
+            work=blocked,
+            weight=Weight.LIGHT,
+            summary="needs a card nobody has",
+            required_vram_mb=900_000,
+        )
+        self.scheduler.submit(
+            work=behind,
+            weight=Weight.LIGHT,
+            summary="needs nothing at all",
+            required_vram_mb=0,
+        )
+
+        self.scheduler.tick()
+
+        self.assertEqual(behind.runs, 1)
+        self.assertEqual(blocked.runs, 0)
+
+    def test_the_blocked_one_is_still_reported_as_blocked(self) -> None:
+        # Skipping it must not mean forgetting to say why it is waiting.
+        self.scheduler.submit(
+            work=Work(),
+            weight=Weight.LIGHT,
+            summary="needs a card nobody has",
+            required_vram_mb=900_000,
+        )
+        self.scheduler.submit(
+            work=Work(),
+            weight=Weight.LIGHT,
+            summary="needs nothing at all",
+            required_vram_mb=0,
+        )
+
+        self.scheduler.tick()
+
+        stuck = self.scheduler.view().tasks[0]
+
+        self.assertEqual(stuck["heldReason"], HoldReason.SAFETY_FLOOR.value)
+
+    def test_several_blocked_tasks_do_not_stall_it_either(self) -> None:
+        for index in range(4):
+            self.scheduler.submit(
+                work=Work(),
+                weight=Weight.LIGHT,
+                summary=f"impossible {index}",
+                required_vram_mb=900_000,
+            )
+
+        behind = Work()
+        self.scheduler.submit(
+            work=behind,
+            weight=Weight.LIGHT,
+            summary="the one that can run",
+            required_vram_mb=0,
+        )
+
+        self.scheduler.tick()
+
+        self.assertEqual(behind.runs, 1)
+
+
+class TestTheGovernorDoesNotOverruleTheQueue(unittest.TestCase):
+    """
+    The livelock, pinned down.
+
+    The queue judges the machine over a window, because one reading of a
+    working machine is close to meaningless. The governor used to take its
+    own instantaneous reading when asked for a reservation, and on a loaded
+    machine it refused every time — so the queue admitted a task, the governor
+    refused it, the task went back, and around it went. Observed end to end:
+    nothing could ever run.
+
+    What the governor still decides is its own business — one heavy owner at a
+    time — and no caller may waive that.
+    """
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.machine = Machine(self.clock, level=LoadLevel.FREE)
+
+        events: list[QueueEvent] = []
+
+        # A governor whose own readings say the machine is hammered.
+        self.scheduler = QueueScheduler(
+            queue=SafeQueue(clock=self.clock),
+            governor=ResourceGovernor(
+                read_system=lambda: SystemStatus(
+                    cpu_usage_percent=99.0,
+                    ram_usage_percent=97.0,
+                    ram_used_gb=15.0,
+                    ram_total_gb=16.0,
+                ),
+                read_gpu=lambda: GpuStatus(
+                    name="RTX 5080",
+                    temperature_c=84,
+                    gpu_utilization_percent=100,
+                    vram_used_mb=16_000,
+                    vram_total_mb=CARD_MB,
+                ),
+                clock=self.clock,
+            ),
+            monitor=self.machine,  # type: ignore[arg-type]
+            notify=events.append,
+            clock=self.clock,
+        )
+
+    def test_the_queues_verdict_is_the_one_that_counts(self) -> None:
+        work = Work()
+        self.scheduler.submit(
+            work=work,
+            weight=Weight.LIGHT,
+            summary="something",
+            required_vram_mb=0,
+        )
+
+        self.scheduler.tick()
+
+        self.assertEqual(work.runs, 1)
+
+    def test_it_does_not_spin(self) -> None:
+        work = Work()
+        task_id = self.scheduler.submit(
+            work=work,
+            weight=Weight.LIGHT,
+            summary="something",
+            required_vram_mb=0,
+        ).task_id
+
+        for _ in range(10):
+            self.scheduler.tick()
+
+        self.assertEqual(work.runs, 1)
+        self.assertLessEqual(
+            self.scheduler.queue.get(task_id).attempts,
+            1,
+        )
+
+    def test_but_one_heavy_task_at_a_time_still_holds(self) -> None:
+        # The rule the governor exists for. A caller may tell it what it
+        # thinks of the machine; it may not tell it to hand out two heavy
+        # reservations.
+        # The verdict has to be supplied here too, or this governor refuses
+        # the setup for the same reason it would refuse everything else, and
+        # the test would be asserting against a reservation that was never
+        # made — which is exactly what it did on the first run.
+        grant = self.scheduler.governor.request(
+            "somebody-else",
+            Weight.HEAVY,
+            decision=ResourceDecision.ALLOW,
+        )
+        self.assertTrue(grant.granted, "the setup did not take the lease")
+
+        heavy = Work()
+        self.scheduler.submit(
+            work=heavy,
+            weight=Weight.HEAVY,
+            summary="a long think",
+            required_vram_mb=0,
+        )
+
+        self.scheduler.tick()
+
+        self.assertEqual(heavy.runs, 0)
+
+
 class TestItSaysWhatItIsDoing(SchedulerTestCase):
     def test_submitting_announces_the_task(self) -> None:
         self.submit(Work())
@@ -547,6 +733,44 @@ class TestItSaysWhatItIsDoing(SchedulerTestCase):
             self.scheduler.tick()
 
         self.assertEqual(len(self.events), before)
+
+    def test_a_held_task_does_not_change_just_by_waiting(self) -> None:
+        """
+        The bug an end-to-end run found, pinned down where it is provable.
+
+        The reason a task is held used to include how long it had been held,
+        so the wording differed every tick, so the queue looked different
+        every tick, so the interface was told twenty times in five seconds
+        that nothing had happened. How long it has been waiting belongs in a
+        field of its own, not inside the sentence.
+        """
+        self.machine.level = LoadLevel.BUSY
+        self.submit(Work())
+
+        self.scheduler.tick()
+        first = self.scheduler.view().tasks[0]["detail"]
+
+        for _ in range(10):
+            self.clock.advance(2.0)
+            self.scheduler.tick()
+
+        self.assertEqual(
+            self.scheduler.view().tasks[0]["detail"],
+            first,
+        )
+
+    def test_and_so_the_revision_does_not_move_either(self) -> None:
+        self.machine.level = LoadLevel.BUSY
+        self.submit(Work())
+        self.scheduler.tick()
+
+        before = self.scheduler.view().revision
+
+        for _ in range(10):
+            self.clock.advance(2.0)
+            self.scheduler.tick()
+
+        self.assertEqual(self.scheduler.view().revision, before)
 
     def test_the_level_is_announced_when_it_changes(self) -> None:
         self.machine.level = LoadLevel.BUSY

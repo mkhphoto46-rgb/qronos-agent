@@ -91,6 +91,39 @@ class TestTheModelHasToFit(unittest.TestCase):
         self.assertIn("cannot be overridden", message)
 
 
+class TestWorkThatLoadsNothing(unittest.TestCase):
+    """
+    The headroom is for the allocation about to be made.
+
+    An end-to-end run put a task needing no graphics memory at all behind a
+    512 MB requirement on a card with 256 MB free, and watched it wait for a
+    condition that had nothing to do with it. Nothing is being loaded, so
+    there is nothing to find room for.
+    """
+
+    def test_a_task_needing_nothing_passes_on_a_full_card(self) -> None:
+        self.assertTrue(check(a_reading(free_vram_mb=0), 0).passed)
+
+    def test_even_when_less_than_the_headroom_is_free(self) -> None:
+        self.assertTrue(check(a_reading(free_vram_mb=1), 0).passed)
+
+    def test_but_the_temperature_limit_still_applies_to_it(self) -> None:
+        # Loading nothing is not a licence to add work to a card that is
+        # already too hot.
+        verdict = check(a_reading(gpu_temperature_c=90), 0)
+
+        self.assertFalse(verdict.passed)
+        self.assertIs(verdict.breach, FloorBreach.GPU_TEMPERATURE)
+
+    def test_and_so_does_system_memory(self) -> None:
+        self.assertFalse(check(a_reading(ram_percent=96.0), 0).passed)
+
+    def test_one_megabyte_is_not_nothing(self) -> None:
+        # The exemption is for zero exactly. A task that loads a little still
+        # needs room for it plus the headroom.
+        self.assertFalse(check(a_reading(free_vram_mb=100), 1).passed)
+
+
 class TestTemperature(unittest.TestCase):
     def test_eighty_four_is_allowed(self) -> None:
         self.assertTrue(check(a_reading(gpu_temperature_c=84), FAST_MB).passed)

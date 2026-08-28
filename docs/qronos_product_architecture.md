@@ -98,10 +98,31 @@ and every future tool—not only Heavy-Brain handoff.
 - Expose conservative, balanced, and custom limits in the UI, while keeping
   non-bypassable thermal and memory safety limits.
 
-The current prototype performs preflight checks and a second fresh check just
-before generation. Process-aware attribution, sustained in-flight monitoring,
-disk/power signals, hysteresis, and safe cancellation are still required before
-this subsystem can be called production-ready. No software can guarantee that a
+Sustained monitoring, hysteresis and self-attribution now exist, in
+`core/load_signal.py`. A machine is judged busy when it has been busy for most
+of a window rather than at the instant it was asked, which was the whole
+problem: measured on the development card, the GPU signal crossed its own
+threshold twenty-nine times in forty-five seconds, and ten consecutive
+evaluations of an unchanging machine produced three different answers. Twenty
+seconds of evidence are required before work is held and thirty before it
+resumes — quick to yield, slow to take.
+
+Self-attribution is by subtraction rather than by process, because Windows
+reports no per-process VRAM at all: every entry comes back as `[N/A]`. Qronos
+subtracts what it knows it loaded, which is enough, and normally nothing, since
+both brains are unloaded after every turn.
+
+Work that cannot start is now queued rather than refused — `core/safe_queue.py`
+driven by `core/queue_scheduler.py` — with the reason shown to the user and an
+override that lifts politeness but never the safety floor in
+`core/hard_floor.py`. The floor is deliberately narrow: the card being too hot,
+and the model not fitting. A busy processor is a reason to wait, not a reason it
+is unsafe to proceed.
+
+Still required: disk and power signals, and safe cancellation of work already
+running — `SafeQueue.cancel` moves the state but nothing interrupts a task in
+flight, which is harmless while the queue holds placeholders and would be a lie
+in the interface once it holds real work. No software can guarantee that a
 computer will never crash; the goal is conservative prevention, graceful
 degradation, and tested recovery.
 

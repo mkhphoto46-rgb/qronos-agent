@@ -188,6 +188,19 @@ def check(
                 gpu_temperature_c=temperature,
             )
 
+    if required_vram_mb == 0:
+        # Nothing is going to be loaded, so there is nothing to find room for.
+        # Applying the headroom here would refuse work that cannot possibly
+        # harm the card — which is what it did, until an end-to-end run put a
+        # task needing no graphics memory behind a 512 MB requirement and
+        # watched it wait forever.
+        return FloorVerdict(
+            passed=True,
+            required_vram_mb=0,
+            free_vram_mb=sample.vram_free_mb,
+            gpu_temperature_c=temperature,
+        )
+
     if sample.vram_free_mb is None:
         return FloorVerdict(
             passed=True,

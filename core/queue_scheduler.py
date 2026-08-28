@@ -60,7 +60,8 @@ from core.load_signal import (
     LoadSample,
     SustainedLoadMonitor,
 )
-from core.resource_governor import ResourceGovernor, Weight
+from core.resource_governor import Refusal, ResourceGovernor, Weight
+from core.resource_policy import ResourceDecision
 from core.safe_queue import QueuedTask, SafeQueue, TaskState
 
 
@@ -102,6 +103,19 @@ class HoldReason(Enum):
     HEAVY_TASK_IN_PROGRESS = "heavy_task_in_progress"
     PAUSED = "paused"
     SAFETY_FLOOR = "safety_floor"
+    ACTIVITY_MODE = "activity_mode"
+
+
+#: What the governor's refusals mean to somebody looking at the queue.
+#: Written out rather than derived, so a refusal added to the governor later
+#: shows up as a missing entry rather than silently becoming "a heavy task is
+#: already running" — which is the mistake the permission gate documents at
+#: some length.
+_HOLD_FOR_REFUSAL: dict[Refusal, HoldReason] = {
+    Refusal.HEAVY_TASK_IN_PROGRESS: HoldReason.HEAVY_TASK_IN_PROGRESS,
+    Refusal.ACTIVITY_MODE: HoldReason.ACTIVITY_MODE,
+    Refusal.RESOURCE_PRESSURE: HoldReason.SUSTAINED_LOAD,
+}
 
 
 #: Holds an override can lift. Anything else is a safety limit or a
@@ -459,12 +473,21 @@ class QueueScheduler:
         sample: LoadSample,
     ) -> Optional[_Entry]:
         """
-        The task that may start right now, if any.
+        The first task that may start right now, if any.
 
-        The safety floor is checked before the politeness hold, and that order
+        Every waiting task is considered in turn rather than only the one at
+        the front. ``SafeQueue.next_ready`` already skips heavy work when
+        heavy work cannot run, on the grounds that "letting one heavy task at
+        the front stall every light task behind it would make the queue worse
+        than no queue" — but the same is true of a task the safety floor
+        refuses, and that one used to stall the whole line. An end-to-end run
+        found it: a task needing a model that would never fit sat at the front
+        and nothing behind it was ever looked at again.
+
+        The safety floor is asked before the politeness hold, and that order
         is deliberate. Both would stop the same task, but only one of them can
-        be lifted by the user — so a task the floor refuses must be reported as
-        refused by the floor, or the interface offers a "run anyway" button
+        be lifted by the user — so a task the floor refuses must be reported
+        as refused by the floor, or the interface offers a "run anyway" button
         that cannot possibly work and the user presses it twice.
         """
         with self._lock:
@@ -474,79 +497,97 @@ class QueueScheduler:
                 return None
 
             heavy_allowed = self.governor.heavy_owner() is None
-            task = self.queue.next_ready(heavy_allowed=heavy_allowed)
+            candidates = [
+                task
+                for task in self.queue.waiting()
+                if heavy_allowed or task.weight is not Weight.HEAVY
+            ]
 
-            if task is None:
-                return None
-
-            entry = self._entries.get(task.task_id)
+        for task in candidates:
+            with self._lock:
+                entry = self._entries.get(task.task_id)
 
             if entry is None:
-                return None
+                continue
 
-        verdict = check_floor(
-            sample,
-            required_vram_mb=entry.required_vram_mb,
-            config=self.floor,
-            currently_refused=entry.floor_refusal is not None,
-        )
+            verdict = check_floor(
+                sample,
+                required_vram_mb=entry.required_vram_mb,
+                config=self.floor,
+                currently_refused=entry.floor_refusal is not None,
+            )
 
-        with self._lock:
-            if not verdict.passed:
-                entry.floor_refusal = verdict
-                entry.override = False
-                self._hold(entry, HoldReason.SAFETY_FLOOR, verdict.message())
+            with self._lock:
+                if not verdict.passed:
+                    entry.floor_refusal = verdict
+                    entry.override = False
+                    self._hold(
+                        entry,
+                        HoldReason.SAFETY_FLOOR,
+                        verdict.message(),
+                    )
+                    continue
 
-                return None
+                entry.floor_refusal = None
 
-            entry.floor_refusal = None
+                if level is not LoadLevel.FREE and not entry.override:
+                    self._hold(
+                        entry,
+                        HoldReason.SUSTAINED_LOAD
+                        if level is LoadLevel.BUSY
+                        else HoldReason.WARMING_UP,
+                        self.monitor.snapshot().reason,
+                    )
+                    continue
 
-            if level is not LoadLevel.FREE and not entry.override:
-                self._hold(
-                    entry,
-                    HoldReason.SUSTAINED_LOAD
-                    if level is LoadLevel.BUSY
-                    else HoldReason.WARMING_UP,
-                    self.monitor.snapshot().describe(),
-                )
+                if task.attempts >= self.config.max_attempts:
+                    # Something is wrong with this task rather than with the
+                    # machine. A visible stall beats an invisible spin.
+                    self.queue.pause(task.task_id)
+                    self._hold(
+                        entry,
+                        HoldReason.PAUSED,
+                        (
+                            f"Qronos tried this {task.attempts} times "
+                            "without it completing, so it is paused for you "
+                            "to look at."
+                        ),
+                    )
+                    self._bump()
+                    continue
 
-                return None
+                return entry
 
-            if task.attempts >= self.config.max_attempts:
-                # Something is wrong with this task rather than with the
-                # machine. A visible stall beats an invisible spin.
-                self.queue.pause(task.task_id)
-                self._hold(
-                    entry,
-                    HoldReason.PAUSED,
-                    (
-                        f"Qronos tried this {task.attempts} times without it "
-                        "completing, so it is paused for you to look at."
-                    ),
-                )
-                self._bump()
-
-                return None
-
-            return entry
+        return None
 
     def _start(self, entry: _Entry, level: LoadLevel) -> None:
         task = self.queue.get(entry.task_id)
+
+        # The machine has already been judged, over a window, by the monitor —
+        # and the safety floor has already been asked, against a reading taken
+        # moments ago. Letting the governor take a third, instantaneous reading
+        # here would let one sample overrule both, which is precisely the spin
+        # that stopped anything ever running.
         grant = self.governor.request(
             task_id=entry.task_id,
             weight=task.weight,
             activity_mode=self._activity_mode(),
             resource_pressure=ResourcePressure.NORMAL,
+            decision=ResourceDecision.ALLOW,
         )
 
         if not grant.granted:
-            # The governor's own rules — one heavy owner, performance mode —
-            # are correctness, not politeness, so an override does not skip
+            # What is left for the governor to refuse is its own business: the
+            # single-heavy-owner rule and performance mode. Those are
+            # correctness rather than manners, so an override does not skip
             # them.
             with self._lock:
                 self._hold(
                     entry,
-                    HoldReason.HEAVY_TASK_IN_PROGRESS,
+                    _HOLD_FOR_REFUSAL.get(
+                        grant.refusal,
+                        HoldReason.HEAVY_TASK_IN_PROGRESS,
+                    ),
                     grant.detail,
                 )
             return
