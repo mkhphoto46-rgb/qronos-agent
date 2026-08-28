@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from enum import Enum
 
 from core.link_capability import (
     CONSOLE_ONLY,
@@ -12,6 +13,7 @@ from core.link_capability import (
     Capability,
     LinkOp,
     LinkScope,
+    _reason_for,
     authorise,
     resolve_capabilities,
     scope_for_peer,
@@ -206,7 +208,7 @@ class TestPermissionEngineStillApplies(unittest.TestCase):
     def test_deleting_a_file_needs_approval_rather_than_being_impossible(
         self,
     ) -> None:
-        # Mapping delete to SENSITIVE would deny it outright and make
+        # Mapping delete to FORBIDDEN would deny it outright and make
         # DELETE_FILES a capability nothing could ever exercise.
         decision = authorise("delete_file", LinkScope.LOCAL_NETWORK)
 
@@ -230,6 +232,88 @@ class TestPermissionEngineStillApplies(unittest.TestCase):
         self.assertIs(
             authorise("run_app", LinkScope.REMOTE_TUNNEL).reason,
             AuthReason.OUT_OF_SCOPE,
+        )
+
+
+class TestTranslationFailsClosed(unittest.TestCase):
+    """
+    The guard on turning a permission decision into an answer.
+
+    The permission engine grew from three decisions to five when it moved to
+    the five authorization levels. Code that branched on the old three and let
+    an ``else`` mean "allowed" would have silently granted both new decisions.
+    A remote device is the wrong place to discover that, so the translation is
+    checked here decision by decision.
+    """
+
+    def test_only_an_explicit_allow_allows(self) -> None:
+        allowing = {
+            decision
+            for decision in PermissionDecision
+            if _reason_for(decision) is AuthReason.ALLOWED
+        }
+
+        self.assertEqual(allowing, {PermissionDecision.ALLOW})
+
+    def test_every_confirmation_decision_asks_for_approval(self) -> None:
+        for decision in (
+            PermissionDecision.REQUIRE_VOICE_CONFIRMATION,
+            PermissionDecision.REQUIRE_UI_CONFIRMATION,
+            PermissionDecision.REQUIRE_TYPED_SECRET,
+        ):
+            with self.subTest(decision=decision):
+                self.assertIs(
+                    _reason_for(decision),
+                    AuthReason.NEEDS_APPROVAL,
+                )
+
+    def test_deny_is_refused(self) -> None:
+        self.assertIs(
+            _reason_for(PermissionDecision.DENY),
+            AuthReason.PERMISSION_DENIED,
+        )
+
+    def test_every_decision_the_engine_can_return_is_handled(self) -> None:
+        # Not a tautology: it fails the day someone adds a sixth decision to
+        # the permission engine without deciding what the link should do
+        # with it.
+        for decision in PermissionDecision:
+            with self.subTest(decision=decision):
+                self.assertIn(
+                    _reason_for(decision),
+                    {
+                        AuthReason.ALLOWED,
+                        AuthReason.NEEDS_APPROVAL,
+                        AuthReason.PERMISSION_DENIED,
+                    },
+                )
+
+    def test_a_decision_the_translation_has_never_seen_is_refused(
+        self,
+    ) -> None:
+        # Stands in for a decision added later. Refusal is the only safe
+        # answer to a value this module was not written against.
+        class UnknownDecision(Enum):
+            SOMETHING_NEW = "something_new"
+
+        self.assertIs(
+            _reason_for(UnknownDecision.SOMETHING_NEW),
+            AuthReason.PERMISSION_DENIED,
+        )
+
+
+class TestManagingDevicesIsRefusedOverTheLink(unittest.TestCase):
+    def test_listing_devices_is_refused(self) -> None:
+        decision = authorise("list_devices", LinkScope.LOCAL_NETWORK)
+
+        self.assertTrue(decision.refused)
+        self.assertFalse(decision.needs_approval)
+
+    def test_revoking_a_device_is_refused(self) -> None:
+        # A phone that could revoke devices could revoke every device but
+        # itself. The console is the only place this happens.
+        self.assertTrue(
+            authorise("revoke_device", LinkScope.LOCAL_NETWORK).refused
         )
 
 
