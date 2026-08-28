@@ -24,6 +24,7 @@ from core.resource_guard import (
 )
 from core.resource_policy import ResourceDecision
 from core.task_plan import PlanStep, TaskPlan
+from core.workers import Unavailable, WorkerRegistry
 
 
 QRONOS_SYSTEM_PROMPT = """
@@ -60,6 +61,11 @@ class StepResult:
     output: str
     error: str | None = None
 
+    # Set when the step could not run because no worker answers for its
+    # task type. Carries a reason code, so a caller can tell a missing
+    # capability from a failed one without reading the error text.
+    unavailable: Unavailable | None = None
+
 
 class Orchestrator:
     """
@@ -75,6 +81,7 @@ class Orchestrator:
         runtime: BrainRuntime | None = None,
         model_manager: ModelManager | None = None,
         activity_guard: ActivityGuard | None = None,
+        workers: WorkerRegistry | None = None,
     ) -> None:
         self.runtime = (
             runtime
@@ -98,6 +105,14 @@ class Orchestrator:
             activity_guard
             if activity_guard is not None
             else ActivityGuard()
+        )
+
+        # Empty unless something registers a worker, so an orchestrator
+        # built the old way behaves exactly as it did before.
+        self.workers = (
+            workers
+            if workers is not None
+            else WorkerRegistry()
         )
 
     def execute_plan(
@@ -163,14 +178,8 @@ class Orchestrator:
         )
 
         if task_class is None:
-            return StepResult(
-                order=step.order,
-                success=False,
-                output="",
-                error=(
-                    f"Task type '{step.task_type.value}' "
-                    "is not implemented yet."
-                ),
+            return self._execute_with_worker(
+                step
             )
 
         try:
@@ -360,6 +369,13 @@ class Orchestrator:
     def _get_task_class(
         step: PlanStep,
     ) -> TaskClass | None:
+        """
+        Which brain runs this step, or None when no brain does.
+
+        None is not "unsupported". Vision, Computer and Browser are real task
+        types that simply do not run on a language model, so they are handed to
+        the worker registry instead.
+        """
         if step.task_type.value == "fast":
             return TaskClass.FAST
 
@@ -367,6 +383,53 @@ class Orchestrator:
             return TaskClass.HEAVY
 
         return None
+
+    def _execute_with_worker(
+        self,
+        step: PlanStep,
+    ) -> StepResult:
+        """
+        Run a step that belongs to a worker rather than a brain.
+
+        Until a worker registers for the task type, this reports the gap. It
+        used to report it as a formatted English sentence in the same field a
+        genuine failure uses, so nothing could distinguish "not built yet" from
+        "broke just now" except matching on prose. The registry answers with a
+        reason code, and the sentence is rendered from it.
+        """
+        unavailable = self.workers.availability(
+            step.task_type
+        )
+
+        if unavailable is not None:
+            return StepResult(
+                order=step.order,
+                success=False,
+                output="",
+                error=unavailable.message(),
+                unavailable=unavailable,
+            )
+
+        worker = self.workers.worker_for(
+            step.task_type
+        )
+
+        try:
+            produced = worker.execute(step)
+        except Exception as error:
+            return StepResult(
+                order=step.order,
+                success=False,
+                output="",
+                error=str(error),
+            )
+
+        return StepResult(
+            order=step.order,
+            success=produced.success,
+            output=produced.output,
+            error=produced.error,
+        )
 
     @staticmethod
     def _build_step_content(
