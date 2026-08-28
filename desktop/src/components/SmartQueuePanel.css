@@ -1,0 +1,317 @@
+/*
+ * The smart queue panel.
+ *
+ * Its own prefix rather than reusing permissions-security-activity-*, which
+ * would have saved a couple of hundred lines. Those rows are a security log
+ * and these are work waiting for the machine; sharing a class would mean one
+ * of them could never be restyled without disturbing the other. The values
+ * are copied so it reads as the same family — same 9px padding, same
+ * asymmetric radius, same gradient pair, same 150ms transitions.
+ *
+ * Right-to-left, like the rest of the application.
+ */
+
+.smart-queue-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+
+  border-bottom: 1px solid rgba(75, 142, 187, 0.1);
+}
+
+.smart-queue-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.smart-queue-head h3 {
+  margin: 0;
+
+  font-size: calc(12px * var(--qronos-ui-scale, 1));
+  font-weight: 600;
+  color: rgba(214, 236, 247, 0.92);
+}
+
+.smart-queue-kicker {
+  display: block;
+
+  margin-top: 2px;
+
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: calc(8.5px * var(--qronos-ui-scale, 1));
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(120, 173, 205, 0.55);
+}
+
+/* The queue's own hold, kept visually of the same family as the emergency
+   pause without inheriting its meaning. That control promises to stop every
+   permission-gated action, which is a much larger promise than this one. */
+.smart-queue-hold-toggle {
+  flex-shrink: 0;
+
+  padding: 5px 10px;
+
+  border: 1px solid rgba(88, 177, 224, 0.2);
+  border-radius: 8px 4px 8px 4px;
+
+  background: rgba(8, 29, 39, 0.5);
+
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: calc(8.5px * var(--qronos-ui-scale, 1));
+  letter-spacing: 0.06em;
+  color: rgba(150, 199, 225, 0.75);
+
+  cursor: pointer;
+
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    color 150ms ease;
+}
+
+.smart-queue-hold-toggle:hover {
+  border-color: rgba(88, 177, 224, 0.4);
+  color: rgba(198, 230, 246, 0.95);
+}
+
+.smart-queue-hold-toggle-active {
+  border-color: rgba(224, 168, 88, 0.45);
+  background: rgba(50, 32, 10, 0.45);
+  color: rgba(240, 200, 140, 0.95);
+}
+
+.smart-queue-hold-note,
+.smart-queue-empty,
+.smart-queue-note {
+  margin: 0;
+
+  font-size: calc(10.5px * var(--qronos-ui-scale, 1));
+  line-height: 1.6;
+  color: rgba(158, 197, 219, 0.7);
+}
+
+.smart-queue-empty {
+  padding: 14px 10px;
+
+  border: 1px dashed rgba(75, 142, 187, 0.14);
+  border-radius: 10px 6px 10px 6px;
+
+  text-align: center;
+}
+
+.smart-queue-note {
+  color: rgba(140, 178, 200, 0.45);
+}
+
+/* -------------------------------------------------------------- the rows */
+
+.smart-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  margin: 0;
+  padding: 0;
+
+  list-style: none;
+}
+
+.smart-queue-row {
+  position: relative;
+
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+
+  padding: 9px;
+
+  border: 1px solid rgba(75, 142, 187, 0.075);
+  border-radius: 10px 6px 10px 6px;
+
+  background: linear-gradient(
+    135deg,
+    rgba(8, 29, 39, 0.42),
+    rgba(5, 17, 25, 0.24)
+  );
+
+  transition:
+    transform 150ms ease,
+    border-color 150ms ease,
+    background 150ms ease;
+}
+
+.smart-queue-row:hover {
+  transform: translateX(-2px);
+  border-color: rgba(88, 177, 224, 0.18);
+}
+
+.smart-queue-row-waiting {
+  border-inline-end: 2px solid rgba(88, 177, 224, 0.35);
+}
+
+.smart-queue-row-running {
+  border-inline-end: 2px solid rgba(110, 220, 170, 0.5);
+}
+
+/* Held by a safety limit rather than by manners. Deliberately a different
+   colour from "waiting", because no button the user can press will move it. */
+.smart-queue-row-held {
+  border-inline-end: 2px solid rgba(224, 168, 88, 0.5);
+}
+
+.smart-queue-row-failed {
+  border-inline-end: 2px solid rgba(224, 108, 108, 0.5);
+}
+
+.smart-queue-row-time {
+  flex-shrink: 0;
+
+  padding-top: 2px;
+
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: calc(9px * var(--qronos-ui-scale, 1));
+  color: rgba(120, 173, 205, 0.5);
+}
+
+.smart-queue-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.smart-queue-row-summary {
+  margin: 0 0 4px;
+
+  font-size: calc(11px * var(--qronos-ui-scale, 1));
+  line-height: 1.5;
+  color: rgba(214, 236, 247, 0.9);
+
+  overflow-wrap: anywhere;
+}
+
+.smart-queue-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+
+  margin: 0;
+}
+
+.smart-queue-row-meta div {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.smart-queue-row-meta dt {
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: calc(8px * var(--qronos-ui-scale, 1));
+  letter-spacing: 0.06em;
+  color: rgba(120, 173, 205, 0.45);
+}
+
+.smart-queue-row-meta dd {
+  margin: 0;
+
+  font-size: calc(9.5px * var(--qronos-ui-scale, 1));
+  color: rgba(180, 214, 234, 0.8);
+}
+
+.smart-queue-row-detail {
+  margin: 5px 0 0;
+
+  font-size: calc(9.5px * var(--qronos-ui-scale, 1));
+  line-height: 1.55;
+  color: rgba(150, 190, 214, 0.6);
+}
+
+/* ----------------------------------------------------------- the buttons */
+
+.smart-queue-actions {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.smart-queue-override,
+.smart-queue-cancel,
+.smart-queue-refusal-dismiss {
+  padding: 4px 9px;
+
+  border-radius: 7px 4px 7px 4px;
+
+  font-size: calc(9.5px * var(--qronos-ui-scale, 1));
+
+  cursor: pointer;
+
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    color 150ms ease;
+}
+
+.smart-queue-override {
+  border: 1px solid rgba(88, 177, 224, 0.3);
+  background: rgba(10, 40, 56, 0.55);
+  color: rgba(198, 230, 246, 0.9);
+}
+
+.smart-queue-override:hover {
+  border-color: rgba(88, 177, 224, 0.55);
+  background: rgba(14, 54, 74, 0.7);
+}
+
+.smart-queue-cancel,
+.smart-queue-refusal-dismiss {
+  border: 1px solid rgba(120, 150, 170, 0.16);
+  background: transparent;
+  color: rgba(150, 185, 205, 0.6);
+}
+
+.smart-queue-cancel:hover,
+.smart-queue-refusal-dismiss:hover {
+  border-color: rgba(224, 108, 108, 0.35);
+  color: rgba(232, 170, 170, 0.85);
+}
+
+/* ------------------------------------------------------- refused override */
+
+.smart-queue-refusal {
+  padding: 9px;
+
+  border: 1px solid rgba(224, 168, 88, 0.28);
+  border-radius: 10px 6px 10px 6px;
+
+  background: linear-gradient(
+    135deg,
+    rgba(46, 31, 10, 0.4),
+    rgba(26, 18, 6, 0.25)
+  );
+}
+
+.smart-queue-refusal p {
+  margin: 0;
+
+  font-size: calc(10.5px * var(--qronos-ui-scale, 1));
+  line-height: 1.6;
+  color: rgba(240, 210, 165, 0.9);
+}
+
+.smart-queue-refusal-detail {
+  margin-top: 4px !important;
+
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: calc(9px * var(--qronos-ui-scale, 1)) !important;
+  line-height: 1.55 !important;
+  color: rgba(210, 180, 140, 0.65) !important;
+}
+
+.smart-queue-refusal-dismiss {
+  margin-top: 7px;
+}
