@@ -135,8 +135,12 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     Warnings: true,
     Updates: true,
   });
-  const [launchAtStartup, setLaunchAtStartup] = useState(true);
-  const [tray, setTray] = useState(true);
+  // Both start off and stay off. Neither is implemented — there is no
+  // startup registration and no tray icon in tauri.conf.json — and a
+  // switch showing ON for a feature that does not exist is worse than an
+  // absent switch, because the user believes it and stops looking.
+  const [launchAtStartup, setLaunchAtStartup] = useState(false);
+  const [tray, setTray] = useState(false);
   const [theme, setTheme] = useState("System");
   const [uiLanguage, setUiLanguage] = useState("فارسی");
   const [responseLanguage, setResponseLanguage] = useState("Auto");
@@ -214,11 +218,11 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
         </SettingRow>
       </SettingGroup>
       <SettingGroup title="STARTUP" index="03">
-        <SettingRow title="اجرا همراه Windows" description="Qronos پس از ورود شما آماده شود.">
-          <Toggle checked={launchAtStartup} onChange={setLaunchAtStartup} label="Launch with Windows" />
+        <SettingRow title="اجرا همراه Windows" description="هنوز در دسترس نیست — Qronos پس از ورود شما آماده شود.">
+          <Toggle checked={launchAtStartup} onChange={setLaunchAtStartup} label="Launch with Windows" disabled />
         </SettingRow>
-        <SettingRow title="حفظ در System Tray" description="با بستن پنجره، Qronos در پس‌زمینه فعال بماند.">
-          <Toggle checked={tray} onChange={setTray} label="Keep in system tray" />
+        <SettingRow title="حفظ در System Tray" description="هنوز در دسترس نیست — با بستن پنجره، Qronos در پس‌زمینه فعال بماند.">
+          <Toggle checked={tray} onChange={setTray} label="Keep in system tray" disabled />
         </SettingRow>
       </SettingGroup>
       <SettingGroup title="ABOUT QRONOS" index="04">

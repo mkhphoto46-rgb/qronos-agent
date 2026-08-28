@@ -257,58 +257,21 @@ const permissionItems: PermissionItem[] = [
   },
 ];
 
-const securityActivities: SecurityActivity[] = [
-  {
-    id: "sa1",
-    time: "21:41",
-    event: "FILE DELETE",
-    target: "old_build.zip",
-    policy: "ALWAYS ASK",
-    decision: "ALLOWED ONCE",
-    source: "USER COMMAND",
-    tone: "ask",
-  },
-  {
-    id: "sa2",
-    time: "21:34",
-    event: "MICROPHONE",
-    target: "Realtek USB Mic",
-    policy: "SESSION",
-    decision: "SESSION START",
-    source: "VOICE INPUT",
-    tone: "session",
-  },
-  {
-    id: "sa3",
-    time: "21:26",
-    event: "FILE UPLOAD",
-    target: "architecture.pdf → example.com",
-    policy: "ALWAYS ASK",
-    decision: "DENIED",
-    source: "BROWSER ACTION",
-    tone: "denied",
-  },
-  {
-    id: "sa4",
-    time: "21:18",
-    event: "POLICY CHANGE",
-    target: "Browser & Web",
-    policy: "CUSTOM",
-    decision: "ALWAYS ASK → ALLOW",
-    source: "USER SETTINGS",
-    tone: "policy",
-  },
-  {
-    id: "sa5",
-    time: "21:12",
-    event: "PROTECTED PATH",
-    target: "C:\\Windows\\System32",
-    policy: "DENY",
-    decision: "BLOCKED",
-    source: "SYSTEM POLICY",
-    tone: "denied",
-  },
-];
+// Empty until the action audit trail feeds it.
+//
+// This list used to hold five invented entries — a file deletion, a
+// microphone session on a device this machine does not have, a denied
+// upload — rendered under the heading "Permission & sensitive action
+// history" with timestamps, policies and decisions. None of it had
+// happened. On a Library shelf that is placeholder content; on the screen
+// whose whole job is to answer "what has Qronos done on my computer, and
+// what did I permit?", it is an answer that is confidently wrong.
+//
+// core/action_audit.py records every permission decision, allows and
+// denials alike, and ActionAuditLog.for_action can rebuild a timeline.
+// When a Tauri command exposes it, this becomes that list. Until then an
+// empty state is the truthful thing to show.
+const securityActivities: SecurityActivity[] = [];
 
 
 const groupLabels: Array<{
@@ -2069,6 +2032,13 @@ function PermissionsView({
             </header>
 
             <div className="permissions-security-activity-list">
+              {securityActivities.length === 0 && (
+                <p className="permissions-security-activity-empty">
+                  هنوز هیچ اقدامی ثبت نشده است.
+                  <span>No actions have been recorded yet.</span>
+                </p>
+              )}
+
               {securityActivities.map(
                 (
                   activity,
