@@ -124,6 +124,9 @@ class WebResearchWorker(TaskWorker):
         """
         return self.research is not None
 
+    def close(self) -> None:
+        self.research.close()
+
     def execute(self, step: PlanStep) -> WorkerOutput:
         request = step.description
 

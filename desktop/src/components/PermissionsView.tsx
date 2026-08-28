@@ -257,58 +257,9 @@ const permissionItems: PermissionItem[] = [
   },
 ];
 
-const securityActivities: SecurityActivity[] = [
-  {
-    id: "sa1",
-    time: "21:41",
-    event: "FILE DELETE",
-    target: "old_build.zip",
-    policy: "ALWAYS ASK",
-    decision: "ALLOWED ONCE",
-    source: "USER COMMAND",
-    tone: "ask",
-  },
-  {
-    id: "sa2",
-    time: "21:34",
-    event: "MICROPHONE",
-    target: "Realtek USB Mic",
-    policy: "SESSION",
-    decision: "SESSION START",
-    source: "VOICE INPUT",
-    tone: "session",
-  },
-  {
-    id: "sa3",
-    time: "21:26",
-    event: "FILE UPLOAD",
-    target: "architecture.pdf → example.com",
-    policy: "ALWAYS ASK",
-    decision: "DENIED",
-    source: "BROWSER ACTION",
-    tone: "denied",
-  },
-  {
-    id: "sa4",
-    time: "21:18",
-    event: "POLICY CHANGE",
-    target: "Browser & Web",
-    policy: "CUSTOM",
-    decision: "ALWAYS ASK → ALLOW",
-    source: "USER SETTINGS",
-    tone: "policy",
-  },
-  {
-    id: "sa5",
-    time: "21:12",
-    event: "PROTECTED PATH",
-    target: "C:\\Windows\\System32",
-    policy: "DENY",
-    decision: "BLOCKED",
-    source: "SYSTEM POLICY",
-    tone: "denied",
-  },
-];
+// Real audit records are not connected to this view yet. Never present demo
+// file, microphone, or policy events as if they happened on the user's system.
+const securityActivities: SecurityActivity[] = [];
 
 
 const groupLabels: Array<{
@@ -2069,6 +2020,15 @@ function PermissionsView({
             </header>
 
             <div className="permissions-security-activity-list">
+              {securityActivities.length === 0 && (
+                <article className="permissions-security-activity-row permissions-security-activity-policy">
+                  <div className="permissions-security-activity-main">
+                    <strong>NO RECORDED ACTIVITY</strong>
+                    <span>Live audit history is not connected to this screen yet.</span>
+                  </div>
+                </article>
+              )}
+
               {securityActivities.map(
                 (
                   activity,
@@ -2152,6 +2112,7 @@ function PermissionsView({
             <button
               type="button"
               className="permissions-security-activity-footer"
+              disabled
             >
               <span>
                 VIEW FULL AUDIT
@@ -2169,7 +2130,7 @@ function PermissionsView({
               <i />
 
               <span>
-                Audit log is append-only in the final runtime architecture
+                Waiting for the live append-only audit connection
               </span>
             </div>
           </aside>

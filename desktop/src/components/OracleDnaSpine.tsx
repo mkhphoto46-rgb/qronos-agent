@@ -24,7 +24,7 @@ export type OracleMemoryPhase =
 
 export type OracleMemoryNode = {
   id: string;
-  progress: number;
+  spinePosition: number;
   role: MemoryRole;
 };
 
@@ -657,10 +657,10 @@ function OracleDnaSpine({
         memorySignalRef.current =
           {
             fromProgress:
-              previousMemory.progress,
+              previousMemory.spinePosition,
 
             toProgress:
-              nextMemory.progress,
+              nextMemory.spinePosition,
 
             startedAt:
               performance.now(),
@@ -2120,7 +2120,7 @@ function OracleDnaSpine({
         memoriesRef.current
       ) {
         const progress =
-          memory.progress;
+          memory.spinePosition;
 
         const phaseValue =
           progress *

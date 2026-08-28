@@ -7,6 +7,10 @@ from typing import Optional
 import psutil
 
 
+class GpuStatusReadError(RuntimeError):
+    """An NVIDIA sensor exists but did not return a trustworthy reading."""
+
+
 @dataclass(frozen=True)
 class GpuStatus:
     name: str
@@ -47,18 +51,25 @@ def read_gpu_status() -> Optional[GpuStatus]:
             timeout=5,
             check=True,
         )
-    except (FileNotFoundError, subprocess.SubprocessError):
+    except FileNotFoundError:
+        # NVIDIA support is optional. A missing executable means this machine
+        # has no usable NVIDIA sensor; it is not a failed reading.
         return None
+    except subprocess.SubprocessError as exc:
+        # A present sensor timing out or failing is different from no NVIDIA
+        # hardware. Let ActivityGuard fail closed instead of treating an
+        # unknown load as an idle GPU.
+        raise GpuStatusReadError("nvidia-smi failed") from exc
 
     lines = result.stdout.strip().splitlines()
 
     if not lines:
-        return None
+        raise GpuStatusReadError("nvidia-smi returned no GPU data")
 
     parts = [part.strip() for part in lines[0].split(",")]
 
     if len(parts) != 5:
-        return None
+        raise GpuStatusReadError("nvidia-smi returned malformed GPU data")
 
     try:
         name = parts[0]
@@ -66,8 +77,8 @@ def read_gpu_status() -> Optional[GpuStatus]:
         gpu_utilization_percent = int(parts[2])
         vram_used_mb = int(parts[3])
         vram_total_mb = int(parts[4])
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise GpuStatusReadError("nvidia-smi returned non-numeric GPU data") from exc
 
     return GpuStatus(
         name=name,

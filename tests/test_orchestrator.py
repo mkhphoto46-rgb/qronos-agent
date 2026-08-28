@@ -521,6 +521,13 @@ class TestOrchestrator(unittest.TestCase):
             self.orchestrator.ollama,
             "unload_all",
         ) as mock_unload, patch.object(
+            self.orchestrator.activity_guard,
+            "detect",
+            return_value=self._make_state(
+                ActivityMode.NORMAL,
+                ResourcePressure.NORMAL,
+            ),
+        ), patch.object(
             self.orchestrator.model_manager,
             "select_model",
         ) as mock_select:
@@ -566,6 +573,68 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(
             mock_select.call_count,
             2,
+        )
+
+        self.assertIs(
+            mock_select.call_args_list[1].kwargs["resource_pressure"],
+            ResourcePressure.NORMAL,
+        )
+
+    def test_retry_remeasures_pressure_after_unloading_own_model(self) -> None:
+        with patch(
+            "core.orchestrator.read_system_status",
+            return_value=self._safe_system(),
+        ), patch(
+            "core.orchestrator.read_gpu_status",
+            return_value=self._safe_gpu(),
+        ), patch.object(
+            self.orchestrator.ollama,
+            "list_running_models",
+            return_value=[object()],
+        ), patch.object(
+            self.orchestrator.ollama,
+            "unload_all",
+        ), patch.object(
+            self.orchestrator.activity_guard,
+            "detect",
+            return_value=self._make_state(
+                ActivityMode.NORMAL,
+                ResourcePressure.NORMAL,
+            ),
+        ), patch.object(
+            self.orchestrator.model_manager,
+            "select_model",
+        ) as mock_select:
+            blocked = type(
+                "Selection",
+                (),
+                {
+                    "decision": ResourceDecision.BLOCK,
+                    "model": get_model("fast"),
+                    "keep_loaded": False,
+                },
+            )
+            allowed = type(
+                "Selection",
+                (),
+                {
+                    "decision": ResourceDecision.ALLOW,
+                    "model": get_model("fast"),
+                    "keep_loaded": True,
+                },
+            )
+            mock_select.side_effect = [blocked, allowed]
+
+            result = self.orchestrator._prepare_resources(
+                TaskClass.FAST,
+                ActivityMode.NORMAL,
+                ResourcePressure.CRITICAL,
+            )
+
+        self.assertIs(result, allowed)
+        self.assertIs(
+            mock_select.call_args_list[1].kwargs["resource_pressure"],
+            ResourcePressure.NORMAL,
         )
 
     def test_gaming_mode_blocks_heavy_model(self) -> None:

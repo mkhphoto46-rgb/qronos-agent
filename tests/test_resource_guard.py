@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import unittest
+import subprocess
+from unittest.mock import patch
 
-from core.resource_guard import read_gpu_status, read_system_status
+from core.resource_guard import (
+    GpuStatusReadError,
+    read_gpu_status,
+    read_system_status,
+)
 
 
 class TestResourceGuard(unittest.TestCase):
+    @patch("core.resource_guard.subprocess.run", side_effect=FileNotFoundError)
+    def test_missing_nvidia_sensor_is_optional(self, _run) -> None:
+        self.assertIsNone(read_gpu_status())
+
+    @patch(
+        "core.resource_guard.subprocess.run",
+        side_effect=subprocess.TimeoutExpired("nvidia-smi", 5),
+    )
+    def test_broken_nvidia_sensor_is_not_treated_as_no_gpu(self, _run) -> None:
+        with self.assertRaises(GpuStatusReadError):
+            read_gpu_status()
+
     def test_system_status_has_valid_cpu_usage(self) -> None:
         status = read_system_status()
 

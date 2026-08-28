@@ -547,7 +547,7 @@ the protocol changes.
 | Python older than 3.13 | Layer 1 cannot start | Probed at startup; verified to refuse cleanly on 3.12 |
 | Windows Python lacks TLS-PSK | Layer 1 cannot start | Probed at startup, clear message; fallback is certificate-based mTLS |
 | User's VPN captures the private range | LAN link unreachable **from a browser** — measured. From a native app, unproven | The app pins its socket to the Wi-Fi network (`TRANSPORT_WIFI`). Defeated only by Android lockdown mode |
-| PC has a VPN adapter holding the default route | The QR code advertises an address the phone cannot reach; pairing fails with nothing on screen to explain it | **Open defect.** `local_address()` returned two different addresses on the same machine minutes apart |
+| PC has a VPN adapter holding the default route | The QR code could advertise an address the phone cannot reach | Fixed: active physical Ethernet/Wi-Fi private addresses outrank VPN/TUN/TAP adapters; link-local and loopback candidates are rejected, with loopback retained only as a visible no-network failure |
 | Registry file corrupted | Cannot authenticate any device | Raises rather than starting empty; user re-pairs deliberately |
 | Registry file deleted | All devices unpaired | Re-pair; the failure is safe in the right direction |
 | Phone lost | Attacker holds a valid key | Revoke at the PC; enforced at the next handshake |

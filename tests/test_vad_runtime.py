@@ -51,7 +51,7 @@ class FakeVADRuntime(VADRuntime):
         return None
 
 
-class TestableWhisperCppVADRuntime(
+class FakeWhisperCppVADRuntime(
     WhisperCppVADRuntime
 ):
     def __init__(
@@ -242,7 +242,7 @@ class TestVADRuntime(
         self,
     ) -> None:
         runtime = (
-            TestableWhisperCppVADRuntime()
+            FakeWhisperCppVADRuntime()
         )
 
         with self.assertRaises(
@@ -256,7 +256,7 @@ class TestVADRuntime(
         self,
     ) -> None:
         runtime = (
-            TestableWhisperCppVADRuntime()
+            FakeWhisperCppVADRuntime()
         )
 
         result = runtime.process_pcm16(
@@ -299,7 +299,7 @@ class TestVADRuntime(
         self,
     ) -> None:
         runtime = (
-            TestableWhisperCppVADRuntime()
+            FakeWhisperCppVADRuntime()
         )
 
         first = runtime.process_pcm16(
@@ -350,7 +350,7 @@ class TestVADRuntime(
         self,
     ) -> None:
         runtime = (
-            TestableWhisperCppVADRuntime()
+            FakeWhisperCppVADRuntime()
         )
 
         runtime.process_pcm16(
@@ -386,7 +386,7 @@ class TestVADRuntime(
         self,
     ) -> None:
         runtime = (
-            TestableWhisperCppVADRuntime()
+            FakeWhisperCppVADRuntime()
         )
 
         runtime.prepare()
@@ -412,7 +412,7 @@ class TestVADRuntime(
         self,
     ) -> None:
         runtime = (
-            TestableWhisperCppVADRuntime()
+            FakeWhisperCppVADRuntime()
         )
 
         runtime.close()

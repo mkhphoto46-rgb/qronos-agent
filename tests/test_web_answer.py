@@ -229,6 +229,28 @@ class TestRefusals(unittest.TestCase):
 
         self.assertIs(answer.rejection, AnswerRejection.EMPTY)
 
+    def test_fully_cited_plain_prose_is_accepted(self) -> None:
+        answer = validate_response(
+            "The first fact is supported [1]. The second is supported [2].",
+            package(),
+        )
+
+        self.assertTrue(answer.ok)
+        self.assertEqual(len(answer.claims), 2)
+
+    def test_plain_prose_with_an_uncited_sentence_is_refused(self) -> None:
+        answer = validate_response(
+            "A supported fact [1]. An unsupported extra claim.",
+            package(),
+        )
+
+        self.assertIs(answer.rejection, AnswerRejection.UNCITED_CLAIM)
+
+    def test_plain_prose_with_a_fake_citation_is_refused(self) -> None:
+        answer = validate_response("A fabricated source [99].", package())
+
+        self.assertIs(answer.rejection, AnswerRejection.FABRICATED_CITATION)
+
     def test_an_empty_evidence_package_can_only_refuse(self) -> None:
         # Answering anyway would mean answering from the model's own knowledge
         # while appearing to have read the web.
