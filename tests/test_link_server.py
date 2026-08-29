@@ -412,7 +412,7 @@ class TestHandlerFailures(ServerTestCase):
         # An exception message can carry a path or a fragment of the user's
         # data. The phone gets a fixed code and the detail stays here.
         def explode(session, request):
-            raise RuntimeError("C:/Users/amin/private/secrets.txt is missing")
+            raise RuntimeError("C:/Users/example/private/secrets.txt is missing")
 
         harness = ServerHarness(handlers={LinkOp.STATUS: explode})
 
