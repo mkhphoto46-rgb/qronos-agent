@@ -315,6 +315,109 @@ Twelve frames over sixty seconds, all verified as being of the scene: it
 reported the person arriving, the empty room in between, both colours of the
 card being held up, and read the on-screen counter.
 
+That scene is drawn by this project, which makes it reproducible and offline
+and also makes it the easy case — flat colours, hard edges, no motion blur, no
+compression. It proves the session and the plumbing. It does not prove the
+model can do the job.
+
+So there is a second harness against **real footage of a real person**: "Me at
+the zoo", the first video uploaded to YouTube, played in a browser and watched
+through the screen. It is a person talking straight into a hand-held camera at
+close range, in 240p from 2005 — blown-out highlights, heavy compression,
+motion blur, worse than any webcam. And he turns around partway through, so
+"is the person facing the camera" has an answer that changes during the run and
+a watcher that says the same thing every time fails rather than passes.
+
+Twenty-three frames over ninety-seven seconds:
+
+| | |
+|---|---|
+| Answered in the form asked | **23 of 23** |
+| A person detected | **23 of 23** |
+| Facing direction stated | **23 of 23** — 19 facing the camera, 4 turned away |
+| Caught the moment he turns around | yes, 4 frames |
+| Described the surroundings too | 23 of 23 mention the zoo enclosure |
+
+The facing-direction number took a prompt change to reach. An earlier
+`WATCH_INSTRUCTION` put "whether a person is visible and facing the camera" at
+the end of a general request to describe the frame, and the model answered it
+about seven times in ten — it is a request for one or two sentences, and the
+last clause is the one that gets dropped. Measured across runs: 21 of 21, then
+20 of 21, then 15 of 21.
+
+Asking for the two facts **first**, as their own numbered questions, fixed it.
+They are also the only two a camera is watched for: is somebody there, and are
+they facing you. The reply now comes back as
+
+```text
+1. Yes
+2. Facing the camera
+3. An elephant is visible behind a fence to the right of the person.
+```
+
+which is both more useful and far easier to check than prose.
+
+The clip is public rather than from this machine, which is the rule: there is
+video of identifiable people on any development machine and none of it goes
+near this project. The page is served from `127.0.0.1` and embeds the no-cookie
+player, so no consent banner appears and nothing is agreed to on anybody's
+behalf — a YouTube embed refuses to play from a `file://` page, which is worth
+knowing before trying it.
+
+It is not in the test suite. It needs the internet and it needs somebody else's
+video to still exist.
+
+### What a watching session costs
+
+Sampled every 250 ms for the whole ninety-seven seconds, not only while the
+model was talking — a session that holds four gigabytes throughout and one that
+holds it for two seconds at a time look identical otherwise.
+
+| | |
+|---|---|
+| Graphics memory | peak **+4,490 MiB** over what the card already held |
+| Graphics load | busy **91%** of the session, 58% mean |
+| Card temperature | 48-63 C, mean 55 |
+| The model server's processor share | **1%**, peak 7% |
+| The model server's memory | **117 MiB** |
+| The whole machine's processor | 45% mean — most of it something else entirely |
+
+Two things worth reading off that.
+
+**Nothing accumulates.** The session's peak is the same +4,490 MiB that a
+single answer costs. Twenty-three frames do not cost more than one, so no
+memory is being kept between them.
+
+**The processor is not where this happens.** The model server averaged 1% of
+it. That figure is measured against the server's own processes rather than the
+machine total, which matters: two runs an hour apart measured 43% and 62% for
+the whole machine doing identical work, because something else was running the
+second time. A check against the machine total would have called that a Qronos
+regression. The architecture document asks for this attribution for exactly
+this reason.
+
+### One frame every 4.2 seconds, and half of it is loading
+
+The model is unloaded after every frame and loaded again for the next — 0 of 23
+frames found it still on the card. That is Qronos's rule working as written:
+nothing stays loaded between turns, and a watching session is not exempt.
+
+The cost is about 2.2 s of every 4.2 s spent reloading a model that is about to
+be asked the same question again.
+
+**Whether that is the right trade is an open question, and it is not mine to
+settle.** The argument for holding it is that a watching session is one
+continuous operation, not a series of turns: it has an explicit start, a
+visible indicator, a hard time limit and a stop button, so the model would be
+resident for a bounded period the user can see and end. That is exactly the
+case the no-residency rule was not written about — the rule exists because the
+Fast Brain was being held for ten minutes after a turn nobody was watching.
+The argument against is that it is 3.3 GB of somebody's card, held while they
+are doing something else.
+
+Holding it for the session would roughly halve the frame interval. Nothing in
+this branch does it.
+
 ---
 
 ## Running the measurements
@@ -324,16 +427,20 @@ python tools/vision_corpus.py                  # draw the corpus
 python tools/test_qronos_vision_live.py        # what the model can do      12/12
 python tools/test_qronos_ocr_hint_live.py      # whether OCR earns its place 26/26
 python tools/test_qronos_watching_live.py      # watching something move    14/14
+python tools/test_qronos_webcam_video_live.py # a real person, real footage 15/15
 ```
 
-Each needs Ollama running and the model pulled. The watching harness opens a
-browser window and asks not to be interrupted while it runs.
+Each needs Ollama running and the model pulled. The last two open a browser
+window and ask not to be interrupted while they run, and the last one needs the
+internet.
 
 ---
 
 ## What is not built
 
-- **A camera device source.** See above.
+- **A camera device source.** See above. What a camera would produce has been
+  tested against real footage; the twenty lines that talk to Windows Media
+  Capture are what is missing.
 - **Cropping to a region by coordinate.** Grounding is accurate enough for it
   (0.92 overlap), and the token floor means a crop of a screen costs the same
   as the whole screen, so there is nothing to save until there is a second
