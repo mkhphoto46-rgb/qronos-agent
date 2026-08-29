@@ -51,6 +51,11 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     "core.whisper_cpp_runtime": (
         "Runs the whisper binary to transcribe an audio file."
     ),
+    "core.chatterbox_runtime": (
+        "Runs the speech binary as a local server so Qronos can speak. It "
+        "listens on the loopback address only, writes audio to a file it "
+        "was given, and touches nothing else on the machine."
+    ),
     "core.whisper_cpp_vad_runtime": (
         "Runs the whisper binary for voice activity detection."
     ),

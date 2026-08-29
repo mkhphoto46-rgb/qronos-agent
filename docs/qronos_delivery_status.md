@@ -22,7 +22,8 @@ tested end-to-end, packaged, secured, and validated on a clean Windows machine.
 | Capability | Product target | Prototype / component | Tested implementation | Production-ready |
 |---|---|---|---|---|
 | Wake word | Always-available local activation | Audio input, ONNX engine, trigger state machine | Component tests and real model load | No: poor model quality and no authorized live-mic test |
-| STT / TTS / Voice Session | Natural local voice conversation | Not end-to-end | No | No |
+| STT / Voice Session | Natural local voice conversation | Not end-to-end | No | No |
+| TTS | A Persian voice, locally | Chatterbox Persian behind a resident CrispASR server; settings chosen by a 38-run sweep | 39 component tests plus a live harness on the real weights | No: Qronos produces speech but does not yet speak its answers, and the weights derive from non-commercial ones |
 | Fast Brain | Fast local conversation and routing | 4B integration and lifecycle policy | Component tests; real benchmark pending final model tag | No |
 | Heavy Brain | On-demand deeper reasoning | 14B integration and offload policy | Component tests; real hardware benchmark pending | No |
 | Resource protection | Always yield to user workload | CPU/RAM/GPU/VRAM/temperature checks, activity modes | Preflight and second fresh-check tests | No: process attribution and in-flight monitoring remain |

@@ -10,6 +10,8 @@ script. The first production version must provide:
 - A polished desktop UI and system-tray experience.
 - A persistent supervisor process and a separate user-session runtime.
 - Local wake word, STT, TTS, Fast Brain, and Heavy Brain services.
+  TTS is built and measured — see `docs/qronos_voice_output.md` — and, like
+  the brains, asks the safety floor for room before it takes the card.
 - Permission-gated tools for applications, files, browsers, and devices.
 - Resource-aware model lifecycle management.
 - Visible activity, approval, error, and undo history.

@@ -65,7 +65,7 @@ Qronos **does not write, analyse or run code**. That is a deliberate boundary, n
 | Model lifecycle | Load and unload intelligently | ✅ Implemented and tested |
 | Wake word | Always-available local activation | ⚠️ Code ready, **model not ready** |
 | Speech-to-text | Persian + English, local | 🔶 whisper.cpp wired in, language set to `auto` |
-| Text-to-speech | Natural Persian voice | ❌ Does not exist |
+| Text-to-speech | Natural Persian voice | 🔶 Chatterbox Persian works and is measured; Qronos does not speak its answers yet. See `docs/qronos_voice_output.md` |
 | Fast Brain / Heavy Brain | Quick chat + deeper reasoning | 🔶 Integrated, not benchmarked on real hardware |
 | App / file / browser control | Typed actions with undo | ❌ Interfaces and folders only |
 | Desktop UI and system tray | Polished Windows experience | 🔶 Tauri shell on branch, not connected to the backend |
