@@ -192,8 +192,8 @@ class OllamaController(BrainRuntime):
 
                 if message.images:
                     entry["images"] = [
-                        vision_image.prepare(path).base64
-                        for path in message.images
+                        vision_image.as_prepared(image).base64
+                        for image in message.images
                     ]
 
                 built.append(entry)

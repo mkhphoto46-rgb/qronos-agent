@@ -90,6 +90,18 @@ class PreparedImage:
             f"about {self.tokens} tokens"
         )
 
+    def __repr__(self) -> str:
+        """
+        The picture described, never the picture itself.
+
+        A generated repr would put the whole bitmap into every log line and
+        every traceback that touches one. This is the reason a capture can be
+        passed around as an object at all instead of only as a path.
+        """
+        where = "" if self.source is None else f", from {self.source.name}"
+
+        return f"PreparedImage({self.describe()}{where})"
+
 
 def image_tokens(width: int, height: int) -> int:
     """
@@ -133,7 +145,7 @@ def planned_size(
 
 
 def cost(
-    path: str | Path,
+    image: "str | Path | PreparedImage",
     long_edge: int | None = SEND_LONG_EDGE,
 ) -> int:
     """
@@ -141,13 +153,36 @@ def cost(
 
     No decode: a request that will not fit should be refused before anything
     expensive happens, and the header carries everything the arithmetic needs.
+    An already-prepared picture knows its own cost and is simply asked.
     """
-    data = read(path)
+    if isinstance(image, PreparedImage):
+        return image.tokens
+
+    data = read(image)
     sniff(data)
 
     width, height = planned_size(*dimensions(data), long_edge=long_edge)
 
     return image_tokens(width, height)
+
+
+def as_prepared(
+    image: "str | Path | PreparedImage",
+    long_edge: int | None = SEND_LONG_EDGE,
+) -> PreparedImage:
+    """
+    A picture, whatever form it arrived in.
+
+    Two forms exist because the two sources are genuinely different. A file the
+    user pointed at is a path, and holding it as one keeps a megabyte out of
+    every repr. A screen capture was never a file and must not become one — it
+    is held in memory, encoded, sent and dropped — so it arrives already
+    prepared and is passed straight through.
+    """
+    if isinstance(image, PreparedImage):
+        return image
+
+    return prepare(image, long_edge=long_edge)
 
 
 def sniff(data: bytes) -> str:

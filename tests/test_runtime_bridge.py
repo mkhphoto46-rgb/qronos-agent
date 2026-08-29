@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -30,11 +31,17 @@ from typing import Any
 from unittest.mock import patch
 
 from core.action_audit import ActionAuditLog
+from core.screen_capture import (
+    CaptureUnavailable,
+    DisplayGeometry,
+    ScreenCapture,
+)
 from core.command_recorder import CommandRecordingResult
 from core.conversation_session import ConversationSession
 from core.orchestrator import StepResult
 from core.runtime_bridge import (
     AUDIO_SPECTRUM_BANDS,
+    LOOK_AT_SCREEN_ACTION,
     PUSH_TO_TALK_ACTION,
     QronosRuntime,
     emit,
@@ -189,6 +196,10 @@ def prepared_runtime(
     # In memory: the trail is wired here for the same reason production wires
     # it, but a unit test must not append to the user's real audit file.
     runtime.action_audit = ActionAuditLog(path=None)
+
+    # A capture that does not need a screen, so these tests run on a build
+    # machine with no display and on Ubuntu, where GDI does not exist.
+    runtime.screen_capture = screenless_capture()
 
     runtime.orchestrator = orchestrator or FakeOrchestrator()
     runtime.conversation_session = ConversationSession(clock=FakeClock())
@@ -662,15 +673,17 @@ class TestRoutingIsReported(unittest.TestCase):
                 self.assertEqual(routed["message"], expected.value)
 
     def test_the_plan_carries_the_transcript_as_its_goal(self) -> None:
+        # Not a request to look at something: those stop and ask before a plan
+        # is built at all. See TestLookingAtTheScreen.
         orchestrator = FakeOrchestrator()
         runtime = prepared_runtime(
-            speech=FakeSpeechRuntime(transcript="یک عکس بگیر"),
+            speech=FakeSpeechRuntime(transcript="سلام کرونوس"),
             orchestrator=orchestrator,
         )
 
         captured_events(runtime.push_to_talk)
 
-        self.assertEqual(orchestrator.plans[0].goal, "یک عکس بگیر")
+        self.assertEqual(orchestrator.plans[0].goal, "سلام کرونوس")
 
     def test_measured_qronos_name_variants_are_corrected_at_invocation(self) -> None:
         for transcript in (
@@ -703,6 +716,350 @@ class TestRoutingIsReported(unittest.TestCase):
 
         assert runtime.orchestrator is not None
         self.assertIn(TaskType.BROWSER, runtime.orchestrator.workers.registered())
+
+    def test_prepare_registers_the_production_vision_worker(self) -> None:
+        runtime = QronosRuntime()
+
+        with patch("core.runtime_bridge.AudioInput"), patch(
+            "core.runtime_bridge.CommandRecorder"
+        ), patch(
+            "core.runtime_bridge.WhisperCppVADRuntime"
+        ) as vad_type, patch(
+            "core.runtime_bridge.WhisperCppRuntime"
+        ) as speech_type:
+            vad_type.return_value.health_check.return_value = True
+            speech_type.return_value.health_check.return_value = True
+            runtime.prepare()
+
+        assert runtime.orchestrator is not None
+        self.assertIn(TaskType.VISION, runtime.orchestrator.workers.registered())
+
+
+def screenless_capture(width: int = 8, height: int = 6, watch=None) -> ScreenCapture:
+    """A capture that needs no screen, and optionally records what it was asked."""
+
+    def grab(window):
+        if watch is not None:
+            watch.append(window)
+
+        # Not a flat rectangle: a blank capture is answered without building a
+        # plan at all, which is correct and is not what most of these tests
+        # are about.
+        return (
+            bytes(
+                byte
+                for index in range(width * height)
+                for byte in (index % 251, (index * 7) % 241, (index * 13) % 239, 0)
+            ),
+            width,
+            height,
+        )
+
+    return ScreenCapture(
+        grab=grab,
+        geometry_fn=lambda: DisplayGeometry(width, height, width, height),
+    )
+
+
+class TestLookingAtTheScreen(unittest.TestCase):
+    """
+    The two-step vision turn.
+
+    Looking at the screen needs UI confirmation, and the runtime cannot give
+    itself one: a spoken yes is consent from somebody who has not been shown
+    what is about to be looked at. So a spoken request to look stops, the
+    desktop asks, and a second action comes back with the answer.
+
+    Most of these are about the stopping half, because that is the half that
+    protects somebody.
+    """
+
+    def test_a_spoken_request_to_look_stops_and_asks(self) -> None:
+        orchestrator = FakeOrchestrator()
+        runtime = prepared_runtime(
+            speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن"),
+            orchestrator=orchestrator,
+        )
+
+        events = captured_events(runtime.push_to_talk)
+        kinds = [event["eventType"] for event in events]
+
+        self.assertIn("voice_needs_screen", kinds)
+        self.assertEqual(orchestrator.plans, [])
+
+    def test_the_question_is_remembered_while_the_person_decides(self) -> None:
+        runtime = prepared_runtime(
+            speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن")
+        )
+
+        captured_events(runtime.push_to_talk)
+
+        self.assertEqual(runtime.pending_look, "به این پنجره نگاه کن")
+
+    def test_saying_no_captures_nothing_and_is_not_an_error(self) -> None:
+        grabbed: list = []
+        runtime = prepared_runtime()
+        runtime.screen_capture = screenless_capture(watch=grabbed)
+
+        events = captured_events(
+            lambda: runtime.look_at_screen(
+                approved=False, question="What is this?"
+            )
+        )
+        kinds = [event["eventType"] for event in events]
+
+        self.assertIn("voice_screen_declined", kinds)
+        self.assertNotIn("runtime_error", kinds)
+        self.assertEqual(grabbed, [])
+
+    def test_forgetting_the_answer_is_the_same_as_saying_no(self) -> None:
+        runtime = prepared_runtime()
+
+        events = captured_events(
+            lambda: runtime.look_at_screen(question="What is this?")
+        )
+
+        self.assertIn(
+            "voice_screen_declined",
+            [event["eventType"] for event in events],
+        )
+
+    def test_saying_yes_captures_and_answers(self) -> None:
+        runtime = prepared_runtime()
+
+        events = captured_events(
+            lambda: runtime.look_at_screen(
+                approved=True, question="What is on my screen?"
+            )
+        )
+        kinds = [event["eventType"] for event in events]
+
+        self.assertIn("voice_capturing_screen", kinds)
+        self.assertIn("voice_captured_screen", kinds)
+        self.assertIn("voice_turn_complete", kinds)
+
+    def test_the_picture_reaches_the_plan(self) -> None:
+        orchestrator = FakeOrchestrator()
+        runtime = prepared_runtime(orchestrator=orchestrator)
+
+        captured_events(
+            lambda: runtime.look_at_screen(
+                approved=True, question="What is on my screen?"
+            )
+        )
+
+        step = orchestrator.plans[0].steps[0]
+
+        self.assertIs(step.task_type, TaskType.VISION)
+        self.assertEqual(len(step.images), 1)
+        self.assertEqual((step.images[0].width, step.images[0].height), (8, 6))
+
+    def test_a_blank_screen_is_answered_without_a_model(self) -> None:
+        """
+        Faster and more honest. Shown a flat rectangle, the model spends five
+        seconds and ten gigabytes describing a flat rectangle.
+        """
+        orchestrator = FakeOrchestrator()
+        runtime = prepared_runtime(orchestrator=orchestrator)
+        runtime.screen_capture = ScreenCapture(
+            grab=lambda window: (bytes(4 * 8 * 6), 8, 6),
+            geometry_fn=lambda: DisplayGeometry(8, 6, 8, 6),
+        )
+
+        events = captured_events(
+            lambda: runtime.look_at_screen(approved=True, question="What?")
+        )
+        kinds = [event["eventType"] for event in events]
+
+        self.assertIn("voice_screen_blank", kinds)
+        self.assertEqual(orchestrator.plans, [])
+
+    def test_the_picture_is_never_written_to_disk(self) -> None:
+        orchestrator = FakeOrchestrator()
+        runtime = prepared_runtime(orchestrator=orchestrator)
+
+        captured_events(
+            lambda: runtime.look_at_screen(approved=True, question="What?")
+        )
+
+        self.assertIsNone(orchestrator.plans[0].steps[0].images[0].source)
+
+    def test_the_remembered_question_is_used_when_none_is_given(self) -> None:
+        orchestrator = FakeOrchestrator()
+        runtime = prepared_runtime(
+            speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن"),
+            orchestrator=orchestrator,
+        )
+
+        captured_events(runtime.push_to_talk)
+        captured_events(lambda: runtime.look_at_screen(approved=True))
+
+        self.assertEqual(orchestrator.plans[0].goal, "به این پنجره نگاه کن")
+
+    def test_a_used_question_is_forgotten(self) -> None:
+        """
+        So a question asked five minutes ago cannot be answered against
+        whatever happens to be on the screen now.
+        """
+        runtime = prepared_runtime(
+            speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن")
+        )
+
+        captured_events(runtime.push_to_talk)
+        captured_events(lambda: runtime.look_at_screen(approved=True))
+
+        self.assertIsNone(runtime.pending_look)
+
+    def test_a_declined_question_is_forgotten_too(self) -> None:
+        runtime = prepared_runtime(
+            speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن")
+        )
+
+        captured_events(runtime.push_to_talk)
+        captured_events(lambda: runtime.look_at_screen(approved=False))
+
+        self.assertIsNone(runtime.pending_look)
+
+    def test_looking_with_nothing_asked_is_an_error(self) -> None:
+        runtime = prepared_runtime()
+
+        events = captured_events(lambda: runtime.look_at_screen(approved=True))
+
+        self.assertIn(
+            "runtime_error",
+            [event["eventType"] for event in events],
+        )
+
+    def test_a_machine_that_cannot_capture_says_so_distinctly(self) -> None:
+        """
+        Not a ``runtime_error``: "this machine cannot" is something a person
+        can act on, and describing it as a fault is not.
+        """
+
+        def refuses(window):
+            raise CaptureUnavailable(
+                "Qronos can only look at the screen on Windows."
+            )
+
+        runtime = prepared_runtime()
+        runtime.screen_capture = ScreenCapture(
+            grab=refuses,
+            geometry_fn=lambda: DisplayGeometry(8, 6, 8, 6),
+        )
+
+        events = captured_events(
+            lambda: runtime.look_at_screen(approved=True, question="What?")
+        )
+        kinds = [event["eventType"] for event in events]
+
+        self.assertIn("voice_screen_unavailable", kinds)
+        self.assertNotIn("runtime_error", kinds)
+
+    def test_a_failure_from_the_worker_reaches_the_person(self) -> None:
+        runtime = prepared_runtime(
+            orchestrator=FakeOrchestrator(
+                results=[
+                    StepResult(
+                        order=1,
+                        success=False,
+                        output="",
+                        error="The vision model is not installed.",
+                    )
+                ]
+            )
+        )
+
+        events = captured_events(
+            lambda: runtime.look_at_screen(approved=True, question="What?")
+        )
+        message = next(
+            event["message"]
+            for event in events
+            if event["eventType"] == "runtime_error"
+        )
+
+        self.assertEqual(message, "The vision model is not installed.")
+
+    def test_asking_for_the_window_uses_the_one_from_the_hotkey(self) -> None:
+        """
+        Read when the hotkey fired, because a moment later Qronos may have
+        focus itself and "read this window" would read Qronos.
+        """
+        asked: list = []
+        runtime = prepared_runtime()
+        runtime.screen_capture = screenless_capture(watch=asked)
+        runtime.last_foreground_window = 4242
+
+        captured_events(
+            lambda: runtime.look_at_screen(
+                approved=True, question="What?", window_only=True
+            )
+        )
+
+        self.assertEqual(asked, [4242])
+
+    def test_asking_for_the_whole_screen_ignores_the_window(self) -> None:
+        asked: list = []
+        runtime = prepared_runtime()
+        runtime.screen_capture = screenless_capture(watch=asked)
+        runtime.last_foreground_window = 4242
+
+        captured_events(
+            lambda: runtime.look_at_screen(approved=True, question="What?")
+        )
+
+        self.assertEqual(asked, [None])
+
+
+class TestTheLookActionIsDispatched(unittest.TestCase):
+    def test_the_action_reaches_the_runtime_with_its_answer(self) -> None:
+        runtime = prepared_runtime()
+        seen: list = []
+        done = threading.Event()
+
+        def record(**kwargs):
+            seen.append(kwargs)
+            done.set()
+
+        runtime.look_at_screen = record
+
+        captured_events(
+            lambda: handle_action(
+                runtime,
+                {
+                    "actionId": LOOK_AT_SCREEN_ACTION,
+                    "approved": True,
+                    "question": "What is this?",
+                    "windowOnly": True,
+                },
+            )
+        )
+
+        # The turn runs off the reader thread, so that a command sent during
+        # one still arrives. Wait for it rather than sleeping.
+        self.assertTrue(done.wait(5))
+        self.assertEqual(
+            seen,
+            [
+                {
+                    "approved": True,
+                    "question": "What is this?",
+                    "window_only": True,
+                }
+            ],
+        )
+
+    def test_an_unknown_action_is_still_a_warning(self) -> None:
+        runtime = prepared_runtime()
+
+        events = captured_events(
+            lambda: handle_action(runtime, {"actionId": "qronos.nonsense"})
+        )
+
+        self.assertIn(
+            "runtime_warning",
+            [event["eventType"] for event in events],
+        )
 
 
 if __name__ == "__main__":

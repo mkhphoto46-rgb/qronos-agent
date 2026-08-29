@@ -25,8 +25,15 @@ from core.audio_input import AudioInput
 from core.command_recorder import CommandRecorder
 from core.conversation_session import ConversationSession
 from core.orchestrator import Orchestrator
+from core.screen_capture import (
+    Capture,
+    CaptureRefused,
+    CaptureUnavailable,
+    ScreenCapture,
+    foreground_window,
+)
 from core.task_plan import TaskPlan
-from core.task_router import TaskRouter
+from core.task_router import TaskRouter, TaskType
 from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
@@ -35,6 +42,13 @@ from core.web_worker import WebResearchWorker
 
 
 PUSH_TO_TALK_ACTION = "qronos.push_to_talk"
+
+#: Sent by the desktop once the person has been shown what will be captured
+#: and has agreed. The permission for looking at the screen is UI confirmation,
+#: so the answer has to come from the interface that showed them; the runtime
+#: cannot give it to itself. Without ``approved`` the gate refuses and nothing
+#: is captured, which is the failure that costs nothing.
+LOOK_AT_SCREEN_ACTION = "qronos.look_at_screen"
 AUDIO_SPECTRUM_BANDS = 32
 EMIT_LOCK = threading.Lock()
 
@@ -67,6 +81,18 @@ class QronosRuntime:
         self.speech_runtime: WhisperCppRuntime | None = None
         self.task_router: TaskRouter | None = None
         self.action_audit: ActionAuditLog | None = None
+        self.screen_capture: ScreenCapture | None = None
+
+        # The window the user was looking at when they last pressed the
+        # hotkey. Read at that instant and remembered, because a moment later
+        # Qronos may have focus itself and "read this window" would read
+        # Qronos.
+        self.last_foreground_window: int | None = None
+
+        # What the user asked while the desktop is asking them whether Qronos
+        # may look. Cleared as soon as it is used or refused, so a stale
+        # question cannot be answered against a later screen.
+        self.pending_look: str | None = None
         self.orchestrator: Orchestrator | None = None
         self.conversation_session: ConversationSession | None = None
 
@@ -160,6 +186,8 @@ class QronosRuntime:
         # ship before this line exists.
         self.action_audit = ActionAuditLog()
         set_default_audit_sink(self.action_audit.record_verdict)
+
+        self.screen_capture = ScreenCapture()
         self.orchestrator = Orchestrator()
         self.orchestrator.workers.register(
             WebResearchWorker(
@@ -197,7 +225,7 @@ class QronosRuntime:
         check survives the flag, and the caller already turns a RuntimeError
         into a ``runtime_error`` event the desktop displays.
 
-        This should be unreachable: ``prepare`` assigns all eight or raises.
+        This should be unreachable: ``prepare`` assigns all nine or raises.
         It stays because the cost of being wrong is a crash mid-utterance.
         """
         missing = [
@@ -209,6 +237,7 @@ class QronosRuntime:
                 "speech_runtime",
                 "task_router",
                 "action_audit",
+                "screen_capture",
                 "orchestrator",
                 "conversation_session",
             )
@@ -223,6 +252,10 @@ class QronosRuntime:
             )
 
     def push_to_talk(self) -> None:
+        # First, before anything else and before any work that could take
+        # focus. This is the only moment the answer is right.
+        self.last_foreground_window = foreground_window()
+
         if self.is_busy:
             emit(
                 "runtime_busy",
@@ -298,6 +331,26 @@ class QronosRuntime:
                 "processing",
                 route.task_type.value,
             )
+
+            if route.task_type is TaskType.VISION:
+                # Looking at the screen needs UI confirmation, and the runtime
+                # cannot give itself one: a spoken "yes" is consent from
+                # somebody who has not been shown what is about to be looked
+                # at. So the turn stops here and the desktop asks. It comes
+                # back as LOOK_AT_SCREEN_ACTION if the person agrees, and as
+                # nothing at all if they do not — which is a complete and
+                # correct outcome, not a dropped request.
+                self.pending_look = transcript
+
+                self.conversation_session.begin_listening()
+
+                emit(
+                    "voice_needs_screen",
+                    "ready",
+                    transcript,
+                )
+
+                return
 
             plan = TaskPlan(
                 goal=transcript
@@ -391,6 +444,169 @@ class QronosRuntime:
 
         if self.orchestrator is not None:
             self.orchestrator.workers.close()
+    def look_at_screen(
+        self,
+        approved: bool = False,
+        question: str = "",
+        window_only: bool = False,
+    ) -> None:
+        """
+        The second half of a vision turn: the person has been asked, and said
+        yes.
+
+        ``approved`` comes from the desktop, never from here. A runtime that
+        could approve its own captures would make the permission decorative.
+
+        ``window_only`` uses the window that was in front when the hotkey
+        fired, which is the only moment that answer was right.
+
+        The capture never reaches disk. It is held in memory, encoded, handed
+        to the model and dropped — which is a stronger guarantee than any
+        retention period, and needs no janitor to keep.
+        """
+        if self.is_busy:
+            emit(
+                "runtime_busy",
+                "busy",
+                "Qronos is already processing a request.",
+            )
+            return
+
+        self._set_busy(True)
+
+        asked = (question or self.pending_look or "").strip()
+        self.pending_look = None
+
+        try:
+            self.prepare()
+            self._require_prepared()
+
+            if not asked:
+                raise RuntimeError(
+                    "Qronos was asked to look at the screen without being "
+                    "told what to look for."
+                )
+
+            if not approved:
+                # Not an error and not a failure: a person said no, which is
+                # the permission working. It ends the turn cleanly.
+                emit(
+                    "voice_screen_declined",
+                    "ready",
+                    "Qronos did not look at the screen.",
+                )
+                return
+
+            emit(
+                "voice_capturing_screen",
+                "processing",
+                asked,
+            )
+
+            capture = self._capture_for(window_only)
+
+            emit(
+                "voice_captured_screen",
+                "processing",
+                capture.describe(),
+            )
+
+            if capture.blank:
+                # Answering this without a model is both faster and more
+                # honest. Shown a flat rectangle, the model spends five
+                # seconds and ten gigabytes describing a flat rectangle.
+                emit(
+                    "voice_screen_blank",
+                    "ready",
+                    "There is nothing on the screen to read — it may be "
+                    "locked, asleep, or showing protected video.",
+                )
+                return
+
+            if not self.conversation_session.is_active:
+                self.conversation_session.start()
+
+            self.conversation_session.add_user_message(asked)
+            self.conversation_session.begin_processing()
+
+            plan = TaskPlan(goal=asked)
+            plan.add_step(
+                task_type=TaskType.VISION,
+                description=asked,
+                images=(capture.image,),
+            )
+
+            results = self.orchestrator.execute_plan(plan)
+
+            if not results:
+                raise RuntimeError(
+                    "Qronos did not return an execution result."
+                )
+
+            result = results[-1]
+
+            if not result.success:
+                raise RuntimeError(
+                    result.error or "Qronos could not read the screen."
+                )
+
+            response = result.output.strip()
+
+            if not response:
+                raise RuntimeError(
+                    "Qronos returned an empty response."
+                )
+
+            self.conversation_session.begin_responding()
+            self.conversation_session.add_assistant_message(response)
+            self.conversation_session.begin_listening()
+
+            emit(
+                "voice_response",
+                "ready",
+                response,
+            )
+
+            emit(
+                "voice_turn_complete",
+                "ready",
+                "Screen reading turn completed.",
+            )
+
+        except (CaptureRefused, CaptureUnavailable) as exc:
+            # Separated from the general failure below because these two say
+            # something a person can act on — "you were not asked" and "this
+            # machine cannot" — rather than describing a fault.
+            emit(
+                "voice_screen_unavailable",
+                "error",
+                str(exc),
+            )
+
+        except Exception as exc:
+            emit(
+                "runtime_error",
+                "error",
+                str(exc),
+            )
+
+        finally:
+            self._set_busy(False)
+
+    def _capture_for(self, window_only: bool) -> Capture:
+        window = self.last_foreground_window if window_only else None
+
+        return self.screen_capture.capture(
+            approved=True,
+            window=window,
+            reason=(
+                "Look at the window that was in front."
+                if window
+                else "Look at what is on the screen."
+            ),
+        )
+
+
 
 
 def emit(
@@ -469,20 +685,37 @@ def handle_action(
         action_id,
     )
 
-    if action_id != PUSH_TO_TALK_ACTION:
-        emit(
-            "runtime_warning",
-            "warning",
-            f"Unsupported runtime action: {action_id}",
+    if action_id == PUSH_TO_TALK_ACTION:
+        _in_background(runtime.push_to_talk, "qronos-push-to-talk")
+        return
+
+    if action_id == LOOK_AT_SCREEN_ACTION:
+        _in_background(
+            lambda: runtime.look_at_screen(
+                approved=bool(payload.get("approved", False)),
+                question=str(payload.get("question", "")),
+                window_only=bool(payload.get("windowOnly", False)),
+            ),
+            "qronos-look-at-screen",
         )
         return
 
-    worker = threading.Thread(
-        target=runtime.push_to_talk,
-        name="qronos-push-to-talk",
-        daemon=True,
+    emit(
+        "runtime_warning",
+        "warning",
+        f"Unsupported runtime action: {action_id}",
     )
-    worker.start()
+
+
+def _in_background(work: Any, name: str) -> None:
+    """
+    Run a turn off the reader thread.
+
+    The bridge reads one command per line from stdin, and a turn that runs on
+    that thread stops it reading — so a "stop" sent during a turn would not
+    arrive until the turn it was meant to stop had finished.
+    """
+    threading.Thread(target=work, name=name, daemon=True).start()
 
 
 def main() -> int:

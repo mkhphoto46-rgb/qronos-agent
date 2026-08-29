@@ -3,7 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Sequence
+
+from core.vision_image import PreparedImage
 
 
 class BrainMessageRole(Enum):
@@ -24,16 +27,20 @@ class BrainMessage:
     Higher-level Qronos code uses this structure instead of depending
     directly on the message format of Ollama or another model runtime.
 
-    A message may carry pictures as well as words. They are held as
-    **paths**, not as encoded bytes: this is a frozen dataclass that ends up
-    in log lines and tracebacks, and a megabyte of base64 in a repr would
-    make every one of those unreadable. Encoding is the runtime adapter's
-    business, because the encoding is the runtime's requirement.
+    A message may carry pictures as well as words, in either of the two forms
+    a picture arrives in. A file the user pointed at is a **path**, held as one
+    so a megabyte of base64 never lands in a log line or a traceback. A screen
+    capture was never a file and must not become one — it is held in memory,
+    encoded, sent and dropped — so it arrives as an already-prepared picture,
+    which describes itself rather than printing itself.
+
+    Encoding is the runtime adapter's business either way, because the
+    encoding is the runtime's requirement.
     """
 
     role: BrainMessageRole
     content: str
-    images: tuple[str, ...] = ()
+    images: tuple[str | "PreparedImage", ...] = ()
 
     def __post_init__(self) -> None:
         if not self.content.strip() and not self.images:
@@ -44,9 +51,16 @@ class BrainMessage:
 
         if isinstance(self.images, str):
             raise TypeError(
-                "images is a sequence of paths, not one path. A bare string "
-                "would be read as one path per character."
+                "images is a sequence of pictures, not one picture. A bare "
+                "string would be read as one path per character."
             )
+
+        for image in self.images:
+            if not isinstance(image, (str, Path, PreparedImage)):
+                raise TypeError(
+                    "A picture on a message is a path or an already-prepared "
+                    f"picture, not {type(image).__name__}."
+                )
 
 
 @dataclass(frozen=True)

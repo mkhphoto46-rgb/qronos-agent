@@ -25,10 +25,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Modules that carry out changes to the machine. Empty today. A worker added
-# under core/ that performs actions belongs here, and the test below then
-# requires it to reach the permission gate.
-EXECUTOR_MODULES: tuple[str, ...] = ()
+# Modules that carry out changes to the machine. A worker added under core/
+# that performs actions belongs here, and the test below then requires it to
+# reach the permission gate.
+#
+# This list was empty for a long time, which made the rule below true and
+# vacuous. core.screen_capture is the first entry, and it arrived here the
+# intended way: it imported ctypes, the test failed, and somebody had to
+# decide which list it belonged in.
+EXECUTOR_MODULES: tuple[str, ...] = (
+    "core.screen_capture",
+)
 
 # The one sanctioned route to performing an action.
 GATE_MODULE = "security.gate"
