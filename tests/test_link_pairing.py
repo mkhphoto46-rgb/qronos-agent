@@ -10,6 +10,7 @@ from core.link_pairing import (
     PairingRefusal,
     PairingService,
     local_address,
+    choose_local_address,
 )
 
 
@@ -329,6 +330,26 @@ class TestCompletion(PairingTestCase):
 
 
 class TestLocalAddress(unittest.TestCase):
+    def test_physical_lan_wins_over_the_vpn_default_route(self) -> None:
+        selected = choose_local_address(
+            {
+                "Ethernet": ("192.168.0.3",),
+                "HssStore 127": ("10.235.60.60",),
+                "WeOnlyDo": ("169.254.14.134",),
+            },
+            routed_address="10.235.60.60",
+        )
+
+        self.assertEqual(selected, "192.168.0.3")
+
+    def test_a_down_or_missing_lan_fails_visibly_to_loopback(self) -> None:
+        selected = choose_local_address(
+            {"VPN": ("10.1.2.3",), "Link local": ("169.254.1.2",)},
+            routed_address="10.1.2.3",
+        )
+
+        self.assertEqual(selected, "127.0.0.1")
+
     def test_it_returns_something_that_looks_like_an_address(self) -> None:
         import ipaddress
 

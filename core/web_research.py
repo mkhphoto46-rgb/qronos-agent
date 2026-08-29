@@ -330,6 +330,11 @@ class WebResearch:
     def budget_status(self) -> str:
         return self.search.budget_status()
 
+    def close(self) -> None:
+        """Release the persistent cache and friction-memory connections."""
+        self.search.cache.close()
+        self.fetcher.friction.close()
+
 
 def main() -> None:
     """Run the full pipeline live, stopping at the prompt. Uses real budget."""

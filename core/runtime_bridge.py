@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -41,11 +42,23 @@ from core.task_plan import TaskPlan
 from core.task_router import TaskRouter
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
+from core.web_worker import WebResearchWorker
 
 
 PUSH_TO_TALK_ACTION = "qronos.push_to_talk"
 AUDIO_SPECTRUM_BANDS = 32
 EMIT_LOCK = threading.Lock()
+
+
+
+def normalise_qronos_invocation(transcript: str) -> str:
+    """Correct measured Whisper variants only when Qronos is addressed."""
+    return re.sub(
+        r"^(?P<greeting>\s*\u0633\u0644\u0627\u0645\s+)?(?:\u06a9\u0631\u0648\u0646\u0633|\u062e\u0631\u0648\u0646\u0633|\u06a9\u0631\u0648\u0646\u0632)(?=\s|[\u060c,\u061f?]|$)",
+        lambda match: f"{match.group('greeting') or ''}\u06a9\u0631\u0648\u0646\u0648\u0633",
+        transcript,
+        count=1,
+    )
 
 
 @dataclass(frozen=True)
@@ -219,6 +232,11 @@ class QronosRuntime:
         self.speech_runtime = speech_runtime
         self.task_router = TaskRouter()
         self.orchestrator = Orchestrator()
+        self.orchestrator.workers.register(
+            WebResearchWorker(
+                answer_fn=self.orchestrator.answer_web_prompt,
+            )
+        )
         self.conversation_session = ConversationSession()
 
         emit(
@@ -307,6 +325,8 @@ class QronosRuntime:
                 )
                 .strip()
             )
+
+            transcript = normalise_qronos_invocation(transcript)
 
             if not transcript:
                 raise RuntimeError(
@@ -434,6 +454,12 @@ class QronosRuntime:
         if self.conversation_session is not None:
             try:
                 self.conversation_session.close()
+            except Exception:
+                pass
+
+        if self.orchestrator is not None:
+            try:
+                self.orchestrator.workers.close()
             except Exception:
                 pass
 

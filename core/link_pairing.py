@@ -25,12 +25,15 @@ redacts its key in ``repr`` for the same reason ``DeviceRecord`` does.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import socket
 import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
+
+import psutil
 
 from core.link_capability import LinkScope, scope_for_peer
 from core.link_devices import (
@@ -229,6 +232,76 @@ class OpenWindow:
     used: bool = False
 
 
+_VIRTUAL_ADAPTER_MARKERS = (
+    "vpn",
+    "tun",
+    "tap",
+    "wintun",
+    "wireguard",
+    "hamachi",
+    "zerotier",
+    "hss",
+    "weonlydo",
+)
+
+_PHYSICAL_ADAPTER_MARKERS = (
+    "ethernet",
+    "wi-fi",
+    "wifi",
+    "wireless",
+    "wlan",
+)
+
+
+def choose_local_address(
+    adapters: dict[str, tuple[str, ...]],
+    routed_address: str | None = None,
+) -> str:
+    """Choose a phone-reachable LAN address without preferring a VPN route."""
+    ranked: list[tuple[int, str]] = []
+
+    for adapter_name, addresses in adapters.items():
+        lowered = adapter_name.lower()
+        virtual = any(marker in lowered for marker in _VIRTUAL_ADAPTER_MARKERS)
+        physical = any(marker in lowered for marker in _PHYSICAL_ADAPTER_MARKERS)
+
+        if virtual:
+            continue
+
+        for address in addresses:
+            try:
+                parsed = ipaddress.ip_address(address)
+            except ValueError:
+                continue
+
+            if (
+                parsed.version != 4
+                or parsed.is_loopback
+                or parsed.is_link_local
+                or scope_for_peer(address) is not LinkScope.LOCAL_NETWORK
+            ):
+                continue
+
+            score = 0
+            if physical:
+                score += 100
+            if parsed in ipaddress.ip_network("192.168.0.0/16"):
+                score += 30
+            elif parsed in ipaddress.ip_network("172.16.0.0/12"):
+                score += 20
+            elif parsed in ipaddress.ip_network("10.0.0.0/8"):
+                score += 10
+            if address == routed_address:
+                score += 5
+
+            ranked.append((score, address))
+
+    if not ranked:
+        return "127.0.0.1"
+
+    return max(ranked, key=lambda candidate: candidate[0])[1]
+
+
 def local_address() -> str:
     """
     The PC's address on its own network, for the QR code.
@@ -242,16 +315,35 @@ def local_address() -> str:
     no network rather than handing out an address that cannot work.
     """
 
+    routed_address: str | None = None
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     try:
         probe.connect(("8.8.8.8", 80))
 
-        return str(probe.getsockname()[0])
+        routed_address = str(probe.getsockname()[0])
     except OSError:
-        return "127.0.0.1"
+        pass
     finally:
         probe.close()
+
+    stats = psutil.net_if_stats()
+    adapters: dict[str, tuple[str, ...]] = {}
+
+    for name, records in psutil.net_if_addrs().items():
+        state = stats.get(name)
+        if state is not None and not state.isup:
+            continue
+
+        addresses = tuple(
+            record.address
+            for record in records
+            if record.family == socket.AF_INET
+        )
+        if addresses:
+            adapters[name] = addresses
+
+    return choose_local_address(adapters, routed_address)
 
 
 class PairingService:

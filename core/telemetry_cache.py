@@ -95,6 +95,7 @@ class TelemetryCache:
         self,
         read_system: SystemReader | None = None,
         read_gpu: GpuReader | None = None,
+        first_read_system: SystemReader | None = None,
         max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
         clock: Clock | None = None,
     ) -> None:
@@ -129,7 +130,8 @@ class TelemetryCache:
         # Only applies to the default reader. An injected one belongs to the
         # caller, who knows what it does.
         self._first_read: SystemReader = (
-            read_system_status if read_system is None else self.read_system
+            first_read_system
+            or (read_system_status if read_system is None else self.read_system)
         )
 
     @property

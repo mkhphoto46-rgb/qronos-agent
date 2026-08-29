@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Callable
 
 import psutil
 
 from core.resource_guard import read_gpu_status, read_system_status
+from core.telemetry_cache import Snapshot
 
 
 class ActivityMode(Enum):
@@ -70,6 +72,7 @@ class ActivityGuard:
         self,
         game_processes: set[str] | None = None,
         creator_processes: set[str] | None = None,
+        snapshot_reader: Callable[[], Snapshot] | None = None,
     ) -> None:
         self.game_processes = {
             process.lower()
@@ -90,6 +93,7 @@ class ActivityGuard:
         }
 
         self.manual_mode: ActivityMode | None = None
+        self.snapshot_reader = snapshot_reader
 
     def set_manual_mode(self, mode: ActivityMode) -> None:
         """Set a user-selected activity mode."""
@@ -141,13 +145,17 @@ class ActivityGuard:
             resource_pressure=pressure,
         )
 
-    @classmethod
-    def _detect_resource_pressure(cls) -> ResourcePressure:
+    def _detect_resource_pressure(self) -> ResourcePressure:
         """Evaluate overall system pressure."""
 
         try:
-            system = read_system_status()
-            gpu = read_gpu_status()
+            if self.snapshot_reader is None:
+                system = read_system_status()
+                gpu = read_gpu_status()
+            else:
+                snapshot = self.snapshot_reader()
+                system = snapshot.system
+                gpu = snapshot.gpu
         except Exception:
             # Resource protection fails closed. Starting a model without a
             # trustworthy system snapshot would violate the load policy.
@@ -155,6 +163,8 @@ class ActivityGuard:
 
         critical = False
         high = False
+
+        cls = type(self)
 
         if system.cpu_usage_percent >= cls.CRITICAL_CPU_PERCENT:
             critical = True

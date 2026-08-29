@@ -122,6 +122,9 @@ class TaskWorker(ABC):
         Any effect on the machine goes through :mod:`security.gate` first.
         """
 
+    def close(self) -> None:
+        """Release worker resources. Stateless workers need no cleanup."""
+
 
 class WorkerRegistry:
     """
@@ -155,6 +158,14 @@ class WorkerRegistry:
 
     def registered(self) -> frozenset[TaskType]:
         return frozenset(self._workers)
+
+    def close(self) -> None:
+        """Close every registered worker, even if one cleanup fails."""
+        for worker in self._workers.values():
+            try:
+                worker.close()
+            except Exception:
+                pass
 
     def availability(self, task_type: TaskType) -> Unavailable | None:
         """

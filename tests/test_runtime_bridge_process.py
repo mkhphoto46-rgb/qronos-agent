@@ -98,6 +98,7 @@ class BridgeProcess:
     def close(self) -> None:
         if self.process.poll() is None:
             self.process.kill()
+            self.process.wait(timeout=30)
 
         for stream in (
             self.process.stdin,
