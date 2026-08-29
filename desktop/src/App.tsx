@@ -15,6 +15,9 @@ import {
 } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  QronosVoicePlayer,
+} from "./audio/QronosVoicePlayer";
 
 import SmartQueuePanel from "./components/SmartQueuePanel";
 import type {
@@ -851,6 +854,80 @@ function App() {
     };
   }, [viewPhase]);
 
+  const voicePlayerRef =
+    useRef<QronosVoicePlayer | null>(
+      null,
+    );
+
+  useEffect(() => {
+    const player =
+      new QronosVoicePlayer({
+        onStateChange: (state) => {
+          if (state === "playing") {
+            setScenario(
+              "qronosVoice",
+            );
+            return;
+          }
+
+          if (
+            state === "ended" ||
+            state === "stopped" ||
+            state === "error"
+          ) {
+            setAudioFrame({
+              level: 0,
+              bands: Array.from(
+                { length: 32 },
+                () => 0,
+              ),
+            });
+            setScenario(
+              "idle",
+            );
+          }
+        },
+        onSpectrumFrame: (frame) => {
+          setAudioFrame({
+            level: frame.level,
+            bands: frame.bands,
+          });
+        },
+        onPlaybackStarted: (startedAtMs) => {
+          console.info(
+            "[Qronos Voice Diagnostics] playback_started",
+            {
+              performanceMs:
+                Number(
+                  startedAtMs.toFixed(3),
+                ),
+            },
+          );
+        },
+        onError: (error) => {
+          console.error(
+            "[Qronos Voice Playback]",
+            error,
+          );
+        },
+      });
+
+    voicePlayerRef.current =
+      player;
+
+    return () => {
+      player.dispose();
+
+      if (
+        voicePlayerRef.current ===
+        player
+      ) {
+        voicePlayerRef.current =
+          null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     let unlistenRuntime:
@@ -939,7 +1016,20 @@ function App() {
                 break;
               }
 
+              case "wake_word_listening":
+                setScenario(
+                  "idle",
+                );
+                break;
+
+              case "wake_word_detected":
+                setScenario(
+                  "listening",
+                );
+                break;
+
               case "voice_listening":
+                voicePlayerRef.current?.stop();
                 setScenario(
                   "listening",
                 );
@@ -971,7 +1061,63 @@ function App() {
                 );
                 break;
 
+              case "voice_audio_ready": {
+                try {
+                  const parsed = JSON.parse(
+                    event.payload.message,
+                  ) as {
+                    path?: unknown;
+                  };
+
+                  if (
+                    typeof parsed.path !==
+                      "string" ||
+                    parsed.path.trim().length ===
+                      0
+                  ) {
+                    throw new Error(
+                      "voice_audio_ready did not contain a valid path.",
+                    );
+                  }
+
+                  const player =
+                    voicePlayerRef.current;
+
+                  if (!player) {
+                    throw new Error(
+                      "Qronos voice player is not ready.",
+                    );
+                  }
+
+                  void player
+                    .playPath(
+                      parsed.path,
+                    )
+                    .catch(
+                      (error) => {
+                        console.error(
+                          "[Qronos Voice Playback] play failed:",
+                          error,
+                        );
+                        setScenario(
+                          "idle",
+                        );
+                      },
+                    );
+                } catch (error) {
+                  console.error(
+                    "[Qronos Voice Playback] invalid event:",
+                    error,
+                  );
+                  setScenario(
+                    "idle",
+                  );
+                }
+                break;
+              }
+
               case "runtime_error":
+                voicePlayerRef.current?.stop();
                 setAudioFrame({
                   level: 0,
                   bands: Array.from(
@@ -1046,14 +1192,24 @@ function App() {
                 break;
 
               case "voice_turn_complete":
-                window.setTimeout(
-                  () => {
-                    setScenario(
-                      "idle",
-                    );
-                  },
-                  2200,
-                );
+                if (
+                  !voicePlayerRef.current
+                    ?.isActive()
+                ) {
+                  window.setTimeout(
+                    () => {
+                      if (
+                        !voicePlayerRef.current
+                          ?.isActive()
+                      ) {
+                        setScenario(
+                          "idle",
+                        );
+                      }
+                    },
+                    350,
+                  );
+                }
                 break;
 
               default:
@@ -1061,6 +1217,36 @@ function App() {
             }
           },
         );
+
+      const ensureWakeRuntime =
+        async () => {
+          const status =
+            await invoke<RuntimeStatus>(
+              "get_runtime_status",
+            );
+
+          if (!status.running) {
+            await invoke<RuntimeStatus>(
+              "start_runtime",
+            );
+          }
+
+          await invoke(
+            "send_runtime_action",
+            {
+              actionId:
+                "qronos.wake_listener_start",
+            },
+          );
+        };
+
+      void ensureWakeRuntime()
+        .catch((error) => {
+          console.error(
+            "[Qronos Wake Word] startup failed:",
+            error,
+          );
+        });
 
       const handleRuntimeAction = async (
         event: Event,

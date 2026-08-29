@@ -135,7 +135,7 @@ class TestCommandRecorder(
 
         self.assertEqual(
             config.silence_seconds,
-            2.0,
+            0.96,
         )
 
         self.assertEqual(

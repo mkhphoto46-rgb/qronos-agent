@@ -21,6 +21,12 @@
       }
     ],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "E:\\Project Qronos Agent\\runtime\\chatterbox\\temp\\**"
+        ]
+      },
       "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420"
     }
   },

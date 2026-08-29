@@ -57,6 +57,9 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     "core.resource_guard": (
         "Runs nvidia-smi to read GPU status."
     ),
+    "core.chatterbox_runtime": (
+        "Starts and stops only the bundled local Chatterbox worker process."
+    ),
     "core.storage_guard": (
         "Calls shutil.disk_usage, which only reads free space."
     ),

@@ -27,6 +27,7 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -136,6 +137,28 @@ class FakeSpeechRuntime:
         return self.transcript
 
 
+class FakeVoiceOutput:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.releases = 0
+
+    def health_check(self) -> bool:
+        return True
+
+    def speak_to_file(self, text: str):
+        self.calls.append(text)
+
+        return SimpleNamespace(
+            audio_path=Path("fake-qronos-voice.wav"),
+            audio_seconds=1.0,
+            took_seconds=0.5,
+            real_time_factor=0.5,
+        )
+
+    def release(self) -> None:
+        self.releases += 1
+
+
 class FakeOrchestrator:
     def __init__(
         self,
@@ -185,6 +208,7 @@ def prepared_runtime(
     runtime.speech_runtime = speech or FakeSpeechRuntime(
         temp_dir=temp_dir
     )
+    runtime.voice_output = FakeVoiceOutput()
     runtime.task_router = TaskRouter()
     runtime.orchestrator = orchestrator or FakeOrchestrator()
     runtime.conversation_session = ConversationSession(clock=FakeClock())
@@ -361,6 +385,7 @@ class TestPushToTalkSequence(unittest.TestCase):
                 "voice_transcript",
                 "voice_routed",
                 "voice_response",
+                "voice_synthesizing",
                 "voice_turn_complete",
             ],
         )

@@ -5,6 +5,11 @@ import os
 import re
 import sys
 import threading
+import wave
+from pathlib import Path
+
+import numpy as np
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -22,11 +27,14 @@ if hasattr(sys.stderr, "reconfigure"):
     )
 
 from core.audio_input import AudioInput
-from core.command_recorder import CommandRecorder
+from core.chatterbox_runtime import ChatterboxRuntime
+from core.command_recorder import CommandRecorder, CommandRecorderConfig
 from core.conversation_session import ConversationSession
 from core.hard_floor import required_vram_mb
 from core.load_signal import LoadSample, SustainedLoadMonitor
+from core.resource_context import build_sustained_load_monitor
 from core.model_registry import MODELS
+from core.openwakeword_engine import OpenWakeWordEngine
 from core.orchestrator import Orchestrator
 from core.queue_scheduler import (
     DEFAULT_SCHEDULER_CONFIG,
@@ -43,12 +51,37 @@ from core.task_router import TaskRouter
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
 from core.web_worker import WebResearchWorker
+from core.voice_trigger import VoiceTriggerService
 
 
 PUSH_TO_TALK_ACTION = "qronos.push_to_talk"
+WAKE_LISTENER_START_ACTION = "qronos.wake_listener_start"
+WAKE_LISTENER_STOP_ACTION = "qronos.wake_listener_stop"
+WAKE_PLAYBACK_GUARD_SECONDS = 0.35
+FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
+FOLLOWUP_PLAYBACK_GUARD_SECONDS = 0.25
 AUDIO_SPECTRUM_BANDS = 32
 EMIT_LOCK = threading.Lock()
 
+CONVERSATION_END_PHRASES = {
+    "تمام",
+    "تموم",
+    "تمام شد",
+    "تموم شد",
+    "خداحافظ",
+    "بسه",
+    "ممنون تمومه",
+    "ممنون تمامه",
+    "مرسی تمومه",
+}
+
+VOICE_LATENCY_LOG_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "runtime"
+    / "chatterbox"
+    / "temp"
+    / "voice_latency_latest.json"
+)
 
 
 def normalise_qronos_invocation(transcript: str) -> str:
@@ -59,6 +92,247 @@ def normalise_qronos_invocation(transcript: str) -> str:
         transcript,
         count=1,
     )
+
+
+def _normalise_conversation_control_text(
+    text: str,
+) -> str:
+    cleaned = re.sub(
+        r"[\s\u200c]+",
+        " ",
+        (text or "").strip().lower(),
+    )
+
+    cleaned = re.sub(
+        r"[.!?؟،,؛;:]+$",
+        "",
+        cleaned,
+    ).strip()
+
+    return cleaned
+
+
+def _is_conversation_end_phrase(
+    text: str,
+) -> bool:
+    return (
+        _normalise_conversation_control_text(
+            text
+        )
+        in CONVERSATION_END_PHRASES
+    )
+
+
+VOICE_SPECTRUM_FRAME_SECONDS = 0.08
+VOICE_SPECTRUM_BANDS = 32
+
+
+def _write_voice_spectrum_sidecar(
+    audio_path: str | Path,
+) -> Path:
+    """
+    Precompute Qronos playback spectrum with the same analyser used for
+    microphone input.
+
+    The microphone path calls CommandRecorder._analyze_audio_frame() on
+    80 ms PCM frames. Reusing that exact function here keeps playback and
+    microphone visuals on the same normalization, RMS envelope, Hann window,
+    logarithmic frequency bands, and per-frame band scaling.
+    """
+    source = Path(audio_path)
+
+    with wave.open(
+        str(source),
+        "rb",
+    ) as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        sample_rate = wav_file.getframerate()
+        raw = wav_file.readframes(
+            wav_file.getnframes()
+        )
+
+    if sample_width != 2:
+        raise RuntimeError(
+            "Qronos spectrum sidecar requires 16-bit PCM WAV audio."
+        )
+
+    samples = np.frombuffer(
+        raw,
+        dtype=np.int16,
+    )
+
+    if channels > 1:
+        usable = (
+            samples.size
+            // channels
+            * channels
+        )
+
+        samples = (
+            samples[:usable]
+            .reshape(-1, channels)
+            .astype(np.float32)
+            .mean(axis=1)
+            .clip(-32768, 32767)
+            .astype(np.int16)
+        )
+
+    frame_size = max(
+        1,
+        round(
+            sample_rate
+            * VOICE_SPECTRUM_FRAME_SECONDS
+        ),
+    )
+
+    frames: list[dict[str, object]] = []
+
+    for start in range(
+        0,
+        samples.size,
+        frame_size,
+    ):
+        frame = samples[
+            start:start + frame_size
+        ]
+
+        if frame.size < frame_size:
+            padded = np.zeros(
+                frame_size,
+                dtype=np.int16,
+            )
+            padded[:frame.size] = frame
+            frame = padded
+
+        level, bands = (
+            CommandRecorder._analyze_audio_frame(
+                frame.tobytes(),
+                sample_rate,
+                VOICE_SPECTRUM_BANDS,
+            )
+        )
+
+        frames.append(
+            {
+                "level": round(
+                    float(level),
+                    4,
+                ),
+                "bands": [
+                    round(
+                        float(value),
+                        4,
+                    )
+                    for value in bands
+                ],
+            }
+        )
+
+    sidecar = source.with_suffix(
+        ".spectrum.json"
+    )
+
+    sidecar.write_text(
+        json.dumps(
+            {
+                "frameSeconds":
+                    VOICE_SPECTRUM_FRAME_SECONDS,
+                "frames": frames,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    return sidecar
+
+
+
+TTS_FIRST_CHUNK_TARGET_CHARACTERS = 85
+TTS_LATER_CHUNK_TARGET_CHARACTERS = 125
+TTS_MIN_CHUNK_CHARACTERS = 32
+
+
+def _split_semantic_tts_chunks(
+    text: str,
+) -> list[str]:
+    """
+    Split one finished Brain response into natural speech chunks.
+
+    The Brain response is still complete before this function runs. The goal is
+    only to reduce time-to-first-audio by letting Chatterbox synthesize and emit
+    the first meaningful phrase before the rest of the response.
+
+    Rules:
+    - prefer sentence boundaries
+    - then Persian/English clause punctuation
+    - avoid tiny standalone chunks such as "سلام!"
+    - keep the first chunk shorter than later chunks for lower TTFA
+    """
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        (text or "").strip(),
+    )
+
+    if not cleaned:
+        return []
+
+    pieces = [
+        piece.strip()
+        for piece in re.split(
+            r"(?<=[.!?؟؛])\s+|(?<=[،,:])\s+",
+            cleaned,
+        )
+        if piece.strip()
+    ]
+
+    if not pieces:
+        return [cleaned]
+
+    chunks: list[str] = []
+    current = ""
+
+    for piece in pieces:
+        target = (
+            TTS_FIRST_CHUNK_TARGET_CHARACTERS
+            if not chunks
+            else TTS_LATER_CHUNK_TARGET_CHARACTERS
+        )
+
+        candidate = (
+            piece
+            if not current
+            else f"{current} {piece}"
+        )
+
+        if (
+            current
+            and len(candidate) > target
+            and len(current) >= TTS_MIN_CHUNK_CHARACTERS
+        ):
+            chunks.append(current)
+            current = piece
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+
+    # Merge a tiny final fragment into the previous chunk so Chatterbox does
+    # not synthesize awkward one- or two-word tail utterances.
+    if (
+        len(chunks) >= 2
+        and len(chunks[-1]) < TTS_MIN_CHUNK_CHARACTERS
+    ):
+        chunks[-2] = (
+            f"{chunks[-2]} {chunks[-1]}"
+        ).strip()
+        chunks.pop()
+
+    return chunks
 
 
 @dataclass(frozen=True)
@@ -87,9 +361,15 @@ class QronosRuntime:
         self.vad_runtime: WhisperCppVADRuntime | None = None
         self.command_recorder: CommandRecorder | None = None
         self.speech_runtime: WhisperCppRuntime | None = None
+        self.voice_output: ChatterboxRuntime | None = None
         self.task_router: TaskRouter | None = None
         self.orchestrator: Orchestrator | None = None
         self.conversation_session: ConversationSession | None = None
+
+        self.wake_engine: OpenWakeWordEngine | None = None
+        self.voice_trigger: VoiceTriggerService | None = None
+        self._wake_thread: threading.Thread | None = None
+        self._wake_stop = threading.Event()
 
     def ensure_scheduler(self) -> QueueScheduler:
         """
@@ -108,7 +388,7 @@ class QronosRuntime:
             if self._scheduler is not None:
                 return self._scheduler
 
-            monitor = SustainedLoadMonitor()
+            monitor = build_sustained_load_monitor()
             monitor.prime()
 
             self._scheduler = QueueScheduler(
@@ -210,6 +490,7 @@ class QronosRuntime:
         audio_input = AudioInput()
         vad_runtime = WhisperCppVADRuntime()
         speech_runtime = WhisperCppRuntime()
+        voice_output = ChatterboxRuntime()
 
         if not vad_runtime.health_check():
             raise RuntimeError(
@@ -221,6 +502,11 @@ class QronosRuntime:
                 "Qronos speech runtime is not ready."
             )
 
+        if not voice_output.health_check():
+            raise RuntimeError(
+                "Qronos TTS runtime is not ready."
+            )
+
         vad_runtime.prepare()
 
         self.audio_input = audio_input
@@ -228,8 +514,15 @@ class QronosRuntime:
         self.command_recorder = CommandRecorder(
             audio_input=audio_input,
             vad_runtime=vad_runtime,
+            config=CommandRecorderConfig(
+                silence_seconds=0.96,
+                start_timeout_seconds=(
+                    FOLLOWUP_START_TIMEOUT_SECONDS
+                ),
+            ),
         )
         self.speech_runtime = speech_runtime
+        self.voice_output = voice_output
         self.task_router = TaskRouter()
         self.orchestrator = Orchestrator()
         self.orchestrator.workers.register(
@@ -266,6 +559,7 @@ class QronosRuntime:
                 "vad_runtime",
                 "command_recorder",
                 "speech_runtime",
+                "voice_output",
                 "task_router",
                 "orchestrator",
                 "conversation_session",
@@ -280,22 +574,526 @@ class QronosRuntime:
                 + " missing."
             )
 
-    def push_to_talk(self) -> None:
+    @property
+    def wake_listener_running(self) -> bool:
+        thread = self._wake_thread
+        return thread is not None and thread.is_alive()
+
+    def start_wake_listener(self) -> None:
+        """
+        Start the low-cost Qronos wake-word loop.
+
+        The listener uses the same AudioInput object as command recording, but
+        never reads from it concurrently. After detection, this thread pauses
+        wake-word inference and immediately hands the already-open microphone
+        to CommandRecorder, preserving the first phoneme of the user's command.
+        """
+        with self._lock:
+            if self._wake_thread is not None and self._wake_thread.is_alive():
+                self._notify(
+                    "wake_word_listening",
+                    "listening",
+                    "Qronos wake-word listener is already active.",
+                )
+                return
+
+            self._wake_stop.clear()
+            thread = threading.Thread(
+                target=self._wake_listener_loop,
+                name="qronos-wake-word",
+                daemon=True,
+            )
+            self._wake_thread = thread
+
+        thread.start()
+
+    def stop_wake_listener(self) -> None:
+        self._wake_stop.set()
+
+        audio = self.audio_input
+        if audio is not None:
+            try:
+                audio.stop()
+            except Exception:
+                pass
+
+        trigger = self.voice_trigger
+        if trigger is not None:
+            try:
+                trigger.stop()
+            except Exception:
+                pass
+
+        thread = self._wake_thread
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=0.75)
+
+        self._wake_thread = None
+
+    def _wake_listener_loop(self) -> None:
+        """
+        Run the wake gate and the interactive multi-turn voice session.
+
+        A wake word is required only to open a session. After Qronos finishes
+        speaking, the microphone reopens for a bounded follow-up window and the
+        user may continue without saying Qronos again.
+
+        Full command capture remains off while Qronos is speaking. True
+        mid-speech barge-in is intentionally not implemented here because the
+        current desktop playback path has no acoustic echo cancellation.
+        """
+        try:
+            self.prepare()
+            self._require_prepared()
+
+            if self.audio_input is None:
+                raise RuntimeError(
+                    "Qronos microphone is not prepared for wake-word listening."
+                )
+
+            engine = OpenWakeWordEngine()
+            trigger = VoiceTriggerService(
+                wake_word="Qronos",
+                engine=engine,
+            )
+
+            self.wake_engine = engine
+            self.voice_trigger = trigger
+
+            trigger.start()
+            self.audio_input.start()
+
+            self._notify(
+                "wake_word_listening",
+                "listening",
+                "Say Qronos to start a voice session.",
+            )
+
+            while not self._wake_stop.is_set():
+                try:
+                    frame = self.audio_input.read_frame()
+                except Exception:
+                    if self._wake_stop.is_set():
+                        break
+                    raise
+
+                event = trigger.process_audio(
+                    frame,
+                    timestamp=time.time(),
+                )
+
+                if event is None:
+                    continue
+
+                wake_detected_perf = (
+                    time.perf_counter()
+                )
+
+                trigger.pause()
+
+                self._notify(
+                    "wake_word_detected",
+                    "listening",
+                    json.dumps(
+                        {
+                            "wakeWord": event.wake_word,
+                            "timestamp": round(
+                                event.timestamp,
+                                6,
+                            ),
+                            "score": round(
+                                engine.last_score,
+                                6,
+                            ),
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                )
+
+                if (
+                    self.conversation_session
+                    is not None
+                    and not
+                    self.conversation_session.is_active
+                ):
+                    self.conversation_session.start()
+                    self._notify(
+                        "conversation_session_started",
+                        "listening",
+                        "Interactive voice session started.",
+                    )
+
+                playback_seconds = (
+                    self._run_voice_turn(
+                        trigger_source="wake_word",
+                        detected_at_perf=(
+                            wake_detected_perf
+                        ),
+                    )
+                )
+
+                while (
+                    not self._wake_stop.is_set()
+                    and self.conversation_session
+                    is not None
+                    and self.conversation_session.is_active
+                ):
+                    if playback_seconds > 0:
+                        self._wake_stop.wait(
+                            playback_seconds
+                            + FOLLOWUP_PLAYBACK_GUARD_SECONDS
+                        )
+
+                    if self._wake_stop.is_set():
+                        break
+
+                    if (
+                        not
+                        self.conversation_session.is_active
+                    ):
+                        break
+
+                    self.conversation_session.begin_listening()
+
+                    self._notify(
+                        "conversation_followup_listening",
+                        "listening",
+                        json.dumps(
+                            {
+                                "timeoutSeconds":
+                                    FOLLOWUP_START_TIMEOUT_SECONDS,
+                                "wakeWordRequired":
+                                    False,
+                            },
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                        ),
+                    )
+
+                    playback_seconds = (
+                        self._run_voice_turn(
+                            trigger_source="followup",
+                        )
+                    )
+
+                if self._wake_stop.is_set():
+                    break
+
+                self.audio_input.start()
+                trigger.resume()
+
+                self._notify(
+                    "wake_word_listening",
+                    "listening",
+                    "Say Qronos to start a voice session.",
+                )
+
+        except Exception as exc:
+            if not self._wake_stop.is_set():
+                self._notify(
+                    "runtime_error",
+                    "error",
+                    f"Wake-word listener failed: {exc}",
+                )
+
+        finally:
+            trigger = self.voice_trigger
+            if trigger is not None:
+                try:
+                    trigger.stop()
+                except Exception:
+                    pass
+
+            if self.audio_input is not None:
+                try:
+                    self.audio_input.stop()
+                except Exception:
+                    pass
+
+            self.voice_trigger = None
+            self.wake_engine = None
+
+    def _synthesize_response(self, response: str):
+        """
+        Generate the spoken form of one assistant response.
+
+        This seam lets the production response-to-TTS path be tested without
+        opening the microphone or invoking ASR/LLM work.
+        """
+        if self.voice_output is None:
+            raise RuntimeError(
+                "Qronos TTS runtime is not prepared."
+            )
+
+        self._notify(
+            "voice_synthesizing",
+            "processing",
+            "Generating Qronos voice response.",
+        )
+
+        utterance = self.voice_output.speak_to_file(
+            response
+        )
+
+        def build_spectrum_sidecar() -> None:
+            try:
+                _write_voice_spectrum_sidecar(
+                    utterance.audio_path
+                )
+            except Exception:
+                # Playback spectrum is visual-only. A sidecar failure must
+                # never affect speech playback or the runtime event contract.
+                pass
+
+        threading.Thread(
+            target=build_spectrum_sidecar,
+            name="qronos-spectrum-sidecar",
+            daemon=True,
+        ).start()
+
+        self._notify(
+            "voice_audio_ready",
+            "ready",
+            json.dumps(
+                {
+                    "path": str(utterance.audio_path),
+                    "audioSeconds": round(
+                        utterance.audio_seconds,
+                        3,
+                    ),
+                    "generationSeconds": round(
+                        utterance.took_seconds,
+                        3,
+                    ),
+                    "rtf": round(
+                        utterance.real_time_factor,
+                        3,
+                    ),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+
+        return utterance
+
+
+    def _synthesize_response_chunks(
+        self,
+        response: str,
+    ) -> dict[str, Any]:
+        """
+        Synthesize one complete Brain response as sequential semantic chunks.
+
+        There is still exactly one Chatterbox generation at a time. After each
+        chunk is ready its path is emitted immediately, allowing the desktop
+        player to begin playback while the next chunk is generated.
+        """
+        if self.voice_output is None:
+            raise RuntimeError(
+                "Qronos TTS runtime is not prepared."
+            )
+
+        chunks = _split_semantic_tts_chunks(
+            response
+        )
+
+        if not chunks:
+            raise RuntimeError(
+                "Qronos response produced no TTS chunks."
+            )
+
+        self._notify(
+            "voice_synthesizing",
+            "processing",
+            "Generating Qronos voice response.",
+        )
+
+        total_audio_seconds = 0.0
+        total_model_seconds = 0.0
+        first_audio_ready_perf: float | None = None
+        first_chunk_model_seconds = 0.0
+        first_chunk_audio_seconds = 0.0
+
+        for index, chunk in enumerate(
+            chunks
+        ):
+            utterance = (
+                self.voice_output.speak_to_file(
+                    chunk
+                )
+            )
+
+            if first_audio_ready_perf is None:
+                first_audio_ready_perf = (
+                    time.perf_counter()
+                )
+                first_chunk_model_seconds = (
+                    float(
+                        utterance.took_seconds
+                    )
+                )
+                first_chunk_audio_seconds = (
+                    float(
+                        utterance.audio_seconds
+                    )
+                )
+
+            total_audio_seconds += float(
+                utterance.audio_seconds
+            )
+            total_model_seconds += float(
+                utterance.took_seconds
+            )
+
+            def build_spectrum_sidecar(
+                audio_path=utterance.audio_path,
+            ) -> None:
+                try:
+                    _write_voice_spectrum_sidecar(
+                        audio_path
+                    )
+                except Exception:
+                    # Spectrum is visual-only and must never delay speech.
+                    pass
+
+            threading.Thread(
+                target=build_spectrum_sidecar,
+                name=(
+                    "qronos-spectrum-sidecar-"
+                    f"{index + 1}"
+                ),
+                daemon=True,
+            ).start()
+
+            self._notify(
+                "voice_audio_ready",
+                "ready",
+                json.dumps(
+                    {
+                        "path": str(
+                            utterance.audio_path
+                        ),
+                        "audioSeconds": round(
+                            utterance.audio_seconds,
+                            3,
+                        ),
+                        "generationSeconds": round(
+                            utterance.took_seconds,
+                            3,
+                        ),
+                        "rtf": round(
+                            utterance.real_time_factor,
+                            3,
+                        ),
+                        "chunkIndex": index,
+                        "chunkNumber": index + 1,
+                        "chunkCount": len(chunks),
+                        "isFirstChunk": index == 0,
+                        "isLastChunk": (
+                            index
+                            == len(chunks) - 1
+                        ),
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+            )
+
+        return {
+            "chunks": chunks,
+            "chunkCount": len(chunks),
+            "totalAudioSeconds":
+                total_audio_seconds,
+            "totalModelSeconds":
+                total_model_seconds,
+            "firstAudioReadyPerf":
+                first_audio_ready_perf,
+            "firstChunkModelSeconds":
+                first_chunk_model_seconds,
+            "firstChunkAudioSeconds":
+                first_chunk_audio_seconds,
+        }
+
+
+    def _write_latency_report(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        """
+        Persist one voice-turn latency report under the project E: runtime.
+
+        Diagnostics must never break a voice turn. If writing fails, emit only
+        a warning and continue.
+        """
+        try:
+            VOICE_LATENCY_LOG_PATH.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            VOICE_LATENCY_LOG_PATH.write_text(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        except Exception:
+            # Diagnostics must never change the runtime event contract or
+            # interfere with a voice turn.
+            pass
+
+    def _run_voice_turn(
+        self,
+        trigger_source: str,
+        detected_at_perf: float | None = None,
+    ) -> float:
+        """
+        Capture one user command, run the existing Brain path, synthesize it,
+        and return the generated audio duration.
+
+        This version also instruments every material latency segment without
+        changing the execution order. That gives us a factual baseline before
+        introducing semantic chunking or streaming.
+        """
         if self.is_busy:
-            emit(
+            self._notify(
                 "runtime_busy",
                 "busy",
                 "Qronos is already processing a voice request.",
             )
-            return
+            return 0.0
 
         self._set_busy(True)
+        playback_seconds = 0.0
+
+        turn_started_perf = (
+            detected_at_perf
+            if detected_at_perf is not None
+            else time.perf_counter()
+        )
+
+        report: dict[str, Any] = {
+            "triggerSource": trigger_source,
+            "startedAtEpoch": round(
+                time.time(),
+                6,
+            ),
+        }
 
         try:
             self.prepare()
             self._require_prepared()
 
-            emit(
+            self._notify(
                 "voice_listening",
                 "listening",
                 "Listening for your command.",
@@ -303,20 +1101,26 @@ class QronosRuntime:
 
             self.audio_input.start()
 
+            recording_started = time.perf_counter()
+
             recording = self.command_recorder.record_to_file(
                 self.speech_runtime.temp_dir
-                / "qronos_push_to_talk.wav",
+                / "qronos_voice_command.wav",
                 on_audio_spectrum=self._emit_audio_spectrum,
             )
+
+            recording_finished = time.perf_counter()
 
             self.audio_input.stop()
             self._clear_audio_spectrum()
 
-            emit(
+            self._notify(
                 "voice_transcribing",
                 "processing",
                 "Transcribing voice command.",
             )
+
+            stt_started = time.perf_counter()
 
             transcript = (
                 self.speech_runtime.transcribe_file(
@@ -326,6 +1130,8 @@ class QronosRuntime:
                 .strip()
             )
 
+            stt_finished = time.perf_counter()
+
             transcript = normalise_qronos_invocation(transcript)
 
             if not transcript:
@@ -333,11 +1139,38 @@ class QronosRuntime:
                     "Speech recognition returned an empty command."
                 )
 
-            emit(
+            self._notify(
                 "voice_transcript",
                 "processing",
                 transcript,
             )
+
+            if (
+                trigger_source == "followup"
+                and _is_conversation_end_phrase(
+                    transcript
+                )
+            ):
+                if (
+                    self.conversation_session
+                    is not None
+                    and self.conversation_session.is_active
+                ):
+                    self.conversation_session.close()
+
+                self._notify(
+                    "conversation_session_closed",
+                    "ready",
+                    "Conversation ended by user.",
+                )
+
+                self._notify(
+                    "voice_turn_complete",
+                    "ready",
+                    "Follow-up session ended.",
+                )
+
+                return 0.0
 
             if not self.conversation_session.is_active:
                 self.conversation_session.start()
@@ -347,11 +1180,15 @@ class QronosRuntime:
             )
             self.conversation_session.begin_processing()
 
+            route_started = time.perf_counter()
+
             route = self.task_router.route(
                 transcript
             )
 
-            emit(
+            route_finished = time.perf_counter()
+
+            self._notify(
                 "voice_routed",
                 "processing",
                 route.task_type.value,
@@ -365,9 +1202,13 @@ class QronosRuntime:
                 description=transcript,
             )
 
+            brain_started = time.perf_counter()
+
             results = self.orchestrator.execute_plan(
                 plan
             )
+
+            brain_finished = time.perf_counter()
 
             if not results:
                 raise RuntimeError(
@@ -393,22 +1234,226 @@ class QronosRuntime:
             self.conversation_session.add_assistant_message(
                 response
             )
-            self.conversation_session.begin_listening()
 
-            emit(
+            self._notify(
                 "voice_response",
                 "ready",
                 response,
             )
 
-            emit(
+            tts_started = time.perf_counter()
+
+            chunked = (
+                self._synthesize_response_chunks(
+                    response
+                )
+            )
+
+            all_audio_ready = (
+                time.perf_counter()
+            )
+
+            first_audio_ready = (
+                chunked[
+                    "firstAudioReadyPerf"
+                ]
+                or all_audio_ready
+            )
+
+            playback_elapsed_during_generation = max(
+                0.0,
+                all_audio_ready
+                - first_audio_ready,
+            )
+
+            playback_seconds = max(
+                0.0,
+                float(
+                    chunked[
+                        "totalAudioSeconds"
+                    ]
+                )
+                - playback_elapsed_during_generation,
+            )
+
+            report.update(
+                {
+                    "transcript": transcript,
+                    "route": route.task_type.value,
+                    "response": response,
+                    "recordingAudioSeconds": round(
+                        float(
+                            recording.duration_seconds
+                        ),
+                        3,
+                    ),
+                    "recordingSpeechSeconds": round(
+                        float(
+                            recording.speech_seconds
+                        ),
+                        3,
+                    ),
+                    "generatedAudioSeconds": round(
+                        float(
+                            chunked[
+                                "totalAudioSeconds"
+                            ]
+                        ),
+                        3,
+                    ),
+                    "ttsModelSeconds": round(
+                        float(
+                            chunked[
+                                "totalModelSeconds"
+                            ]
+                        ),
+                        3,
+                    ),
+                    "ttsChunkCount": int(
+                        chunked[
+                            "chunkCount"
+                        ]
+                    ),
+                    "ttsChunks": list(
+                        chunked[
+                            "chunks"
+                        ]
+                    ),
+                    "firstChunkAudioSeconds": round(
+                        float(
+                            chunked[
+                                "firstChunkAudioSeconds"
+                            ]
+                        ),
+                        3,
+                    ),
+                    "firstChunkModelSeconds": round(
+                        float(
+                            chunked[
+                                "firstChunkModelSeconds"
+                            ]
+                        ),
+                        3,
+                    ),
+                    "timingsSeconds": {
+                        "wakeToRecordingStart": round(
+                            recording_started
+                            - turn_started_perf,
+                            3,
+                        ),
+                        "recording": round(
+                            recording_finished
+                            - recording_started,
+                            3,
+                        ),
+                        "stt": round(
+                            stt_finished
+                            - stt_started,
+                            3,
+                        ),
+                        "routing": round(
+                            route_finished
+                            - route_started,
+                            3,
+                        ),
+                        "brain": round(
+                            brain_finished
+                            - brain_started,
+                            3,
+                        ),
+                        "ttsFirstChunk": round(
+                            first_audio_ready
+                            - tts_started,
+                            3,
+                        ),
+                        "ttsAllChunks": round(
+                            all_audio_ready
+                            - tts_started,
+                            3,
+                        ),
+                        "wakeToFirstAudioReady": round(
+                            first_audio_ready
+                            - turn_started_perf,
+                            3,
+                        ),
+                        "wakeToAllAudioReady": round(
+                            all_audio_ready
+                            - turn_started_perf,
+                            3,
+                        ),
+                    },
+                }
+            )
+
+            self._write_latency_report(
+                report
+            )
+
+            self._notify(
                 "voice_turn_complete",
                 "ready",
-                "Push-to-talk turn completed.",
+                (
+                    "Wake-word turn completed."
+                    if trigger_source == "wake_word"
+                    else "Push-to-talk turn completed."
+                ),
+            )
+
+        except TimeoutError as exc:
+            if trigger_source == "followup":
+                report["followupTimedOut"] = True
+                report["closedAtEpoch"] = round(
+                    time.time(),
+                    6,
+                )
+
+                self._write_latency_report(
+                    report
+                )
+
+                if (
+                    self.conversation_session
+                    is not None
+                    and self.conversation_session.is_active
+                ):
+                    self.conversation_session.close()
+
+                self._notify(
+                    "conversation_session_closed",
+                    "ready",
+                    "Follow-up window expired.",
+                )
+
+                return 0.0
+
+            report["error"] = str(exc)
+            report["failedAtEpoch"] = round(
+                time.time(),
+                6,
+            )
+
+            self._write_latency_report(
+                report
+            )
+
+            self._notify(
+                "runtime_error",
+                "error",
+                str(exc),
             )
 
         except Exception as exc:
-            emit(
+            report["error"] = str(exc)
+            report["failedAtEpoch"] = round(
+                time.time(),
+                6,
+            )
+
+            self._write_latency_report(
+                report
+            )
+
+            self._notify(
                 "runtime_error",
                 "error",
                 str(exc),
@@ -428,7 +1473,16 @@ class QronosRuntime:
 
             self._set_busy(False)
 
+        return playback_seconds
+
+    def push_to_talk(self) -> None:
+        self._run_voice_turn(
+            trigger_source="push_to_talk",
+        )
+
     def close(self) -> None:
+        self.stop_wake_listener()
+
         # The scheduler first, and before anything that could raise. Its
         # thread writes to stdout, and a write after main() has returned is a
         # traceback on stderr, which the desktop reads as a crash and
@@ -448,6 +1502,12 @@ class QronosRuntime:
         if self.vad_runtime is not None:
             try:
                 self.vad_runtime.close()
+            except Exception:
+                pass
+
+        if self.voice_output is not None:
+            try:
+                self.voice_output.release()
             except Exception:
                 pass
 
@@ -627,20 +1687,33 @@ def handle_action(
         action_id,
     )
 
-    if action_id != PUSH_TO_TALK_ACTION:
+    if action_id == WAKE_LISTENER_START_ACTION:
+        runtime.start_wake_listener()
+        return
+
+    if action_id == WAKE_LISTENER_STOP_ACTION:
+        runtime.stop_wake_listener()
         emit(
-            "runtime_warning",
-            "warning",
-            f"Unsupported runtime action: {action_id}",
+            "wake_word_stopped",
+            "ready",
+            "Qronos wake-word listener stopped.",
         )
         return
 
-    worker = threading.Thread(
-        target=runtime.push_to_talk,
-        name="qronos-push-to-talk",
-        daemon=True,
+    if action_id == PUSH_TO_TALK_ACTION:
+        worker = threading.Thread(
+            target=runtime.push_to_talk,
+            name="qronos-push-to-talk",
+            daemon=True,
+        )
+        worker.start()
+        return
+
+    emit(
+        "runtime_warning",
+        "warning",
+        f"Unsupported runtime action: {action_id}",
     )
-    worker.start()
 
 
 #: The longest summary the desktop may submit. A queue entry is shown in a

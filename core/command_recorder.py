@@ -52,7 +52,7 @@ class CommandRecorderConfig:
     speech_start_threshold: float = 0.50
     speech_continue_threshold: float = 0.50
 
-    silence_seconds: float = 2.0
+    silence_seconds: float = 0.96
     max_duration_seconds: float = 60.0
     start_timeout_seconds: float = 8.0
 
