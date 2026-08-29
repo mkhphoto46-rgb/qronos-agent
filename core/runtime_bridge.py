@@ -484,9 +484,10 @@ class QronosRuntime:
         self.pending_look = None
 
         try:
-            self.prepare()
-            self._require_prepared()
-
+            # Both of these come before ``prepare``, which starts the
+            # microphone stack. Saying no to a screen capture must never be
+            # the thing that turns a microphone on, and neither must a
+            # malformed request.
             if not asked:
                 raise RuntimeError(
                     "Qronos was asked to look at the screen without being "
@@ -502,6 +503,9 @@ class QronosRuntime:
                     "Qronos did not look at the screen.",
                 )
                 return
+
+            self.prepare()
+            self._require_prepared()
 
             emit(
                 "voice_capturing_screen",

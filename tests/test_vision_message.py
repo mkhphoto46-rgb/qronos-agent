@@ -250,6 +250,99 @@ class TestPayload(unittest.TestCase):
             self.assertLessEqual(max(reopened.size), SEND_LONG_EDGE)
 
 
+class TestWhenTheModelIsNotThere(unittest.TestCase):
+    """
+    Two failures that look identical and are not.
+
+    A model that was never downloaded and a server that is not running
+    produced the same sentence, and they send a person to two completely
+    different places: one to download it, the other to find out whether
+    anything is running at all.
+    """
+
+    def replied(self, status: int):
+        from unittest.mock import Mock, patch
+
+        import requests
+
+        response = Mock()
+        response.status_code = status
+        response.raise_for_status.side_effect = requests.HTTPError(
+            f"HTTP {status}", response=response
+        )
+
+        return patch(
+            "core.ollama_controller.requests.post", return_value=response
+        )
+
+    def ask(self) -> str:
+        controller = OllamaController()
+
+        try:
+            controller.chat(model_name="qwen3-vl:4b-instruct", prompt="hello")
+        except RuntimeError as error:
+            return str(error)
+
+        return ""
+
+    def test_a_missing_model_says_it_is_not_installed(self) -> None:
+        with self.replied(404):
+            message = self.ask()
+
+        self.assertIn("not installed", message)
+        self.assertIn("qwen3-vl:4b-instruct", message)
+
+    def test_a_server_error_is_not_reported_as_a_missing_model(self) -> None:
+        with self.replied(500):
+            message = self.ask()
+
+        self.assertNotIn("not installed", message)
+        self.assertIn("Could not send request", message)
+
+    def test_an_unreachable_server_is_not_either(self) -> None:
+        from unittest.mock import patch
+
+        import requests
+
+        with patch(
+            "core.ollama_controller.requests.post",
+            side_effect=requests.ConnectionError("refused"),
+        ):
+            message = self.ask()
+
+        self.assertNotIn("not installed", message)
+        self.assertIn("Could not send request", message)
+
+    def test_the_vision_worker_passes_the_reason_through(self) -> None:
+        """
+        So "the vision model was never downloaded" reaches the person rather
+        than being flattened into "something went wrong".
+        """
+        from core.task_plan import PlanStep
+        from core.task_router import TaskType
+        from core.vision_worker import VisionWorker, brain_describe_fn
+
+        with TemporaryDirectory() as folder:
+            picture = Path(folder) / "shot.png"
+            picture.write_bytes(png_bytes(64, 64))
+
+            with self.replied(404):
+                worker = VisionWorker(
+                    describe_fn=brain_describe_fn(OllamaController())
+                )
+                result = worker.execute(
+                    PlanStep(
+                        order=1,
+                        task_type=TaskType.VISION,
+                        description="What is this?",
+                        images=(str(picture),),
+                    )
+                )
+
+        self.assertFalse(result.success)
+        self.assertIn("not installed", result.error)
+
+
 class RecordingHandler(BaseHTTPRequestHandler):
     """A stand-in Ollama that keeps the request it was given."""
 

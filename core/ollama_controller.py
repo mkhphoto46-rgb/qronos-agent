@@ -278,6 +278,23 @@ class OllamaController(BrainRuntime):
 
             response.raise_for_status()
 
+        except requests.HTTPError as exc:
+            # A model that was never downloaded and a server that is not
+            # running produce the same sentence otherwise, and they send a
+            # person to two completely different places: one to `ollama pull`,
+            # the other to check whether anything is running at all.
+            if exc.response is not None and exc.response.status_code == 404:
+                raise RuntimeError(
+                    f"The model {model_name} is not installed on this "
+                    "machine. Qronos downloads the models it needs; if this "
+                    "one is missing, that download has not happened yet."
+                ) from exc
+
+            raise RuntimeError(
+                "Could not send request to model: "
+                f"{model_name}"
+            ) from exc
+
         except requests.RequestException as exc:
             raise RuntimeError(
                 "Could not send request to model: "

@@ -51,6 +51,10 @@ the full interface is built.
 
 - Fast Brain: `qwen3:4b-instruct`, Q4_K_M, approximately 2.5 GB.
 - Heavy Brain: `qwen3:14b`, Q4_K_M, approximately 9.3 GB.
+- Vision: `qwen3-vl:4b-instruct`, Q4_K_M, approximately 3.3 GB. Its own model,
+  loaded only when there is something to look at. It is not a `TaskClass`: it
+  describes, and the Heavy Brain reasons about the description. See
+  [Qronos Vision](qronos_vision.md) for what it costs and what it can read.
 - Fast Brain is the default conversational and routing model.
 - Heavy Brain is only for tasks that require deeper reasoning.
 - Deterministic commands should bypass both models when possible.
@@ -79,7 +83,10 @@ degrade the task safely.
 ### Always-On Resource Sentinel
 
 Resource protection applies to Fast Brain, Heavy Brain, voice services, vision,
-and every future tool—not only Heavy-Brain handoff.
+and every future tool—not only Heavy-Brain handoff. The vision model peaks at
+about 4.6 GB **during generation**, which is the figure the policy must use;
+its load-time figure is much smaller and using that one is how a model gets
+onto a card it can only crawl on.
 
 - Read fresh CPU, RAM, GPU utilization, VRAM, GPU temperature, disk pressure,
   battery/power state, and detected game/creator activity before every model
