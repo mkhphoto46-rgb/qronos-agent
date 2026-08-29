@@ -83,6 +83,15 @@ type DeviceScopeMode =
 type PermissionsViewProps = {
   phase: ViewPhase;
   onClose: () => void;
+
+  /**
+   * Rendered above the security activity list.
+   *
+   * A slot rather than a set of queue props: this component is long enough
+   * already, and the queue's state, its event subscription and its commands
+   * all live in App.tsx with everything else of that kind.
+   */
+  smartQueue?: React.ReactNode;
 };
 
 type SecurityParticle = {
@@ -1100,6 +1109,7 @@ function PermissionIcon({
 }
 
 function PermissionsView({
+  smartQueue,
   phase,
   onClose,
 }: PermissionsViewProps) {
@@ -2018,6 +2028,8 @@ function PermissionsView({
           </aside>
 
           <aside className="permissions-activity-panel">
+            {smartQueue}
+
             <header className="permissions-security-activity-head">
               <div>
                 <span>
