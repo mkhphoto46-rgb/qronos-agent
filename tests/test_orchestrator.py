@@ -206,7 +206,10 @@ class TestOrchestrator(unittest.TestCase):
                 "TEST_STEP_ONE",
                 "TEST_STEP_TWO",
             ],
-        ) as mock_chat:
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "stop_model",
+        ) as mock_stop:
 
             mock_detect.return_value = self._make_state(
                 ActivityMode.NORMAL,
@@ -231,6 +234,11 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual(
             mock_chat.call_count,
+            2,
+        )
+
+        self.assertEqual(
+            mock_stop.call_count,
             2,
         )
 
