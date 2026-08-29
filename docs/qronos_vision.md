@@ -405,18 +405,27 @@ nothing stays loaded between turns, and a watching session is not exempt.
 The cost is about 2.2 s of every 4.2 s spent reloading a model that is about to
 be asked the same question again.
 
-**Whether that is the right trade is an open question, and it is not mine to
-settle.** The argument for holding it is that a watching session is one
-continuous operation, not a series of turns: it has an explicit start, a
-visible indicator, a hard time limit and a stop button, so the model would be
-resident for a bounded period the user can see and end. That is exactly the
-case the no-residency rule was not written about — the rule exists because the
-Fast Brain was being held for ten minutes after a turn nobody was watching.
-The argument against is that it is 3.3 GB of somebody's card, held while they
-are doing something else.
+**This was raised as a question and the answer is to leave it alone.** The
+case for holding the model was real: a watching session is one continuous
+operation rather than a series of turns, with an explicit start, a visible
+indicator, a hard time limit and a stop button — so the model would be resident
+for a bounded period the user can see and end, which is not the situation the
+no-residency rule was written about. That rule exists because the Fast Brain
+was being held for ten minutes after a turn nobody was watching.
 
-Holding it for the session would roughly halve the frame interval. Nothing in
-this branch does it.
+It stays as it is anyway, and the reason is the one on the other side: it is
+3.3 GB of somebody's graphics card, held while they are doing something else.
+A frame every 4.2 seconds is fast enough for what a camera session is for —
+is somebody there, are they facing the screen — and Qronos's whole claim about
+resources is that it yields rather than reserves. Buying two seconds a frame by
+sitting on a third of a 16 GB card is the wrong trade for this product, even
+where the rule would permit it.
+
+Should that ever be revisited, the numbers are above and the change is one
+line: the vision path calls `stop_model` after every answer, and a watching
+session would skip that until the session ends. It would roughly halve the
+frame interval. Do not make it without also deciding what happens when the
+session is left running and the user starts a game.
 
 ---
 

@@ -30,6 +30,21 @@ kept. Frames are held in memory, sent, and dropped — nothing accumulates, and
 what a person can look back at afterwards is a list of sentences rather than a
 recording. That is not a saving, it is the point: a watching session that left
 frames behind would be a recording made without anybody deciding to make one.
+
+**The model is reloaded for every frame, deliberately.** Measured against real
+footage: 0 of 23 frames found it still on the card, so about 2.2 s of every
+4.2 s is spent loading a model that is about to be asked the same question
+again. Holding it for the length of the session would roughly halve that, and
+would arguably be within the rules — a session is one bounded operation the
+user can see and stop, not the idle keep-alive the no-residency rule was
+written against.
+
+It is not done, and that is a decision rather than an oversight. Watching costs
+3.3 GB of somebody's graphics card, and a frame every four seconds already
+answers what a camera session is asked: is somebody there, are they facing the
+screen. Qronos yields resources rather than reserving them, and this is a place
+where the cheap two seconds is not worth the card. See ``docs/qronos_vision.md``
+for the measurements and for what revisiting it would involve.
 """
 
 from __future__ import annotations
