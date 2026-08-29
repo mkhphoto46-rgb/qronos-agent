@@ -4,9 +4,8 @@ The same minute of a real machine, judged both ways.
 `tests/test_load_signal.py` proves the rules against readings invented to
 exercise them. This proves the same thing against readings nobody invented:
 sixty-two seconds recorded off the development machine on 2026-08-28 while its
-owner was working — ComfyUI holding most of the graphics card, a browser and a
-WebView alive, the GPU swinging between idle and pegged every couple of
-seconds.
+owner was working — another application holding most of the graphics card, and
+the GPU swinging between idle and pegged every couple of seconds.
 
 The point of keeping it as a file rather than a live measurement is that it is
 deterministic and runs anywhere, including the Linux CI machine that has no

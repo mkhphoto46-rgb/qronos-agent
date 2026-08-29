@@ -1,7 +1,7 @@
 {
   "recorded": "2026-08-28",
   "machine": "NVIDIA RTX 5080, 16303 MiB, Windows 11",
-  "note": "The user was working normally: ComfyUI holding most of the card, Chrome and a WebView active. Sampled every 2 seconds through the same readers core/load_signal.py uses.",
+  "note": "The user was working normally, with another application holding most of the card. Sampled every 2 seconds through the same readers core/load_signal.py uses.",
   "interval_seconds": 2.0,
   "samples": [
     {
