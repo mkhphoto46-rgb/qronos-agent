@@ -20,6 +20,7 @@ if hasattr(sys.stderr, "reconfigure"):
         errors="backslashreplace",
     )
 
+from core.action_audit import ActionAuditLog
 from core.audio_input import AudioInput
 from core.command_recorder import CommandRecorder
 from core.conversation_session import ConversationSession
@@ -29,6 +30,7 @@ from core.task_router import TaskRouter
 from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
+from security.gate import set_default_audit_sink
 from core.web_worker import WebResearchWorker
 
 
@@ -64,6 +66,7 @@ class QronosRuntime:
         self.command_recorder: CommandRecorder | None = None
         self.speech_runtime: WhisperCppRuntime | None = None
         self.task_router: TaskRouter | None = None
+        self.action_audit: ActionAuditLog | None = None
         self.orchestrator: Orchestrator | None = None
         self.conversation_session: ConversationSession | None = None
 
@@ -148,6 +151,15 @@ class QronosRuntime:
         )
         self.speech_runtime = speech_runtime
         self.task_router = TaskRouter()
+
+        # "Every decision is recorded" was true only in tests: the gate's
+        # default sink was installed by the test suite and by nobody else, so
+        # an executor that omitted the audit argument in production produced
+        # no trail at all — silently, and indistinguishably from a call that
+        # was never made. The first thing that can capture the screen must not
+        # ship before this line exists.
+        self.action_audit = ActionAuditLog()
+        set_default_audit_sink(self.action_audit.record_verdict)
         self.orchestrator = Orchestrator()
         self.orchestrator.workers.register(
             WebResearchWorker(
@@ -185,7 +197,7 @@ class QronosRuntime:
         check survives the flag, and the caller already turns a RuntimeError
         into a ``runtime_error`` event the desktop displays.
 
-        This should be unreachable: ``prepare`` assigns all seven or raises.
+        This should be unreachable: ``prepare`` assigns all eight or raises.
         It stays because the cost of being wrong is a crash mid-utterance.
         """
         missing = [
@@ -196,6 +208,7 @@ class QronosRuntime:
                 "command_recorder",
                 "speech_runtime",
                 "task_router",
+                "action_audit",
                 "orchestrator",
                 "conversation_session",
             )

@@ -30,6 +30,8 @@ class ActionCategory(Enum):
     CONVERSATION = "conversation"
     SYSTEM_STATUS = "system_status"
     READ_NON_SENSITIVE = "read_non_sensitive"
+    READ_SCREEN = "read_screen"
+    WATCH_CAMERA = "watch_camera"
     OPEN_APPLICATION = "open_application"
     BROWSER_NAVIGATION = "browser_navigation"
     CREATE_OR_EDIT_FILE = "create_or_edit_file"
@@ -102,6 +104,34 @@ ACTION_POLICIES = {
         PermissionLevel.AUTO_ALLOW,
         True,
         "Read explicitly selected non-sensitive local information.",
+    ),
+    # Not READ_NON_SENSITIVE, which is auto-allowed. Nobody chooses what is on
+    # their screen at the moment somebody asks to look at it: a password
+    # manager may be open, or someone else's message, or a document that is
+    # not the user's to show. A spoken "yes" is consent given without being
+    # shown what is about to be looked at, so this is the tier that means
+    # "act only after showing exactly what will happen".
+    #
+    # Reversible in the sense the policy means — nothing on the machine
+    # changes. Nothing is written down either: a capture is held in memory,
+    # encoded, sent and dropped, and never reaches disk. That is a stronger
+    # guarantee than a retention period, and it needs no janitor to keep.
+    ActionCategory.READ_SCREEN: _policy(
+        ActionCategory.READ_SCREEN,
+        PermissionLevel.UI_CONFIRMATION,
+        True,
+        "Look at what is currently on the screen, once, after showing what "
+        "will be captured.",
+    ),
+    # Begin a watching session — not take a frame. See
+    # :mod:`security.watching` for why the session is the unit of consent and
+    # why that is not a sixth permission level.
+    ActionCategory.WATCH_CAMERA: _policy(
+        ActionCategory.WATCH_CAMERA,
+        PermissionLevel.UI_CONFIRMATION,
+        True,
+        "Begin a camera watching session that the user starts, can see "
+        "running, and can stop at any time.",
     ),
     ActionCategory.OPEN_APPLICATION: _policy(
         ActionCategory.OPEN_APPLICATION,

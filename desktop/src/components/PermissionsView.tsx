@@ -187,10 +187,12 @@ const permissionItems: PermissionItem[] = [
     description:
       "اجازه‌ی استفاده از Camera به Scope دستگاه وابسته است. Permission می‌تواند چند دوربین را پوشش دهد، اما هر Capture فقط یک Camera فعال دارد.",
     actions: [
-      "Camera Access — Always Ask",
+      "Start Watching — Always Ask",
       "Switch Camera — Always Ask",
       "Background Capture — Deny",
     ],
+    protectedNote:
+      "واحد اجازه، Session است نه Frame: کاربر آن را شروع می‌کند، تا وقتی فعال است Indicator دیده می‌شود، حداکثر ۱۰ دقیقه ادامه دارد و هر لحظه با یک عمل متوقف می‌شود. Capture بدون Indicator یا بدون شروع توسط کاربر، Hidden Surveillance است و رد می‌شود.",
   },
   {
     id: "screen",
@@ -206,6 +208,8 @@ const permissionItems: PermissionItem[] = [
       "Live Screen Context — Session",
       "Background Capture — Deny",
     ],
+    protectedNote:
+      "«Always Ask» یعنی UI Confirmation، نه تأیید صوتی: کسی که از Qronos می‌خواهد به صفحه نگاه کند، اول باید ببیند چه چیزی قرار است دیده شود. هیچ Capture‌ای روی دیسک نوشته نمی‌شود؛ در حافظه می‌ماند، ارسال می‌شود و دور ریخته می‌شود.",
   },
   {
     id: "clipboard",

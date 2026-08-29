@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from core.action_audit import ActionAuditLog
 from core.command_recorder import CommandRecordingResult
 from core.conversation_session import ConversationSession
 from core.orchestrator import StepResult
@@ -184,6 +185,11 @@ def prepared_runtime(
         temp_dir=temp_dir
     )
     runtime.task_router = TaskRouter()
+
+    # In memory: the trail is wired here for the same reason production wires
+    # it, but a unit test must not append to the user's real audit file.
+    runtime.action_audit = ActionAuditLog(path=None)
+
     runtime.orchestrator = orchestrator or FakeOrchestrator()
     runtime.conversation_session = ConversationSession(clock=FakeClock())
 

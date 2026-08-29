@@ -168,5 +168,65 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
                 self.assertTrue(reason.strip())
 
 
+class TestTheAuditTrailIsWiredInProduction(unittest.TestCase):
+    """
+    "Every decision is recorded" was a claim about the test suite.
+
+    ``set_default_audit_sink`` existed, worked, and was called from
+    ``tests/test_gate.py`` and from nowhere else. So in a real run the gate had
+    no default sink, and an executor that omitted the audit argument produced
+    no trail — silently, and indistinguishably from a call that was never made.
+
+    Static, like the rest of this file, because the alternative is starting the
+    voice runtime, which needs a microphone.
+    """
+
+    SINK_INSTALLER = "set_default_audit_sink"
+
+    def installers(self) -> tuple[str, ...]:
+        return tuple(
+            module_name(path)
+            for path in product_modules()
+            if self.SINK_INSTALLER in path.read_text(encoding="utf-8")
+        )
+
+    def test_something_outside_the_tests_installs_the_sink(self) -> None:
+        callers = [
+            name
+            for name in self.installers()
+            if name != GATE_MODULE
+        ]
+
+        self.assertTrue(
+            callers,
+            "Nothing in core/ or security/ installs the gate's default audit "
+            "sink, so in production no decision is recorded unless every "
+            "caller remembers to pass one.",
+        )
+
+    def test_the_runtime_bridge_installs_it_while_preparing(self) -> None:
+        # Specifically in prepare(), not at import: installing a sink as a
+        # side effect of importing a module would write to the user's audit
+        # file from any script that happened to import the bridge.
+        source = (ROOT / "core" / "runtime_bridge.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+
+        prepare = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "prepare"
+        )
+
+        called = {
+            node.func.id
+            for node in ast.walk(prepare)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        self.assertIn(self.SINK_INSTALLER, called)
+
+
 if __name__ == "__main__":
     unittest.main()
