@@ -195,26 +195,46 @@ class TestFailingQuietly(unittest.TestCase):
     A hint that throws is worse than a hint that is missing.
 
     The picture goes to the model regardless, so nothing is lost by having no
-    hint — and everything is lost by raising through the middle of a request
+    hint, and everything is lost by raising through the middle of a request
     somebody is waiting on. Each of these was a real way it could have.
+
+    ``available`` is patched alongside ``subprocess.run``, so the failure
+    handling is exercised on both CI platforms rather than only on Windows.
+    Without that, these ran on Linux, returned at the platform guard before
+    reaching anything they had patched, and passed by asserting the very thing
+    the guard already guarantees. The one test here with a specific assertion
+    is what caught the other two being vacuous.
     """
 
+    def on_a_machine_with_an_engine(self):
+        return patch("core.windows_ocr.available", return_value=True)
+
     def test_no_picture_is_a_reason_not_a_crash(self) -> None:
-        self.assertFalse(read(b"").ok)
+        with self.on_a_machine_with_an_engine():
+            reading = read(b"")
+
+        self.assertFalse(reading.ok)
+        self.assertIn("no picture", reading.reason.lower())
 
     def test_powershell_missing_is_a_reason(self) -> None:
-        with patch(
+        with self.on_a_machine_with_an_engine(), patch(
             "core.windows_ocr.subprocess.run",
             side_effect=FileNotFoundError("powershell.exe"),
         ):
-            self.assertFalse(read(b"\x89PNG").ok)
+            reading = read(b"\x89PNG")
+
+        self.assertFalse(reading.ok)
+        self.assertIn("powershell", reading.reason.lower())
 
     def test_powershell_hanging_is_a_reason(self) -> None:
-        with patch(
+        with self.on_a_machine_with_an_engine(), patch(
             "core.windows_ocr.subprocess.run",
             side_effect=subprocess.TimeoutExpired("powershell.exe", 20),
         ):
-            self.assertFalse(read(b"\x89PNG").ok)
+            reading = read(b"\x89PNG")
+
+        self.assertFalse(reading.ok)
+        self.assertIn("timed out", reading.reason.lower())
 
     def test_powershell_failing_carries_what_it_said(self) -> None:
         class Failed:
@@ -222,8 +242,26 @@ class TestFailingQuietly(unittest.TestCase):
             stdout = ""
             stderr = "Unable to find type [Windows.Globalization.Language]."
 
-        with patch("core.windows_ocr.subprocess.run", return_value=Failed()):
+        with self.on_a_machine_with_an_engine(), patch(
+            "core.windows_ocr.subprocess.run", return_value=Failed()
+        ):
             self.assertIn("Globalization", read(b"\x89PNG").reason)
+
+    def test_a_reply_that_is_not_json_is_a_reason(self) -> None:
+        """
+        PowerShell writes warnings to standard output given the chance, and a
+        warning in front of the JSON is not JSON.
+        """
+
+        class Chatty:
+            returncode = 0
+            stdout = "WARNING: something unrelated\n"
+            stderr = ""
+
+        with self.on_a_machine_with_an_engine(), patch(
+            "core.windows_ocr.subprocess.run", return_value=Chatty()
+        ):
+            self.assertIn("Unreadable", read(b"\x89PNG").reason)
 
     def test_the_adapter_turns_every_failure_into_no_hint(self) -> None:
         with patch("core.vision_ocr.read", side_effect=RuntimeError("boom")):
