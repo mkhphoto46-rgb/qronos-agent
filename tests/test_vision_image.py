@@ -399,5 +399,41 @@ class TestPreparing(unittest.TestCase):
             prepare(path)
 
 
+class TestAPictureCanCarryAReading(unittest.TestCase):
+    """
+    Text somebody else already read off this picture, riding with it.
+
+    It travels on the picture because that is what it is about, and because the
+    reading is made at a resolution the picture no longer has: OCR runs on the
+    full-size capture and the model is sent a 1280-pixel version.
+    """
+
+    def setUp(self) -> None:
+        self.folder = TemporaryDirectory()
+        self.root = Path(self.folder.name)
+        self.addCleanup(self.folder.cleanup)
+
+    def test_a_picture_carries_no_reading_by_default(self) -> None:
+        self.assertEqual(prepare_bytes(png_bytes(64, 64)).hint, "")
+
+    def test_a_reading_can_be_attached(self) -> None:
+        from dataclasses import replace
+
+        prepared = replace(prepare_bytes(png_bytes(64, 64)), hint="Saved.")
+
+        self.assertEqual(prepared.hint, "Saved.")
+
+    def test_the_repr_says_a_hint_is_there_without_printing_it(self) -> None:
+        from dataclasses import replace
+
+        prepared = replace(
+            prepare_bytes(png_bytes(64, 64)), hint="a very long reading " * 200
+        )
+
+        self.assertIn("hint", repr(prepared))
+        self.assertNotIn("a very long reading", repr(prepared))
+        self.assertLess(len(repr(prepared)), 200)
+
+
 if __name__ == "__main__":
     unittest.main()

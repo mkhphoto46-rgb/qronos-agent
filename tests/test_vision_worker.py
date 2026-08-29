@@ -477,5 +477,106 @@ class TestTheVisionModelIsDeclared(unittest.TestCase):
         )
 
 
+class TestTheOcrHint(VisionWorkerCase):
+    """
+    A reading somebody else made, offered to the model rather than trusted.
+
+    Why it exists at all is a measurement, not an assumption. On a single
+    dialog the model is exact and OCR is not, so the first answer was no. On a
+    4K desktop shrunk to what Qronos actually sends, the model reads the layout
+    perfectly and invents the numbers — 0.171 character error, none of three
+    error codes right — and the same picture with the hint attached scores
+    0.009. They fail in opposite directions, which is what makes one useful to
+    the other.
+    """
+
+    def hinted(self, hint: str):
+        from core.vision_image import prepare
+        from dataclasses import replace
+
+        return replace(prepare(self.picture), hint=hint)
+
+    def test_a_picture_with_no_hint_asks_exactly_what_it_used_to(self) -> None:
+        """
+        So a request without one is byte-identical to the request Qronos made
+        before hints existed.
+        """
+        worker = VisionWorker(describe_fn=self.describe())
+
+        step = self.step("What is on my screen?")
+
+        self.assertEqual(worker.hinted(step), "What is on my screen?")
+
+    def test_a_hint_reaches_the_prompt(self) -> None:
+        worker = VisionWorker(describe_fn=self.describe())
+
+        step = self.step(
+            "What is on my screen?",
+            images=(self.hinted("Error code: 0x8024402C"),),
+        )
+
+        self.assertIn("0x8024402C", worker.hinted(step))
+
+    def test_it_is_offered_as_a_hint_and_not_as_the_answer(self) -> None:
+        """
+        Every word of the preamble is doing something. "May contain mistakes"
+        and "reading order may be scrambled" are both true — measured — and
+        saying so is what makes the model reconcile the hint against the pixels
+        instead of copying it.
+        """
+        worker = VisionWorker(describe_fn=self.describe())
+
+        step = self.step(
+            "What is on my screen?",
+            images=(self.hinted("Error code: 0x8024402C"),),
+        )
+        prompt = worker.hinted(step)
+
+        self.assertIn("may contain mistakes", prompt)
+        self.assertIn("scrambled", prompt)
+        self.assertIn("higher resolution", prompt)
+
+    def test_hints_from_several_pictures_all_arrive(self) -> None:
+        worker = VisionWorker(describe_fn=self.describe())
+
+        step = self.step(
+            "Compare these.",
+            images=(self.hinted("first reading"), self.hinted("second reading")),
+        )
+        prompt = worker.hinted(step)
+
+        self.assertIn("first reading", prompt)
+        self.assertIn("second reading", prompt)
+
+    def test_a_hint_counts_against_the_context_budget(self) -> None:
+        """
+        A hint is text and text costs context. A full desktop reads as about a
+        thousand tokens — most of a picture again — and an overflowing context
+        does not fail loudly, it silently loses the beginning of the request.
+        """
+        worker = VisionWorker(describe_fn=self.describe(), context_tokens=2_000)
+
+        without = self.step("What?")
+        with_one = self.step("What?", images=(self.hinted("x" * 8_000),))
+
+        self.assertIsNone(worker._check_budget(without.images))
+        self.assertIsNotNone(worker._check_budget(with_one.images))
+
+    def test_the_picture_still_goes_with_the_hint(self) -> None:
+        """
+        Never a replacement. If the reading is wrong the model can still see
+        what is actually there.
+        """
+        worker = VisionWorker(describe_fn=self.describe())
+
+        picture = self.hinted("Error code: 0x8024402C")
+
+        worker.execute(self.step("What is on my screen?", images=(picture,)))
+
+        _, images = self.described[0]
+
+        self.assertEqual(images, (picture,))
+
+
 if __name__ == "__main__":
     unittest.main()

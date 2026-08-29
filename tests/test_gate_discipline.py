@@ -79,6 +79,9 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     "core.runtime_bridge": (
         "Reconfigures its own stdio streams."
     ),
+    "core.windows_ocr": (
+        "Runs PowerShell to reach Windows' text recogniser, which only reads."
+    ),
 }
 
 

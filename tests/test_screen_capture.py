@@ -425,6 +425,79 @@ class TestOffWindows(unittest.TestCase):
         self.assertTrue(screenless().health_check())
 
 
+class TestTheTextHint(unittest.TestCase):
+    """
+    The reading happens here because here is the only place the full-size
+    pixels exist.
+
+    By the time a picture reaches a model it has been shrunk to a 1280-pixel
+    long edge, and reading it at full size is the entire reason the hint is
+    worth having.
+    """
+
+    def test_no_reader_means_no_hint(self) -> None:
+        self.assertEqual(
+            screenless(64, 48, pixels=busy_pixels).capture(approved=True).image.hint,
+            "",
+        )
+
+    def test_a_reader_is_given_the_full_size_picture(self) -> None:
+        seen: list = []
+
+        def reader(png: bytes) -> str:
+            with Image.open(BytesIO(png)) as reopened:
+                seen.append(reopened.size)
+
+            return "some text"
+
+        ScreenCapture(
+            grab=fake_grab(2560, 1440, busy_pixels),
+            geometry_fn=fake_geometry(2560, 1440),
+            read_text=reader,
+        ).capture(approved=True)
+
+        self.assertEqual(seen, [(2560, 1440)])
+
+    def test_what_it_reads_rides_with_the_picture(self) -> None:
+        result = ScreenCapture(
+            grab=fake_grab(64, 48, busy_pixels),
+            geometry_fn=fake_geometry(64, 48),
+            read_text=lambda png: "Error code: 0x8024402C",
+        ).capture(approved=True)
+
+        self.assertEqual(result.image.hint, "Error code: 0x8024402C")
+
+    def test_a_reader_that_fails_does_not_fail_the_capture(self) -> None:
+        """
+        A hint that throws is worse than a hint that is missing. The picture is
+        going to the model either way.
+        """
+
+        def explodes(png: bytes) -> str:
+            raise RuntimeError("PowerShell is not on this machine.")
+
+        result = ScreenCapture(
+            grab=fake_grab(64, 48, busy_pixels),
+            geometry_fn=fake_geometry(64, 48),
+            read_text=explodes,
+        ).capture(approved=True)
+
+        self.assertEqual(result.image.hint, "")
+        self.assertTrue(result.image.data)
+
+    def test_a_blank_screen_is_not_read(self) -> None:
+        """Nothing to read, and a quarter of a second not to spend."""
+        called: list = []
+
+        ScreenCapture(
+            grab=fake_grab(64, 48),
+            geometry_fn=fake_geometry(64, 48),
+            read_text=lambda png: called.append(1) or "",
+        ).capture(approved=True)
+
+        self.assertEqual(called, [])
+
+
 @unittest.skipUnless(sys.platform == "win32", "GDI is a Windows thing.")
 class TestTheRealScreen(unittest.TestCase):
     """

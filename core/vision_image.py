@@ -74,6 +74,12 @@ class PreparedImage:
     #: True when the picture was shrunk on the way through.
     resized: bool = False
 
+    #: Text somebody else has already read off this picture, at a resolution
+    #: this one may no longer have. It rides with the picture because that is
+    #: what it is about — see ``core/windows_ocr.py`` for why it is worth
+    #: carrying, and why it is a hint rather than an answer.
+    hint: str = ""
+
     @property
     def tokens(self) -> int:
         """What this will cost the model's context, before any words."""
@@ -99,8 +105,9 @@ class PreparedImage:
         passed around as an object at all instead of only as a path.
         """
         where = "" if self.source is None else f", from {self.source.name}"
+        hint = f", with a {len(self.hint)}-character hint" if self.hint else ""
 
-        return f"PreparedImage({self.describe()}{where})"
+        return f"PreparedImage({self.describe()}{where}{hint})"
 
 
 def image_tokens(width: int, height: int) -> int:

@@ -126,6 +126,47 @@ DESCRIBE_INSTRUCTION = (
 )
 
 
+#: How a reading somebody else made is offered to the model.
+#:
+#: Every word of this is doing something. "May be wrong" and "reading order may
+#: be scrambled" are true — measured — and saying so is what makes the model
+#: reconcile the hint against the pixels rather than copy it. "At a higher
+#: resolution than you can see" is the reason to consult it at all, and is also
+#: true: the hint is read at full size and the picture is sent shrunk.
+HINT_PREAMBLE = (
+    "Another program read this image with optical character recognition and "
+    "produced the text below. It read the image at a higher resolution than "
+    "you can see, so it is worth checking against — especially for codes and "
+    "numbers. Its reading order may be scrambled and it may contain mistakes, "
+    "so trust your own eyes about what is where."
+)
+
+
+def with_hints(question: str, images: Sequence[object]) -> str:
+    """
+    The question, with anything already read off the pictures attached.
+
+    Unchanged when there is nothing to attach, so a request with no hint is
+    exactly the request Qronos made before hints existed.
+    """
+    hints = [
+        getattr(image, "hint", "")
+        for image in images
+        if getattr(image, "hint", "")
+    ]
+
+    if not hints:
+        return question
+
+    body = "\n\n".join(hints)
+
+    return (
+        f"{HINT_PREAMBLE}\n\n"
+        f"--- what the other program read ---\n{body}\n--- end ---\n\n"
+        f"{question}"
+    )
+
+
 def brain_describe_fn(
     runtime: BrainRuntime,
     model_name: str | None = None,
@@ -146,12 +187,16 @@ def brain_describe_fn(
     context = num_ctx if num_ctx is not None else profile.context_tokens
 
     def describe(question: str, images: Sequence[str]) -> str:
+        asked = with_hints(
+            f"{DESCRIBE_INSTRUCTION}\n\n{question}".strip(), images
+        )
+
         answer = runtime.chat(
             model_name=name,
             messages=[
                 BrainMessage(
                     role=BrainMessageRole.USER,
-                    content=f"{DESCRIBE_INSTRUCTION}\n\n{question}".strip(),
+                    content=asked,
                     images=tuple(images),
                 )
             ],
@@ -301,7 +346,15 @@ class VisionWorker(TaskWorker):
         loses the beginning of itself, and what gets lost first is the
         instruction telling the model what to do.
         """
-        total = sum(cost(path) for path in images)
+        total = sum(cost(image) for image in images)
+
+        # A hint is text and text costs context. Roughly four characters to a
+        # token, which is close enough for a budget check: a full desktop reads
+        # as about 550 words, or some 900 tokens, which is most of a picture
+        # again and would silently overflow a 4,096-token context otherwise.
+        total += sum(
+            len(getattr(image, "hint", "")) // 4 for image in images
+        )
 
         if total + TEXT_ALLOWANCE_TOKENS <= self.context_tokens:
             return None
@@ -313,6 +366,10 @@ class VisionWorker(TaskWorker):
             f"{self.context_tokens - TEXT_ALLOWANCE_TOKENS}. Ask about fewer "
             "at a time."
         )
+
+    def hinted(self, step: PlanStep) -> str:
+        """The prompt this step would produce. Here so a test can read it."""
+        return with_hints(step.description, step.images)
 
     @staticmethod
     def _refuse(message: str) -> WorkerOutput:

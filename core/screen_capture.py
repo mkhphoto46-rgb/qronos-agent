@@ -55,6 +55,8 @@ import sys
 from dataclasses import dataclass
 from typing import Callable
 
+from dataclasses import replace
+
 from core.actions import ActionRequest
 from core.vision_image import PreparedImage, prepare_bytes
 from security.gate import AuditSink, evaluate
@@ -222,10 +224,18 @@ class ScreenCapture:
         grab: Callable[[int | None], tuple[bytes, int, int]] | None = None,
         geometry_fn: Callable[[], DisplayGeometry] | None = None,
         audit: AuditSink | None = None,
+        read_text: Callable[[bytes], str] | None = None,
     ) -> None:
         self._grab = grab if grab is not None else _grab_with_gdi
         self._geometry = geometry_fn if geometry_fn is not None else geometry
         self._audit = audit
+
+        # Optional, and it runs here rather than later because here is the only
+        # place the full-resolution pixels exist. By the time the picture
+        # reaches a model it has been shrunk to a 1280-pixel long edge, and
+        # reading it at full size is the entire reason the hint is worth
+        # having. See core/windows_ocr.py for the measurement.
+        self._read_text = read_text
 
     def health_check(self) -> bool:
         """True when a capture could be attempted. Starts nothing."""
@@ -272,13 +282,26 @@ class ScreenCapture:
                 "or may have closed."
             )
 
-        image = prepare_bytes(_encode_png(raw, width, height))
+        encoded = _encode_png(raw, width, height)
+        image = prepare_bytes(encoded)
+        blank = _looks_blank(image.data)
+
+        if self._read_text is not None and not blank:
+            try:
+                hint = self._read_text(encoded)
+            except Exception:
+                # A hint that throws is worse than a hint that is missing. The
+                # picture is going to the model either way.
+                hint = ""
+
+            if hint:
+                image = replace(image, hint=hint)
 
         return Capture(
             image=image,
             geometry=shape,
             window=window,
-            blank=_looks_blank(image.data),
+            blank=blank,
         )
 
 
