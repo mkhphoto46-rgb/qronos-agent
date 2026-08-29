@@ -920,6 +920,11 @@ pub fn run() {
                     runtime::start_runtime,
                     runtime::ping_runtime,
                     runtime::send_runtime_action,
+            runtime::queue_list,
+            runtime::queue_submit,
+            runtime::queue_cancel,
+            runtime::queue_override,
+            runtime::queue_set_paused,
                     runtime::stop_runtime
                 ],
             )

@@ -173,6 +173,7 @@ class ResourceGovernor:
         weight: Weight,
         activity_mode: ActivityMode = ActivityMode.NORMAL,
         resource_pressure: ResourcePressure = ResourcePressure.NORMAL,
+        decision: ResourceDecision | None = None,
     ) -> Grant:
         """
         Check and reserve in one step.
@@ -181,6 +182,22 @@ class ResourceGovernor:
         window in which a second heavy task is told yes on readings taken
         before the first one started, which is the failure the architecture
         calls out as mandatory to prevent.
+
+        ``decision`` lets a caller that has already judged the machine say so,
+        instead of having its judgement quietly overruled by one instantaneous
+        sample taken here.
+
+        That is not a convenience. The queue judges the machine over a window,
+        because a single reading of a working machine is close to meaningless —
+        on the development card the GPU signal crossed its own threshold
+        twenty-nine times in forty-five seconds. When the queue decided a task
+        could start and this method then took its own reading and refused, the
+        task went back to the queue, was admitted again, was refused again, and
+        span. That is not hypothetical: it was observed end to end, and nothing
+        could ever run.
+
+        The single-heavy-owner rule and the lease still apply either way. Those
+        are correctness, and no caller may waive them.
         """
         if not task_id.strip():
             raise ValueError("A reservation must name a task.")
@@ -198,11 +215,12 @@ class ResourceGovernor:
                 if refusal is not None:
                     return refusal
 
-            decision = evaluate_resources(
-                self.read_system(),
-                self.read_gpu(),
-                self.thresholds,
-            )
+            if decision is None:
+                decision = evaluate_resources(
+                    self.read_system(),
+                    self.read_gpu(),
+                    self.thresholds,
+                )
 
             if decision is ResourceDecision.BLOCK:
                 return Grant(

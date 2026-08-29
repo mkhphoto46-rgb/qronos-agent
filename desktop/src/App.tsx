@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -15,6 +16,11 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import SmartQueuePanel from "./components/SmartQueuePanel";
+import type {
+  QueueRefusal,
+  QueueSnapshot,
+} from "./components/SmartQueuePanel";
 import "./App.css";
 
 import ConversationSpine from "./components/ConversationSpine";
@@ -124,6 +130,34 @@ const subtitleByScenario: Record<
 };
 
 function App() {
+  // The queue. Whole state each time rather than a delta, with a revision to
+  // drop anything that arrives out of order — the bridge sends it that way
+  // because a delta stream cannot recover from one mangled line.
+  const [
+    queueSnapshot,
+    setQueueSnapshot,
+  ] = useState<QueueSnapshot | null>(
+    null,
+  );
+
+  const [
+    queueRefusal,
+    setQueueRefusal,
+  ] = useState<QueueRefusal | null>(
+    null,
+  );
+
+  // The status line's text comes from a scenario lookup and has no free-text
+  // channel. This is the only way in, and it is temporary by design: the
+  // queue is a thing that happened, not a mode Qronos is in.
+  const [
+    statusOverride,
+    setStatusOverride,
+  ] = useState<{
+    label: string;
+    subtitle: string;
+  } | null>(null);
+
   const [
     scenario,
     setScenario,
@@ -950,6 +984,67 @@ function App() {
                 );
                 break;
 
+              case "runtime_ready":
+                // Asking for the queue is also what starts it. Nothing is
+                // sampled or scheduled until somebody wants it.
+                void invoke(
+                  "queue_list",
+                ).catch(
+                  () => undefined,
+                );
+                break;
+
+              case "queue_changed":
+                try {
+                  const next = JSON.parse(
+                    event.payload.message,
+                  ) as QueueSnapshot;
+
+                  setQueueSnapshot(
+                    (current) =>
+                      current &&
+                      current.revision >
+                        next.revision
+                        ? current
+                        : next,
+                  );
+                } catch {
+                  // A queue we cannot read is better ignored than shown
+                  // wrongly; the next event carries the whole state again.
+                }
+                break;
+
+              case "queue_task_queued":
+                setStatusOverride({
+                  label:
+                    "کار سنگین نگه داشته شد",
+                  subtitle:
+                    "WORK QUEUED — MACHINE BUSY",
+                });
+
+                window.setTimeout(
+                  () => {
+                    setStatusOverride(
+                      null,
+                    );
+                  },
+                  6000,
+                );
+                break;
+
+              case "queue_override_refused":
+                try {
+                  setQueueRefusal(
+                    JSON.parse(
+                      event.payload
+                        .message,
+                    ) as QueueRefusal,
+                  );
+                } catch {
+                  // Same reasoning as above.
+                }
+                break;
+
               case "voice_turn_complete":
                 window.setTimeout(
                   () => {
@@ -1082,19 +1177,62 @@ function App() {
   const statusLabel =
     useMemo(
       () =>
+        statusOverride?.label ??
         statusByScenario[
           scenario
         ],
-      [scenario],
+      [
+        scenario,
+        statusOverride,
+      ],
     );
 
   const statusSubtitle =
     useMemo(
       () =>
+        statusOverride?.subtitle ??
         subtitleByScenario[
           scenario
         ],
-      [scenario],
+      [
+        scenario,
+        statusOverride,
+      ],
+    );
+
+  // Work waiting for the machine to free up. Drives the badge, so a queued
+  // task is visible without having to be on the permissions screen.
+  const waitingCount =
+    useMemo(
+      () =>
+        (
+          queueSnapshot?.tasks ?? []
+        ).filter(
+          (task) =>
+            task.state ===
+              "queued" ||
+            task.state === "paused",
+        ).length,
+      [queueSnapshot],
+    );
+
+  const sendQueueCommand =
+    useCallback(
+      (
+        command: string,
+        args: Record<
+          string,
+          unknown
+        > = {},
+      ) => {
+        void invoke(
+          command,
+          args,
+        ).catch(
+          () => undefined,
+        );
+      },
+      [],
     );
 
   useEffect(() => {
@@ -1454,6 +1592,41 @@ function App() {
       />
 
       <PermissionsView
+        smartQueue={
+          <SmartQueuePanel
+            snapshot={
+              queueSnapshot
+            }
+            refusal={
+              queueRefusal
+            }
+            onOverride={(
+              taskId,
+            ) =>
+              sendQueueCommand(
+                "queue_override",
+                { taskId },
+              )
+            }
+            onCancel={(taskId) =>
+              sendQueueCommand(
+                "queue_cancel",
+                { taskId },
+              )
+            }
+            onTogglePaused={(
+              paused,
+            ) =>
+              sendQueueCommand(
+                "queue_set_paused",
+                { paused },
+              )
+            }
+            onDismissRefusal={() =>
+              setQueueRefusal(null)
+            }
+          />
+        }
         phase={
           settingsEntrySource === "permissions" &&
           viewPhase === "entering-settings"
@@ -1579,13 +1752,6 @@ function App() {
             </svg>
           </span>
 
-          <span
-            className="nav-notification-badge"
-            aria-label="3 اعلان جدید"
-          >
-            3
-          </span>
-
           <span>
             گفتگوها
           </span>
@@ -1663,6 +1829,15 @@ function App() {
               />
             </svg>
           </span>
+
+          {waitingCount > 0 && (
+            <span
+              className="nav-notification-badge"
+              aria-label={`${waitingCount} کار در انتظار`}
+            >
+              {waitingCount}
+            </span>
+          )}
 
           <span>
             مجوزها

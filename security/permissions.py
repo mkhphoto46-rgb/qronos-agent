@@ -177,9 +177,11 @@ ACTION_POLICIES = {
     ),
     ActionCategory.CODE_ANALYSIS: _policy(
         ActionCategory.CODE_ANALYSIS,
-        PermissionLevel.FORBIDDEN,
-        False,
-        "Analyze source code, scripts, binaries, or exploit behavior.",
+        PermissionLevel.AUTO_ALLOW,
+        True,
+        "Read and analyze existing source code, scripts, errors, tracebacks, "
+        "binaries, or program behavior without generating, modifying, or "
+        "executing code.",
     ),
     ActionCategory.CODE_MODIFICATION: _policy(
         ActionCategory.CODE_MODIFICATION,

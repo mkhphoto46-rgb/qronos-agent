@@ -4989,3 +4989,23 @@
 .permissions-back {
   top: -39px !important;
 }
+
+/* Shown when the audit trail has nothing in it, which is the honest state
+   until core/action_audit.py is exposed to the interface. The panel used to
+   be filled with invented history instead. */
+.permissions-security-activity-empty {
+  display: grid;
+  gap: 6px;
+  padding: 22px 18px;
+  color: rgba(194, 221, 231, 0.66);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.permissions-security-activity-empty span {
+  color: rgba(120, 152, 166, 0.72);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}

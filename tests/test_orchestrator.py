@@ -206,7 +206,10 @@ class TestOrchestrator(unittest.TestCase):
                 "TEST_STEP_ONE",
                 "TEST_STEP_TWO",
             ],
-        ) as mock_chat:
+        ) as mock_chat, patch.object(
+            self.orchestrator.ollama,
+            "stop_model",
+        ) as mock_stop:
 
             mock_detect.return_value = self._make_state(
                 ActivityMode.NORMAL,
@@ -231,6 +234,11 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual(
             mock_chat.call_count,
+            2,
+        )
+
+        self.assertEqual(
+            mock_stop.call_count,
             2,
         )
 
@@ -360,8 +368,16 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("block", results[0].error.lower())
         mock_chat.assert_not_called()
 
-    def test_normal_fast_brain_can_stay_warm(self) -> None:
-        plan = TaskPlan(goal="Warm fast brain test")
+    def test_the_fast_brain_is_unloaded_even_when_nothing_is_wrong(self) -> None:
+        """
+        The one case that used to keep a model in VRAM, and no longer does.
+
+        Normal activity, normal pressure, a short Fast turn: the conditions
+        the old ten-minute keep-alive was written for. Qronos now gives the
+        card back after every answer without exception, so this asserts the
+        absence of a special case rather than the presence of one.
+        """
+        plan = TaskPlan(goal="Fast brain unload test")
 
         plan.add_step(
             TaskType.FAST,
@@ -397,7 +413,7 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual(
             mock_chat.call_args.kwargs["keep_alive"],
-            "10m",
+            "0",
         )
         self.assertFalse(
             mock_chat.call_args.kwargs["think"],
@@ -407,7 +423,9 @@ class TestOrchestrator(unittest.TestCase):
             256,
         )
 
-        mock_stop.assert_not_called()
+        mock_stop.assert_called_once_with(
+            "qwen3:4b-instruct",
+        )
 
     def test_normal_heavy_brain_thinks_and_unloads(self) -> None:
         plan = TaskPlan(goal="Heavy reasoning test")
@@ -538,7 +556,6 @@ class TestOrchestrator(unittest.TestCase):
                 {
                     "decision": ResourceDecision.WARN,
                     "model": get_model("fast"),
-                    "keep_loaded": False,
                 },
             )
 
@@ -548,7 +565,6 @@ class TestOrchestrator(unittest.TestCase):
                 {
                     "decision": ResourceDecision.ALLOW,
                     "model": get_model("fast"),
-                    "keep_loaded": True,
                 },
             )
 

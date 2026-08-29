@@ -209,6 +209,206 @@ class TestActions(BridgeProcessTestCase):
         self.assertIsNotNone(self.bridge.read_until("runtime_error"))
 
 
+class QueueBridgeTestCase(BridgeProcessTestCase):
+    """A bridge with the queue scheduler genuinely running behind it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+
+        # queue_list is what builds and starts the scheduler. Every test below
+        # needs that thread to actually exist, or it would be asserting
+        # against a bridge that never started one.
+        self.bridge.send({"command": "queue_list"})
+        self.assertIsNotNone(
+            self.bridge.read_until("queue_changed", timeout=60.0),
+            "the bridge never sent a queue",
+        )
+
+    def queue(self, timeout: float = REPLY_TIMEOUT) -> dict:
+        event = self.bridge.read_until("queue_changed", timeout=timeout)
+
+        self.assertIsNotNone(event, "no queue arrived")
+
+        return json.loads(event["message"])
+
+
+class TestTheQueueSurvivesShutdown(QueueBridgeTestCase):
+    """
+    The regressions first, because they are what a new thread endangers.
+
+    A background thread that writes to stdout can outlive main() by a few
+    milliseconds. If it does, the write raises, the exception reaches
+    threading.excepthook, and a traceback lands on stderr — which the desktop
+    reads as a crash and reports to the user as one.
+    """
+
+    def test_it_still_acknowledges_and_exits(self) -> None:
+        self.bridge.send({"command": "shutdown"})
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_stopping"))
+        self.assertEqual(self.bridge.process.wait(timeout=30), 0)
+
+    def test_a_closed_stdin_still_ends_it(self) -> None:
+        assert self.bridge.process.stdin is not None
+        self.bridge.process.stdin.close()
+
+        self.assertEqual(self.bridge.process.wait(timeout=30), 0)
+
+    def test_it_still_writes_nothing_to_stderr(self) -> None:
+        self.bridge.send({"command": "shutdown"})
+        self.bridge.process.wait(timeout=30)
+
+        assert self.bridge.process.stderr is not None
+
+        self.assertEqual(self.bridge.process.stderr.read().strip(), "")
+
+
+class TestTheQueueProtocol(QueueBridgeTestCase):
+    def test_an_empty_queue_comes_back_empty(self) -> None:
+        self.bridge.send({"command": "queue_list"})
+
+        self.assertEqual(self.queue()["tasks"], [])
+
+    def test_the_queue_carries_a_revision_and_a_level(self) -> None:
+        self.bridge.send({"command": "queue_list"})
+        queue = self.queue()
+
+        self.assertIn("revision", queue)
+        self.assertIn(queue["level"], ("unknown", "free", "busy"))
+
+    def test_a_submitted_task_appears(self) -> None:
+        self.bridge.send(
+            {
+                "command": "queue_submit",
+                "summary": "analyse the quarterly numbers",
+                "weight": "heavy",
+            }
+        )
+
+        tasks = self.queue()["tasks"]
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["summary"], "analyse the quarterly numbers")
+        self.assertEqual(tasks[0]["weight"], "heavy")
+
+    def test_submitting_announces_it_separately(self) -> None:
+        # The interface has to be told once, plainly, that work was held —
+        # not left to notice a new row in a list it may not be showing.
+        self.bridge.send(
+            {"command": "queue_submit", "summary": "something heavy"}
+        )
+
+        self.assertIsNotNone(self.bridge.read_until("queue_task_queued"))
+
+    def test_every_queue_event_is_one_line(self) -> None:
+        # The Rust reader splits on newlines. An event spanning two lines
+        # would arrive as two unparseable halves.
+        self.bridge.send({"command": "queue_submit", "summary": "one line"})
+        event = self.bridge.read_until("queue_changed")
+
+        self.assertEqual(len(json.dumps(event).splitlines()), 1)
+
+    def test_the_message_is_parseable_json(self) -> None:
+        self.bridge.send({"command": "queue_list"})
+        event = self.bridge.read_until("queue_changed")
+
+        self.assertIsInstance(json.loads(event["message"]), dict)
+
+    def test_a_cancelled_task_leaves_the_waiting_list(self) -> None:
+        self.bridge.send(
+            {
+                "command": "queue_submit",
+                "summary": "cancel me",
+                "weight": "heavy",
+            }
+        )
+        task_id = self.queue()["tasks"][0]["taskId"]
+
+        self.bridge.send({"command": "queue_cancel", "taskId": task_id})
+        states = {task["state"] for task in self.queue()["tasks"]}
+
+        self.assertNotIn("queued", states)
+
+    def test_pausing_is_reflected_in_the_queue(self) -> None:
+        self.bridge.send({"command": "queue_set_paused", "paused": True})
+
+        self.assertTrue(self.queue()["paused"])
+
+
+class TestBadQueueInput(QueueBridgeTestCase):
+    """
+    Every one of these arrives over a pipe from another process.
+
+    None may kill the reader loop, and none may be quietly accepted.
+    """
+
+    def test_a_cancel_with_no_task_id_is_an_error(self) -> None:
+        self.bridge.send({"command": "queue_cancel"})
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_error"))
+        self.assertIsNone(self.bridge.process.poll())
+
+    def test_an_override_of_an_unknown_task_is_survivable(self) -> None:
+        self.bridge.send({"command": "queue_override", "taskId": "q-nothing"})
+        self.bridge.send({"command": "ping"})
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_pong"))
+
+    def test_an_unknown_weight_is_rejected(self) -> None:
+        self.bridge.send(
+            {"command": "queue_submit", "summary": "x", "weight": "enormous"}
+        )
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_error"))
+
+    def test_an_empty_summary_is_rejected(self) -> None:
+        self.bridge.send({"command": "queue_submit", "summary": "   "})
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_error"))
+
+    def test_an_enormous_summary_is_rejected(self) -> None:
+        # An unbounded string arriving over a pipe is somebody else's memory
+        # to spend.
+        self.bridge.send({"command": "queue_submit", "summary": "x" * 5_000})
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_error"))
+
+    def test_a_non_boolean_pause_is_rejected(self) -> None:
+        self.bridge.send({"command": "queue_set_paused", "paused": "yes"})
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_error"))
+
+    def test_the_queue_still_answers_after_all_of_them(self) -> None:
+        for payload in (
+            {"command": "queue_cancel"},
+            {"command": "queue_submit", "summary": ""},
+            {"command": "queue_set_paused", "paused": 1},
+            {"command": "queue_override", "taskId": "  "},
+        ):
+            self.bridge.send(payload)
+
+        self.bridge.send({"command": "queue_list"})
+
+        self.assertIsNotNone(self.bridge.read_until("queue_changed"))
+        self.assertIsNone(self.bridge.process.poll())
+
+
+class TestNothingHappensUntilAsked(BridgeProcessTestCase):
+    """
+    A bridge nobody has spoken to must do nothing at all.
+
+    This is why the scheduler is built on first use rather than at startup: a
+    sampler thread launching nvidia-smi every two seconds is a side effect,
+    and a freshly started bridge is supposed to have none.
+    """
+
+    def test_a_fresh_bridge_answers_a_ping_and_nothing_else(self) -> None:
+        self.bridge.send({"command": "ping"})
+        event = self.bridge.read_event()
+
+        self.assertEqual(event["eventType"], "runtime_pong")
+
+
 class TestShutdown(BridgeProcessTestCase):
     def test_it_acknowledges_and_exits(self) -> None:
         self.bridge.send({"command": "shutdown"})

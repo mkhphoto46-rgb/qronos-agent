@@ -28,7 +28,9 @@ from __future__ import annotations
 
 from typing import Callable
 
+from core.brain_runtime import BrainRuntime
 from core.persian_text import contains_marker, normalise
+from core.web_answer import ANSWER_SCHEMA
 from core.task_plan import PlanStep
 from core.task_router import TaskType
 from core.web_query import PrivacyGateError, build_query
@@ -86,6 +88,34 @@ def is_interactive_request(text: str) -> bool:
     """
     return contains_marker(normalise(text).lower(), _INTERACTIVE)
 
+
+def brain_answer_fn(
+    runtime: BrainRuntime,
+    model_name: str,
+    num_ctx: int | None = None,
+) -> Callable[[str], str]:
+    """
+    An answer function that returns the shape the validator requires.
+
+    The evidence prompt asks for a JSON object; this constrains generation
+    to :data:`core.web_answer.ANSWER_SCHEMA` as well, so the reply is that
+    object rather than a well-meant approximation of one.
+
+    Without the constraint the model answered in cited prose — correctly,
+    and usefully — and ``validate_response`` rejected all of it as
+    MALFORMED, so every lookup ended in "I could not find a clear answer".
+    """
+
+    def answer(prompt: str) -> str:
+        return runtime.chat(
+            model_name=model_name,
+            prompt=prompt,
+            num_predict=600,
+            num_ctx=num_ctx,
+            response_format=ANSWER_SCHEMA,
+        )
+
+    return answer
 
 class WebResearchWorker(TaskWorker):
     """

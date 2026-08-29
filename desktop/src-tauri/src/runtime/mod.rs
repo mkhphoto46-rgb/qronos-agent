@@ -189,14 +189,16 @@ fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
     });
 }
 
-fn write_runtime_command(
+/// Send one command to the runtime.
+///
+/// There used to be two of these: this one, which could only send a bare
+/// command, and a copy inside `send_runtime_action` that inlined the write so
+/// it could carry an argument. A third caller is where two copies quietly
+/// become two behaviours, so they are one function that takes a payload.
+fn write_runtime_payload(
     process: &mut RuntimeProcess,
-    command: &str,
+    payload: serde_json::Value,
 ) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "command": command
-    });
-
     writeln!(process.stdin, "{payload}")
         .map_err(|error| format!("Could not write to Qronos runtime: {error}"))?;
 
@@ -204,6 +206,45 @@ fn write_runtime_command(
         .stdin
         .flush()
         .map_err(|error| format!("Could not flush Qronos runtime command: {error}"))
+}
+
+fn write_runtime_command(
+    process: &mut RuntimeProcess,
+    command: &str,
+) -> Result<(), String> {
+    write_runtime_payload(process, serde_json::json!({ "command": command }))
+}
+
+/// Send a command to a runtime that may not be there.
+///
+/// Every queue command shares this shape: take the lock, complain clearly if
+/// nothing is running, write, flush. The answer arrives as an event rather
+/// than a return value, because a queue change concerns anybody looking at
+/// the queue and not only whoever pressed the button.
+fn send_to_runtime(
+    state: &State<'_, RuntimeManagerState>,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let mut guard = state
+        .process
+        .lock()
+        .map_err(|_| "Runtime manager lock failed.".to_string())?;
+
+    let process = guard
+        .as_mut()
+        .ok_or_else(|| "Qronos runtime is not running.".to_string())?;
+
+    write_runtime_payload(process, payload)
+}
+
+fn require_task_id(task_id: &str) -> Result<&str, String> {
+    let cleaned = task_id.trim();
+
+    if cleaned.is_empty() {
+        return Err("A queue command needs a task id.".to_string());
+    }
+
+    Ok(cleaned)
 }
 
 pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -397,27 +438,94 @@ pub fn send_runtime_action(
         return Err("Runtime action id must not be empty.".to_string());
     }
 
-    let mut guard = state
-        .process
-        .lock()
-        .map_err(|_| "Runtime manager lock failed.".to_string())?;
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "action",
+            "actionId": cleaned
+        }),
+    )
+}
 
-    let process = guard
-        .as_mut()
-        .ok_or_else(|| "Qronos runtime is not running.".to_string())?;
+// ---------------------------------------------------------------------------
+// The smart queue.
+//
+// All fire-and-forget. Each resolves when the write succeeds, not when the
+// runtime has done anything, and the result comes back as a `queue_changed`
+// event — the same shape `send_runtime_action` has always had.
+// ---------------------------------------------------------------------------
 
-    let payload = serde_json::json!({
-        "command": "action",
-        "actionId": cleaned
-    });
+#[tauri::command]
+pub fn queue_list(state: State<'_, RuntimeManagerState>) -> Result<(), String> {
+    send_to_runtime(&state, serde_json::json!({ "command": "queue_list" }))
+}
 
-    writeln!(process.stdin, "{payload}")
-        .map_err(|error| format!("Could not write runtime action: {error}"))?;
+#[tauri::command(rename_all = "camelCase")]
+pub fn queue_submit(
+    summary: String,
+    weight: Option<String>,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let cleaned = summary.trim();
 
-    process
-        .stdin
-        .flush()
-        .map_err(|error| format!("Could not flush runtime action: {error}"))
+    if cleaned.is_empty() {
+        return Err("A queued task must say what it is.".to_string());
+    }
+
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "queue_submit",
+            "summary": cleaned,
+            "weight": weight.unwrap_or_else(|| "light".to_string())
+        }),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn queue_cancel(
+    task_id: String,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let cleaned = require_task_id(&task_id)?;
+
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "queue_cancel",
+            "taskId": cleaned
+        }),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn queue_override(
+    task_id: String,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let cleaned = require_task_id(&task_id)?;
+
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "queue_override",
+            "taskId": cleaned
+        }),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn queue_set_paused(
+    paused: bool,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "queue_set_paused",
+            "paused": paused
+        }),
+    )
 }
 
 #[tauri::command]
