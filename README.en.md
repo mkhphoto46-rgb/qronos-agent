@@ -118,7 +118,7 @@ What is in the repository today is only the **adapter code** (`core/openwakeword
          │      Intelligence core         │
          │  Task Router                   │
          │   ├── Deterministic (no LLM)   │
-         │   ├── Fast Brain  (warm)       │
+         │   ├── Fast Brain  (on-demand)  │
          │   └── Heavy Brain (on-demand)  │
          │  Planner · Orchestrator        │
          └────────────────┬───────────────┘

@@ -30,13 +30,43 @@ class TaskClass(Enum):
 
 @dataclass(frozen=True)
 class ModelSelection:
+    """
+    Which model to run, and whether the machine has room to run it.
+
+    There is deliberately no "keep this one loaded" field. Nothing Qronos
+    loads stays loaded: every model is unloaded as soon as it has answered.
+    See :class:`ModelManager` for the measurements behind that.
+    """
+
     model: ModelProfile
     decision: ResourceDecision
-    keep_loaded: bool
 
 
 class ModelManager:
-    """Choose models while respecting activity and resource pressure."""
+    """
+    Choose models while respecting activity and resource pressure.
+
+    Models are on demand, without exception. The Fast Brain used to be kept
+    warm for ten minutes after answering, on the reasoning that loading is
+    what makes a voice assistant feel slow. Measured on the development card,
+    that trade does not pay for itself:
+
+        Fast Brain, 8,192-token context, measured 2026-08-28
+            resident                3,442 MiB, permanently
+            saved per turn          about 1.7 s
+            whole turn, loaded      2.5 s
+            whole turn, from cold   4.2 s
+
+    Three and a half gigabytes held continuously, so that an occasional turn
+    is under two seconds quicker, is not a good use of somebody else's
+    graphics card. It is also the difference between Qronos owning a fifth of
+    a 16 GB card at rest and owning none of it.
+
+    The saving is smaller than it looks, too, because the operating system
+    caches the weights file in RAM. The 1.7 s above is a copy from memory
+    onto the card. Only the first load after a restart reads the disk, and no
+    keep-alive policy helps with that one.
+    """
 
     def __init__(
         self,
@@ -83,16 +113,9 @@ class ModelManager:
         ):
             decision = ResourceDecision.BLOCK
 
-        keep_loaded = self._should_keep_loaded(
-            task_class=task_class,
-            activity_mode=activity_mode,
-            resource_pressure=resource_pressure,
-        )
-
         return ModelSelection(
             model=model,
             decision=decision,
-            keep_loaded=keep_loaded,
         )
 
     def can_start(
@@ -133,26 +156,6 @@ class ModelManager:
             ActivityMode.CREATOR_ASSIST,
             ActivityMode.CREATOR_PERFORMANCE,
         }
-
-    @staticmethod
-    def _should_keep_loaded(
-        task_class: TaskClass,
-        activity_mode: ActivityMode,
-        resource_pressure: ResourcePressure,
-    ) -> bool:
-        if task_class is not TaskClass.FAST:
-            return False
-
-        if activity_mode is not ActivityMode.NORMAL:
-            return False
-
-        if (
-            resource_pressure
-            is not ResourcePressure.NORMAL
-        ):
-            return False
-
-        return True
 
 
 if __name__ == "__main__":

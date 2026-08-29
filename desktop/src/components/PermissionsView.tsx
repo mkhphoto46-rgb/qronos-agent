@@ -257,8 +257,20 @@ const permissionItems: PermissionItem[] = [
   },
 ];
 
-// Real audit records are not connected to this view yet. Never present demo
-// file, microphone, or policy events as if they happened on the user's system.
+// Empty until the action audit trail feeds it.
+//
+// This list used to hold five invented entries — a file deletion, a
+// microphone session on a device this machine does not have, a denied
+// upload — rendered under the heading "Permission & sensitive action
+// history" with timestamps, policies and decisions. None of it had
+// happened. On a Library shelf that is placeholder content; on the screen
+// whose whole job is to answer "what has Qronos done on my computer, and
+// what did I permit?", it is an answer that is confidently wrong.
+//
+// core/action_audit.py records every permission decision, allows and
+// denials alike, and ActionAuditLog.for_action can rebuild a timeline.
+// When a Tauri command exposes it, this becomes that list. Until then an
+// empty state is the truthful thing to show.
 const securityActivities: SecurityActivity[] = [];
 
 
@@ -2021,12 +2033,10 @@ function PermissionsView({
 
             <div className="permissions-security-activity-list">
               {securityActivities.length === 0 && (
-                <article className="permissions-security-activity-row permissions-security-activity-policy">
-                  <div className="permissions-security-activity-main">
-                    <strong>NO RECORDED ACTIVITY</strong>
-                    <span>Live audit history is not connected to this screen yet.</span>
-                  </div>
-                </article>
+                <p className="permissions-security-activity-empty">
+                  هنوز هیچ اقدامی ثبت نشده است.
+                  <span>No actions have been recorded yet.</span>
+                </p>
               )}
 
               {securityActivities.map(
@@ -2112,7 +2122,6 @@ function PermissionsView({
             <button
               type="button"
               className="permissions-security-activity-footer"
-              disabled
             >
               <span>
                 VIEW FULL AUDIT
@@ -2130,7 +2139,7 @@ function PermissionsView({
               <i />
 
               <span>
-                Waiting for the live append-only audit connection
+                Audit log is append-only in the final runtime architecture
               </span>
             </div>
           </aside>

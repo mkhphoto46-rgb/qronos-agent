@@ -46,7 +46,6 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(result.model.name, "qwen3:4b-instruct")
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
-        self.assertTrue(result.keep_loaded)
 
     def test_heavy_model_selection(self) -> None:
         result = self.manager.select_model(
@@ -57,7 +56,6 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(result.model.name, "qwen3:14b")
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
-        self.assertFalse(result.keep_loaded)
 
     def test_heavy_model_blocked_when_vram_is_critical(self) -> None:
         result = self.manager.select_model(
@@ -114,7 +112,6 @@ class TestModelManager(unittest.TestCase):
         )
 
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
-        self.assertFalse(result.keep_loaded)
 
     def test_gaming_performance_blocks_heavy_model(self) -> None:
         result = self.manager.select_model(
@@ -155,25 +152,6 @@ class TestModelManager(unittest.TestCase):
         )
 
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
-        self.assertFalse(result.keep_loaded)
-
-    def test_idle_mode_does_not_keep_models_loaded(self) -> None:
-        fast = self.manager.select_model(
-            TaskClass.FAST,
-            self.make_system(),
-            self.make_gpu(),
-            ActivityMode.IDLE,
-        )
-
-        heavy = self.manager.select_model(
-            TaskClass.HEAVY,
-            self.make_system(),
-            self.make_gpu(),
-            ActivityMode.IDLE,
-        )
-
-        self.assertFalse(fast.keep_loaded)
-        self.assertFalse(heavy.keep_loaded)
 
     def test_high_pressure_blocks_heavy_model(self) -> None:
         result = self.manager.select_model(
@@ -200,7 +178,6 @@ class TestModelManager(unittest.TestCase):
             result.decision,
             ResourceDecision.BLOCK,
         )
-        self.assertFalse(result.keep_loaded)
 
     def test_critical_pressure_blocks_heavy_model(self) -> None:
         result = self.manager.select_model(
@@ -227,9 +204,16 @@ class TestModelManager(unittest.TestCase):
             result.decision,
             ResourceDecision.BLOCK,
         )
-        self.assertFalse(result.keep_loaded)
 
-    def test_normal_pressure_keeps_fast_brain_warm(self) -> None:
+    def test_a_selection_cannot_ask_for_a_model_to_be_kept_loaded(self) -> None:
+        """
+        Nothing Qronos loads stays loaded.
+
+        The Fast Brain used to be kept warm for ten minutes under exactly
+        these conditions — normal activity, normal pressure. It is not any
+        more, and the way to be sure is that there is no longer a field to
+        say so: a caller cannot resurrect the behaviour by setting a flag.
+        """
         result = self.manager.select_model(
             TaskClass.FAST,
             self.make_system(),
@@ -238,29 +222,8 @@ class TestModelManager(unittest.TestCase):
             ResourcePressure.NORMAL,
         )
 
-        self.assertTrue(result.keep_loaded)
+        self.assertFalse(hasattr(result, "keep_loaded"))
 
-    def test_high_pressure_does_not_keep_fast_brain_warm(self) -> None:
-        result = self.manager.select_model(
-            TaskClass.FAST,
-            self.make_system(),
-            self.make_gpu(),
-            ActivityMode.NORMAL,
-            ResourcePressure.HIGH,
-        )
-
-        self.assertFalse(result.keep_loaded)
-
-    def test_critical_pressure_does_not_keep_fast_brain_warm(self) -> None:
-        result = self.manager.select_model(
-            TaskClass.FAST,
-            self.make_system(),
-            self.make_gpu(),
-            ActivityMode.NORMAL,
-            ResourcePressure.CRITICAL,
-        )
-
-        self.assertFalse(result.keep_loaded)
 
 
 if __name__ == "__main__":

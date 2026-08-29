@@ -5,7 +5,13 @@ import unittest
 from core.orchestrator import Orchestrator
 from core.task_plan import PlanStep, TaskPlan
 from core.task_router import TaskType
+from core.web_answer import (
+    ANSWER_SCHEMA,
+    SYSTEM_PROMPT_EN,
+    SYSTEM_PROMPT_FA,
+)
 from core.web_worker import (
+    brain_answer_fn,
     REFUSAL_MESSAGE,
     WebResearchWorker,
     is_interactive_request,
@@ -219,3 +225,60 @@ class TestHealthCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheAnswerFormatIsEnforced(unittest.TestCase):
+    """
+    The prompt and the validator have to agree, and they did not.
+
+    `validate_response` calls `json.loads` and requires an object shaped
+    `{"answered", "answer", "claims": [{"statement", "citations"}]}`. The
+    prompt described those fields in English prose and never used the word
+    JSON, so a model doing exactly as asked produced cited prose that was
+    rejected as MALFORMED — and every real lookup ended in "I could not find
+    a clear answer", however good the search had been.
+
+    Two halves to the fix, and both are checked here: the prompt states the
+    contract, and a runtime that supports structured output is given the
+    schema so the shape is enforced rather than requested.
+    """
+
+    def test_both_prompts_ask_for_json(self) -> None:
+        for name, prompt in (
+            ("english", SYSTEM_PROMPT_EN),
+            ("persian", SYSTEM_PROMPT_FA),
+        ):
+            with self.subTest(prompt=name):
+                self.assertIn("JSON", prompt)
+
+    def test_both_prompts_name_every_required_field(self) -> None:
+        for name, prompt in (
+            ("english", SYSTEM_PROMPT_EN),
+            ("persian", SYSTEM_PROMPT_FA),
+        ):
+            for field in ("answered", "answer", "claims", "citations"):
+                with self.subTest(prompt=name, field=field):
+                    self.assertIn(field, prompt)
+
+    def test_the_answer_function_constrains_the_reply(self) -> None:
+        captured: dict = {}
+
+        class RecordingRuntime:
+            def chat(self, **kwargs):
+                captured.update(kwargs)
+                return "{}"
+
+        brain_answer_fn(RecordingRuntime(), "some-model", num_ctx=8192)("p")
+
+        self.assertIs(captured["response_format"], ANSWER_SCHEMA)
+        self.assertEqual(captured["num_ctx"], 8192)
+
+    def test_the_schema_matches_what_the_validator_requires(self) -> None:
+        # If these drift apart the model is constrained to the wrong shape,
+        # which fails exactly as silently as no constraint at all.
+        self.assertEqual(
+            set(ANSWER_SCHEMA["required"]),
+            {"answered", "answer", "claims"},
+        )
+        claim = ANSWER_SCHEMA["properties"]["claims"]["items"]
+        self.assertEqual(set(claim["required"]), {"statement", "citations"})

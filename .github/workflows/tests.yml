@@ -1,18 +1,17 @@
 name: Qronos Tests
 
 on:
+  # Every branch. The list used to name five prefixes, so a branch called
+  # anything else pushed twenty commits without a single check running and
+  # nothing said so. A branch that costs nothing to test should be tested.
   push:
     branches:
-      - main
-      - "feature/**"
-      - "fix/**"
-      - "refactor/**"
-      - "security/**"
-      - "test/**"
+      - "**"
 
   pull_request:
     branches:
       - main
+      - "feature/**"
 
 permissions:
   contents: read
