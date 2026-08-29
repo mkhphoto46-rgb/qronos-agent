@@ -223,5 +223,226 @@ class TestPrivateDataStaysOut(unittest.TestCase):
                 self.assertIn(directory, ignored)
 
 
+
+# ---------------------------------------------------------------------------
+# Nothing from the machine that wrote the code.
+# ---------------------------------------------------------------------------
+
+#: Patterns that mean somebody's own computer has leaked into the repository.
+#:
+#: Written as fragments rather than whole paths because the interesting failure
+#: is a half-path in a docstring or a commit-message-shaped comment, not a
+#: tidy absolute path somebody would have noticed.
+PRIVATE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("c:\\users\\", "a Windows home directory"),
+    ("/c/users/", "a Windows home directory, in POSIX form"),
+    ("c:/users/", "a Windows home directory, with forward slashes"),
+    ("/users/", "a macOS or Linux home directory"),
+    ("\\appdata\\", "a Windows AppData path"),
+    ("/appdata/", "a Windows AppData path"),
+    ("onedrive", "a personal cloud folder"),
+)
+
+#: Files that may legitimately contain a home path, with the reason.
+#:
+#: Kept deliberately short. An entry here is a promise that a reader has looked
+#: at the line and decided it names nobody.
+#: Applications whose presence would say what is installed on the machine the
+#: code was written on.
+#:
+#: An explicit list rather than a rule, because nothing can tell "this
+#: developer happens to run a 3D slicer" from "Qronos integrates with this"
+#: except knowing which is which. Everything Qronos genuinely depends on —
+#: Ollama, Chrome, Tauri, whisper.cpp, CrispASR — is deliberately absent, and
+#: naming those is correct and expected.
+#:
+#: When something here becomes a real integration, delete it from this list
+#: rather than excepting the file that mentions it.
+PERSONAL_SOFTWARE: tuple[str, ...] = (
+    "comfyui",
+    "bambu studio",
+    "bambulab",
+    "telegram desktop",
+    "shadowplay",
+    "signalrgb",
+    "rustdesk",
+)
+
+PRIVATE_PATTERN_EXCEPTIONS: dict[str, str] = {
+    "tests/test_release_hygiene.py": (
+        "This file lists the patterns it looks for."
+    ),
+    "tests/test_link_server.py": (
+        "Fabricates a path-shaped exception message to prove the link server "
+        "does not forward one to a phone. The path names nobody, and making "
+        "it unrealistic would weaken the test it exists for."
+    ),
+}
+
+
+def text_files() -> tuple[Path, ...]:
+    """Every tracked text file worth reading, excluding what does not ship."""
+
+    skip_directories = {
+        ".git",
+        ".venv",
+        "node_modules",
+        "__pycache__",
+        "target",
+        "dist",
+        "runtime",
+        "temp",
+        # Tauri regenerates this on every build and none of it is tracked.
+        # Its schemas quote example URLs that look like home paths.
+        "gen",
+    }
+    suffixes = {
+        ".py", ".md", ".txt", ".json", ".toml", ".yml", ".yaml",
+        ".rs", ".ts", ".tsx", ".js", ".css", ".html", ".ps1", ".sh",
+    }
+
+    found: list[Path] = []
+
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in suffixes:
+            continue
+
+        if skip_directories & set(path.relative_to(ROOT).parts):
+            continue
+
+        found.append(path)
+
+    return tuple(found)
+
+
+class TestNothingPersonalIsCommitted(unittest.TestCase):
+    """
+    The repository must not describe the machine it was written on.
+
+    This is not hypothetical tidiness. Three commits in this project's history
+    carried a home directory and a Windows account name, and two files named
+    the application that happened to be using the graphics card while a
+    measurement was taken. All four were written by someone documenting real
+    numbers carefully — which is exactly how it happens, because the detail
+    feels like evidence at the time.
+
+    Rewriting published history to remove them is disruptive and slow. Failing
+    a test before the commit is neither.
+    """
+
+    def test_no_tracked_file_names_somebodys_home_directory(self) -> None:
+        offences: list[str] = []
+
+        for path in text_files():
+            relative = path.relative_to(ROOT).as_posix()
+
+            if relative in PRIVATE_PATTERN_EXCEPTIONS:
+                continue
+
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+
+            lowered = content.lower()
+
+            for pattern, description in PRIVATE_PATTERNS:
+                if pattern in lowered:
+                    line = next(
+                        (
+                            number
+                            for number, text in enumerate(
+                                content.splitlines(), start=1
+                            )
+                            if pattern in text.lower()
+                        ),
+                        0,
+                    )
+                    offences.append(
+                        f"{relative}:{line} contains {description} "
+                        f"({pattern!r})"
+                    )
+                    break
+
+        self.assertEqual(
+            offences,
+            [],
+            "These files describe the machine they were written on. Replace "
+            "the path with a placeholder, or an environment variable if it is "
+            "an instruction somebody will run:\n  "
+            + "\n  ".join(offences),
+        )
+
+    def test_no_tracked_file_names_the_authors_other_software(self) -> None:
+        """
+        What is installed on a developer's machine is nobody else's business.
+
+        The softer half of the same mistake. Recording that a measurement was
+        taken "while <some application> held the graphics card" feels like
+        diligence — it is the honest reason the number looked the way it did —
+        and it still tells a stranger what that person was running.
+
+        The measurement survives the fix intact. "Another application was
+        holding the card" carries every part of the meaning that mattered.
+        """
+        offences: list[str] = []
+
+        for path in text_files():
+            relative = path.relative_to(ROOT).as_posix()
+
+            if relative in PRIVATE_PATTERN_EXCEPTIONS:
+                continue
+
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+
+            lowered = content.lower()
+
+            for name in PERSONAL_SOFTWARE:
+                if name in lowered:
+                    line = next(
+                        (
+                            number
+                            for number, line_text in enumerate(
+                                content.splitlines(), start=1
+                            )
+                            if name in line_text.lower()
+                        ),
+                        0,
+                    )
+                    offences.append(f"{relative}:{line} names {name!r}")
+                    break
+
+        self.assertEqual(
+            offences,
+            [],
+            "These files name software that happens to be installed on "
+            "somebody's machine. Say what mattered about it instead, or if "
+            "Qronos now genuinely integrates with it, remove it from "
+            "PERSONAL_SOFTWARE:\n  " + "\n  ".join(offences),
+        )
+
+    def test_every_exception_still_exists(self) -> None:
+        # An exception for a file that has been deleted or renamed is a hole
+        # nobody is watching.
+        for relative in PRIVATE_PATTERN_EXCEPTIONS:
+            with self.subTest(path=relative):
+                self.assertTrue(
+                    (ROOT / relative).is_file(),
+                    f"{relative} is excepted from the private-path check but "
+                    "no longer exists.",
+                )
+
+    def test_every_exception_carries_a_reason(self) -> None:
+        for relative, reason in PRIVATE_PATTERN_EXCEPTIONS.items():
+            with self.subTest(path=relative):
+                self.assertTrue(
+                    reason.strip(),
+                    f"{relative} is excepted with no reason given.",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
