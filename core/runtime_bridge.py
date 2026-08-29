@@ -26,6 +26,7 @@ from core.conversation_session import ConversationSession
 from core.orchestrator import Orchestrator
 from core.task_plan import TaskPlan
 from core.task_router import TaskRouter
+from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
 from core.web_worker import WebResearchWorker
@@ -152,6 +153,18 @@ class QronosRuntime:
             WebResearchWorker(
                 answer_fn=self.orchestrator.answer_web_prompt,
             )
+        )
+
+        # Vision is reachable from here on. It is given the orchestrator's own
+        # runtime rather than a second one, so the two models queue behind each
+        # other on one card instead of racing for it.
+        #
+        # Until screen capture lands, a spoken request to look at something
+        # arrives with nothing attached and the worker says so. That is the
+        # honest answer, and it is a different one from "vision does not
+        # exist".
+        self.orchestrator.workers.register(
+            build_vision_worker(self.orchestrator.runtime)
         )
         self.conversation_session = ConversationSession()
 

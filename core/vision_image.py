@@ -107,6 +107,49 @@ def image_tokens(width: int, height: int) -> int:
     return max(MINIMUM_IMAGE_TOKENS, patches)
 
 
+def planned_size(
+    width: int,
+    height: int,
+    long_edge: int | None = SEND_LONG_EDGE,
+) -> tuple[int, int]:
+    """
+    The size a picture will be sent at, without touching the pixels.
+
+    Separate from the resizing itself so that a caller can find out what an
+    image is going to cost before deciding whether to send it — which is a
+    question worth answering before spending a decode on the answer.
+
+    Rounded to whole patches, because a part-used patch costs a whole token.
+    """
+    if long_edge is None or max(width, height) <= long_edge:
+        return width, height
+
+    scale = long_edge / max(width, height)
+
+    return (
+        max(PATCH_PIXELS, round(width * scale / PATCH_PIXELS) * PATCH_PIXELS),
+        max(PATCH_PIXELS, round(height * scale / PATCH_PIXELS) * PATCH_PIXELS),
+    )
+
+
+def cost(
+    path: str | Path,
+    long_edge: int | None = SEND_LONG_EDGE,
+) -> int:
+    """
+    What this picture will cost the context, read from its header alone.
+
+    No decode: a request that will not fit should be refused before anything
+    expensive happens, and the header carries everything the arithmetic needs.
+    """
+    data = read(path)
+    sniff(data)
+
+    width, height = planned_size(*dimensions(data), long_edge=long_edge)
+
+    return image_tokens(width, height)
+
+
 def sniff(data: bytes) -> str:
     """
     The format, from the first few bytes.
@@ -275,14 +318,7 @@ def _shrink(
             "this is probably not the project's virtual environment."
         ) from error
 
-    scale = long_edge / max(width, height)
-
-    # Rounded to whole patches, because a partly-used patch costs a whole
-    # token. Never below one patch.
-    new_width = max(PATCH_PIXELS, round(width * scale / PATCH_PIXELS) * PATCH_PIXELS)
-    new_height = max(
-        PATCH_PIXELS, round(height * scale / PATCH_PIXELS) * PATCH_PIXELS
-    )
+    new_width, new_height = planned_size(width, height, long_edge)
 
     try:
         with Image.open(BytesIO(data)) as image:
