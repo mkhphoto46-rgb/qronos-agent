@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 
 import requests
 
+from core import vision_image
 from core.brain_runtime import (
     BrainMessage,
     BrainRuntime,
@@ -162,12 +163,17 @@ class OllamaController(BrainRuntime):
     def _build_messages(
         prompt: str,
         messages: Sequence[BrainMessage] | None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict]:
         """
         Convert runtime-neutral Qronos messages to Ollama messages.
 
         Structured conversation messages take precedence over the legacy
         single prompt.
+
+        A message carrying pictures gains an ``images`` field holding them
+        base64-encoded, which is what this API wants. A message carrying none
+        does not gain the field at all — so every request Qronos already
+        sends goes out byte-identical, and a test says so.
         """
 
         if messages is not None:
@@ -176,13 +182,23 @@ class OllamaController(BrainRuntime):
                     "messages must not be empty."
                 )
 
-            return [
-                {
+            built: list[dict] = []
+
+            for message in messages:
+                entry: dict = {
                     "role": message.role.value,
                     "content": message.content,
                 }
-                for message in messages
-            ]
+
+                if message.images:
+                    entry["images"] = [
+                        vision_image.prepare(path).base64
+                        for path in message.images
+                    ]
+
+                built.append(entry)
+
+            return built
 
         cleaned_prompt = prompt.strip()
 

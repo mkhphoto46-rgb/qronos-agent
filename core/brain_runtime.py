@@ -23,15 +23,29 @@ class BrainMessage:
 
     Higher-level Qronos code uses this structure instead of depending
     directly on the message format of Ollama or another model runtime.
+
+    A message may carry pictures as well as words. They are held as
+    **paths**, not as encoded bytes: this is a frozen dataclass that ends up
+    in log lines and tracebacks, and a megabyte of base64 in a repr would
+    make every one of those unreadable. Encoding is the runtime adapter's
+    business, because the encoding is the runtime's requirement.
     """
 
     role: BrainMessageRole
     content: str
+    images: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.content.strip():
+        if not self.content.strip() and not self.images:
             raise ValueError(
-                "Brain message content must not be empty."
+                "A brain message must carry something — either words or "
+                "at least one picture."
+            )
+
+        if isinstance(self.images, str):
+            raise TypeError(
+                "images is a sequence of paths, not one path. A bare string "
+                "would be read as one path per character."
             )
 
 
