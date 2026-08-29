@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -27,11 +28,22 @@ from core.task_plan import TaskPlan
 from core.task_router import TaskRouter
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
+from core.web_worker import WebResearchWorker
 
 
 PUSH_TO_TALK_ACTION = "qronos.push_to_talk"
 AUDIO_SPECTRUM_BANDS = 32
 EMIT_LOCK = threading.Lock()
+
+
+def normalise_qronos_invocation(transcript: str) -> str:
+    """Correct measured Whisper variants only when Qronos is addressed."""
+    return re.sub(
+        r"^(?P<greeting>\s*سلام\s+)?(?:کرونس|خرونس|کرونز)(?=\s|[،,؟?]|$)",
+        lambda match: f"{match.group('greeting') or ''}کرونوس",
+        transcript,
+        count=1,
+    )
 
 
 @dataclass(frozen=True)
@@ -136,6 +148,11 @@ class QronosRuntime:
         self.speech_runtime = speech_runtime
         self.task_router = TaskRouter()
         self.orchestrator = Orchestrator()
+        self.orchestrator.workers.register(
+            WebResearchWorker(
+                answer_fn=self.orchestrator.answer_web_prompt,
+            )
+        )
         self.conversation_session = ConversationSession()
 
         emit(
@@ -224,6 +241,8 @@ class QronosRuntime:
                 )
                 .strip()
             )
+
+            transcript = normalise_qronos_invocation(transcript)
 
             if not transcript:
                 raise RuntimeError(
@@ -343,6 +362,9 @@ class QronosRuntime:
                 self.conversation_session.close()
             except Exception:
                 pass
+
+        if self.orchestrator is not None:
+            self.orchestrator.workers.close()
 
 
 def emit(

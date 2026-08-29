@@ -27,6 +27,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from core.command_recorder import CommandRecordingResult
 from core.conversation_session import ConversationSession
@@ -37,6 +38,7 @@ from core.runtime_bridge import (
     QronosRuntime,
     emit,
     handle_action,
+    normalise_qronos_invocation,
     parse_payload,
 )
 from core.task_router import TaskRouter, TaskType
@@ -663,6 +665,38 @@ class TestRoutingIsReported(unittest.TestCase):
         captured_events(runtime.push_to_talk)
 
         self.assertEqual(orchestrator.plans[0].goal, "یک عکس بگیر")
+
+    def test_measured_qronos_name_variants_are_corrected_at_invocation(self) -> None:
+        for transcript in (
+            "کرونس صدای من رو میشنوی؟",
+            "خرونس، وضعیت پروژه چیه؟",
+            "سلام کرونز حالت چطوره؟",
+        ):
+            with self.subTest(transcript=transcript):
+                corrected = normalise_qronos_invocation(transcript)
+                self.assertIn("کرونوس", corrected)
+
+    def test_qronos_like_words_inside_normal_text_are_not_rewritten(self) -> None:
+        transcript = "درباره اسطوره کرونس توضیح بده"
+
+        self.assertEqual(normalise_qronos_invocation(transcript), transcript)
+
+    def test_prepare_registers_the_production_web_worker(self) -> None:
+        runtime = QronosRuntime()
+
+        with patch("core.runtime_bridge.AudioInput"), patch(
+            "core.runtime_bridge.CommandRecorder"
+        ), patch(
+            "core.runtime_bridge.WhisperCppVADRuntime"
+        ) as vad_type, patch(
+            "core.runtime_bridge.WhisperCppRuntime"
+        ) as speech_type:
+            vad_type.return_value.health_check.return_value = True
+            speech_type.return_value.health_check.return_value = True
+            runtime.prepare()
+
+        assert runtime.orchestrator is not None
+        self.assertIn(TaskType.BROWSER, runtime.orchestrator.workers.registered())
 
 
 if __name__ == "__main__":

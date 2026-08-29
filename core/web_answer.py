@@ -195,6 +195,9 @@ def build_prompt(
     sections = [
         system,
         "",
+        "Return only a JSON object matching this schema; do not wrap it in Markdown:",
+        json.dumps(ANSWER_SCHEMA, ensure_ascii=False, separators=(",", ":")),
+        "",
         f"Valid citation labels: {labels}",
         "",
         package.render(),
@@ -255,11 +258,7 @@ def validate_response(
         try:
             payload = json.loads(payload)
         except json.JSONDecodeError as exc:
-            return _refusal(
-                AnswerRejection.MALFORMED,
-                f"Response was not valid JSON: {exc}",
-                persian,
-            )
+            return _validate_cited_prose(payload, package, persian, exc)
 
     if not isinstance(payload, dict):
         return _refusal(
@@ -371,6 +370,61 @@ def validate_response(
         sources_disagree=bool(payload.get("sources_disagree", False)),
         is_persian=persian,
         cited_urls=cited_urls,
+    )
+
+
+def _validate_cited_prose(
+    text: str,
+    package: EvidencePackage,
+    persian: bool,
+    parse_error: json.JSONDecodeError,
+) -> WebAnswer:
+    """Accept non-JSON output only when every sentence is safely cited."""
+    segments = tuple(
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?؟])\s+|\n+", text.strip())
+        if segment.strip()
+    )
+
+    if not segments:
+        return _refusal(AnswerRejection.EMPTY, "The model returned nothing.", persian)
+
+    if not extract_citations(text):
+        return _refusal(
+            AnswerRejection.MALFORMED,
+            f"Response was neither valid JSON nor cited prose: {parse_error}",
+            persian,
+        )
+
+    valid = package.valid_citations
+    claims: list[Claim] = []
+
+    for segment in segments:
+        citations = extract_citations(segment)
+        if not citations:
+            return _refusal(
+                AnswerRejection.UNCITED_CLAIM,
+                f"A prose claim carried no citation: {segment[:80]!r}",
+                persian,
+            )
+
+        for citation in citations:
+            if citation not in valid:
+                return _refusal(
+                    AnswerRejection.FABRICATED_CITATION,
+                    f"Citation {citation} does not refer to supplied evidence.",
+                    persian,
+                )
+
+        claims.append(Claim(statement=segment, citations=citations))
+
+    return WebAnswer(
+        answered=True,
+        text=text.strip(),
+        claims=tuple(claims),
+        is_persian=persian,
+        cited_urls=_urls_for(claims, package),
+        detail=f"Accepted safe cited prose after JSON parsing failed: {parse_error}",
     )
 
 

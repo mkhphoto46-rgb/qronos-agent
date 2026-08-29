@@ -31,7 +31,7 @@ type Conversation = {
   role: ConversationRole;
   time: string;
   text: string;
-  progress: number;
+  spinePosition: number;
 };
 
 type MemoryPocketParticle = {
@@ -63,7 +63,7 @@ const conversations: Conversation[] = [
     time: "19:34",
     text:
       "ساختار Context به شکل DNA طراحی شده تا هر گفت‌وگو به صورت یک Memory Node زنده داخل جریان حافظه دیده شود و بدون شلوغ کردن رابط کاربری، آخرین گفتگوها همیشه در دسترس باشند.",
-    progress: 0.24,
+    spinePosition: 0.24,
   },
   {
     id: "conversation-2",
@@ -71,7 +71,7 @@ const conversations: Conversation[] = [
     time: "19:21",
     text:
       "وقتی Memory انتخاب می‌شود، می‌خواهم نود مربوط به آن باز شود و متن گفتگو از همان نقطه ظاهر شود؛ نه این‌که یک کارت مستقل و جدا از ساختار DNA روی صفحه قرار بگیرد.",
-    progress: 0.5,
+    spinePosition: 0.5,
   },
   {
     id: "conversation-1",
@@ -79,7 +79,7 @@ const conversations: Conversation[] = [
     time: "19:06",
     text:
       "ساختار اصلی رابط همان Oracle مرکزی باقی می‌ماند. Memory Pocket فقط حافظه انتخاب‌شده را از دل DNA آشکار می‌کند و تاریخچه کامل همچنان در بخش Conversations قرار می‌گیرد.",
-    progress: 0.76,
+    spinePosition: 0.76,
   },
 ];
 
@@ -173,10 +173,10 @@ const pocketParticles =
   buildPocketParticles();
 
 function getPocketPosition(
-  progress: number,
+  spinePosition: number,
 ) {
   const raw =
-    18 + progress * 61;
+    18 + spinePosition * 61;
 
   return Math.min(
     66,
@@ -257,8 +257,8 @@ function ConversationSpine() {
             id:
               conversation.id,
 
-            progress:
-              conversation.progress,
+            spinePosition:
+              conversation.spinePosition,
 
             role:
               conversation.role,
@@ -291,7 +291,7 @@ function ConversationSpine() {
       return {
         "--memory-pocket-top":
           `${getPocketPosition(
-            displayedConversation.progress,
+            displayedConversation.spinePosition,
           )}%`,
 
         "--memory-node-source-x":

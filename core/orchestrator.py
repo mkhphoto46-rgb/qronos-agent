@@ -21,8 +21,10 @@ from core.ollama_controller import OllamaController
 from core.resource_guard import (
     read_gpu_status,
     read_system_status,
+    read_system_status_since_last_call,
 )
 from core.resource_policy import ResourceDecision
+from core.telemetry_cache import TelemetryCache
 from core.task_plan import PlanStep, TaskPlan
 from core.workers import Unavailable, WorkerRegistry
 
@@ -82,6 +84,7 @@ class Orchestrator:
         model_manager: ModelManager | None = None,
         activity_guard: ActivityGuard | None = None,
         workers: WorkerRegistry | None = None,
+        telemetry: TelemetryCache | None = None,
     ) -> None:
         self.runtime = (
             runtime
@@ -101,10 +104,16 @@ class Orchestrator:
             )
         )
 
+        self.telemetry = telemetry or TelemetryCache(
+            read_system=lambda: read_system_status_since_last_call(),
+            read_gpu=lambda: read_gpu_status(),
+            first_read_system=lambda: read_system_status(),
+        )
+
         self.activity_guard = (
             activity_guard
             if activity_guard is not None
-            else ActivityGuard()
+            else ActivityGuard(snapshot_reader=self.telemetry.current)
         )
 
         # Empty unless something registers a worker, so an orchestrator
@@ -298,6 +307,33 @@ class Orchestrator:
                 error=str(exc),
             )
 
+    def answer_web_prompt(self, prompt: str) -> str:
+        """Run Web Research's evidence prompt through the guarded Fast Brain."""
+        activity = self.activity_guard.detect()
+        selection = self._prepare_resources(
+            TaskClass.FAST,
+            activity.mode,
+            activity.resource_pressure,
+        )
+
+        if selection.decision is not ResourceDecision.ALLOW:
+            raise RuntimeError(
+                self._resource_error(
+                    selection.decision,
+                    activity.resource_pressure,
+                )
+            )
+
+        return self.runtime.chat(
+            model_name=selection.model.name,
+            prompt=prompt,
+            think=False,
+            num_predict=768,
+            # Web answers are occasional and can fill VRAM. Unload after the
+            # request so the next voice turn is not blocked by our own model.
+            keep_alive="0",
+        )
+
     def _prepare_resources(
         self,
         task_class: TaskClass,
@@ -308,8 +344,9 @@ class Orchestrator:
         Prepare resources and return the selected model.
         """
 
-        system = read_system_status()
-        gpu = read_gpu_status()
+        snapshot = self.telemetry.current()
+        system = snapshot.system
+        gpu = snapshot.gpu
 
         selection = (
             self.model_manager.select_model(
@@ -338,17 +375,23 @@ class Orchestrator:
         if running_models:
             self.runtime.unload_all()
 
-            system = read_system_status()
-            gpu = read_gpu_status()
+            # The pressure that triggered cleanup may have been caused by
+            # Qronos's own resident model. Reusing that stale value makes the
+            # retry fail even after VRAM has been released.
+            refreshed_activity = self.activity_guard.detect()
+            self.telemetry.invalidate()
+            snapshot = self.telemetry.current()
+            system = snapshot.system
+            gpu = snapshot.gpu
 
             retry = (
                 self.model_manager.select_model(
                     task_class=task_class,
                     system=system,
                     gpu=gpu,
-                    activity_mode=activity_mode,
+                    activity_mode=refreshed_activity.mode,
                     resource_pressure=(
-                        resource_pressure
+                        refreshed_activity.resource_pressure
                     ),
                 )
             )
