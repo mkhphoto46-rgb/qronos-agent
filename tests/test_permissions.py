@@ -99,15 +99,38 @@ class TestPermissionEngine(unittest.TestCase):
         )
         self.assertEqual(result, PermissionDecision.DENY)
 
-    def test_code_analysis_is_always_denied(self) -> None:
+    def test_code_analysis_is_allowed(self) -> None:
         result = evaluate_action(
             ActionCategory.CODE_ANALYSIS,
         )
-        self.assertEqual(result, PermissionDecision.DENY)
+        self.assertEqual(result, PermissionDecision.ALLOW)
+
+    def test_code_analysis_policy_is_read_only_and_reversible(self) -> None:
+        policy = get_permission_policy(
+            ActionCategory.CODE_ANALYSIS,
+        )
+
+        self.assertEqual(
+            policy.level,
+            PermissionLevel.AUTO_ALLOW,
+        )
+        self.assertTrue(policy.reversible)
 
     def test_code_generation_is_always_denied(self) -> None:
         result = evaluate_action(
             ActionCategory.CODE_GENERATION,
+        )
+        self.assertEqual(result, PermissionDecision.DENY)
+
+    def test_code_modification_is_always_denied(self) -> None:
+        result = evaluate_action(
+            ActionCategory.CODE_MODIFICATION,
+        )
+        self.assertEqual(result, PermissionDecision.DENY)
+
+    def test_script_execution_is_always_denied(self) -> None:
+        result = evaluate_action(
+            ActionCategory.SCRIPT_EXECUTION,
         )
         self.assertEqual(result, PermissionDecision.DENY)
 
@@ -124,7 +147,9 @@ class TestPermissionEngine(unittest.TestCase):
         self.assertEqual(result, PermissionDecision.DENY)
 
     def test_cyber_attack_is_always_denied(self) -> None:
-        result = evaluate_action(ActionCategory.CYBER_ATTACK)
+        result = evaluate_action(
+            ActionCategory.CYBER_ATTACK,
+        )
         self.assertEqual(result, PermissionDecision.DENY)
 
     def test_unauthorized_persistence_is_always_denied(self) -> None:
@@ -137,6 +162,7 @@ class TestPermissionEngine(unittest.TestCase):
         policy = get_permission_policy(
             ActionCategory.DELETE_RECOVERABLE,
         )
+
         self.assertTrue(policy.reversible)
         self.assertEqual(
             policy.level,
@@ -147,6 +173,7 @@ class TestPermissionEngine(unittest.TestCase):
         policy = get_permission_policy(
             ActionCategory.IRREVERSIBLE_DESTRUCTION,
         )
+
         self.assertFalse(policy.reversible)
         self.assertEqual(
             policy.level,
