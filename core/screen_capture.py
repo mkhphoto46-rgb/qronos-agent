@@ -34,9 +34,19 @@ terminal, the editor and most of what anybody would ask Qronos to read.
 Measured on this machine: one distinct colour from the window's own device
 context, more than a hundred thousand from the screen's at the same
 coordinates. So the window's rectangle is looked up and that region of the
-composited screen is copied instead. It works for every renderer, and it is
-correct because the window being asked about is the foreground one, which is
-on top by definition.
+composited screen is copied instead. It works for every renderer.
+
+**The cost of that is occlusion, and it is a real limitation.** Copying the
+screen at a window's coordinates copies whatever is actually there — so a
+window with something on top of it captures the thing on top. For the case this
+was built for that is fine, because the foreground window is on top by
+definition, and :func:`foreground_window` is read at the instant the hotkey
+fires. It is not fine for capturing a window that is behind another one, and
+there is no honest way to do that with this approach. Anything asking for a
+particular window should bring it forward first, or ask for the whole screen.
+A live harness found this the expensive way: it opened a browser that did not
+come to the front, captured the game behind it, and reported on that instead
+for a full run.
 
 **Nothing is written to disk.** The bitmap goes from GDI into memory, is
 encoded to PNG in memory, and is handed on as bytes. There is no temporary file
@@ -179,6 +189,53 @@ def foreground_window() -> int | None:
     return int(handle) or None
 
 
+def window_titled(fragment: str) -> int | None:
+    """
+    The first visible window whose title contains this text.
+
+    For finding a particular window rather than whichever one has focus.
+    :func:`foreground_window` answers "what is the user looking at", and that is
+    the right question for a hotkey; it is the wrong question for anything that
+    opened a window itself and wants that one. A live harness learned this by
+    opening a browser, capturing whatever was in front instead, and confidently
+    reporting on somebody else's video.
+
+    Matched case-insensitively, and skips windows with no title, which is most
+    of them: a running desktop has hundreds of invisible windows belonging to
+    the shell.
+    """
+    if not available():
+        return None
+
+    user32 = ctypes.windll.user32
+    wanted = fragment.casefold()
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def visit(handle, _unused):
+        if not user32.IsWindowVisible(handle):
+            return True
+
+        length = user32.GetWindowTextLengthW(handle)
+
+        if length <= 0:
+            return True
+
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(handle, buffer, length + 1)
+
+        if wanted in buffer.value.casefold():
+            found.append(int(handle))
+
+            return False
+
+        return True
+
+    user32.EnumWindows(visit, 0)
+
+    return found[0] if found else None
+
+
 def geometry() -> DisplayGeometry:
     """What the display is, without capturing anything from it."""
     if not available():
@@ -271,6 +328,44 @@ class ScreenCapture:
                 f"{verdict.reason} Nothing was captured."
             )
 
+        return self._take(window)
+
+    def capture_under(
+        self,
+        session,
+        window: int | None = None,
+    ) -> Capture:
+        """
+        One frame, under a watching session's grant rather than a fresh one.
+
+        A session is one decision covering many frames, bounded in time and
+        visible the whole while — see :mod:`security.watching`. Asking the gate
+        again per frame would not be more careful, it would be a confirmation
+        dialog every two seconds, which people learn to dismiss without
+        reading.
+
+        The session is still asked, every time, and it is the thing that says
+        no when the time limit passes, when nothing has looked for a while, or
+        when somebody pressed stop.
+        """
+        verdict = session.may_take_frame()
+
+        if not verdict.allowed:
+            raise CaptureRefused(verdict.reason)
+
+        capture = self._take(window)
+
+        session.took_frame()
+
+        return capture
+
+    def _take(self, window: int | None) -> Capture:
+        """
+        The pixels, with permission already settled.
+
+        Private because there is no path to it that has not asked somebody:
+        :meth:`capture` asks the gate and :meth:`capture_under` asks a session.
+        """
         shape = self._geometry()
         raw, width, height = self._grab(window)
 

@@ -251,7 +251,14 @@ class WatchingSession:
 
         now = self.clock()
 
-        if now - (self._started_at or now) >= self.max_seconds:
+        # ``is None``, never ``or``. A clock that reads zero is a perfectly
+        # ordinary clock — ``time.monotonic`` is zero at boot on some
+        # platforms, and any injected one starts wherever it likes — and
+        # ``self._started_at or now`` reads zero as "not started", which makes
+        # the elapsed time zero for ever and the session immortal. Found by a
+        # test whose clock happened to start at zero; the existing tests all
+        # started at 100 and could not express it.
+        if now - self._elapsed_from(self._started_at, now) >= self.max_seconds:
             self.stop(WatchEnded.REACHED_TIME_LIMIT)
 
             return FrameVerdict(
@@ -262,7 +269,7 @@ class WatchingSession:
                 ),
             )
 
-        if now - (self._last_frame_at or now) >= self.idle_seconds:
+        if now - self._elapsed_from(self._last_frame_at, now) >= self.idle_seconds:
             self.stop(WatchEnded.WENT_IDLE)
 
             return FrameVerdict(
@@ -275,7 +282,8 @@ class WatchingSession:
 
         if (
             self.frames
-            and now - (self._last_frame_at or 0.0) < self.min_frame_interval
+            and self._last_frame_at is not None
+            and now - self._last_frame_at < self.min_frame_interval
         ):
             # Not an error and not the end of the session — just too soon.
             # The indicator stays up, because watching is still happening.
@@ -286,6 +294,11 @@ class WatchingSession:
             )
 
         return FrameVerdict(allowed=True, indicator_visible=True)
+
+    @staticmethod
+    def _elapsed_from(mark: float | None, now: float) -> float:
+        """The mark, or now when there is none — treating zero as a real time."""
+        return now if mark is None else mark
 
     def took_frame(self) -> None:
         """Record that a frame was actually taken."""
