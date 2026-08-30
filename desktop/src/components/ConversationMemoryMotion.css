@@ -1,0 +1,1837 @@
+/* =========================================================
+   QRONOS MEMORY BLOOM
+   Particle field centered behind memory text.
+   Stronger visibility + irregular living twinkle.
+   ========================================================= */
+
+.memory-pocket {
+  --memory-node-source-x: 0px;
+  --memory-node-source-y: 50%;
+
+  /*
+   * Final visual calibration.
+   *
+   * The DNA anchor itself is NOT moved.
+   * Only the rendered memory particle field
+   * is shifted so it sits behind the text body.
+   */
+  --memory-particle-field-x: 6px;
+  --memory-particle-field-y: 42px;
+
+  animation: none;
+  opacity: 1;
+}
+
+/* =========================================================
+   WHOLE MEMORY POCKET
+   ========================================================= */
+
+.memory-pocket-opening {
+  animation:
+    qronosMemoryPocketOpen
+    760ms
+    cubic-bezier(
+      0.18,
+      0.78,
+      0.2,
+      1
+    )
+    both;
+}
+
+.memory-pocket-open {
+  opacity: 1;
+}
+
+.memory-pocket-closing {
+  pointer-events: none;
+
+  animation:
+    qronosMemoryPocketClose
+    620ms
+    cubic-bezier(
+      0.36,
+      0,
+      0.72,
+      0.25
+    )
+    both;
+}
+
+@keyframes qronosMemoryPocketOpen {
+  0% {
+    opacity: 0;
+
+    transform:
+      translateY(-50%)
+      translateX(-7px)
+      scale(0.985);
+
+    filter: blur(1.8px);
+  }
+
+  28% {
+    opacity: 0.3;
+
+    transform:
+      translateY(-50%)
+      translateX(-4px)
+      scale(0.99);
+
+    filter: blur(1.1px);
+  }
+
+  65% {
+    opacity: 0.78;
+
+    transform:
+      translateY(-50%)
+      translateX(-1px)
+      scale(0.997);
+
+    filter: blur(0.35px);
+  }
+
+  100% {
+    opacity: 1;
+
+    transform:
+      translateY(-50%)
+      translateX(0)
+      scale(1);
+
+    filter: blur(0);
+  }
+}
+
+@keyframes qronosMemoryPocketClose {
+  0% {
+    opacity: 1;
+
+    transform:
+      translateY(-50%)
+      translateX(0)
+      scale(1);
+
+    filter: blur(0);
+  }
+
+  44% {
+    opacity: 0.72;
+
+    transform:
+      translateY(-50%)
+      translateX(-2px)
+      scale(0.996);
+
+    filter: blur(0.35px);
+  }
+
+  78% {
+    opacity: 0.28;
+
+    transform:
+      translateY(-50%)
+      translateX(-5px)
+      scale(0.989);
+
+    filter: blur(1px);
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translateY(-50%)
+      translateX(-7px)
+      scale(0.984);
+
+    filter: blur(1.7px);
+  }
+}
+
+/* =========================================================
+   CHAT EDGE SLIT
+   ========================================================= */
+
+.memory-pocket-slit {
+  position: absolute !important;
+
+  z-index: 4;
+
+  left: -18px !important;
+  top: 50% !important;
+
+  width: 38px !important;
+  height: 144px !important;
+
+  transform:
+    translateY(-50%) !important;
+
+  pointer-events: none;
+
+  opacity: 0.72;
+}
+
+.memory-pocket-opening
+  .memory-pocket-slit {
+  animation:
+    qronosSlitOpen
+    820ms
+    ease-out
+    both;
+}
+
+.memory-pocket-closing
+  .memory-pocket-slit {
+  animation:
+    qronosSlitClose
+    560ms
+    ease-in
+    both;
+}
+
+@keyframes qronosSlitOpen {
+  0% {
+    opacity: 0;
+  }
+
+  40% {
+    opacity: 0.32;
+  }
+
+  100% {
+    opacity: 0.72;
+  }
+}
+
+@keyframes qronosSlitClose {
+  0% {
+    opacity: 0.72;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+/* =========================================================
+   PARTICLE FIELD
+   ========================================================= */
+
+.memory-pocket-bloom {
+  position: absolute !important;
+
+  /*
+   * Behind text (text is z-index 6),
+   * but above the dark fog.
+   */
+  z-index: 3;
+
+  inset: -18px -24px -26px -18px !important;
+
+  width: auto !important;
+  height: auto !important;
+
+  transform: none !important;
+
+  overflow: visible;
+
+  pointer-events: none;
+
+  opacity: 1 !important;
+}
+
+.memory-pocket-anchor-pending
+  .memory-pocket-bloom {
+  visibility: hidden;
+}
+
+.memory-pocket-anchor-ready
+  .memory-pocket-bloom {
+  visibility: visible;
+}
+
+/*
+ * Very soft energy atmosphere around
+ * the particle field itself.
+ */
+.memory-pocket-anchor-ready
+  .memory-pocket-bloom::before {
+  content: "";
+
+  position: absolute;
+
+  left: 22%;
+  top: 36%;
+
+  width: 70%;
+  height: 58%;
+
+  border-radius: 50%;
+
+  pointer-events: none;
+
+  background:
+    radial-gradient(
+      ellipse at center,
+      rgba(67, 204, 244, 0.07) 0%,
+      rgba(70, 179, 232, 0.035) 42%,
+      rgba(90, 102, 211, 0.018) 63%,
+      transparent 78%
+    );
+
+  filter: blur(16px);
+
+  opacity: 0.8;
+
+  animation:
+    qronosMemoryFieldAura
+    6.4s
+    ease-in-out
+    infinite;
+}
+
+@keyframes qronosMemoryFieldAura {
+  0%,
+  100% {
+    opacity: 0.44;
+
+    transform:
+      scale(0.96);
+  }
+
+  46% {
+    opacity: 0.9;
+
+    transform:
+      scale(1.04);
+  }
+
+  72% {
+    opacity: 0.6;
+
+    transform:
+      scale(1);
+  }
+}
+
+/* =========================================================
+   INDIVIDUAL PARTICLES
+   ========================================================= */
+
+.memory-pocket
+  .memory-pocket-bloom
+  i {
+  position: absolute !important;
+
+  left:
+    var(
+      --memory-node-source-x
+    ) !important;
+
+  top:
+    var(
+      --memory-node-source-y
+    ) !important;
+
+  width:
+    var(
+      --memory-particle-size,
+      3px
+    ) !important;
+
+  height:
+    var(
+      --memory-particle-size,
+      3px
+    ) !important;
+
+  margin: 0;
+
+  border-radius: 50%;
+
+  opacity: 0;
+
+  background:
+    rgba(
+      111,
+      229,
+      255,
+      1
+    ) !important;
+
+  box-shadow:
+    0 0 5px
+      rgba(
+        124,
+        231,
+        255,
+        0.42
+      ),
+    0 0 11px
+      rgba(
+        55,
+        190,
+        241,
+        0.22
+      );
+
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(0.2);
+
+  will-change:
+    transform,
+    opacity,
+    filter;
+}
+
+/* =========================================================
+   PARTICLE ACCENTS
+   ========================================================= */
+
+/* White energy particles */
+
+.memory-pocket
+  .memory-pocket-bloom
+  i:nth-child(7n) {
+  background:
+    rgba(
+      248,
+      255,
+      255,
+      1
+    ) !important;
+
+  box-shadow:
+    0 0 6px
+      rgba(
+        239,
+        255,
+        255,
+        0.76
+      ),
+    0 0 14px
+      rgba(
+        167,
+        242,
+        255,
+        0.42
+      );
+}
+
+/* Violet accents */
+
+.memory-pocket
+  .memory-pocket-bloom
+  i:nth-child(12n) {
+  background:
+    rgba(
+      183,
+      163,
+      255,
+      1
+    ) !important;
+
+  box-shadow:
+    0 0 6px
+      rgba(
+        193,
+        177,
+        255,
+        0.58
+      ),
+    0 0 13px
+      rgba(
+        124,
+        101,
+        255,
+        0.34
+      );
+}
+
+/* Slightly larger rare points */
+
+.memory-pocket
+  .memory-pocket-bloom
+  i:nth-child(11n) {
+  scale: 1.16;
+}
+
+/* =========================================================
+   OPENING PARTICLES
+   ========================================================= */
+
+.memory-pocket-anchor-ready.memory-pocket-opening
+  .memory-pocket-bloom
+  i {
+  animation:
+    qronosParticleMaterialize
+    760ms
+    cubic-bezier(
+      0.18,
+      0.76,
+      0.2,
+      1
+    )
+    var(
+      --memory-particle-delay,
+      0ms
+    )
+    both;
+}
+
+@keyframes qronosParticleMaterialize {
+  0% {
+    opacity: 0;
+
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      )
+      scale(0.16);
+  }
+
+  18% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.38
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-x
+              ) +
+              var(
+                --memory-particle-field-x
+              )
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.12
+        ),
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-y
+              ) +
+              var(
+                --memory-particle-field-y
+              )
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.12
+        ),
+        0
+      )
+      scale(0.48);
+  }
+
+  46% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.76
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-x
+              ) +
+              var(
+                --memory-particle-field-x
+              )
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.48
+        ),
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-y
+              ) +
+              var(
+                --memory-particle-field-y
+              )
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.48
+        ),
+        0
+      )
+      scale(0.9);
+  }
+
+  76% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.54
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-x
+              ) +
+              var(
+                --memory-particle-field-x
+              )
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.84
+        ),
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-y
+              ) +
+              var(
+                --memory-particle-field-y
+              )
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.84
+        ),
+        0
+      )
+      scale(1.04);
+  }
+
+  100% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.48
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          )
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          )
+        ),
+        0
+      )
+      scale(1);
+  }
+}
+
+/* =========================================================
+   OPEN / LIVING PARTICLE FIELD
+   ========================================================= */
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i {
+  opacity:
+    calc(
+      var(
+        --memory-particle-alpha,
+        0.5
+      ) *
+      0.48
+    );
+
+  transform:
+    translate3d(
+      calc(
+        (
+          var(
+            --memory-particle-target-x
+          ) +
+          var(
+            --memory-particle-field-x
+          )
+        ) -
+        var(
+          --memory-node-source-x
+        )
+      ),
+      calc(
+        (
+          var(
+            --memory-particle-target-y
+          ) +
+          var(
+            --memory-particle-field-y
+          )
+        ) -
+        var(
+          --memory-node-source-y
+        )
+      ),
+      0
+    )
+    scale(1);
+
+  animation:
+    qronosParticleBreath
+      var(
+        --memory-particle-duration,
+        5.5s
+      )
+      ease-in-out
+      180ms
+      infinite
+      alternate
+      both;
+}
+
+/*
+ * Different particles breathe on
+ * different timings.
+ */
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(3n) {
+  animation-duration:
+    4.9s;
+}
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(4n) {
+  animation-duration:
+    6.2s;
+}
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(5n) {
+  animation-duration:
+    5.6s;
+}
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(8n) {
+  animation-duration:
+    7.1s;
+}
+
+@keyframes qronosParticleBreath {
+  0% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.4
+      );
+
+    filter:
+      brightness(0.92);
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          )
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          )
+        ),
+        0
+      )
+      scale(0.96);
+  }
+
+  24% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.62
+      );
+
+    filter:
+      brightness(1.08);
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          ) +
+          var(
+            --memory-particle-drift-x,
+            3px
+          ) *
+          0.34
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          ) +
+          var(
+            --memory-particle-drift-y,
+            2px
+          ) *
+          0.32
+        ),
+        0
+      )
+      scale(1.03);
+  }
+
+  /*
+   * Short visible flare.
+   */
+  31% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.98
+      );
+
+    filter:
+      brightness(1.72)
+      drop-shadow(
+        0 0 3px
+        rgba(
+          188,
+          248,
+          255,
+          0.52
+        )
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          ) +
+          var(
+            --memory-particle-drift-x,
+            3px
+          ) *
+          0.46
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          ) +
+          var(
+            --memory-particle-drift-y,
+            2px
+          ) *
+          0.42
+        ),
+        0
+      )
+      scale(1.12);
+  }
+
+  39% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.54
+      );
+
+    filter:
+      brightness(1.03);
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          ) +
+          var(
+            --memory-particle-drift-x,
+            3px
+          ) *
+          0.62
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          ) +
+          var(
+            --memory-particle-drift-y,
+            2px
+          ) *
+          0.54
+        ),
+        0
+      )
+      scale(1.01);
+  }
+
+  62% {
+    /*
+     * Some particles almost disappear here.
+     * This creates the irregular "off/on"
+     * field rather than a constant glow.
+     */
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.2
+      );
+
+    filter:
+      brightness(0.82);
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          ) -
+          var(
+            --memory-particle-drift-x,
+            3px
+          ) *
+          0.18
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          ) -
+          var(
+            --memory-particle-drift-y,
+            2px
+          ) *
+          0.14
+        ),
+        0
+      )
+      scale(0.94);
+  }
+
+  74% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.78
+      );
+
+    filter:
+      brightness(1.26)
+      drop-shadow(
+        0 0 2px
+        rgba(
+          145,
+          235,
+          255,
+          0.36
+        )
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          ) -
+          var(
+            --memory-particle-drift-x,
+            3px
+          ) *
+          0.52
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          ) -
+          var(
+            --memory-particle-drift-y,
+            2px
+          ) *
+          0.46
+        ),
+        0
+      )
+      scale(1.06);
+  }
+
+  84% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.32
+      );
+
+    filter:
+      brightness(0.94);
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          ) -
+          var(
+            --memory-particle-drift-x,
+            3px
+          ) *
+          0.3
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          ) -
+          var(
+            --memory-particle-drift-y,
+            2px
+          ) *
+          0.28
+        ),
+        0
+      )
+      scale(0.98);
+  }
+
+  100% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.46
+      );
+
+    filter:
+      brightness(1);
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          )
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          )
+        ),
+        0
+      )
+      scale(1);
+  }
+}
+
+/* =========================================================
+   EXTRA RARE ENERGY EVENTS
+   ========================================================= */
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(9n) {
+  animation-name:
+    qronosParticleBreath,
+    qronosRareParticleFlash;
+
+  animation-duration:
+    5.8s,
+    8.7s;
+
+  animation-timing-function:
+    ease-in-out,
+    ease-in-out;
+
+  animation-iteration-count:
+    infinite,
+    infinite;
+
+  animation-direction:
+    alternate,
+    normal;
+
+  animation-delay:
+    160ms,
+    -3.4s;
+
+  animation-fill-mode:
+    both,
+    both;
+}
+
+.memory-pocket-anchor-ready.memory-pocket-open
+  .memory-pocket-bloom
+  i:nth-child(13n) {
+  animation-name:
+    qronosParticleBreath,
+    qronosRareParticleFlash;
+
+  animation-duration:
+    6.6s,
+    10.4s;
+
+  animation-timing-function:
+    ease-in-out,
+    ease-in-out;
+
+  animation-iteration-count:
+    infinite,
+    infinite;
+
+  animation-direction:
+    alternate,
+    normal;
+
+  animation-delay:
+    260ms,
+    -6.7s;
+
+  animation-fill-mode:
+    both,
+    both;
+}
+
+@keyframes qronosRareParticleFlash {
+  0%,
+  17%,
+  21%,
+  54%,
+  58%,
+  82%,
+  100% {
+    box-shadow:
+      0 0 5px
+        rgba(
+          124,
+          231,
+          255,
+          0.4
+        ),
+      0 0 11px
+        rgba(
+          55,
+          190,
+          241,
+          0.2
+        );
+  }
+
+  19% {
+    box-shadow:
+      0 0 7px
+        rgba(
+          244,
+          255,
+          255,
+          0.98
+        ),
+      0 0 17px
+        rgba(
+          111,
+          232,
+          255,
+          0.74
+        ),
+      0 0 26px
+        rgba(
+          76,
+          184,
+          255,
+          0.24
+        );
+  }
+
+  56% {
+    box-shadow:
+      0 0 7px
+        rgba(
+          236,
+          252,
+          255,
+          0.82
+        ),
+      0 0 15px
+        rgba(
+          167,
+          157,
+          255,
+          0.54
+        );
+  }
+}
+
+/* =========================================================
+   CLOSING
+   ========================================================= */
+
+.memory-pocket-anchor-ready.memory-pocket-closing
+  .memory-pocket-bloom
+  i {
+  animation:
+    qronosParticleDissolve
+    600ms
+    cubic-bezier(
+      0.4,
+      0,
+      0.72,
+      0.28
+    )
+    var(
+      --memory-particle-return-delay,
+      0ms
+    )
+    both;
+}
+
+@keyframes qronosParticleDissolve {
+  0% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.48
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            var(
+              --memory-particle-target-x
+            ) +
+            var(
+              --memory-particle-field-x
+            )
+          ) -
+          var(
+            --memory-node-source-x
+          )
+        ),
+        calc(
+          (
+            var(
+              --memory-particle-target-y
+            ) +
+            var(
+              --memory-particle-field-y
+            )
+          ) -
+          var(
+            --memory-node-source-y
+          )
+        ),
+        0
+      )
+      scale(1);
+  }
+
+  32% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.62
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-x
+              ) +
+              var(
+                --memory-particle-field-x
+              )
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.76
+        ),
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-y
+              ) +
+              var(
+                --memory-particle-field-y
+              )
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.76
+        ),
+        0
+      )
+      scale(0.92);
+  }
+
+  68% {
+    opacity:
+      calc(
+        var(
+          --memory-particle-alpha,
+          0.5
+        ) *
+        0.48
+      );
+
+    transform:
+      translate3d(
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-x
+              ) +
+              var(
+                --memory-particle-field-x
+              )
+            ) -
+            var(
+              --memory-node-source-x
+            )
+          ) *
+          0.3
+        ),
+        calc(
+          (
+            (
+              var(
+                --memory-particle-target-y
+              ) +
+              var(
+                --memory-particle-field-y
+              )
+            ) -
+            var(
+              --memory-node-source-y
+            )
+          ) *
+          0.3
+        ),
+        0
+      )
+      scale(0.66);
+  }
+
+  100% {
+    opacity: 0;
+
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      )
+      scale(0.12);
+  }
+}
+
+/* =========================================================
+   TEXT MATERIALIZATION
+   ========================================================= */
+
+.memory-pocket-copy-zone {
+  position: relative;
+
+  z-index: 6;
+
+  opacity: 1;
+
+  filter: none;
+}
+
+.memory-pocket-opening
+  .memory-pocket-copy-zone,
+.memory-pocket-open
+  .memory-pocket-copy-zone,
+.memory-pocket-closing
+  .memory-pocket-copy-zone {
+  animation: none !important;
+}
+
+.memory-pocket-opening
+  .memory-pocket-copy-zone {
+  animation:
+    qronosMemoryTextMaterialize
+    720ms
+    70ms
+    cubic-bezier(
+      0.2,
+      0.72,
+      0.2,
+      1
+    )
+    both !important;
+}
+
+@keyframes qronosMemoryTextMaterialize {
+  0% {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.7px
+      );
+
+    transform:
+      translateX(
+        -4px
+      );
+
+    clip-path:
+      inset(
+        0
+        100%
+        0
+        0
+      );
+  }
+
+  30% {
+    opacity: 0.22;
+
+    filter:
+      blur(
+        1px
+      );
+
+    clip-path:
+      inset(
+        0
+        67%
+        0
+        0
+      );
+  }
+
+  62% {
+    opacity: 0.72;
+
+    filter:
+      blur(
+        0.4px
+      );
+
+    transform:
+      translateX(
+        -1px
+      );
+
+    clip-path:
+      inset(
+        0
+        25%
+        0
+        0
+      );
+  }
+
+  100% {
+    opacity: 1;
+
+    filter: blur(0);
+
+    transform:
+      translateX(
+        0
+      );
+
+    clip-path:
+      inset(
+        0
+        0
+        0
+        0
+      );
+  }
+}
+
+.memory-pocket-open
+  .memory-pocket-copy-zone {
+  opacity: 1 !important;
+
+  transform: none !important;
+
+  filter: none !important;
+
+  clip-path:
+    inset(
+      0
+      0
+      0
+      0
+    ) !important;
+}
+
+.memory-pocket-closing
+  .memory-pocket-copy-zone {
+  animation:
+    qronosMemoryTextDissolve
+    470ms
+    cubic-bezier(
+      0.4,
+      0,
+      0.72,
+      0.28
+    )
+    both !important;
+}
+
+@keyframes qronosMemoryTextDissolve {
+  0% {
+    opacity: 1;
+
+    filter: blur(0);
+
+    transform:
+      translateX(
+        0
+      );
+
+    clip-path:
+      inset(
+        0
+        0
+        0
+        0
+      );
+  }
+
+  55% {
+    opacity: 0.48;
+
+    filter:
+      blur(
+        0.5px
+      );
+
+    transform:
+      translateX(
+        -2px
+      );
+
+    clip-path:
+      inset(
+        0
+        32%
+        0
+        0
+      );
+  }
+
+  100% {
+    opacity: 0;
+
+    filter:
+      blur(
+        1.5px
+      );
+
+    transform:
+      translateX(
+        -4px
+      );
+
+    clip-path:
+      inset(
+        0
+        88%
+        0
+        0
+      );
+  }
+}
+
+/* =========================================================
+   FOG
+   ========================================================= */
+
+.memory-pocket-fog {
+  opacity: 0.56 !important;
+
+  filter:
+    blur(
+      13px
+    ) !important;
+
+  background:
+    radial-gradient(
+      ellipse
+      at
+      42%
+      56%,
+      rgba(
+        4,
+        19,
+        28,
+        0.58
+      )
+      0%,
+      rgba(
+        4,
+        17,
+        25,
+        0.38
+      )
+      38%,
+      rgba(
+        4,
+        15,
+        23,
+        0.14
+      )
+      66%,
+      transparent
+      100%
+    ) !important;
+}
+
+/* =========================================================
+   REDUCED MOTION
+   ========================================================= */
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .memory-pocket-opening,
+  .memory-pocket-closing,
+  .memory-pocket-slit,
+  .memory-pocket-bloom i,
+  .memory-pocket-copy-zone {
+    animation-duration:
+      0.001ms !important;
+
+    animation-iteration-count:
+      1 !important;
+  }
+}

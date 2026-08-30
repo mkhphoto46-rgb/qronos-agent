@@ -7,6 +7,10 @@ from typing import Optional
 import psutil
 
 
+class GpuStatusReadError(RuntimeError):
+    """An NVIDIA sensor exists but did not return a trustworthy reading."""
+
+
 @dataclass(frozen=True)
 class GpuStatus:
     name: str
@@ -47,18 +51,25 @@ def read_gpu_status() -> Optional[GpuStatus]:
             timeout=5,
             check=True,
         )
-    except (FileNotFoundError, subprocess.SubprocessError):
+    except FileNotFoundError:
+        # NVIDIA support is optional. A missing executable means this machine
+        # has no usable NVIDIA sensor; it is not a failed reading.
         return None
+    except subprocess.SubprocessError as exc:
+        # A present sensor timing out or failing is different from no NVIDIA
+        # hardware. Let ActivityGuard fail closed instead of treating an
+        # unknown load as an idle GPU.
+        raise GpuStatusReadError("nvidia-smi failed") from exc
 
     lines = result.stdout.strip().splitlines()
 
     if not lines:
-        return None
+        raise GpuStatusReadError("nvidia-smi returned no GPU data")
 
     parts = [part.strip() for part in lines[0].split(",")]
 
     if len(parts) != 5:
-        return None
+        raise GpuStatusReadError("nvidia-smi returned malformed GPU data")
 
     try:
         name = parts[0]
@@ -66,8 +77,8 @@ def read_gpu_status() -> Optional[GpuStatus]:
         gpu_utilization_percent = int(parts[2])
         vram_used_mb = int(parts[3])
         vram_total_mb = int(parts[4])
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise GpuStatusReadError("nvidia-smi returned non-numeric GPU data") from exc
 
     return GpuStatus(
         name=name,
@@ -92,6 +103,33 @@ def read_system_status() -> SystemStatus:
         ram_usage_percent=memory.percent,
         ram_used_gb=ram_used_gb,
         ram_total_gb=ram_total_gb,
+    )
+
+
+def read_system_status_since_last_call() -> SystemStatus:
+    """
+    Read CPU and RAM without blocking.
+
+    :func:`read_system_status` samples the CPU over half a second, which is
+    the right way to answer "what is the CPU doing" from a standing start
+    and the wrong way to answer it repeatedly. psutil can instead report the
+    average since the previous call, which costs nothing and is more
+    accurate for a caller that asks regularly: the gap between two calls is
+    a real measurement window rather than an artificial one.
+
+    The catch is the first call, which has no previous call to measure from
+    and returns 0.0. A caller that samples repeatedly — which is the only
+    caller this is for — should prime it once and discard that reading.
+    """
+    cpu_usage_percent = psutil.cpu_percent(interval=None)
+
+    memory = psutil.virtual_memory()
+
+    return SystemStatus(
+        cpu_usage_percent=cpu_usage_percent,
+        ram_usage_percent=memory.percent,
+        ram_used_gb=memory.used / (1024 ** 3),
+        ram_total_gb=memory.total / (1024 ** 3),
     )
 
 

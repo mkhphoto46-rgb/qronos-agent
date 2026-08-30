@@ -122,7 +122,7 @@
          │      هسته تصمیم‌گیری           │
          │  Task Router                   │
          │   ├── Deterministic (بدون LLM) │
-         │   ├── Fast Brain  (warm)       │
+         │   ├── Fast Brain  (on-demand)  │
          │   └── Heavy Brain (on-demand)  │
          │  Planner · Orchestrator        │
          └────────────────┬───────────────┘
@@ -271,12 +271,20 @@ core/
                           TLS 1.3 و کلید از پیش مشترک.
                           docs/QRONOS_DEVICE_LINK.md را ببینید.
 
+  بینایی                  screen_capture.py — یک عکس از صفحه، از مسیر
+                          Permission Gate. windows_ocr.py آن را رایگان
+                          می‌خواند و نتیجه فقط یک راهنماست که مدل با
+                          پیکسل‌ها می‌سنجدش. vision_worker.py توصیف می‌کند و
+                          مغز سنگین استدلال. docs/qronos_vision.md را ببینید.
+
 security/
   permissions.py          سطوح ریسک و تصمیم مجوز
+  watching.py             اجازه‌ای که ادامه دارد، دیده می‌شود و خودش تمام می‌شود
 
 docs/
   QRONOS_DEVICE_LINK.md     اتصال تلفن، لایه ۱ و لایه ۲
   qronos_project_context.md جهت محصول و محدودیت‌ها
+  qronos_vision.md          آنچه Qronos می‌بیند و هزینه‌اش
   qronos_wake_word_spec.md  مشخصات Wake Word
   voice_trigger_spec.md     مشخصات Voice Trigger
 

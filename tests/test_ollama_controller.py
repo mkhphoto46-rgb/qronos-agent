@@ -97,7 +97,7 @@ class TestOllamaController(unittest.TestCase):
             {
                 "models": [
                     {
-                        "name": "qwen3.5:9b",
+                        "name": "qwen3:4b",
                         "size": "6594462816",
                         "processor": "100% GPU",
                         "context_length": 4096,
@@ -117,7 +117,7 @@ class TestOllamaController(unittest.TestCase):
 
         self.assertEqual(
             result[0].name,
-            "qwen3.5:9b",
+            "qwen3:4b",
         )
 
         self.assertEqual(
@@ -171,13 +171,13 @@ class TestOllamaController(unittest.TestCase):
         )
 
         self.controller.stop_model(
-            "qwen3.5:9b"
+            "qwen3:4b"
         )
 
         mock_post.assert_called_once_with(
             "http://127.0.0.1:11434/api/generate",
             json={
-                "model": "qwen3.5:9b",
+                "model": "qwen3:4b",
                 "prompt": "",
                 "keep_alive": 0,
                 "stream": False,
@@ -198,12 +198,12 @@ class TestOllamaController(unittest.TestCase):
 
         with self.assertRaises(RuntimeError) as context:
             self.controller.stop_model(
-                "qwen3.5:9b"
+                "qwen3:4b"
             )
 
         self.assertEqual(
             str(context.exception),
-            "Could not stop model: qwen3.5:9b",
+            "Could not stop model: qwen3:4b",
         )
 
     @patch.object(
@@ -221,14 +221,14 @@ class TestOllamaController(unittest.TestCase):
     ) -> None:
         mock_list_running_models.return_value = [
             OllamaModelStatus(
-                name="qwen3.5:9b",
+                name="qwen3:4b",
                 size="6594462816",
                 processor="100% GPU",
                 context=4096,
                 until="later",
             ),
             OllamaModelStatus(
-                name="qwen3.6:27b",
+                name="qwen3:14b",
                 size="17420420832",
                 processor="100% GPU",
                 context=4096,
@@ -244,11 +244,11 @@ class TestOllamaController(unittest.TestCase):
         )
 
         mock_stop_model.assert_any_call(
-            "qwen3.5:9b"
+            "qwen3:4b"
         )
 
         mock_stop_model.assert_any_call(
-            "qwen3.6:27b"
+            "qwen3:14b"
         )
 
     @patch("core.ollama_controller.requests.post")
@@ -265,7 +265,7 @@ class TestOllamaController(unittest.TestCase):
         )
 
         result = self.controller.chat(
-            model_name="qwen3.5:9b",
+            model_name="qwen3:4b",
             prompt="Reply with exactly: Qronos test passed.",
             think=False,
             num_predict=20,
@@ -280,7 +280,7 @@ class TestOllamaController(unittest.TestCase):
         mock_post.assert_called_once_with(
             "http://127.0.0.1:11434/api/chat",
             json={
-                "model": "qwen3.5:9b",
+                "model": "qwen3:4b",
                 "messages": [
                     {
                         "role": "user",
@@ -314,7 +314,7 @@ class TestOllamaController(unittest.TestCase):
         )
 
         result = self.controller.chat(
-            model_name="qwen3.5:9b",
+            model_name="qwen3:4b",
             prompt="Reply with one word: ready.",
             think=False,
             keep_alive="5m",
@@ -343,13 +343,13 @@ class TestOllamaController(unittest.TestCase):
 
         with self.assertRaises(RuntimeError) as context:
             self.controller.chat(
-                model_name="qwen3.5:9b",
+                model_name="qwen3:4b",
                 prompt="test",
             )
 
         self.assertEqual(
             str(context.exception),
-            "Could not send request to model: qwen3.5:9b",
+            "Could not send request to model: qwen3:4b",
         )
 
 

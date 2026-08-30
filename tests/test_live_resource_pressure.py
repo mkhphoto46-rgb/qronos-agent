@@ -30,11 +30,12 @@ class TestLiveResourcePressure(unittest.TestCase):
         self,
         temperature: int,
         vram_used: int,
+        utilization: int = 10,
     ) -> GpuStatus:
         return GpuStatus(
             name="NVIDIA GeForce RTX 3070 Ti",
             temperature_c=temperature,
-            gpu_utilization_percent=80,
+            gpu_utilization_percent=utilization,
             vram_used_mb=vram_used,
             vram_total_mb=8192,
         )
@@ -91,6 +92,40 @@ class TestLiveResourcePressure(unittest.TestCase):
         self.assertEqual(
             state.resource_pressure,
             ResourcePressure.HIGH,
+        )
+
+    def test_high_gpu_utilization_pressure(self) -> None:
+        guard = ActivityGuard()
+
+        with patch(
+            "core.activity_guard.read_system_status",
+            return_value=self.make_system(20.0, 40.0),
+        ), patch(
+            "core.activity_guard.read_gpu_status",
+            return_value=self.make_gpu(50, 2000, utilization=80),
+        ):
+            state = guard.detect()
+
+        self.assertEqual(
+            state.resource_pressure,
+            ResourcePressure.HIGH,
+        )
+
+    def test_critical_gpu_utilization_pressure(self) -> None:
+        guard = ActivityGuard()
+
+        with patch(
+            "core.activity_guard.read_system_status",
+            return_value=self.make_system(20.0, 40.0),
+        ), patch(
+            "core.activity_guard.read_gpu_status",
+            return_value=self.make_gpu(50, 2000, utilization=95),
+        ):
+            state = guard.detect()
+
+        self.assertEqual(
+            state.resource_pressure,
+            ResourcePressure.CRITICAL,
         )
 
     def test_critical_vram_pressure(self) -> None:

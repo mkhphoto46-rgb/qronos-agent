@@ -1,55 +1,129 @@
+# ==========================================================
+# QRONOS AGENT - GIT IGNORE
+# ==========================================================
+
+# ----------------------------------------------------------
 # Python
+# ----------------------------------------------------------
+
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 *.pyo
 
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ----------------------------------------------------------
 # Environment / secrets
+# ----------------------------------------------------------
+
 .env
 .env.*
 !.env.example
 
-# Qronos private data
 data/
 memory/
 private/
 secrets/
 credentials/
 
-# Logs
+# ----------------------------------------------------------
+# Logs / temporary output
+# ----------------------------------------------------------
+
 logs/
 *.log
 
-# Temporary files
 temp/
 tmp/
 output/
 *.tmp
 
+# ----------------------------------------------------------
+# Local Qronos development artifacts
+# ----------------------------------------------------------
+
+qronos_changes.txt
+qronos_files.txt
+test_results.txt
+
+desktop/qronos_*_diff.txt*
+desktop/backups/
+
+# Accidental local command/file artifact.
+desktop/npm
+
+# Local manual backups / archives.
+*.bak
+*.rar
+
+# ----------------------------------------------------------
 # Local caches
+# ----------------------------------------------------------
+
 .cache/
 cache/
+/runtime/cache/
 
+# ----------------------------------------------------------
 # AI model files
+# ----------------------------------------------------------
+
 models/**
 !models/wake_word/
 !models/wake_word/qronos_recommended_settings.json
+
 *.gguf
 *.safetensors
 *.bin
 
-# OS / IDE
+# ----------------------------------------------------------
+# Local runtime assets
+# ----------------------------------------------------------
+#
+# Runtime binaries, downloaded models, development virtual
+# environments, generated audio samples and third-party
+# runtime repositories remain local during development.
+#
+# Production packaging will include approved runtime assets
+# through the installer/build pipeline rather than Git.
+# ----------------------------------------------------------
+
+# The whole directory, not a list of subpaths. Building whisper.cpp here
+# produces a CMake tree — caches, object files, generated projects, vendored
+# ggml sources — several hundred files that the earlier per-subdirectory
+# rules did not cover. None of it belongs in the repository, and every path
+# under it is either a downloaded model or something a build produced.
+#
+# Anchored with a leading slash: unanchored, `runtime/` matches a directory
+# of that name at any depth, which silently swallowed
+# desktop/src-tauri/src/runtime/ — real Rust source. Files already tracked
+# there were unaffected, but a new one would never have been added, and
+# nothing would have said so.
+/runtime/
+
+# ----------------------------------------------------------
+# Local databases
+# ----------------------------------------------------------
+
+*.db
+*.sqlite
+*.sqlite3
+
+# ----------------------------------------------------------
+# Operating system / IDE
+# ----------------------------------------------------------
+
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# Python tooling
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+# ----------------------------------------------------------
+# Local tools
+# ----------------------------------------------------------
 
-# Local databases
-*.db
-*.sqlite
-*.sqlite3
+tools/

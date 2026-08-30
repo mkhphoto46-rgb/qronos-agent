@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import getpass
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from core.link_capability import Capability
 from core.link_devices import (
     SECRET_BYTES,
+    _PERMITTED_ACL_PRINCIPALS,
     DeviceRecord,
     DeviceRegistry,
     DeviceStatus,
     DeviceStoreCorrupt,
+    SecretFileNotProtected,
     UnknownDevice,
+    _acl_principals,
     is_valid_device_id,
     new_device_id,
     new_secret,
@@ -297,15 +304,70 @@ class TestPersistence(unittest.TestCase):
 
         self.assertIsNone(self.registry().secret_for(record.device_id))
 
+    @unittest.skipIf(os.name == "nt", "POSIX modes; Windows is checked below")
     def test_the_file_is_not_world_readable(self) -> None:
         registry = self.registry()
         registry.create("phone")
 
         mode = self.path.stat().st_mode & 0o777
 
-        # Windows ignores the mode, which is why this is not the only
-        # protection the key file has.
         self.assertEqual(mode & 0o077, 0, oct(mode))
+
+    @unittest.skipUnless(os.name == "nt", "Windows access-control lists")
+    def test_the_file_is_reachable_only_by_its_owner(self) -> None:
+        # The Windows half of the rule above. Not a mode check: Windows keeps
+        # reporting 0666 from stat no matter what the real permissions are,
+        # which is exactly why asserting the mode here proved nothing.
+        registry = self.registry()
+        registry.create("phone")
+
+        owner = getpass.getuser().upper()
+        outsiders = {
+            principal
+            for principal in _acl_principals(self.path)
+            if principal not in _PERMITTED_ACL_PRINCIPALS
+            and principal != owner
+            and not principal.endswith("\\" + owner)
+        }
+
+        self.assertEqual(outsiders, set())
+
+    @unittest.skipUnless(os.name == "nt", "Windows access-control lists")
+    def test_inheritance_is_removed_so_the_parent_cannot_widen_it(
+        self,
+    ) -> None:
+        # Without /inheritance:r the file keeps whatever the parent grants, and
+        # a later change to the parent would silently widen access to the keys.
+        registry = self.registry()
+        registry.create("phone")
+
+        listing = subprocess.run(
+            ["icacls", str(self.path)],
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+
+        self.assertNotIn("(I)", listing)
+
+    def test_no_secret_is_written_when_the_file_cannot_be_protected(
+        self,
+    ) -> None:
+        # The rule this module is built on: a pairing secret in a file that
+        # could not be locked down is worse than no pairing at all, because
+        # everything else in the link trusts that secret. Refusing to write is
+        # the safe failure, and it must leave nothing behind.
+        registry = self.registry()
+
+        with mock.patch(
+            "core.link_devices._restrict_to_owner",
+            side_effect=SecretFileNotProtected("simulated failure"),
+        ):
+            with self.assertRaises(SecretFileNotProtected):
+                registry.create("phone")
+
+        self.assertFalse(self.path.exists())
+        self.assertEqual(list(Path(self.directory.name).glob("*.tmp")), [])
 
     def test_no_temporary_file_is_left_behind(self) -> None:
         registry = self.registry()

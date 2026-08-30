@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -145,6 +147,61 @@ class StorageStatus:
         return tuple(unique)
 
 
+def is_reparse_point(path: str | Path) -> bool:
+    """
+    True for a symlink, a junction, or any other reparse point.
+
+    ``Path.is_symlink`` is not enough on Windows, which is the only platform
+    Qronos ships on. A *junction* is a reparse point but not a symlink, so
+    ``is_symlink`` answers False for one, and ``stat`` follows it. Junctions
+    also need no privileges: any program running as the user can create one
+    with ``mklink /J``, while a symlink needs Developer Mode or an
+    administrator.
+
+    Measured before this existed: a junction placed inside a Qronos directory
+    and pointing at a folder of documents made 1.2 MB of the user's files count
+    toward a 250 KB Qronos quota. Nothing was deleted — containment held — but
+    the component then looked permanently over its cap, so cleanup would keep
+    removing real scratch data trying to reach a limit it could never reach.
+
+    A path that is not there answers False. It is not a reparse point, it is
+    absent, and saying otherwise makes a caller report a missing file as a
+    link — which is what the janitor's own tests caught the first time this
+    was written.
+
+    Any other unreadable path answers True. Not being able to tell what
+    something is, is a reason to leave it alone rather than to walk into it.
+    """
+    try:
+        if os.path.islink(path):
+            return True
+
+        if os.path.isjunction(path):
+            return True
+
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+def is_nameable(path: str | Path) -> bool:
+    """
+    False when the text cannot be a path on any platform.
+
+    A control character, the null byte included, is not a legal part of a file
+    name anywhere. Checking the text directly is deliberate: the platforms do
+    not agree on what happens otherwise. POSIX raises ``ValueError`` from
+    ``Path.resolve``, which the caller can catch. Windows resolves the string
+    without complaint, produces a path that simply does not exist, and leaves
+    the caller to discover that on its own.
+    """
+    return not any(ch < " " for ch in str(path))
+
+
 def resolve_measurable_path(path: str | Path) -> Path | None:
     """
     Return the nearest existing directory at or above ``path``.
@@ -153,13 +210,20 @@ def resolve_measurable_path(path: str | Path) -> Path | None:
     directories in :mod:`core.config` before they are created, so the reading
     walks upwards until it finds something real. Returns None when nothing in
     the chain exists or the path cannot be resolved at all.
+
+    A path that cannot be named is rejected before the walk begins. Without
+    that, a malformed path on Windows resolves against the working directory
+    and the walk climbs out of the nonsense into a real ancestor, so a caller
+    asking about garbage would be handed a genuine reading for an unrelated
+    volume.
     """
+    if not is_nameable(path):
+        return None
+
     try:
         candidate = Path(path).expanduser().resolve()
     except (OSError, ValueError):
-        # ValueError covers malformed paths, such as an embedded null byte,
-        # which Path.resolve raises rather than OSError. A path Qronos cannot
-        # even name is not a path it can measure.
+        # A path Qronos cannot even name is not a path it can measure.
         return None
 
     # Path.parents stops at the anchor, so this terminates on every platform.

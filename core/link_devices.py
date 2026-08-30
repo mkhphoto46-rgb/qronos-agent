@@ -23,10 +23,12 @@ as the artifact ownership store.
 from __future__ import annotations
 
 import base64
+import getpass
 import json
 import os
 import re
 import secrets
+import subprocess
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -89,6 +91,133 @@ def is_valid_device_id(device_id: str) -> bool:
     registry keys and the audit log.
     """
     return bool(DEVICE_ID_PATTERN.match(device_id))
+
+
+class SecretFileNotProtected(Exception):
+    """The device file could not be restricted to its owner."""
+
+
+# Principals that may legitimately appear on the device file's Windows ACL
+# besides the owner. Neither is a boundary worth defending: an administrator
+# can take ownership of any file, and SYSTEM already runs above the user. What
+# the ACL has to exclude is every *other* standard account on the machine.
+_PERMITTED_ACL_PRINCIPALS = frozenset(
+    {
+        "NT AUTHORITY\\SYSTEM",
+        "BUILTIN\\ADMINISTRATORS",
+        "OWNER RIGHTS",
+    }
+)
+
+_ICACLS_TIMEOUT_SECONDS = 15
+
+# Only defined on Windows, and zero is the documented "no special flags" value
+# everywhere else, so the calls below stay importable on a POSIX machine even
+# though nothing there reaches them.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _acl_principals(path: Path) -> frozenset[str]:
+    """
+    The accounts named on a file's Windows ACL, upper-cased.
+
+    ``icacls`` prints the path, then one ``PRINCIPAL:(rights)`` entry per line.
+    Rights are irrelevant here: any entry at all means that account can reach
+    the file, and the question being asked is who appears, not what they may
+    do.
+    """
+    result = subprocess.run(
+        ["icacls", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=_ICACLS_TIMEOUT_SECONDS,
+        creationflags=_NO_WINDOW,
+    )
+
+    if result.returncode != 0:
+        raise SecretFileNotProtected(
+            f"Could not read the permissions of {path}."
+        )
+
+    principals: set[str] = set()
+
+    for line in result.stdout.splitlines():
+        # Strip the path off the first line; later lines are indented.
+        entry = line.replace(str(path), "", 1).strip()
+
+        if not entry or ":" not in entry:
+            continue
+
+        principal, _, _rights = entry.partition(":")
+        principal = principal.strip()
+
+        if principal:
+            principals.add(principal.upper())
+
+    return frozenset(principals)
+
+
+def _restrict_to_owner(path: Path) -> None:
+    """
+    Make the file readable by its owner and nobody else.
+
+    POSIX gets mode 0600. Windows ignores the mode entirely — the file keeps
+    whatever it inherited from its parent, and ``stat`` keeps reporting 0666 no
+    matter what the real permissions are — so the access-control list is
+    rewritten instead: inheritance off, one entry for the current user.
+
+    Raises :class:`SecretFileNotProtected` rather than returning quietly. This
+    file holds the shared secret every paired device authenticates with. A
+    secret sitting in a world-readable file is worse than no pairing at all,
+    because the pairing is what the rest of the link trusts, so the write is
+    abandoned instead.
+    """
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+        return
+
+    owner = getpass.getuser()
+
+    try:
+        granted = subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"{owner}:(F)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_ICACLS_TIMEOUT_SECONDS,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SecretFileNotProtected(
+            f"Could not restrict {path} to {owner}: {error}"
+        ) from error
+
+    if granted.returncode != 0:
+        raise SecretFileNotProtected(
+            f"Could not restrict {path} to {owner}: "
+            f"{granted.stderr.strip() or granted.stdout.strip()}"
+        )
+
+    # Read the list back rather than trusting the exit code. Group policy on a
+    # domain-joined machine can reapply inherited entries, and icacls reports
+    # success for the change it made regardless.
+    unexpected = {
+        principal
+        for principal in _acl_principals(path)
+        if principal not in _PERMITTED_ACL_PRINCIPALS
+        and not principal.endswith("\\" + owner.upper())
+        and principal != owner.upper()
+    }
+
+    if unexpected:
+        raise SecretFileNotProtected(
+            f"{path} is still reachable by {sorted(unexpected)}."
+        )
 
 
 def new_device_id() -> str:
@@ -288,8 +417,9 @@ class DeviceRegistry:
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Best effort on the directory. Windows ignores the mode, which is why
-        # this is not the only protection the key file has.
+        # Best effort on the directory, and it stays best effort: a readable
+        # directory reveals that a device file exists, which is not a secret.
+        # The keys inside it are, and those are protected on the file itself.
         try:
             os.chmod(self.path.parent, 0o700)
         except OSError:
@@ -298,18 +428,21 @@ class DeviceRegistry:
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
 
         try:
+            # Create the file empty, restrict it, and only then write the keys
+            # into it. Writing first would leave every pairing secret on disk
+            # under inherited permissions for as long as the restriction takes
+            # to apply — brief, but a window that does not need to exist.
+            temporary.touch()
+            _restrict_to_owner(temporary)
+
             temporary.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
 
-            try:
-                os.chmod(temporary, 0o600)
-            except OSError:
-                pass
-
             # Replace, so a crash mid-write leaves the previous file intact
-            # rather than a truncated one.
+            # rather than a truncated one. The Windows access-control list is
+            # carried across by the rename, and the POSIX mode with it.
             os.replace(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)

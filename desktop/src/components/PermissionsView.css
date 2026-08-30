@@ -1,0 +1,5011 @@
+/* =========================================================
+   QRONOS PERMISSIONS VIEW — V1
+   Security policy / dense bottom-origin particle field.
+   ========================================================= */
+
+.permissions-view {
+  position: absolute;
+
+  z-index: 18;
+
+  inset: 0;
+
+  overflow: hidden;
+
+  visibility: hidden;
+
+  opacity: 0;
+
+  pointer-events: none;
+
+  background:
+    radial-gradient(
+      circle at 50% 48%,
+      rgba(
+        27,
+        69,
+        91,
+        0.09
+      ),
+      transparent
+      39%
+    ),
+    radial-gradient(
+      circle at 68% 62%,
+      rgba(
+        80,
+        74,
+        181,
+        0.045
+      ),
+      transparent
+      31%
+    );
+}
+
+.permissions-view-entering,
+.permissions-view-visible,
+.permissions-view-leaving {
+  visibility: visible;
+}
+
+.permissions-view-entering,
+.permissions-view-visible {
+  pointer-events: auto;
+}
+
+.permissions-view-entering {
+  animation:
+    permissionsViewIn
+    300ms
+    120ms
+    ease-out
+    both;
+}
+
+.permissions-view-visible {
+  opacity: 1;
+}
+
+.permissions-view-leaving {
+  pointer-events: none;
+
+  animation:
+    permissionsViewOut
+    520ms
+    ease-in
+    both;
+}
+
+@keyframes permissionsViewIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes permissionsViewOut {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+/* =========================================================
+   PARTICLE FIELD
+   ========================================================= */
+
+.permissions-particle-canvas {
+  position: absolute;
+
+  z-index: 1;
+
+  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
+  pointer-events: none;
+}
+
+.permissions-security-field {
+  position: absolute;
+
+  z-index: 1;
+
+  left: 50%;
+  top: 51%;
+
+  width: 430px;
+  height: 430px;
+
+  pointer-events: none;
+
+  opacity: 0;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scale(1.16);
+}
+
+.permissions-view-entering
+  .permissions-security-field {
+  animation:
+    permissionsSecurityFieldIn
+    920ms
+    120ms
+    ease-out
+    both;
+}
+
+.permissions-view-visible
+  .permissions-security-field {
+  opacity: 0.15;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    scale(0.78);
+}
+
+.permissions-view-leaving
+  .permissions-security-field {
+  animation:
+    permissionsSecurityFieldIn
+    620ms
+    ease-in
+    reverse
+    both;
+}
+
+.permissions-security-ring,
+.permissions-security-core {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  border-radius: 50%;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    );
+}
+
+.permissions-security-core {
+  width: 42px;
+  height: 42px;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(
+        233,
+        254,
+        255,
+        0.36
+      ),
+      rgba(
+        75,
+        216,
+        255,
+        0.1
+      )
+      36%,
+      transparent
+      74%
+    );
+
+  box-shadow:
+    0
+    0
+    80px
+    rgba(
+      73,
+      206,
+      246,
+      0.11
+    );
+}
+
+.permissions-security-ring {
+  border:
+    1px solid
+    rgba(
+      94,
+      185,
+      234,
+      0.08
+    );
+}
+
+.permissions-security-ring-a {
+  width: 248px;
+  height: 248px;
+
+  animation:
+    permissionsSecurityOrbit
+    10s
+    linear
+    infinite;
+}
+
+.permissions-security-ring-b {
+  width: 390px;
+  height: 390px;
+
+  opacity: 0.6;
+
+  animation:
+    permissionsSecurityOrbit
+    16s
+    linear
+    infinite
+    reverse;
+}
+
+@keyframes permissionsSecurityOrbit {
+  to {
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      rotate(360deg);
+  }
+}
+
+@keyframes permissionsSecurityFieldIn {
+  from {
+    opacity: 0;
+
+    transform:
+      translate(
+        -50%,
+        -40%
+      )
+      scale(1.18);
+  }
+
+  to {
+    opacity: 0.15;
+
+    transform:
+      translate(
+        -50%,
+        -50%
+      )
+      scale(0.78);
+  }
+}
+
+/* =========================================================
+   SHARED RESPONSIVE SHELL
+   ========================================================= */
+
+.permissions-responsive-shell {
+  position: absolute;
+
+  z-index: 4;
+
+  left: 50%;
+  top: 0;
+
+  width: 1180px;
+
+  height:
+    calc(
+      100vh /
+      var(--qronos-ui-scale)
+    );
+
+  transform:
+    translateX(-50%)
+    scale(
+      var(--qronos-ui-scale)
+    );
+
+  transform-origin:
+    center top;
+
+  pointer-events: none;
+}
+
+.permissions-header,
+.permissions-emergency-bar,
+.permissions-layout {
+  pointer-events: auto;
+}
+
+/* =========================================================
+   HEADER
+   ========================================================= */
+
+.permissions-header {
+  position: absolute;
+
+  left: 0;
+  right: 0;
+  top: 46px;
+
+  height: 70px;
+
+  display: grid;
+
+  grid-template-columns:
+    1fr
+    auto;
+
+  align-items: end;
+
+  gap: 20px;
+
+  opacity: 0;
+}
+
+.permissions-view-entering
+  .permissions-header {
+  animation:
+    permissionsHeaderIn
+    520ms
+    520ms
+    ease-out
+    both;
+}
+
+.permissions-view-visible
+  .permissions-header {
+  opacity: 1;
+}
+
+.permissions-view-leaving
+  .permissions-header {
+  animation:
+    permissionsHeaderOut
+    260ms
+    ease-in
+    both;
+}
+
+.permissions-heading {
+  text-align: right;
+}
+
+.permissions-heading > span {
+  color:
+    rgba(
+      104,
+      198,
+      245,
+      0.64
+    );
+
+  font-size: 11px;
+  font-weight: 800;
+
+  letter-spacing: 0.19em;
+}
+
+.permissions-heading h1 {
+  margin:
+    4px
+    0
+    0;
+
+  color:
+    rgba(
+      244,
+      250,
+      254,
+      0.98
+    );
+
+  font-size: 33px;
+  font-weight: 430;
+}
+
+.permissions-heading p {
+  margin:
+    3px
+    0
+    0;
+
+  color:
+    rgba(
+      151,
+      184,
+      203,
+      0.56
+    );
+
+  font-size: 13px;
+}
+
+.permissions-header-status {
+  display: flex;
+
+  align-items: center;
+
+  gap: 7px;
+
+  direction: ltr;
+
+  color:
+    rgba(
+      116,
+      169,
+      200,
+      0.56
+    );
+
+  font-size: 10px;
+
+  letter-spacing: 0.08em;
+}
+
+.permissions-header-status i {
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      84,
+      219,
+      255,
+      0.62
+    );
+}
+
+.permissions-header-status strong {
+  color:
+    rgba(
+      107,
+      224,
+      255,
+      0.82
+    );
+
+  font-size: 11px;
+}
+
+.permissions-back {
+  position: absolute;
+
+  left: 0;
+  top: 3px;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 7px;
+
+  padding:
+    4px
+    2px;
+
+  background: transparent;
+
+  color:
+    rgba(
+      130,
+      191,
+      227,
+      0.68
+    );
+
+  cursor: pointer;
+}
+
+.permissions-back:hover {
+  color:
+    rgba(
+      229,
+      248,
+      255,
+      0.96
+    );
+}
+
+.permissions-back span {
+  font-size: 11.5px;
+}
+
+.permissions-back svg {
+  width: 16px;
+  height: 16px;
+
+  fill: none;
+
+  stroke:
+    currentColor;
+
+  stroke-width: 1.4;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@keyframes permissionsHeaderIn {
+  from {
+    opacity: 0;
+
+    transform:
+      translateY(-8px);
+
+    filter:
+      blur(1.4px);
+  }
+
+  to {
+    opacity: 1;
+
+    transform:
+      translateY(0);
+
+    filter: blur(0);
+  }
+}
+
+@keyframes permissionsHeaderOut {
+  to {
+    opacity: 0;
+
+    transform:
+      translateY(-6px);
+
+    filter:
+      blur(1px);
+  }
+}
+
+/* =========================================================
+   EMERGENCY CONTROL
+   ========================================================= */
+
+.permissions-emergency-bar {
+  position: absolute;
+
+  left: 0;
+  right: 0;
+  top: 132px;
+
+  min-height: 58px;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  gap: 18px;
+
+  padding:
+    9px
+    13px;
+
+  border:
+    1px solid
+    rgba(
+      80,
+      165,
+      211,
+      0.1
+    );
+
+  border-radius:
+    13px
+    7px
+    13px
+    7px;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        8,
+        29,
+        40,
+        0.44
+      ),
+      rgba(
+        6,
+        18,
+        27,
+        0.24
+      )
+    );
+
+  opacity: 0;
+}
+
+.permissions-view-entering
+  .permissions-emergency-bar {
+  animation:
+    permissionsControlIn
+    500ms
+    610ms
+    ease-out
+    both;
+}
+
+.permissions-view-visible
+  .permissions-emergency-bar {
+  opacity: 1;
+}
+
+.permissions-view-leaving
+  .permissions-emergency-bar {
+  animation:
+    permissionsControlOut
+    220ms
+    ease-in
+    both;
+}
+
+.permissions-emergency-bar > div {
+  display: grid;
+
+  grid-template-columns:
+    auto
+    auto;
+
+  align-items: baseline;
+
+  gap:
+    3px
+    10px;
+
+  text-align: right;
+}
+
+.permissions-emergency-bar > div > span {
+  grid-column:
+    1 /
+    -1;
+
+  color:
+    rgba(
+      91,
+      188,
+      228,
+      0.54
+    );
+
+  font-size: 8.5px;
+  font-weight: 800;
+
+  letter-spacing: 0.15em;
+}
+
+.permissions-emergency-bar strong {
+  color:
+    rgba(
+      237,
+      248,
+      252,
+      0.94
+    );
+
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.permissions-emergency-bar small {
+  color:
+    rgba(
+      132,
+      174,
+      194,
+      0.52
+    );
+
+  font-size: 10.5px;
+}
+
+.permissions-pause-toggle {
+  min-width: 118px;
+  height: 36px;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  gap: 8px;
+
+  border:
+    1px solid
+    rgba(
+      77,
+      197,
+      159,
+      0.14
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      25,
+      87,
+      68,
+      0.12
+    );
+
+  color:
+    rgba(
+      103,
+      229,
+      184,
+      0.78
+    );
+
+  font-size: 10.5px;
+  font-weight: 800;
+
+  cursor: pointer;
+}
+
+.permissions-pause-toggle span {
+  width: 6px;
+  height: 6px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      95,
+      235,
+      178,
+      0.95
+    );
+
+  box-shadow:
+    0
+    0
+    10px
+    rgba(
+      95,
+      235,
+      178,
+      0.46
+    );
+}
+
+.permissions-pause-toggle-active {
+  border-color:
+    rgba(
+      255,
+      106,
+      119,
+      0.24
+    );
+
+  background:
+    rgba(
+      112,
+      35,
+      43,
+      0.18
+    );
+
+  color:
+    rgba(
+      255,
+      133,
+      144,
+      0.9
+    );
+}
+
+.permissions-pause-toggle-active span {
+  background:
+    rgba(
+      255,
+      100,
+      115,
+      0.96
+    );
+
+  box-shadow:
+    0
+    0
+    10px
+    rgba(
+      255,
+      94,
+      109,
+      0.5
+    );
+}
+
+@keyframes permissionsControlIn {
+  from {
+    opacity: 0;
+
+    transform:
+      translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+
+    transform:
+      translateY(0);
+  }
+}
+
+@keyframes permissionsControlOut {
+  to {
+    opacity: 0;
+
+    transform:
+      translateY(5px);
+  }
+}
+
+/* =========================================================
+   MAIN LAYOUT
+   ========================================================= */
+
+.permissions-layout {
+  position: absolute;
+
+  left: 0;
+  right: 0;
+  top: 204px;
+  bottom: 92px;
+
+  display: grid;
+
+  grid-template-columns:
+    minmax(
+      0,
+      1fr
+    )
+    360px
+    238px;
+
+  gap: 14px;
+
+  opacity: 0;
+}
+
+.permissions-view-entering
+  .permissions-layout {
+  animation:
+    permissionsLayoutIn
+    620ms
+    690ms
+    ease-out
+    both;
+}
+
+.permissions-view-visible
+  .permissions-layout {
+  opacity: 1;
+}
+
+.permissions-view-leaving
+  .permissions-layout {
+  animation:
+    permissionsLayoutOut
+    320ms
+    ease-in
+    both;
+}
+
+@keyframes permissionsLayoutIn {
+  from {
+    opacity: 0;
+
+    transform:
+      translateY(8px);
+
+    filter:
+      blur(1.6px);
+  }
+
+  to {
+    opacity: 1;
+
+    transform:
+      translateY(0);
+
+    filter: blur(0);
+  }
+}
+
+@keyframes permissionsLayoutOut {
+  to {
+    opacity: 0;
+
+    transform:
+      translateY(6px);
+
+    filter:
+      blur(1.2px);
+  }
+}
+
+/* =========================================================
+   CATALOG
+   ========================================================= */
+
+.permissions-catalog {
+  min-width: 0;
+
+  overflow-y: auto;
+
+  padding:
+    2px
+    6px
+    36px
+    2px;
+
+  scrollbar-width: thin;
+
+  scrollbar-color:
+    rgba(
+      69,
+      163,
+      207,
+      0.12
+    )
+    transparent;
+}
+
+.permissions-group
+  +
+.permissions-group {
+  margin-top: 16px;
+}
+
+.permissions-group > header {
+  height: 20px;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 8px;
+
+  direction: ltr;
+
+  margin-bottom: 6px;
+}
+
+.permissions-group > header span {
+  color:
+    rgba(
+      111,
+      157,
+      205,
+      0.54
+    );
+
+  font-size: 10px;
+  font-weight: 780;
+
+  letter-spacing: 0.13em;
+}
+
+.permissions-group > header i {
+  flex: 1;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      rgba(
+        88,
+        158,
+        211,
+        0.13
+      ),
+      transparent
+    );
+}
+
+.permissions-group-items {
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 6px;
+}
+
+.permissions-item {
+  position: relative;
+
+  min-height: 62px;
+
+  display: grid;
+
+  grid-template-columns:
+    44px
+    minmax(
+      0,
+      1fr
+    )
+    auto
+    8px;
+
+  align-items: center;
+
+  gap: 10px;
+
+  padding:
+    8px
+    10px;
+
+  border:
+    1px solid
+    rgba(
+      72,
+      145,
+      194,
+      0.075
+    );
+
+  border-radius:
+    12px
+    7px
+    12px
+    7px;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        7,
+        25,
+        35,
+        0.36
+      ),
+      rgba(
+        5,
+        16,
+        24,
+        0.18
+      )
+    );
+
+  color:
+    inherit;
+
+  cursor: pointer;
+
+  transition:
+    transform
+      150ms
+      ease,
+    background
+      150ms
+      ease,
+    border-color
+      150ms
+      ease,
+    filter
+      150ms
+      ease;
+}
+
+.permissions-item:hover {
+  transform:
+    translateX(-2px);
+
+  border-color:
+    rgba(
+      81,
+      180,
+      229,
+      0.17
+    );
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        9,
+        36,
+        48,
+        0.48
+      ),
+      rgba(
+        7,
+        21,
+        31,
+        0.28
+      )
+    );
+
+  filter:
+    brightness(1.055);
+}
+
+.permissions-item-selected {
+  border-color:
+    rgba(
+      87,
+      196,
+      243,
+      0.27
+    );
+
+  box-shadow:
+    inset
+    0
+    0
+    0
+    1px
+    rgba(
+      105,
+      117,
+      241,
+      0.06
+    );
+}
+
+.permissions-item-icon {
+  width: 42px;
+  height: 42px;
+
+  display: grid;
+
+  place-items: center;
+
+  border:
+    1px solid
+    rgba(
+      86,
+      188,
+      230,
+      0.13
+    );
+
+  border-radius:
+    11px;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(
+        19,
+        73,
+        93,
+        0.52
+      ),
+      rgba(
+        5,
+        19,
+        27,
+        0.7
+      )
+    );
+
+  color:
+    rgba(
+      111,
+      224,
+      255,
+      0.86
+    );
+}
+
+.permissions-item-icon svg {
+  width: 22px;
+  height: 22px;
+
+  fill: none;
+
+  stroke: currentColor;
+
+  stroke-width: 1.35;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.permissions-item-copy {
+  min-width: 0;
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 3px;
+
+  text-align: right;
+}
+
+.permissions-item-copy strong {
+  color:
+    rgba(
+      238,
+      248,
+      252,
+      0.94
+    );
+
+  font-size: 14.5px;
+  font-weight: 680;
+}
+
+.permissions-item-copy small {
+  color:
+    rgba(
+      129,
+      168,
+      187,
+      0.52
+    );
+
+  font-size: 10.5px;
+}
+
+.permissions-policy-chip {
+  padding:
+    5px
+    8px;
+
+  border-radius: 999px;
+
+  color:
+    rgba(
+      170,
+      209,
+      223,
+      0.72
+    );
+
+  background:
+    rgba(
+      36,
+      82,
+      101,
+      0.15
+    );
+
+  font-size: 9.5px;
+  font-weight: 820;
+
+  letter-spacing: 0.04em;
+
+  white-space: nowrap;
+}
+
+.permissions-policy-custom {
+  color:
+    rgba(
+      114,
+      208,
+      255,
+      0.86
+    );
+
+  background:
+    rgba(
+      48,
+      98,
+      146,
+      0.18
+    );
+}
+
+.permissions-policy-ask,
+.permissions-policy-always-ask {
+  color:
+    rgba(
+      255,
+      190,
+      100,
+      0.86
+    );
+
+  background:
+    rgba(
+      123,
+      80,
+      31,
+      0.14
+    );
+}
+
+.permissions-policy-session {
+  color:
+    rgba(
+      137,
+      222,
+      191,
+      0.84
+    );
+
+  background:
+    rgba(
+      44,
+      112,
+      82,
+      0.13
+    );
+}
+
+.permissions-policy-deny {
+  color:
+    rgba(
+      255,
+      123,
+      136,
+      0.86
+    );
+
+  background:
+    rgba(
+      128,
+      41,
+      51,
+      0.14
+    );
+}
+
+.permissions-risk-dot {
+  width: 6px;
+  height: 6px;
+
+  border-radius: 50%;
+}
+
+.permissions-risk-low {
+  color:
+    rgba(
+      107,
+      231,
+      180,
+      0.9
+    );
+
+  background:
+    rgba(
+      107,
+      231,
+      180,
+      0.92
+    );
+}
+
+.permissions-risk-medium {
+  color:
+    rgba(
+      107,
+      211,
+      255,
+      0.9
+    );
+
+  background:
+    rgba(
+      107,
+      211,
+      255,
+      0.92
+    );
+}
+
+.permissions-risk-high {
+  color:
+    rgba(
+      255,
+      186,
+      87,
+      0.94
+    );
+
+  background:
+    rgba(
+      255,
+      186,
+      87,
+      0.94
+    );
+}
+
+.permissions-risk-critical {
+  color:
+    rgba(
+      255,
+      100,
+      116,
+      0.96
+    );
+
+  background:
+    rgba(
+      255,
+      100,
+      116,
+      0.96
+    );
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      255,
+      90,
+      108,
+      0.34
+    );
+}
+
+/* =========================================================
+   DETAIL PANEL
+   ========================================================= */
+
+.permissions-detail-panel {
+  min-width: 0;
+
+  overflow-y: auto;
+
+  padding:
+    13px;
+
+  border:
+    1px solid
+    rgba(
+      85,
+      139,
+      204,
+      0.1
+    );
+
+  border-radius:
+    14px
+    7px
+    14px
+    7px;
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        8,
+        26,
+        37,
+        0.48
+      ),
+      rgba(
+        5,
+        16,
+        24,
+        0.24
+      )
+    );
+
+  scrollbar-width: none;
+}
+
+.permissions-detail-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.permissions-detail-head {
+  display: grid;
+
+  grid-template-columns:
+    54px
+    minmax(
+      0,
+      1fr
+    )
+    auto;
+
+  align-items: center;
+
+  gap: 11px;
+}
+
+.permissions-detail-icon {
+  width: 52px;
+  height: 52px;
+
+  display: grid;
+
+  place-items: center;
+
+  border:
+    1px solid
+    rgba(
+      84,
+      188,
+      231,
+      0.15
+    );
+
+  border-radius:
+    13px;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(
+        24,
+        87,
+        111,
+        0.54
+      ),
+      rgba(
+        5,
+        20,
+        29,
+        0.7
+      )
+    );
+
+  color:
+    rgba(
+      113,
+      226,
+      255,
+      0.9
+    );
+}
+
+.permissions-detail-icon svg {
+  width: 28px;
+  height: 28px;
+
+  fill: none;
+
+  stroke: currentColor;
+
+  stroke-width: 1.35;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.permissions-detail-head > div:nth-child(2) {
+  min-width: 0;
+
+  text-align: right;
+}
+
+.permissions-detail-head span {
+  color:
+    rgba(
+      100,
+      153,
+      211,
+      0.52
+    );
+
+  font-size: 8.5px;
+  font-weight: 760;
+
+  letter-spacing: 0.13em;
+}
+
+.permissions-detail-head h2 {
+  margin:
+    4px
+    0
+    0;
+
+  color:
+    rgba(
+      241,
+      249,
+      253,
+      0.95
+    );
+
+  font-size: 21px;
+  font-weight: 650;
+}
+
+.permissions-detail-head p {
+  margin:
+    3px
+    0
+    0;
+
+  color:
+    rgba(
+      139,
+      177,
+      194,
+      0.54
+    );
+
+  font-size: 11px;
+}
+
+.permissions-risk-badge {
+  padding:
+    5px
+    7px;
+
+  border:
+    1px solid
+    currentColor;
+
+  border-radius: 999px;
+
+  background: transparent;
+
+  font-size: 8.5px;
+  font-weight: 820;
+
+  letter-spacing: 0.05em;
+}
+
+.permissions-detail-description {
+  margin:
+    15px
+    0
+    0;
+
+  color:
+    rgba(
+      190,
+      217,
+      229,
+      0.74
+    );
+
+  font-size: 13px;
+
+  line-height: 1.75;
+}
+
+.permissions-policy-selector {
+  margin-top: 15px;
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(
+      5,
+      minmax(
+        0,
+        1fr
+      )
+    );
+
+  gap: 5px;
+}
+
+.permissions-policy-option {
+  min-height: 31px;
+
+  border-radius: 7px;
+
+  background:
+    rgba(
+      12,
+      35,
+      47,
+      0.38
+    );
+
+  color:
+    rgba(
+      137,
+      181,
+      201,
+      0.58
+    );
+
+  font-size: 8.5px;
+  font-weight: 760;
+
+  cursor: pointer;
+}
+
+.permissions-policy-option:hover:not(:disabled) {
+  color:
+    rgba(
+      225,
+      245,
+      252,
+      0.92
+    );
+
+  background:
+    rgba(
+      20,
+      52,
+      68,
+      0.52
+    );
+}
+
+.permissions-policy-option-active {
+  color:
+    rgba(
+      229,
+      248,
+      255,
+      0.96
+    );
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        44,
+        113,
+        155,
+        0.5
+      ),
+      rgba(
+        64,
+        77,
+        170,
+        0.34
+      )
+    );
+}
+
+.permissions-policy-option:disabled {
+  opacity: 0.22;
+
+  cursor: not-allowed;
+}
+
+.permissions-action-matrix {
+  margin-top: 17px;
+}
+
+.permissions-action-matrix > header {
+  display: flex;
+
+  align-items: center;
+
+  gap: 8px;
+
+  margin-bottom: 6px;
+
+  direction: ltr;
+}
+
+.permissions-action-matrix > header span {
+  color:
+    rgba(
+      105,
+      157,
+      207,
+      0.52
+    );
+
+  font-size: 8.5px;
+  font-weight: 780;
+
+  letter-spacing: 0.13em;
+}
+
+.permissions-action-matrix > header i {
+  flex: 1;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      rgba(
+        85,
+        158,
+        211,
+        0.13
+      ),
+      transparent
+    );
+}
+
+.permissions-action-row {
+  min-height: 31px;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  gap: 10px;
+
+  padding:
+    0
+    7px;
+
+  border-bottom:
+    1px solid
+    rgba(
+      75,
+      132,
+      177,
+      0.07
+    );
+
+  color:
+    rgba(
+      176,
+      207,
+      220,
+      0.69
+    );
+
+  font-size: 11px;
+}
+
+.permissions-action-row i {
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      92,
+      213,
+      249,
+      0.58
+    );
+}
+
+.permissions-scope-panel,
+.permissions-protected-note {
+  margin-top: 14px;
+
+  padding:
+    10px;
+
+  border-radius: 8px;
+}
+
+.permissions-scope-panel {
+  border:
+    1px solid
+    rgba(
+      78,
+      183,
+      227,
+      0.11
+    );
+
+  background:
+    rgba(
+      13,
+      49,
+      63,
+      0.16
+    );
+}
+
+.permissions-scope-panel span,
+.permissions-protected-note span {
+  display: block;
+
+  margin-bottom: 7px;
+
+  font-size: 8.5px;
+  font-weight: 800;
+
+  letter-spacing: 0.13em;
+}
+
+.permissions-scope-panel span {
+  color:
+    rgba(
+      99,
+      200,
+      239,
+      0.62
+    );
+}
+
+.permissions-scope-panel strong {
+  display: block;
+
+  margin-top: 5px;
+
+  direction: ltr;
+
+  overflow: hidden;
+
+  color:
+    rgba(
+      178,
+      212,
+      224,
+      0.72
+    );
+
+  font-size: 10.5px;
+  font-weight: 550;
+
+  text-align: left;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+}
+
+.permissions-protected-note {
+  border:
+    1px solid
+    rgba(
+      235,
+      115,
+      91,
+      0.11
+    );
+
+  background:
+    rgba(
+      104,
+      36,
+      31,
+      0.1
+    );
+}
+
+.permissions-protected-note span {
+  color:
+    rgba(
+      255,
+      135,
+      112,
+      0.72
+    );
+}
+
+.permissions-protected-note p {
+  margin: 0;
+
+  color:
+    rgba(
+      191,
+      151,
+      142,
+      0.62
+    );
+
+  font-size: 10.5px;
+
+  line-height: 1.65;
+}
+
+/* =========================================================
+   AUDIT PANEL
+   ========================================================= */
+
+.permissions-activity-panel {
+  min-width: 0;
+
+  overflow-y: auto;
+
+  padding:
+    12px;
+
+  border-left:
+    1px solid
+    rgba(
+      84,
+      126,
+      201,
+      0.09
+    );
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        7,
+        22,
+        32,
+        0.34
+      ),
+      rgba(
+        5,
+        14,
+        22,
+        0.16
+      )
+    );
+
+  scrollbar-width: none;
+}
+
+.permissions-activity-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.permissions-activity-panel > header {
+  display: flex;
+
+  align-items: baseline;
+
+  justify-content: space-between;
+
+  gap: 10px;
+
+  direction: ltr;
+}
+
+.permissions-activity-panel > header span {
+  color:
+    rgba(
+      101,
+      156,
+      205,
+      0.52
+    );
+
+  font-size: 8.5px;
+  font-weight: 780;
+
+  letter-spacing: 0.13em;
+}
+
+.permissions-activity-panel > header strong {
+  color:
+    rgba(
+      183,
+      217,
+      229,
+      0.7
+    );
+
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.permissions-activity-list {
+  margin-top: 12px;
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 7px;
+}
+
+.permissions-activity-row {
+  min-height: 54px;
+
+  display: grid;
+
+  grid-template-columns:
+    38px
+    minmax(
+      0,
+      1fr
+    );
+
+  gap:
+    3px
+    8px;
+
+  align-items: center;
+
+  padding:
+    7px
+    8px;
+
+  border:
+    1px solid
+    rgba(
+      71,
+      136,
+      180,
+      0.065
+    );
+
+  border-radius: 8px;
+
+  background:
+    rgba(
+      7,
+      25,
+      34,
+      0.3
+    );
+}
+
+.permissions-activity-row time {
+  grid-row:
+    1 /
+    span
+    2;
+
+  color:
+    rgba(
+      101,
+      171,
+      200,
+      0.56
+    );
+
+  font-size: 10px;
+}
+
+.permissions-activity-row > span {
+  overflow: hidden;
+
+  color:
+    rgba(
+      195,
+      220,
+      231,
+      0.72
+    );
+
+  font-size: 10.5px;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+}
+
+.permissions-activity-row strong {
+  font-size: 8.5px;
+  font-weight: 820;
+
+  letter-spacing: 0.04em;
+}
+
+.permissions-activity-allowed {
+  color:
+    rgba(
+      105,
+      224,
+      177,
+      0.76
+    );
+}
+
+.permissions-activity-denied {
+  color:
+    rgba(
+      255,
+      112,
+      125,
+      0.82
+    );
+}
+
+.permissions-audit-foot {
+  margin-top: 11px;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 6px;
+
+  color:
+    rgba(
+      107,
+      159,
+      180,
+      0.42
+    );
+
+  font-size: 8.5px;
+}
+
+.permissions-audit-foot i {
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      78,
+      214,
+      255,
+      0.62
+    );
+}
+
+/* =========================================================
+   PAUSED BANNER
+   ========================================================= */
+
+.permissions-paused-banner {
+  position: absolute;
+
+  z-index: 60;
+
+  left: 50%;
+  bottom:
+    calc(
+      82px *
+      var(--qronos-ui-scale)
+    );
+
+  min-height: 30px;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 7px;
+
+  padding:
+    0
+    12px;
+
+  transform:
+    translateX(-50%);
+
+  border:
+    1px solid
+    rgba(
+      255,
+      99,
+      113,
+      0.18
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      62,
+      22,
+      28,
+      0.82
+    );
+
+  color:
+    rgba(
+      255,
+      140,
+      151,
+      0.9
+    );
+
+  font-size: 9.5px;
+  font-weight: 820;
+
+  letter-spacing: 0.08em;
+
+  box-shadow:
+    0
+    8px
+    28px
+    rgba(
+      0,
+      0,
+      0,
+      0.24
+    );
+}
+
+.permissions-paused-banner i {
+  width: 5px;
+  height: 5px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      255,
+      103,
+      119,
+      0.96
+    );
+
+  box-shadow:
+    0
+    0
+    9px
+    rgba(
+      255,
+      95,
+      111,
+      0.46
+    );
+}
+
+/* =========================================================
+   HOME -> PERMISSIONS
+   Keep origin semantically at Bottom Nav Shield.
+   ========================================================= */
+
+.app-view-entering-permissions
+  .conversation-spine,
+.app-view-entering-permissions
+  .qrt-panel,
+.app-view-entering-permissions
+  .debug-panel,
+.app-view-entering-permissions
+  .core-zone,
+.app-view-entering-permissions
+  .orb-status,
+.app-view-entering-permissions
+  .command-dock {
+  pointer-events: none;
+
+  animation:
+    permissionsHomeOut
+    360ms
+    ease-in
+    both;
+}
+
+.app-view-permissions
+  .conversation-spine,
+.app-view-permissions
+  .qrt-panel,
+.app-view-permissions
+  .debug-panel,
+.app-view-permissions
+  .core-zone,
+.app-view-permissions
+  .orb-status,
+.app-view-permissions
+  .command-dock {
+  opacity: 0;
+
+  pointer-events: none;
+}
+
+.app-view-leaving-permissions
+  .conversation-spine,
+.app-view-leaving-permissions
+  .qrt-panel,
+.app-view-leaving-permissions
+  .debug-panel,
+.app-view-leaving-permissions
+  .core-zone,
+.app-view-leaving-permissions
+  .orb-status,
+.app-view-leaving-permissions
+  .command-dock {
+  pointer-events: none;
+
+  animation:
+    permissionsHomeIn
+    480ms
+    260ms
+    ease-out
+    both;
+}
+
+@keyframes permissionsHomeOut {
+  to {
+    opacity: 0;
+
+    filter:
+      blur(1.2px);
+  }
+}
+
+@keyframes permissionsHomeIn {
+  from {
+    opacity: 0;
+
+    filter:
+      blur(1.2px);
+  }
+
+  to {
+    opacity: 1;
+
+    filter: blur(0);
+  }
+}
+
+/* =========================================================
+   RESPONSIVE SAFETY
+   One shared scale only.
+   ========================================================= */
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .permissions-view,
+  .permissions-particle-canvas,
+  .permissions-security-field,
+  .permissions-header,
+  .permissions-emergency-bar,
+  .permissions-layout,
+  .conversation-spine,
+  .qrt-panel,
+  .core-zone,
+  .orb-status,
+  .command-dock,
+  .debug-panel {
+    animation-duration:
+      0.001ms !important;
+
+    animation-iteration-count:
+      1 !important;
+
+    transition-duration:
+      0.001ms !important;
+  }
+}
+
+
+/* =========================================================
+   PERMISSIONS V3 — HEADER SPACING FIX
+   Keep the text clear of the Emergency capsule.
+   ========================================================= */
+
+.permissions-header {
+  top: 30px;
+  height: 86px;
+  align-items: start;
+}
+
+.permissions-heading h1 {
+  margin-top: 2px;
+}
+
+.permissions-heading p {
+  margin-top: 0;
+  line-height: 1.25;
+}
+
+.permissions-header-status {
+  align-self: start;
+  margin-top: 28px;
+  transform: translateY(-8px);
+}
+
+/* =========================================================
+   PERMISSIONS V3 — DENSE PARTICLE FIELD
+   Canvas count is increased in TSX. These values make the
+   settled field visibly denser without adding glow clouds.
+   ========================================================= */
+
+.permissions-particle-canvas {
+  opacity: 1;
+}
+
+/* =========================================================
+   CUSTOM POLICY EDITOR
+   ========================================================= */
+
+.permissions-custom-editor,
+.permissions-device-scope {
+  margin-top: 15px;
+  padding: 11px;
+  border: 1px solid rgba(83, 164, 214, 0.11);
+  border-radius: 10px;
+  background: rgba(8, 28, 39, 0.28);
+}
+
+.permissions-custom-editor > header,
+.permissions-device-scope > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.permissions-custom-editor > header span,
+.permissions-device-scope > header span {
+  color: rgba(105, 194, 235, 0.68);
+  font-size: 9.5px;
+  font-weight: 820;
+  letter-spacing: 0.12em;
+}
+
+.permissions-custom-editor > header small,
+.permissions-device-scope > header small {
+  color: rgba(143, 180, 197, 0.56);
+  font-size: 9.5px;
+}
+
+.permissions-custom-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.permissions-custom-rule {
+  min-height: 35px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 116px auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 7px;
+  border-bottom: 1px solid rgba(75, 132, 177, 0.065);
+}
+
+.permissions-custom-rule > span {
+  color: rgba(191, 219, 230, 0.76);
+  font-size: 10.5px;
+}
+
+.permissions-custom-rule select {
+  height: 27px;
+  border: 1px solid rgba(81, 156, 201, 0.13);
+  border-radius: 7px;
+  outline: 0;
+  background: rgba(5, 19, 28, 0.86);
+  color: rgba(211, 236, 247, 0.84);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.permissions-custom-rule select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.permissions-custom-rule > strong {
+  color: rgba(255, 137, 112, 0.62);
+  font-size: 7.5px;
+  letter-spacing: 0.07em;
+}
+
+.permissions-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 4px;
+}
+
+.permissions-action-row > strong {
+  color: rgba(112, 205, 240, 0.74);
+  font-size: 9px;
+  font-weight: 780;
+  direction: ltr;
+}
+
+/* =========================================================
+   MICROPHONE / CAMERA DEVICE SCOPE
+   ========================================================= */
+
+.permissions-device-scope-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.permissions-device-scope-options button {
+  min-height: 34px;
+  padding: 0 7px;
+  border-radius: 7px;
+  background: rgba(11, 34, 46, 0.42);
+  color: rgba(139, 181, 200, 0.6);
+  font-size: 8px;
+  font-weight: 780;
+  cursor: pointer;
+}
+
+.permissions-device-scope-options button.active {
+  color: rgba(226, 248, 255, 0.96);
+  background:
+    linear-gradient(
+      135deg,
+      rgba(44, 113, 155, 0.5),
+      rgba(65, 77, 170, 0.34)
+    );
+}
+
+.permissions-device-scope-options button:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.permissions-device-runtime-note {
+  margin-top: 9px;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: rgba(167, 199, 212, 0.64);
+  font-size: 9.5px;
+  line-height: 1.55;
+}
+
+.permissions-device-runtime-note i {
+  width: 5px;
+  height: 5px;
+  margin-top: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: rgba(78, 214, 255, 0.76);
+  box-shadow: 0 0 8px rgba(78, 214, 255, 0.28);
+}
+
+/* =========================================================
+   DIRECT PERMISSIONS -> LIBRARY / CONVERSATIONS
+   The source view fades directly over the destination entry.
+   Home must never become the visible intermediate screen.
+   ========================================================= */
+
+.app-view-entering-library
+  .permissions-view-leaving,
+.app-view-entering-conversations
+  .permissions-view-leaving {
+  visibility: visible !important;
+  pointer-events: none !important;
+  z-index: 24;
+  animation:
+    permissionsDirectSiblingOut
+    520ms
+    ease-in-out
+    both !important;
+}
+
+@keyframes permissionsDirectSiblingOut {
+  0% {
+    opacity: 1;
+  }
+
+  58% {
+    opacity: 0.62;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+/*
+ * During direct sibling exit, suppress the Home composition
+ * completely so there is no one-frame Home flash.
+ */
+
+.app-view-entering-library
+  .permissions-view-leaving
+  ~
+  .bottom-nav,
+.app-view-entering-conversations
+  .permissions-view-leaving
+  ~
+  .bottom-nav {
+  opacity: 1;
+}
+
+
+/* =========================================================
+   PERMISSIONS V4 — REVERSE EXIT TO HOME
+   The entire view must not disappear before the particle
+   field has time to collapse back into the Bottom Nav shield.
+   ========================================================= */
+
+.permissions-view-leaving {
+  opacity: 1 !important;
+
+  animation: none !important;
+
+  background:
+    radial-gradient(
+      circle at 50% 48%,
+      rgba(
+        27,
+        69,
+        91,
+        0.045
+      ),
+      transparent
+      39%
+    ) !important;
+}
+
+/*
+ * Content itself still leaves quickly.
+ * Canvas remains visible for the full reverse transition.
+ */
+
+.permissions-view-leaving
+  .permissions-header {
+  animation:
+    permissionsHeaderOut
+    240ms
+    ease-in
+    both !important;
+}
+
+.permissions-view-leaving
+  .permissions-emergency-bar {
+  animation:
+    permissionsControlOut
+    220ms
+    ease-in
+    both !important;
+}
+
+.permissions-view-leaving
+  .permissions-layout {
+  animation:
+    permissionsLayoutOut
+    280ms
+    ease-in
+    both !important;
+}
+
+.permissions-view-leaving
+  .permissions-particle-canvas {
+  opacity: 1 !important;
+}
+
+/* =========================================================
+   PERMISSIONS V4 — POLICY COLORS
+   ALLOW = green
+   SESSION = cyan/blue
+   ========================================================= */
+
+.permissions-policy-allow {
+  color:
+    rgba(
+      106,
+      232,
+      179,
+      0.9
+    ) !important;
+
+  background:
+    rgba(
+      42,
+      119,
+      84,
+      0.16
+    ) !important;
+}
+
+.permissions-policy-session {
+  color:
+    rgba(
+      112,
+      205,
+      255,
+      0.88
+    ) !important;
+
+  background:
+    rgba(
+      45,
+      92,
+      142,
+      0.17
+    ) !important;
+}
+
+/*
+ * Selected policy buttons follow the same semantics.
+ */
+
+.permissions-policy-option-allow.permissions-policy-option-active {
+  color:
+    rgba(
+      229,
+      255,
+      243,
+      0.98
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        42,
+        132,
+        88,
+        0.58
+      ),
+      rgba(
+        38,
+        98,
+        78,
+        0.44
+      )
+    ) !important;
+
+  box-shadow:
+    inset
+      0
+      0
+      0
+      1px
+      rgba(
+        116,
+        239,
+        185,
+        0.12
+      );
+}
+
+.permissions-policy-option-session.permissions-policy-option-active {
+  color:
+    rgba(
+      228,
+      249,
+      255,
+      0.98
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        42,
+        107,
+        158,
+        0.56
+      ),
+      rgba(
+        61,
+        74,
+        170,
+        0.36
+      )
+    ) !important;
+}
+
+/* =========================================================
+   PERMISSIONS V4 — DIRECT NAVIGATION
+   Permissions <-> Library
+   Permissions <-> Conversations
+   Home stays fully suppressed during the handoff.
+   ========================================================= */
+
+/*
+ * HOME must not become visible behind either sibling transition.
+ */
+
+.app-permissions-direct-to-library
+  .conversation-spine,
+.app-permissions-direct-to-library
+  .qrt-panel,
+.app-permissions-direct-to-library
+  .debug-panel,
+.app-permissions-direct-to-library
+  .core-zone,
+.app-permissions-direct-to-library
+  .orb-status,
+.app-permissions-direct-to-library
+  .command-dock,
+.app-permissions-direct-to-conversations
+  .conversation-spine,
+.app-permissions-direct-to-conversations
+  .qrt-panel,
+.app-permissions-direct-to-conversations
+  .debug-panel,
+.app-permissions-direct-to-conversations
+  .core-zone,
+.app-permissions-direct-to-conversations
+  .orb-status,
+.app-permissions-direct-to-conversations
+  .command-dock,
+.app-permissions-direct-from-library
+  .conversation-spine,
+.app-permissions-direct-from-library
+  .qrt-panel,
+.app-permissions-direct-from-library
+  .debug-panel,
+.app-permissions-direct-from-library
+  .core-zone,
+.app-permissions-direct-from-library
+  .orb-status,
+.app-permissions-direct-from-library
+  .command-dock,
+.app-permissions-direct-from-conversations
+  .conversation-spine,
+.app-permissions-direct-from-conversations
+  .qrt-panel,
+.app-permissions-direct-from-conversations
+  .debug-panel,
+.app-permissions-direct-from-conversations
+  .core-zone,
+.app-permissions-direct-from-conversations
+  .orb-status,
+.app-permissions-direct-from-conversations
+  .command-dock {
+  opacity: 0 !important;
+
+  visibility: hidden !important;
+
+  pointer-events: none !important;
+
+  animation: none !important;
+}
+
+/*
+ * Permissions -> sibling:
+ * source stays above destination until destination is already visible.
+ */
+
+.app-permissions-direct-to-library
+  .permissions-view-leaving,
+.app-permissions-direct-to-conversations
+  .permissions-view-leaving {
+  visibility: visible !important;
+
+  opacity: 1 !important;
+
+  z-index: 25 !important;
+
+  pointer-events: none !important;
+
+  animation:
+    permissionsDirectSourceOut
+    520ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both !important;
+}
+
+.app-permissions-direct-to-library
+  .permissions-view-leaving
+  .permissions-particle-canvas,
+.app-permissions-direct-to-conversations
+  .permissions-view-leaving
+  .permissions-particle-canvas {
+  opacity: 0.62 !important;
+}
+
+/*
+ * Library / Conversations -> Permissions:
+ * source view remains mounted and fades directly into Permissions.
+ */
+
+.app-permissions-direct-from-library
+  .library-view-visible {
+  visibility: visible !important;
+
+  opacity: 1;
+
+  pointer-events: none !important;
+
+  z-index: 19 !important;
+
+  animation:
+    permissionsSiblingSourceOut
+    620ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both !important;
+}
+
+.app-permissions-direct-from-conversations
+  .conversations-view-visible {
+  visibility: visible !important;
+
+  opacity: 1;
+
+  pointer-events: none !important;
+
+  z-index: 19 !important;
+
+  animation:
+    permissionsSiblingSourceOut
+    620ms
+    cubic-bezier(
+      0.22,
+      0.72,
+      0.22,
+      1
+    )
+    both !important;
+}
+
+/*
+ * Permissions itself enters above the still-alive source.
+ */
+
+.app-permissions-direct-from-library
+  .permissions-view-entering,
+.app-permissions-direct-from-conversations
+  .permissions-view-entering {
+  z-index: 24 !important;
+}
+
+@keyframes permissionsDirectSourceOut {
+  0% {
+    opacity: 1;
+  }
+
+  46% {
+    opacity: 0.78;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes permissionsSiblingSourceOut {
+  0% {
+    opacity: 1;
+  }
+
+  52% {
+    opacity: 0.7;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+
+/* =========================================================
+   PERMISSIONS V5 — POLICY COLOR SYSTEM
+   ALLOW       = green
+   SESSION     = cyan / blue
+   ALWAYS ASK  = amber / yellow
+   DENY        = red
+   CUSTOM      = violet / cyan
+   ========================================================= */
+
+/* ---------- Detail selector ---------- */
+
+.permissions-policy-option-deny.permissions-policy-option-active {
+  color:
+    rgba(
+      255,
+      226,
+      230,
+      0.98
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        150,
+        46,
+        58,
+        0.62
+      ),
+      rgba(
+        96,
+        31,
+        41,
+        0.46
+      )
+    ) !important;
+
+  box-shadow:
+    inset
+      0
+      0
+      0
+      1px
+      rgba(
+        255,
+        118,
+        132,
+        0.14
+      ) !important;
+}
+
+.permissions-policy-option-always-ask.permissions-policy-option-active {
+  color:
+    rgba(
+      255,
+      244,
+      216,
+      0.98
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        157,
+        104,
+        32,
+        0.64
+      ),
+      rgba(
+        105,
+        69,
+        24,
+        0.46
+      )
+    ) !important;
+
+  box-shadow:
+    inset
+      0
+      0
+      0
+      1px
+      rgba(
+        255,
+        194,
+        93,
+        0.14
+      ) !important;
+}
+
+.permissions-policy-option-session.permissions-policy-option-active {
+  color:
+    rgba(
+      228,
+      249,
+      255,
+      0.98
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        42,
+        107,
+        158,
+        0.58
+      ),
+      rgba(
+        61,
+        74,
+        170,
+        0.38
+      )
+    ) !important;
+
+  box-shadow:
+    inset
+      0
+      0
+      0
+      1px
+      rgba(
+        111,
+        211,
+        255,
+        0.13
+      ) !important;
+}
+
+.permissions-policy-option-allow.permissions-policy-option-active {
+  color:
+    rgba(
+      229,
+      255,
+      243,
+      0.98
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        42,
+        132,
+        88,
+        0.6
+      ),
+      rgba(
+        38,
+        98,
+        78,
+        0.46
+      )
+    ) !important;
+
+  box-shadow:
+    inset
+      0
+      0
+      0
+      1px
+      rgba(
+        116,
+        239,
+        185,
+        0.13
+      ) !important;
+}
+
+.permissions-policy-option-custom.permissions-policy-option-active {
+  color:
+    rgba(
+      238,
+      235,
+      255,
+      0.98
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        64,
+        111,
+        170,
+        0.56
+      ),
+      rgba(
+        92,
+        72,
+        183,
+        0.5
+      )
+    ) !important;
+
+  box-shadow:
+    inset
+      0
+      0
+      0
+      1px
+      rgba(
+        160,
+        147,
+        255,
+        0.13
+      ) !important;
+}
+
+/* ---------- Main catalog chips ---------- */
+
+.permissions-policy-always-ask {
+  color:
+    rgba(
+      255,
+      193,
+      96,
+      0.9
+    ) !important;
+
+  background:
+    rgba(
+      132,
+      86,
+      31,
+      0.17
+    ) !important;
+}
+
+.permissions-policy-deny {
+  color:
+    rgba(
+      255,
+      123,
+      136,
+      0.9
+    ) !important;
+
+  background:
+    rgba(
+      128,
+      41,
+      51,
+      0.16
+    ) !important;
+}
+
+.permissions-policy-session {
+  color:
+    rgba(
+      112,
+      205,
+      255,
+      0.9
+    ) !important;
+
+  background:
+    rgba(
+      45,
+      92,
+      142,
+      0.18
+    ) !important;
+}
+
+.permissions-policy-allow {
+  color:
+    rgba(
+      106,
+      232,
+      179,
+      0.92
+    ) !important;
+
+  background:
+    rgba(
+      42,
+      119,
+      84,
+      0.17
+    ) !important;
+}
+
+.permissions-policy-custom {
+  color:
+    rgba(
+      168,
+      190,
+      255,
+      0.92
+    ) !important;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        47,
+        96,
+        145,
+        0.2
+      ),
+      rgba(
+        83,
+        67,
+        172,
+        0.18
+      )
+    ) !important;
+}
+
+/* =========================================================
+   ACTION MATRIX — CONSISTENT CAPITALIZATION + STATUS DOTS
+   Text stays neutral; the final dot communicates state.
+   ========================================================= */
+
+.permissions-action-row > strong {
+  color:
+    rgba(
+      172,
+      205,
+      220,
+      0.68
+    ) !important;
+
+  font-size: 9px !important;
+  font-weight: 800 !important;
+
+  letter-spacing:
+    0.035em;
+
+  text-transform:
+    uppercase;
+}
+
+/* ALLOW — green dot */
+
+.permissions-action-row-allow
+  > i {
+  background:
+    rgba(
+      103,
+      232,
+      178,
+      0.96
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      103,
+      232,
+      178,
+      0.32
+    );
+}
+
+/* SESSION — blue / cyan dot */
+
+.permissions-action-row-session
+  > i {
+  background:
+    rgba(
+      105,
+      207,
+      255,
+      0.96
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      105,
+      207,
+      255,
+      0.3
+    );
+}
+
+/* ALWAYS ASK — amber dot */
+
+.permissions-action-row-always-ask
+  > i {
+  background:
+    rgba(
+      255,
+      190,
+      86,
+      0.97
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      255,
+      190,
+      86,
+      0.31
+    );
+}
+
+/* DENY — red dot */
+
+.permissions-action-row-deny
+  > i {
+  background:
+    rgba(
+      255,
+      104,
+      120,
+      0.98
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      255,
+      104,
+      120,
+      0.32
+    );
+}
+
+/* CUSTOM fallback — violet/cyan dot */
+
+.permissions-action-row-custom
+  > i {
+  background:
+    rgba(
+      154,
+      151,
+      255,
+      0.96
+    ) !important;
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      126,
+      146,
+      255,
+      0.3
+    );
+}
+
+
+/* =========================================================
+   PERMISSIONS V6 — SECURITY ACTIVITY REDESIGN
+   Recent Activity is replaced with a focused permission /
+   sensitive-action audit surface.
+   ========================================================= */
+
+.permissions-activity-panel {
+  padding:
+    13px;
+
+  border-left:
+    1px solid
+    rgba(
+      84,
+      126,
+      201,
+      0.1
+    );
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        7,
+        24,
+        34,
+        0.42
+      ),
+      rgba(
+        5,
+        15,
+        23,
+        0.2
+      )
+    );
+}
+
+.permissions-security-activity-head {
+  display: flex;
+
+  align-items: flex-start;
+
+  justify-content: space-between;
+
+  gap: 10px;
+
+  direction: ltr;
+}
+
+.permissions-security-activity-head > div {
+  min-width: 0;
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 4px;
+}
+
+.permissions-security-activity-head span {
+  color:
+    rgba(
+      106,
+      190,
+      231,
+      0.68
+    );
+
+  font-size: 18px;
+  font-weight: 820;
+
+  letter-spacing: 0.13em;
+}
+
+.permissions-security-activity-head strong {
+  color:
+    rgba(
+      165,
+      196,
+      211,
+      0.56
+    );
+
+  font-size: 19px;
+  font-weight: 560;
+
+  line-height: 1.35;
+}
+
+.permissions-security-activity-head small {
+  padding:
+    4px
+    6px;
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      53,
+      95,
+      123,
+      0.16
+    );
+
+  color:
+    rgba(
+      112,
+      206,
+      239,
+      0.62
+    );
+
+  font-size: 15px;
+  font-weight: 800;
+
+  letter-spacing: 0.08em;
+}
+
+.permissions-security-activity-list {
+  margin-top: 13px;
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 8px;
+}
+
+.permissions-security-activity-row {
+  position: relative;
+
+  padding:
+    9px;
+
+  border:
+    1px solid
+    rgba(
+      75,
+      142,
+      187,
+      0.075
+    );
+
+  border-radius:
+    10px
+    6px
+    10px
+    6px;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        8,
+        29,
+        39,
+        0.42
+      ),
+      rgba(
+        5,
+        17,
+        25,
+        0.24
+      )
+    );
+
+  transition:
+    transform
+      150ms
+      ease,
+    border-color
+      150ms
+      ease,
+    background
+      150ms
+      ease;
+}
+
+.permissions-security-activity-row:hover {
+  transform:
+    translateX(-2px);
+
+  border-color:
+    rgba(
+      88,
+      177,
+      222,
+      0.15
+    );
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        10,
+        37,
+        49,
+        0.54
+      ),
+      rgba(
+        7,
+        21,
+        31,
+        0.3
+      )
+    );
+}
+
+.permissions-security-activity-time {
+  display: flex;
+
+  align-items: center;
+
+  gap: 6px;
+
+  direction: ltr;
+}
+
+.permissions-security-activity-time time {
+  color:
+    rgba(
+      112,
+      175,
+      203,
+      0.58
+    );
+
+  font-size: 18px;
+  font-weight: 680;
+}
+
+.permissions-security-activity-time i {
+  width: 6px;
+  height: 6px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      116,
+      194,
+      222,
+      0.66
+    );
+}
+
+.permissions-security-activity-main {
+  margin-top: 7px;
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 3px;
+
+  text-align: left;
+
+  direction: ltr;
+}
+
+.permissions-security-activity-main strong {
+  color:
+    rgba(
+      235,
+      247,
+      252,
+      0.94
+    );
+
+  font-size: 21px;
+  font-weight: 790;
+
+  letter-spacing: 0.035em;
+}
+
+.permissions-security-activity-main span {
+  overflow: hidden;
+
+  color:
+    rgba(
+      155,
+      190,
+      206,
+      0.58
+    );
+
+  font-size: 18px;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+}
+
+.permissions-security-activity-meta {
+  margin:
+    9px
+    0
+    0;
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(
+      2,
+      minmax(
+        0,
+        1fr
+      )
+    );
+
+  gap:
+    7px
+    8px;
+
+  direction: ltr;
+}
+
+.permissions-security-activity-meta > div {
+  min-width: 0;
+}
+
+.permissions-security-activity-meta .wide {
+  grid-column:
+    1 /
+    -1;
+}
+
+.permissions-security-activity-meta dt {
+  color:
+    rgba(
+      99,
+      145,
+      184,
+      0.5
+    );
+
+  font-size: 14px;
+  font-weight: 760;
+
+  letter-spacing: 0.09em;
+}
+
+.permissions-security-activity-meta dd {
+  margin:
+    2px
+    0
+    0;
+
+  overflow: hidden;
+
+  color:
+    rgba(
+      181,
+      207,
+      219,
+      0.68
+    );
+
+  font-size: 16.8px;
+  font-weight: 620;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+}
+
+/* Status color belongs to the audit event dot, not the body text. */
+
+.permissions-security-activity-allowed
+  .permissions-security-activity-time
+  i {
+  background:
+    rgba(
+      103,
+      232,
+      178,
+      0.96
+    );
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      103,
+      232,
+      178,
+      0.28
+    );
+}
+
+.permissions-security-activity-session
+  .permissions-security-activity-time
+  i {
+  background:
+    rgba(
+      105,
+      207,
+      255,
+      0.96
+    );
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      105,
+      207,
+      255,
+      0.28
+    );
+}
+
+.permissions-security-activity-ask
+  .permissions-security-activity-time
+  i {
+  background:
+    rgba(
+      255,
+      190,
+      86,
+      0.97
+    );
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      255,
+      190,
+      86,
+      0.28
+    );
+}
+
+.permissions-security-activity-denied
+  .permissions-security-activity-time
+  i {
+  background:
+    rgba(
+      255,
+      104,
+      120,
+      0.98
+    );
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      255,
+      104,
+      120,
+      0.3
+    );
+}
+
+.permissions-security-activity-policy
+  .permissions-security-activity-time
+  i {
+  background:
+    rgba(
+      157,
+      151,
+      255,
+      0.96
+    );
+
+  box-shadow:
+    0
+    0
+    8px
+    rgba(
+      137,
+      132,
+      255,
+      0.3
+    );
+}
+
+.permissions-security-activity-footer {
+  width: 100%;
+
+  min-height: 34px;
+
+  margin-top: 11px;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  gap: 7px;
+
+  border:
+    1px solid
+    rgba(
+      77,
+      154,
+      200,
+      0.11
+    );
+
+  border-radius: 8px;
+
+  background:
+    rgba(
+      10,
+      32,
+      43,
+      0.34
+    );
+
+  color:
+    rgba(
+      141,
+      198,
+      220,
+      0.66
+    );
+
+  font-size: 17px;
+  font-weight: 780;
+
+  letter-spacing: 0.08em;
+
+  cursor: pointer;
+}
+
+.permissions-security-activity-footer:hover {
+  color:
+    rgba(
+      224,
+      247,
+      255,
+      0.94
+    );
+
+  background:
+    rgba(
+      17,
+      45,
+      58,
+      0.5
+    );
+}
+
+.permissions-security-activity-footer svg {
+  width: 14px;
+  height: 14px;
+
+  fill: none;
+
+  stroke: currentColor;
+
+  stroke-width: 1.5;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.permissions-audit-integrity {
+  margin-top: 10px;
+
+  display: flex;
+
+  align-items: flex-start;
+
+  gap: 7px;
+
+  direction: ltr;
+
+  color:
+    rgba(
+      103,
+      154,
+      177,
+      0.43
+    );
+
+  font-size: 15px;
+
+  line-height: 1.45;
+}
+
+.permissions-audit-integrity i {
+  width: 5px;
+  height: 5px;
+
+  margin-top: 3px;
+
+  flex:
+    0
+    0
+    5px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      88,
+      210,
+      255,
+      0.62
+    );
+
+  box-shadow:
+    0
+    0
+    7px
+    rgba(
+      88,
+      210,
+      255,
+      0.22
+    );
+}
+
+/*
+ * The old Recent Activity row styles are intentionally left
+ * unused so no geometry outside this panel is affected.
+ */
+
+
+/* =========================================================
+   PERMISSIONS V8 — SECURITY ACTIVITY TYPOGRAPHY TUNING
+   Keep clock size as-is.
+   Reduce white event titles modestly.
+   Reduce POLICY / DECISION / SOURCE labels slightly.
+   Reduce metadata values by about one third.
+   Geometry, capsules, dots, icons and spacing stay untouched.
+   ========================================================= */
+
+/* White event titles */
+.permissions-security-activity-main strong {
+  font-size: 17px !important;
+}
+
+/* POLICY / DECISION / SOURCE labels */
+.permissions-security-activity-meta dt {
+  font-size: 12px !important;
+}
+
+/* SESSION / VOICE INPUT / ALWAYS ASK / DENY / BROWSER ACTION etc. */
+.permissions-security-activity-meta dd {
+  font-size: 11.2px !important;
+}
+
+/* Keep the clock exactly at the current approved size */
+.permissions-security-activity-time time {
+  font-size: 18px !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V9 — SECURITY ACTIVITY FIXED HEADER / FOOTER
+   Header and footer stay fixed inside the panel.
+   Only the event list scrolls.
+   ========================================================= */
+
+.permissions-activity-panel {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+/* Keep the header fixed and make its main title more readable. */
+.permissions-security-activity-head {
+  flex: 0 0 auto !important;
+  position: relative !important;
+  z-index: 3 !important;
+  padding-bottom: 10px !important;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        7,
+        24,
+        34,
+        0.96
+      ),
+      rgba(
+        7,
+        24,
+        34,
+        0.82
+      ),
+      transparent
+    ) !important;
+}
+
+.permissions-security-activity-head span {
+  font-size: 20px !important;
+}
+
+.permissions-security-activity-head strong {
+  font-size: 15px !important;
+}
+
+/* AUDIT stays compact and fixed in place. */
+.permissions-security-activity-head small {
+  font-size: 7px !important;
+  flex: 0 0 auto !important;
+}
+
+/* Only this middle section scrolls. */
+.permissions-security-activity-list {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  margin-top: 4px !important;
+  padding-right: 2px !important;
+  padding-bottom: 10px !important;
+
+  scrollbar-width: thin;
+  scrollbar-color:
+    rgba(
+      73,
+      166,
+      207,
+      0.16
+    )
+    transparent;
+}
+
+.permissions-security-activity-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.permissions-security-activity-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.permissions-security-activity-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background:
+    rgba(
+      73,
+      166,
+      207,
+      0.18
+    );
+}
+
+/* White event titles: one more step smaller. */
+.permissions-security-activity-main strong {
+  font-size: 15px !important;
+}
+
+/* Footer stays fixed below the scrollable activity list. */
+.permissions-security-activity-footer,
+.permissions-audit-integrity {
+  flex: 0 0 auto !important;
+  position: relative !important;
+  z-index: 3 !important;
+}
+
+/* Keep VIEW FULL AUDIT visible at all times. */
+.permissions-security-activity-footer {
+  margin-top: 8px !important;
+}
+
+/* Keep the integrity note fixed under the footer. */
+.permissions-audit-integrity {
+  padding-top: 2px !important;
+  margin-top: 8px !important;
+  background:
+    linear-gradient(
+      0deg,
+      rgba(
+        5,
+        15,
+        23,
+        0.96
+      ),
+      rgba(
+        5,
+        15,
+        23,
+        0.78
+      ),
+      transparent
+    ) !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V10 — HEADER + SECURITY ACTIVITY POLISH
+   Requested changes:
+   - Mirror English PERMISSIONS on the left of the main header.
+   - Bring ACTIVE POLICIES / POLICY ENGINE closer to Pause Actions.
+   - SECURITY ACTIVITY stays on one line.
+   - Remove AUDIT chip entirely (removed in TSX).
+   - Slightly reduce Security Activity subtitle.
+   - Vertically center VIEW FULL AUDIT text with its arrow.
+   ========================================================= */
+
+/* ---------- Main permissions header ---------- */
+
+.permissions-header {
+  grid-template-columns:
+    minmax(
+      0,
+      1fr
+    )
+    auto
+    minmax(
+      0,
+      1fr
+    ) !important;
+
+  align-items: start !important;
+}
+
+/* Persian heading remains on the right. */
+.permissions-heading {
+  grid-column: 3 !important;
+
+  justify-self: end !important;
+
+  text-align: right !important;
+}
+
+/* English mirror title on the left. */
+.permissions-heading-en {
+  grid-column: 1 !important;
+
+  grid-row: 1 !important;
+
+  align-self: start !important;
+
+  justify-self: start !important;
+
+  margin-top: 28px !important;
+
+  pointer-events: none;
+}
+
+.permissions-heading-en span {
+  color:
+    rgba(
+      235,
+      247,
+      252,
+      0.9
+    );
+
+  font-size: 24px;
+
+  font-weight: 500;
+
+  letter-spacing: 0.055em;
+
+  white-space: nowrap;
+}
+
+/*
+ * Status belongs visually just above the Emergency capsule,
+ * not high in the header.
+ */
+.permissions-header-status {
+  position: absolute !important;
+
+  left: 0 !important;
+
+  right: auto !important;
+
+  top: 80px !important;
+
+  margin-top: 0 !important;
+
+  transform: none !important;
+
+  align-self: auto !important;
+}
+
+/* Keep Back usable without colliding with the mirrored title. */
+.permissions-back {
+  left: 0 !important;
+
+  top: -2px !important;
+}
+
+/* ---------- Security Activity fixed header ---------- */
+
+.permissions-security-activity-head > div {
+  width: 100% !important;
+
+  min-width: 0 !important;
+}
+
+.permissions-security-activity-head span {
+  font-size: 16px !important;
+
+  line-height: 1.1 !important;
+
+  white-space: nowrap !important;
+
+  word-break: normal !important;
+}
+
+/* Subtitle: one step smaller than current. */
+.permissions-security-activity-head strong {
+  font-size: 13px !important;
+
+  line-height: 1.3 !important;
+}
+
+/*
+ * AUDIT was removed from TSX.
+ * Keep this defensive rule so no legacy chip can render.
+ */
+.permissions-security-activity-head small {
+  display: none !important;
+}
+
+/* ---------- Security Activity event titles ---------- */
+
+.permissions-security-activity-main strong {
+  font-size: 14px !important;
+}
+
+/* ---------- Fixed footer alignment ---------- */
+
+.permissions-security-activity-footer {
+  display: grid !important;
+
+  grid-template-columns:
+    1fr
+    16px !important;
+
+  align-items: center !important;
+
+  justify-items: center !important;
+
+  min-height: 34px !important;
+
+  padding:
+    0
+    10px !important;
+
+  line-height: 1 !important;
+}
+
+.permissions-security-activity-footer span {
+  align-self: center !important;
+
+  justify-self: center !important;
+
+  line-height: 1 !important;
+
+  transform: translateY(0) !important;
+}
+
+.permissions-security-activity-footer svg {
+  align-self: center !important;
+
+  justify-self: end !important;
+
+  margin: 0 !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V11 — FINAL TOP HEADER ALIGNMENT
+   Persian block stays on the RIGHT.
+   Exact English mirror stays on the LEFT.
+   Active Policies / Policy Engine removed in TSX.
+   ========================================================= */
+
+.permissions-header {
+  display: grid !important;
+
+  grid-template-columns:
+    minmax(
+      0,
+      1fr
+    )
+    minmax(
+      0,
+      1fr
+    ) !important;
+
+  align-items: start !important;
+
+  gap: 28px !important;
+}
+
+.permissions-heading {
+  grid-column: 2 !important;
+  grid-row: 1 !important;
+
+  justify-self: stretch !important;
+
+  text-align: right !important;
+
+  direction: rtl !important;
+}
+
+.permissions-heading-en {
+  grid-column: 1 !important;
+  grid-row: 1 !important;
+
+  justify-self: stretch !important;
+
+  align-self: start !important;
+
+  margin-top: 0 !important;
+
+  text-align: left !important;
+
+  direction: ltr !important;
+
+  pointer-events: none;
+}
+
+.permissions-heading h1,
+.permissions-heading-en h1 {
+  margin:
+    0 !important;
+
+  color:
+    rgba(
+      244,
+      250,
+      254,
+      0.98
+    ) !important;
+
+  font-size:
+    33px !important;
+
+  font-weight:
+    430 !important;
+
+  line-height:
+    1.05 !important;
+}
+
+.permissions-heading p,
+.permissions-heading-en p {
+  margin:
+    3px
+    0
+    0 !important;
+
+  color:
+    rgba(
+      151,
+      184,
+      203,
+      0.56
+    ) !important;
+
+  font-size:
+    13px !important;
+
+  line-height:
+    1.25 !important;
+}
+
+/* Legacy status is intentionally gone. */
+.permissions-header-status {
+  display:
+    none !important;
+}
+
+/* Keep Back clear of the mirrored English heading. */
+.permissions-back {
+  left: 0 !important;
+  top: -24px !important;
+}
+
+/* =========================================================
+   PERMISSIONS V11 — SECURITY ACTIVITY FOOTER TRUE CENTER
+   The text is centered mathematically in the capsule.
+   Arrow remains fixed on the right.
+   ========================================================= */
+
+.permissions-security-activity-footer {
+  position:
+    relative !important;
+
+  display:
+    flex !important;
+
+  align-items:
+    center !important;
+
+  justify-content:
+    center !important;
+
+  min-height:
+    34px !important;
+
+  padding:
+    0
+    34px !important;
+
+  line-height:
+    normal !important;
+}
+
+.permissions-security-activity-footer span {
+  display:
+    flex !important;
+
+  align-items:
+    center !important;
+
+  justify-content:
+    center !important;
+
+  height:
+    100% !important;
+
+  margin:
+    0 !important;
+
+  padding:
+    0 !important;
+
+  line-height:
+    1 !important;
+
+  transform:
+    translateY(
+      1px
+    ) !important;
+}
+
+.permissions-security-activity-footer svg {
+  position:
+    absolute !important;
+
+  right:
+    10px !important;
+
+  top:
+    50% !important;
+
+  margin:
+    0 !important;
+
+  transform:
+    translateY(
+      -50%
+    ) !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V12 — HEADER ANCHORED TO EMERGENCY CAPSULE EDGES
+   Reference:
+   - Persian block starts exactly from the RIGHT edge of the
+     Pause Actions / Emergency Control capsule.
+   - English block starts exactly from the LEFT edge.
+   - Both sit above the capsule with breathing room.
+   ========================================================= */
+
+.permissions-header {
+  left: 0 !important;
+  right: 0 !important;
+
+  display: block !important;
+
+  height: 92px !important;
+
+  top: 30px !important;
+
+  pointer-events: auto !important;
+}
+
+/* RIGHT edge anchor — Persian */
+.permissions-heading {
+  position: absolute !important;
+
+  top: 0 !important;
+  right: 0 !important;
+  left: auto !important;
+
+  width: auto !important;
+
+  margin: 0 !important;
+
+  text-align: right !important;
+  direction: rtl !important;
+
+  transform: none !important;
+}
+
+.permissions-heading h1 {
+  margin: 0 !important;
+
+  text-align: right !important;
+}
+
+.permissions-heading p {
+  margin:
+    3px
+    0
+    0 !important;
+
+  text-align: right !important;
+
+  white-space: nowrap !important;
+}
+
+/* LEFT edge anchor — English */
+.permissions-heading-en {
+  position: absolute !important;
+
+  top: 0 !important;
+  left: 0 !important;
+  right: auto !important;
+
+  width: auto !important;
+
+  margin: 0 !important;
+
+  text-align: left !important;
+  direction: ltr !important;
+
+  transform: none !important;
+}
+
+.permissions-heading-en h1 {
+  margin: 0 !important;
+
+  text-align: left !important;
+}
+
+.permissions-heading-en p {
+  margin:
+    3px
+    0
+    0 !important;
+
+  text-align: left !important;
+
+  white-space: nowrap !important;
+}
+
+/*
+ * The Emergency capsule remains the hard alignment reference.
+ * Keep its left/right edges identical to the header shell.
+ */
+.permissions-emergency-bar {
+  left: 0 !important;
+  right: 0 !important;
+
+  top: 132px !important;
+}
+
+/*
+ * Back control moves above the English block so it never
+ * pushes either title inward.
+ */
+.permissions-back {
+  left: 0 !important;
+  top: -26px !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V13 — FINAL HEADER VERTICAL POSITION
+   Use the Pause Actions capsule as the vertical reference.
+   Titles sit roughly 10–15 px above the capsule.
+   ========================================================= */
+
+.permissions-header {
+  top: 66px !important;
+  height: 54px !important;
+}
+
+/* Keep both mirrored title blocks aligned to that same baseline. */
+.permissions-heading,
+.permissions-heading-en {
+  top: 0 !important;
+}
+
+/* Back control remains separate and does not affect title alignment. */
+.permissions-back {
+  top: -24px !important;
+}
+
+/* =========================================================
+   PERMISSIONS V13 — VIEW FULL AUDIT CENTERING
+   Text stays on one line, slightly smaller, and is centered
+   independently from the arrow.
+   ========================================================= */
+
+.permissions-security-activity-footer {
+  position: relative !important;
+
+  display: block !important;
+
+  min-height: 34px !important;
+
+  padding:
+    0
+    34px !important;
+
+  line-height: 1 !important;
+}
+
+.permissions-security-activity-footer span {
+  position: absolute !important;
+
+  left: 50% !important;
+  top: 50% !important;
+
+  width: max-content !important;
+  height: auto !important;
+
+  margin: 0 !important;
+  padding: 0 !important;
+
+  white-space: nowrap !important;
+
+  font-size: 12px !important;
+  line-height: 1 !important;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    ) !important;
+}
+
+/* Arrow keeps its approved position. */
+.permissions-security-activity-footer svg {
+  position: absolute !important;
+
+  right: 10px !important;
+  top: 50% !important;
+
+  margin: 0 !important;
+
+  transform:
+    translateY(
+      -50%
+    ) !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V14 — MIRRORED HEADER TYPOGRAPHY MATCH
+   Persian and English title blocks use the exact same scale.
+   Both move slightly lower and their subtitles sit tighter
+   under the main title.
+   ========================================================= */
+
+.permissions-header {
+  top: 72px !important;
+}
+
+/* Main titles: exact same size and visual rhythm */
+.permissions-heading h1,
+.permissions-heading-en h1 {
+  font-size: 29px !important;
+  line-height: 1 !important;
+  font-weight: 430 !important;
+}
+
+/* Subtitles: same size on both sides, pulled closer */
+.permissions-heading p,
+.permissions-heading-en p {
+  margin-top: 1px !important;
+  font-size: 11.5px !important;
+  line-height: 1.12 !important;
+}
+
+/* English block needs the tightest vertical stacking */
+.permissions-heading-en p {
+  margin-top: 0 !important;
+}
+
+/* Keep both mirrored blocks aligned on the same top line */
+.permissions-heading,
+.permissions-heading-en {
+  top: 0 !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V15 — HEADER 10PX CLOSER TO EMERGENCY CAPSULE
+   Move both mirrored title blocks downward together.
+   ========================================================= */
+
+.permissions-header {
+  top: 82px !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V16 — TITLE SCALE + LOWER POSITION
+   - Persian and English main titles use the exact same size.
+   - Both main titles are slightly smaller.
+   - Subtitles sit tighter under the main titles.
+   - Entire mirrored header moves a few pixels closer to
+     the Pause Actions / Emergency Control capsule.
+   - Back control is brought back down so it is not visually
+     detached near the top edge.
+   ========================================================= */
+
+.permissions-header {
+  top: 86px !important;
+}
+
+/* Main titles: exact same size */
+.permissions-heading h1,
+.permissions-heading-en h1 {
+  font-size: 26px !important;
+  line-height: 1 !important;
+  font-weight: 430 !important;
+}
+
+/* Bring subtitles tighter under both titles */
+.permissions-heading p,
+.permissions-heading-en p {
+  margin-top: 0 !important;
+  font-size: 11.5px !important;
+  line-height: 1.08 !important;
+}
+
+/* Keep both title groups aligned identically */
+.permissions-heading,
+.permissions-heading-en {
+  top: 0 !important;
+}
+
+/*
+ * Back control should remain available but not float too high.
+ * It is moved closer to the header group while keeping
+ * enough clearance from the English title.
+ */
+.permissions-back {
+  top: -12px !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V17 — BACK RESTORE + PERSIAN TITLE MICRO-SPACING
+   - Restore Back / ESC to its previous approved position.
+   - Keep all other V16 sizes and alignment unchanged.
+   - Move only the Persian main title 2px upward to create
+     a slightly larger gap above its subtitle.
+   ========================================================= */
+
+.permissions-back {
+  top: -24px !important;
+}
+
+.permissions-heading h1 {
+  transform:
+    translateY(
+      -2px
+    ) !important;
+}
+
+
+/* =========================================================
+   PERMISSIONS V18 — BACK CONTROL 15PX HIGHER
+   Only move the Back / ESC control upward.
+   Everything else remains unchanged.
+   ========================================================= */
+
+.permissions-back {
+  top: -39px !important;
+}
+
+/* Shown when the audit trail has nothing in it, which is the honest state
+   until core/action_audit.py is exposed to the interface. The panel used to
+   be filled with invented history instead. */
+.permissions-security-activity-empty {
+  display: grid;
+  gap: 6px;
+  padding: 22px 18px;
+  color: rgba(194, 221, 231, 0.66);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.permissions-security-activity-empty span {
+  color: rgba(120, 152, 166, 0.72);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}

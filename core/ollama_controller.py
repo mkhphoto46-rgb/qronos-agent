@@ -1,72 +1,135 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import requests
+
+from core import vision_image
+from core.brain_runtime import (
+    BrainMessage,
+    BrainRuntime,
+    BrainRuntimeModelStatus,
+)
 
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 
-@dataclass(frozen=True)
-class OllamaModelStatus:
-    """Information about a currently loaded Ollama model."""
-
-    name: str
-    size: str
-    processor: str
-    context: int
-    until: str
+# Temporary compatibility alias.
+# Existing tests and development code can keep importing
+# OllamaModelStatus while Qronos moves to runtime-neutral types.
+OllamaModelStatus = BrainRuntimeModelStatus
 
 
-class OllamaController:
-    """Control local Ollama models through the local HTTP API."""
+class OllamaController(BrainRuntime):
+    """
+    Development BrainRuntime adapter backed by the local Ollama HTTP API.
 
-    def __init__(self, base_url: str = OLLAMA_BASE_URL) -> None:
+    Qronos higher-level code talks to the BrainRuntime interface instead
+    of depending directly on Ollama. A bundled native runtime can replace
+    this adapter in the production application later.
+    """
+
+    def __init__(
+        self,
+        base_url: str = OLLAMA_BASE_URL,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
 
     def health_check(self) -> bool:
-        """Return True when the local Ollama API is reachable."""
+        """
+        Return True when the local Ollama API is reachable.
+        """
+
         try:
             response = requests.get(
                 f"{self.base_url}/api/version",
                 timeout=3,
             )
+
             response.raise_for_status()
+
             return True
+
         except requests.RequestException:
             return False
 
-    def list_running_models(self) -> list[OllamaModelStatus]:
-        """Return currently loaded Ollama models."""
+    def list_running_models(
+        self,
+    ) -> list[BrainRuntimeModelStatus]:
+        """
+        Return currently loaded Ollama models.
+        """
+
         try:
             response = requests.get(
                 f"{self.base_url}/api/ps",
                 timeout=3,
             )
+
             response.raise_for_status()
+
         except requests.RequestException as exc:
-            raise RuntimeError("Ollama API is unavailable.") from exc
+            raise RuntimeError(
+                "Ollama API is unavailable."
+            ) from exc
 
         data = response.json()
-        models: list[OllamaModelStatus] = []
 
-        for model in data.get("models", []):
+        models: list[
+            BrainRuntimeModelStatus
+        ] = []
+
+        for model in data.get(
+            "models",
+            [],
+        ):
             models.append(
-                OllamaModelStatus(
-                    name=str(model.get("name", "")),
-                    size=str(model.get("size", "")),
-                    processor=str(model.get("processor", "")),
-                    context=int(model.get("context_length", 0) or 0),
-                    until=str(model.get("expires_at", "")),
+                BrainRuntimeModelStatus(
+                    name=str(
+                        model.get(
+                            "name",
+                            "",
+                        )
+                    ),
+                    size=str(
+                        model.get(
+                            "size",
+                            "",
+                        )
+                    ),
+                    processor=str(
+                        model.get(
+                            "processor",
+                            "",
+                        )
+                    ),
+                    context=int(
+                        model.get(
+                            "context_length",
+                            0,
+                        )
+                        or 0
+                    ),
+                    until=str(
+                        model.get(
+                            "expires_at",
+                            "",
+                        )
+                    ),
                 )
             )
 
         return models
 
-    def stop_model(self, model_name: str) -> None:
-        """Unload a model from Ollama."""
+    def stop_model(
+        self,
+        model_name: str,
+    ) -> None:
+        """
+        Unload one model from Ollama.
+        """
+
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
@@ -78,44 +141,133 @@ class OllamaController:
                 },
                 timeout=10,
             )
+
             response.raise_for_status()
+
         except requests.RequestException as exc:
             raise RuntimeError(
                 f"Could not stop model: {model_name}"
             ) from exc
 
     def unload_all(self) -> None:
-        """Unload all currently running models."""
+        """
+        Unload every currently running model.
+        """
+
         for model in self.list_running_models():
-            self.stop_model(model.name)
+            self.stop_model(
+                model.name
+            )
+
+    @staticmethod
+    def _build_messages(
+        prompt: str,
+        messages: Sequence[BrainMessage] | None,
+    ) -> list[dict]:
+        """
+        Convert runtime-neutral Qronos messages to Ollama messages.
+
+        Structured conversation messages take precedence over the legacy
+        single prompt.
+
+        A message carrying pictures gains an ``images`` field holding them
+        base64-encoded, which is what this API wants. A message carrying none
+        does not gain the field at all — so every request Qronos already
+        sends goes out byte-identical, and a test says so.
+        """
+
+        if messages is not None:
+            if not messages:
+                raise ValueError(
+                    "messages must not be empty."
+                )
+
+            built: list[dict] = []
+
+            for message in messages:
+                entry: dict = {
+                    "role": message.role.value,
+                    "content": message.content,
+                }
+
+                if message.images:
+                    entry["images"] = [
+                        vision_image.as_prepared(image).base64
+                        for image in message.images
+                    ]
+
+                built.append(entry)
+
+            return built
+
+        cleaned_prompt = prompt.strip()
+
+        if not cleaned_prompt:
+            raise ValueError(
+                "Either prompt or messages must be provided."
+            )
+
+        return [
+            {
+                "role": "user",
+                "content": cleaned_prompt,
+            }
+        ]
 
     def chat(
         self,
         model_name: str,
-        prompt: str,
+        prompt: str = "",
+        messages: Sequence[BrainMessage] | None = None,
         think: bool = False,
         num_predict: Optional[int] = None,
+        num_ctx: Optional[int] = None,
         keep_alive: str = "5m",
+        response_format: Optional[dict] = None,
     ) -> str:
-        """Send a single chat request to a local Ollama model."""
+        """
+        Send one chat request through the Ollama development runtime.
+
+        Multi-turn conversations use structured BrainMessage objects.
+        Legacy single-turn callers can continue passing prompt.
+        """
+
         options: dict[str, int] = {}
 
         if num_predict is not None:
-            options["num_predict"] = num_predict
+            options["num_predict"] = (
+                num_predict
+            )
 
-        payload = {
+        # Without this the server picks its own context, which for these
+        # models is 262144 tokens and costs more than ten gigabytes of key
+        # and value cache — for a 2.3 GB model. Left unset, Qronos fills the
+        # card and then refuses its own next request.
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
+
+        ollama_messages = (
+            self._build_messages(
+                prompt=prompt,
+                messages=messages,
+            )
+        )
+
+        payload: dict = {
             "model": model_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            "messages": ollama_messages,
             "think": think,
             "stream": False,
             "keep_alive": keep_alive,
             "options": options,
         }
+
+        # Structured output. A caller that needs a particular shape back
+        # can constrain generation to it rather than describing it in the
+        # prompt and hoping — which is how the web research layer came to
+        # discard every answer it produced.
+        if response_format is not None:
+            payload["format"] = response_format
 
         try:
             response = requests.post(
@@ -123,16 +275,42 @@ class OllamaController:
                 json=payload,
                 timeout=600,
             )
+
             response.raise_for_status()
+
+        except requests.HTTPError as exc:
+            # A model that was never downloaded and a server that is not
+            # running produce the same sentence otherwise, and they send a
+            # person to two completely different places: one to `ollama pull`,
+            # the other to check whether anything is running at all.
+            if exc.response is not None and exc.response.status_code == 404:
+                raise RuntimeError(
+                    f"The model {model_name} is not installed on this "
+                    "machine. Qronos downloads the models it needs; if this "
+                    "one is missing, that download has not happened yet."
+                ) from exc
+
+            raise RuntimeError(
+                "Could not send request to model: "
+                f"{model_name}"
+            ) from exc
+
         except requests.RequestException as exc:
             raise RuntimeError(
-                f"Could not send request to model: {model_name}"
+                "Could not send request to model: "
+                f"{model_name}"
             ) from exc
 
         data = response.json()
 
         return str(
-            data.get("message", {}).get("content", "")
+            data.get(
+                "message",
+                {},
+            ).get(
+                "content",
+                "",
+            )
         )
 
 
@@ -140,6 +318,11 @@ if __name__ == "__main__":
     controller = OllamaController()
 
     if controller.health_check():
-        print("Ollama API: OK")
+        print(
+            "Ollama API: OK"
+        )
+
     else:
-        print("Ollama API: unavailable")
+        print(
+            "Ollama API: unavailable"
+        )

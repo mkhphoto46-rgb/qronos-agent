@@ -136,25 +136,52 @@ OP_CAPABILITY: dict[LinkOp, Capability | None] = {
 }
 
 
-# What the existing permission engine is asked about. Deleting a file maps to
-# CREATE_OR_EDIT rather than SENSITIVE on purpose: SENSITIVE is an outright
-# refusal, which would make DELETE_FILES a capability that can never be
-# exercised, and an unreachable policy is worse than a strict one. Approval is
-# the honest answer, and it matches
+# What the existing permission engine is asked about.
+#
+# This table was written against the earlier risk-category levels (SAFE_READ,
+# CREATE_OR_EDIT, RUN_APPLICATION, CONTROL_SYSTEM, SENSITIVE). The permission
+# engine now speaks the five authorization levels of the product architecture,
+# so the table is restated in those terms. The decision each operation ends up
+# with is unchanged: what was allowed outright is still allowed, what needed
+# approval still needs it, and what was refused is still refused.
+#
+# Deleting a file asks for a confirmation rather than FORBIDDEN on purpose:
+# FORBIDDEN is an outright refusal, which would make DELETE_FILES a capability
+# that can never be exercised, and an unreachable policy is worse than a strict
+# one. Approval is the honest answer, and it matches
 # ``CONFIG.security.destructive_actions_require_approval``.
+#
+# UI_CONFIRMATION rather than VOICE_CONFIRMATION for everything that changes
+# the machine: the request arrives from a phone, so the person approving it is
+# not necessarily the person at the keyboard, and a spoken confirmation can be
+# heard and imitated by whoever is in the room.
 OP_PERMISSION: dict[LinkOp, PermissionLevel] = {
-    LinkOp.PING: PermissionLevel.SAFE_READ,
-    LinkOp.ASK: PermissionLevel.SAFE_READ,
-    LinkOp.SEARCH: PermissionLevel.SAFE_READ,
-    LinkOp.STATUS: PermissionLevel.SAFE_READ,
-    LinkOp.READ_FILE: PermissionLevel.SAFE_READ,
-    LinkOp.WRITE_FILE: PermissionLevel.CREATE_OR_EDIT,
-    LinkOp.DELETE_FILE: PermissionLevel.CREATE_OR_EDIT,
-    LinkOp.RUN_APP: PermissionLevel.RUN_APPLICATION,
-    LinkOp.SYSTEM_CONTROL: PermissionLevel.CONTROL_SYSTEM,
-    LinkOp.LIST_DEVICES: PermissionLevel.SENSITIVE,
-    LinkOp.REVOKE_DEVICE: PermissionLevel.SENSITIVE,
+    LinkOp.PING: PermissionLevel.AUTO_ALLOW,
+    LinkOp.ASK: PermissionLevel.AUTO_ALLOW,
+    LinkOp.SEARCH: PermissionLevel.AUTO_ALLOW,
+    LinkOp.STATUS: PermissionLevel.AUTO_ALLOW,
+    LinkOp.READ_FILE: PermissionLevel.AUTO_ALLOW,
+    LinkOp.WRITE_FILE: PermissionLevel.UI_CONFIRMATION,
+    LinkOp.DELETE_FILE: PermissionLevel.UI_CONFIRMATION,
+    LinkOp.RUN_APP: PermissionLevel.UI_CONFIRMATION,
+    LinkOp.SYSTEM_CONTROL: PermissionLevel.UI_CONFIRMATION,
+    LinkOp.LIST_DEVICES: PermissionLevel.FORBIDDEN,
+    LinkOp.REVOKE_DEVICE: PermissionLevel.FORBIDDEN,
 }
+
+
+# Every decision the permission engine can return, sorted into the three
+# answers this module gives. Written as an explicit set rather than an if/else
+# chain because the engine gained two decisions when it moved to five levels,
+# and an ``else`` branch would have quietly turned both of them into "allowed".
+# Anything not named here is refused; see ``_reason_for``.
+_APPROVAL_DECISIONS = frozenset(
+    {
+        PermissionDecision.REQUIRE_VOICE_CONFIRMATION,
+        PermissionDecision.REQUIRE_UI_CONFIRMATION,
+        PermissionDecision.REQUIRE_TYPED_SECRET,
+    }
+)
 
 
 class AuthReason(Enum):
@@ -225,6 +252,27 @@ def resolve_capabilities(
     return profile & frozenset(grants)
 
 
+def _reason_for(permission: PermissionDecision) -> AuthReason:
+    """
+    Turn a permission decision into this module's answer.
+
+    Only an explicit ALLOW allows. Every decision that asks for a confirmation
+    becomes NEEDS_APPROVAL, and everything else — DENY, or a decision added to
+    the permission engine after this was written — is refused.
+
+    The refusal of the unknown is the point. A request arriving over the link
+    comes from another machine, so the cost of guessing wrong in the permissive
+    direction is a remote device doing something nobody approved.
+    """
+    if permission is PermissionDecision.ALLOW:
+        return AuthReason.ALLOWED
+
+    if permission in _APPROVAL_DECISIONS:
+        return AuthReason.NEEDS_APPROVAL
+
+    return AuthReason.PERMISSION_DENIED
+
+
 def authorise(
     op_name: str,
     scope: LinkScope,
@@ -291,12 +339,7 @@ def authorise(
     # allowed to be stricter.
     permission = evaluate_permission(OP_PERMISSION[op])
 
-    if permission is PermissionDecision.DENY:
-        reason = AuthReason.PERMISSION_DENIED
-    elif permission is PermissionDecision.REQUIRE_APPROVAL:
-        reason = AuthReason.NEEDS_APPROVAL
-    else:
-        reason = AuthReason.ALLOWED
+    reason = _reason_for(permission)
 
     return Authorisation(
         op_name=op_name,

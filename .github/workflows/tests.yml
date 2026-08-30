@@ -1,26 +1,43 @@
 name: Qronos Tests
 
 on:
+  # Every branch. The list used to name five prefixes, so a branch called
+  # anything else pushed twenty commits without a single check running and
+  # nothing said so. A branch that costs nothing to test should be tested.
   push:
     branches:
-      - main
-      - "feature/**"
-      - "fix/**"
-      - "refactor/**"
-      - "security/**"
-      - "test/**"
+      - "**"
 
   pull_request:
     branches:
       - main
+      - "feature/**"
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Run Qronos Test Suite
-    runs-on: ubuntu-latest
+    # Windows is the platform Qronos ships on, and it is the one the suite was
+    # never run against. Three failures lived on main for weeks behind a green
+    # Ubuntu badge: two paths that Windows resolves where POSIX raises, and a
+    # file permission check that Windows cannot express as a mode at all.
+    #
+    # The two jobs also install different dependency sets — openwakeword is
+    # pinned to `platform_system == "Windows"` — so the Windows job exercises
+    # code the Linux job never imports.
+    name: Run Qronos Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Both results, every time. Stopping at the first failure would hide
+      # whether a break is platform-specific, which is the question this
+      # matrix exists to answer.
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
 
     steps:
       - name: Checkout repository
@@ -51,6 +68,9 @@ jobs:
         run: python -m pip check
 
       - name: Verify CI source
+        # Explicit bash: the Windows runner defaults to PowerShell, which has
+        # no sed.
+        shell: bash
         run: |
           echo "===== COMMIT ====="
           git rev-parse HEAD

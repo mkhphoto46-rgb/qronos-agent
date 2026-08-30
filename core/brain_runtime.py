@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Sequence
+
+from core.vision_image import PreparedImage
+
+
+class BrainMessageRole(Enum):
+    """
+    Runtime-neutral chat message roles.
+    """
+
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+@dataclass(frozen=True)
+class BrainMessage:
+    """
+    One runtime-neutral conversation message.
+
+    Higher-level Qronos code uses this structure instead of depending
+    directly on the message format of Ollama or another model runtime.
+
+    A message may carry pictures as well as words, in either of the two forms
+    a picture arrives in. A file the user pointed at is a **path**, held as one
+    so a megabyte of base64 never lands in a log line or a traceback. A screen
+    capture was never a file and must not become one — it is held in memory,
+    encoded, sent and dropped — so it arrives as an already-prepared picture,
+    which describes itself rather than printing itself.
+
+    Encoding is the runtime adapter's business either way, because the
+    encoding is the runtime's requirement.
+    """
+
+    role: BrainMessageRole
+    content: str
+    images: tuple[str | "PreparedImage", ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.content.strip() and not self.images:
+            raise ValueError(
+                "A brain message must carry something — either words or "
+                "at least one picture."
+            )
+
+        if isinstance(self.images, str):
+            raise TypeError(
+                "images is a sequence of pictures, not one picture. A bare "
+                "string would be read as one path per character."
+            )
+
+        for image in self.images:
+            if not isinstance(image, (str, Path, PreparedImage)):
+                raise TypeError(
+                    "A picture on a message is a path or an already-prepared "
+                    f"picture, not {type(image).__name__}."
+                )
+
+
+@dataclass(frozen=True)
+class BrainRuntimeModelStatus:
+    """
+    Runtime-neutral information about a loaded brain model.
+    """
+
+    name: str
+    size: str = ""
+    processor: str = ""
+    context: int = 0
+    until: str = ""
+
+
+class BrainRuntime(ABC):
+    """
+    Runtime-independent interface used by Qronos to talk to local brains.
+
+    The MVP currently uses Ollama behind this interface. Production can
+    later replace Ollama with a bundled native runtime without changing
+    the Orchestrator or higher-level Qronos logic.
+
+    chat() supports either:
+
+        prompt:
+            A legacy single-turn request.
+
+        messages:
+            Structured multi-turn conversation context.
+
+    Structured messages take precedence when supplied.
+    """
+
+    @abstractmethod
+    def health_check(self) -> bool:
+        """
+        Return True when the brain runtime is ready.
+        """
+
+    @abstractmethod
+    def chat(
+        self,
+        model_name: str,
+        prompt: str = "",
+        messages: Sequence[BrainMessage] | None = None,
+        think: bool = False,
+        num_predict: int | None = None,
+        num_ctx: int | None = None,
+        keep_alive: str = "5m",
+        response_format: dict | None = None,
+    ) -> str:
+        """
+        Generate a response with the requested brain.
+
+        messages should be used for multi-turn conversation.
+
+        prompt remains available for single-turn callers and temporary
+        backward compatibility while Qronos migrates to structured chat.
+        """
+
+    @abstractmethod
+    def list_running_models(
+        self,
+    ) -> list[BrainRuntimeModelStatus]:
+        """
+        Return models currently loaded by the runtime.
+        """
+
+    @abstractmethod
+    def stop_model(
+        self,
+        model_name: str,
+    ) -> None:
+        """
+        Unload one model.
+        """
+
+    @abstractmethod
+    def unload_all(self) -> None:
+        """
+        Unload every model currently managed by the runtime.
+        """

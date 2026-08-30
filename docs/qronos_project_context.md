@@ -21,6 +21,8 @@ Qronos is intended to become a local-first Windows automation agent with:
 - Resource protection for gaming and creator workloads.
 - Optional secure remote control from a phone.
 - Future support for printers, 3D printers, and other third-party devices.
+- An installable standalone Windows application with its own polished UI/UX,
+  system tray, activity history, approval history, and undo experience.
 
 ## Architectural Decisions Recovered from Chats
 
@@ -99,6 +101,57 @@ classifier before optional TFLite conversion failed.
   service, router, orchestrator, STT, or TTS.
 - No live microphone detection test has been authorized or completed for this
   trained model.
+
+## Local Brain Model Selection
+
+- Fast Brain uses the official Ollama tag `qwen3:4b-instruct`. The shorter
+  `qwen3:4b` tag currently resolves to a thinking-only 2507 build and failed the
+  fast-response benchmark, so it is not the configured Fast Brain.
+  - Dense model with approximately 4.02 billion parameters.
+  - Default Ollama artifact: Q4_K_M, approximately 2.5 GB.
+  - Expected to fit on the development machine's 8 GB GPU for fast local use.
+- Heavy Brain uses the official Ollama tag `qwen3:14b`.
+  - Dense model with approximately 14.8 billion parameters.
+  - Default Ollama artifact: Q4_K_M, approximately 9.3 GB.
+  - Does not fit fully in the development machine's 8 GB VRAM and therefore
+    requires partial CPU/RAM offload.
+  - Must remain on-demand and must be blocked during gaming, creator, high,
+    and critical resource states.
+- Both models are from the Qwen3 family and are published under Apache 2.0.
+- Every Heavy Brain request requires a fresh resource and activity check before
+  loading, followed by a second check immediately before generation.
+- The UI must expose model loading and reasoning states and stream output so a
+  resource-aware handoff does not look frozen.
+
+## Permission and Product Architecture
+
+- Qronos uses five permission levels: automatic, voice confirmation, UI
+  confirmation, typed Qronos secret, and always denied.
+- Voice confirmation is limited to low-risk, visible, reversible operations and
+  is not treated as biometric identity.
+- High-risk actions require a typed Qronos secret or Windows Hello. Qronos must
+  never request or store the user's Windows password.
+- Credential access, security bypass, irreversible destruction, hidden
+  surveillance, and self-modification of security policy are always denied.
+- The LLM may propose structured actions but may not execute them directly.
+  Execution belongs to a permission-gated Action Broker.
+- Detailed requirements are preserved in `docs/qronos_product_architecture.md`.
+- The installed Qronos runtime may not generate, analyze, modify, or execute
+  code, scripts, macros, or arbitrary shell instructions under any permission
+  level.
+- Registry modification, boot or security configuration, raw-disk access,
+  backup destruction, and privilege escalation are Level 5 / always denied.
+- Malware, exploitation, credential attacks, unauthorized intrusion, vulnerable
+  target scanning, hidden services, backdoors, and unauthorized persistence are
+  also Level 5 / always denied.
+- Resource protection is global: both Fast and Heavy Brain loads are blocked
+  under high/critical pressure, and a fresh second check is required immediately
+  before generation. Production still needs process-aware continuous monitoring
+  so Qronos yields its own resources without reacting to its own VRAM reservation.
+- External intrusion response is deterministic and separate from the LLM. It
+  rejects, throttles, contains, and finally performs a safe shutdown only for
+  high-confidence critical compromise, avoiding an attacker-triggered shutdown
+  denial-of-service loop.
 
 ## Model Quality Risk
 
