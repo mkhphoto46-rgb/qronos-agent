@@ -754,9 +754,12 @@ class TestRoutingIsReported(unittest.TestCase):
             "core.runtime_bridge.WhisperCppVADRuntime"
         ) as vad_type, patch(
             "core.runtime_bridge.WhisperCppRuntime"
-        ) as speech_type:
+        ) as speech_type, patch(
+            "core.runtime_bridge.ChatterboxRuntime"
+        ) as voice_type:
             vad_type.return_value.health_check.return_value = True
             speech_type.return_value.health_check.return_value = True
+            voice_type.return_value.health_check.return_value = True
             runtime.prepare()
 
         assert runtime.orchestrator is not None

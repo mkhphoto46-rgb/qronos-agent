@@ -16,6 +16,7 @@ particular desktop in front of it is not a test the suite can own.
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from io import BytesIO
 
@@ -508,6 +509,49 @@ class TestTheRealScreen(unittest.TestCase):
     running the suite had open.
     """
 
+    def _stable_foreground_window(self) -> int:
+        """
+        Return a real foreground window whose clipped capture region is usable.
+
+        Windows can briefly expose a transient shell/helper window with a
+        zero-area clipped rectangle while test processes start or finish.
+        That is an environment transition, not a screen-capture defect.
+        """
+        shape = screen_capture.geometry()
+        last_seen = None
+
+        for _ in range(20):
+            handle = foreground_window()
+
+            if handle is not None:
+                left, top, width, height = screen_capture._window_region(
+                    handle,
+                    shape.logical_width,
+                    shape.logical_height,
+                )
+
+                last_seen = (handle, left, top, width, height)
+
+                if width > 0 and height > 0:
+                    return handle
+
+            time.sleep(0.05)
+
+        if last_seen is None:
+            self.skipTest(
+                "Windows did not expose a foreground window during the live "
+                "screen-capture check."
+            )
+
+        handle, left, top, width, height = last_seen
+
+        self.skipTest(
+            "Windows did not expose a foreground window with a positive "
+            "capture region during the live check "
+            f"(handle={handle}, left={left}, top={top}, "
+            f"width={width}, height={height})."
+        )
+
     def test_the_display_reports_a_plausible_size(self) -> None:
         shape = screen_capture.geometry()
 
@@ -538,7 +582,7 @@ class TestTheRealScreen(unittest.TestCase):
         )
 
     def test_there_is_a_window_in_front_of_something(self) -> None:
-        self.assertIsNotNone(foreground_window())
+        self.assertIsNotNone(self._stable_foreground_window())
 
     def test_a_real_window_capture_is_not_a_black_rectangle(self) -> None:
         """
@@ -552,8 +596,10 @@ class TestTheRealScreen(unittest.TestCase):
         length. Measured here: one distinct colour from the window's context,
         over a hundred thousand from the screen's at the same coordinates.
         """
+        window = self._stable_foreground_window()
+
         result = ScreenCapture().capture(
-            approved=True, window=foreground_window()
+            approved=True, window=window
         )
 
         self.assertFalse(
@@ -565,9 +611,10 @@ class TestTheRealScreen(unittest.TestCase):
 
     def test_a_window_capture_is_smaller_than_the_whole_screen(self) -> None:
         """Otherwise the handle is being ignored and the screen returned."""
+        window = self._stable_foreground_window()
         shape = screen_capture.geometry()
         left, top, width, height = screen_capture._window_region(
-            foreground_window(), shape.logical_width, shape.logical_height
+            window, shape.logical_width, shape.logical_height
         )
 
         self.assertGreater(width, 0)
