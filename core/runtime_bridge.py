@@ -26,6 +26,7 @@ if hasattr(sys.stderr, "reconfigure"):
         errors="backslashreplace",
     )
 
+from core.action_audit import ActionAuditLog
 from core.audio_input import AudioInput
 from core.chatterbox_runtime import ChatterboxRuntime
 from core.command_recorder import CommandRecorder, CommandRecorderConfig
@@ -36,6 +37,13 @@ from core.resource_context import build_sustained_load_monitor
 from core.model_registry import MODELS
 from core.openwakeword_engine import OpenWakeWordEngine
 from core.orchestrator import Orchestrator
+from core.screen_capture import (
+    Capture,
+    CaptureRefused,
+    CaptureUnavailable,
+    ScreenCapture,
+    foreground_window,
+)
 from core.queue_scheduler import (
     DEFAULT_SCHEDULER_CONFIG,
     QueueEvent,
@@ -47,14 +55,18 @@ from core.resource_governor import ResourceGovernor, Weight
 from core.resource_policy import ResourceDecision
 from core.safe_queue import SafeQueue
 from core.task_plan import TaskPlan
-from core.task_router import TaskRouter
+from core.task_router import TaskRouter, TaskType
+from core.vision_ocr import read_screen_text
+from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
 from core.web_worker import WebResearchWorker
+from security.gate import set_default_audit_sink
 from core.voice_trigger import VoiceTriggerService
 
 
 PUSH_TO_TALK_ACTION = "qronos.push_to_talk"
+LOOK_AT_SCREEN_ACTION = "qronos.look_at_screen"
 WAKE_LISTENER_START_ACTION = "qronos.wake_listener_start"
 WAKE_LISTENER_STOP_ACTION = "qronos.wake_listener_stop"
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
@@ -363,6 +375,10 @@ class QronosRuntime:
         self.speech_runtime: WhisperCppRuntime | None = None
         self.voice_output: ChatterboxRuntime | None = None
         self.task_router: TaskRouter | None = None
+        self.action_audit: ActionAuditLog | None = None
+        self.screen_capture: ScreenCapture | None = None
+        self.last_foreground_window: int | None = None
+        self.pending_look: str | None = None
         self.orchestrator: Orchestrator | None = None
         self.conversation_session: ConversationSession | None = None
 
@@ -524,11 +540,20 @@ class QronosRuntime:
         self.speech_runtime = speech_runtime
         self.voice_output = voice_output
         self.task_router = TaskRouter()
+
+        self.action_audit = ActionAuditLog()
+        set_default_audit_sink(self.action_audit.record_verdict)
+
+        self.screen_capture = ScreenCapture(read_text=read_screen_text)
+
         self.orchestrator = Orchestrator()
         self.orchestrator.workers.register(
             WebResearchWorker(
                 answer_fn=self.orchestrator.answer_web_prompt,
             )
+        )
+        self.orchestrator.workers.register(
+            build_vision_worker(self.orchestrator.runtime)
         )
         self.conversation_session = ConversationSession()
 
@@ -561,6 +586,8 @@ class QronosRuntime:
                 "speech_runtime",
                 "voice_output",
                 "task_router",
+                "action_audit",
+                "screen_capture",
                 "orchestrator",
                 "conversation_session",
             )
@@ -1064,6 +1091,11 @@ class QronosRuntime:
         changing the execution order. That gives us a factual baseline before
         introducing semantic chunking or streaming.
         """
+        try:
+            self.last_foreground_window = foreground_window()
+        except Exception:
+            self.last_foreground_window = None
+
         if self.is_busy:
             self._notify(
                 "runtime_busy",
@@ -1193,6 +1225,21 @@ class QronosRuntime:
                 "processing",
                 route.task_type.value,
             )
+
+            if route.task_type is TaskType.VISION:
+                self.pending_look = transcript
+                self.conversation_session.begin_listening()
+
+                self._notify(
+                    "voice_needs_screen",
+                    "ready",
+                    transcript,
+                )
+
+                report["route"] = route.task_type.value
+                report["visionApprovalPending"] = True
+                self._write_latency_report(report)
+                return 0.0
 
             plan = TaskPlan(
                 goal=transcript
@@ -1480,6 +1527,151 @@ class QronosRuntime:
             trigger_source="push_to_talk",
         )
 
+
+    def look_at_screen(
+        self,
+        approved: bool = False,
+        question: str = "",
+        window_only: bool = False,
+    ) -> None:
+        if self.is_busy:
+            self._notify(
+                "runtime_busy",
+                "busy",
+                "Qronos is already processing a request.",
+            )
+            return
+
+        self._set_busy(True)
+        asked = (question or self.pending_look or "").strip()
+        self.pending_look = None
+
+        try:
+            if not asked:
+                raise RuntimeError(
+                    "Qronos was asked to look at the screen without being "
+                    "told what to look for."
+                )
+
+            if not approved:
+                self._notify(
+                    "voice_screen_declined",
+                    "ready",
+                    "Qronos did not look at the screen.",
+                )
+                return
+
+            self.prepare()
+            self._require_prepared()
+
+            self._notify(
+                "voice_capturing_screen",
+                "processing",
+                asked,
+            )
+
+            capture = self._capture_for(window_only)
+
+            self._notify(
+                "voice_captured_screen",
+                "processing",
+                capture.describe(),
+            )
+
+            if capture.blank:
+                self._notify(
+                    "voice_screen_blank",
+                    "ready",
+                    "There is nothing on the screen to read — it may be "
+                    "locked, asleep, or showing protected video.",
+                )
+                return
+
+            if not self.conversation_session.is_active:
+                self.conversation_session.start()
+
+            self.conversation_session.add_user_message(asked)
+            self.conversation_session.begin_processing()
+
+            plan = TaskPlan(goal=asked)
+            plan.add_step(
+                task_type=TaskType.VISION,
+                description=asked,
+                images=(capture.image,),
+            )
+
+            results = self.orchestrator.execute_plan(plan)
+
+            if not results:
+                raise RuntimeError(
+                    "Qronos did not return an execution result."
+                )
+
+            result = results[-1]
+
+            if not result.success:
+                raise RuntimeError(
+                    result.error or "Qronos could not read the screen."
+                )
+
+            response = result.output.strip()
+
+            if not response:
+                raise RuntimeError(
+                    "Qronos returned an empty response."
+                )
+
+            self.conversation_session.begin_responding()
+            self.conversation_session.add_assistant_message(response)
+            self.conversation_session.begin_listening()
+
+            self._notify(
+                "voice_response",
+                "ready",
+                response,
+            )
+
+            self._notify(
+                "voice_turn_complete",
+                "ready",
+                "Screen reading turn completed.",
+            )
+
+        except (CaptureRefused, CaptureUnavailable) as exc:
+            self._notify(
+                "voice_screen_unavailable",
+                "error",
+                str(exc),
+            )
+
+        except Exception as exc:
+            self._notify(
+                "runtime_error",
+                "error",
+                str(exc),
+            )
+
+        finally:
+            self._set_busy(False)
+
+    def _capture_for(self, window_only: bool) -> Capture:
+        if self.screen_capture is None:
+            raise RuntimeError(
+                "Qronos screen capture runtime is not prepared."
+            )
+
+        window = self.last_foreground_window if window_only else None
+
+        return self.screen_capture.capture(
+            approved=True,
+            window=window,
+            reason=(
+                "Look at the window that was in front."
+                if window
+                else "Look at what is on the screen."
+            ),
+        )
+
     def close(self) -> None:
         self.stop_wake_listener()
 
@@ -1704,6 +1896,19 @@ def handle_action(
         worker = threading.Thread(
             target=runtime.push_to_talk,
             name="qronos-push-to-talk",
+            daemon=True,
+        )
+        worker.start()
+        return
+
+    if action_id == LOOK_AT_SCREEN_ACTION:
+        worker = threading.Thread(
+            target=lambda: runtime.look_at_screen(
+                approved=bool(payload.get("approved", False)),
+                question=str(payload.get("question", "")),
+                window_only=bool(payload.get("windowOnly", False)),
+            ),
+            name="qronos-look-at-screen",
             daemon=True,
         )
         worker.start()
