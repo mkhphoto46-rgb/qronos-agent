@@ -78,9 +78,7 @@ fn find_project_root() -> Option<PathBuf> {
     }
 
     if let Ok(current) = std::env::current_dir() {
-        if let Some(found) =
-            current.ancestors().find(|c| looks_like_the_checkout(c))
-        {
+        if let Some(found) = current.ancestors().find(|c| looks_like_the_checkout(c)) {
             return Some(found.to_path_buf());
         }
     }
@@ -89,9 +87,7 @@ fn find_project_root() -> Option<PathBuf> {
     {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-        if let Some(found) =
-            manifest.ancestors().find(|c| looks_like_the_checkout(c))
-        {
+        if let Some(found) = manifest.ancestors().find(|c| looks_like_the_checkout(c)) {
             return Some(found.to_path_buf());
         }
     }
@@ -101,7 +97,10 @@ fn find_project_root() -> Option<PathBuf> {
 
 fn python_candidates(project_root: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![
-        project_root.join(".venv").join("Scripts").join("python.exe"),
+        project_root
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe"),
         project_root.join("venv").join("Scripts").join("python.exe"),
     ];
 
@@ -137,10 +136,7 @@ fn resolve_python(project_root: &Path) -> Result<PathBuf, String> {
         }
     }
 
-    Err(
-        "No usable Python runtime was found for Qronos development mode."
-            .to_string(),
-    )
+    Err("No usable Python runtime was found for Qronos development mode.".to_string())
 }
 
 fn runtime_script(project_root: &Path) -> PathBuf {
@@ -208,10 +204,7 @@ fn write_runtime_payload(
         .map_err(|error| format!("Could not flush Qronos runtime command: {error}"))
 }
 
-fn write_runtime_command(
-    process: &mut RuntimeProcess,
-    command: &str,
-) -> Result<(), String> {
+fn write_runtime_command(process: &mut RuntimeProcess, command: &str) -> Result<(), String> {
     write_runtime_payload(process, serde_json::json!({ "command": command }))
 }
 
@@ -258,9 +251,7 @@ pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>
 }
 
 #[tauri::command]
-pub fn get_runtime_status(
-    state: State<'_, RuntimeManagerState>,
-) -> Result<RuntimeStatus, String> {
+pub fn get_runtime_status(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStatus, String> {
     let mut guard = state
         .process
         .lock()
@@ -285,9 +276,7 @@ pub fn get_runtime_status(
                 });
             }
             Err(error) => {
-                return Err(format!(
-                    "Could not inspect Qronos runtime process: {error}"
-                ));
+                return Err(format!("Could not inspect Qronos runtime process: {error}"));
             }
         }
     }
@@ -373,8 +362,7 @@ pub fn start_runtime(
                     continue;
                 }
 
-                let looks_like_error =
-                    trimmed.starts_with("Traceback")
+                let looks_like_error = trimmed.starts_with("Traceback")
                     || trimmed.starts_with("Exception")
                     || trimmed.starts_with("Error:")
                     || trimmed.contains("ModuleNotFoundError")
@@ -412,9 +400,7 @@ pub fn start_runtime(
 }
 
 #[tauri::command]
-pub fn ping_runtime(
-    state: State<'_, RuntimeManagerState>,
-) -> Result<(), String> {
+pub fn ping_runtime(state: State<'_, RuntimeManagerState>) -> Result<(), String> {
     let mut guard = state
         .process
         .lock()
@@ -483,10 +469,7 @@ pub fn queue_submit(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn queue_cancel(
-    task_id: String,
-    state: State<'_, RuntimeManagerState>,
-) -> Result<(), String> {
+pub fn queue_cancel(task_id: String, state: State<'_, RuntimeManagerState>) -> Result<(), String> {
     let cleaned = require_task_id(&task_id)?;
 
     send_to_runtime(
@@ -515,10 +498,7 @@ pub fn queue_override(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn queue_set_paused(
-    paused: bool,
-    state: State<'_, RuntimeManagerState>,
-) -> Result<(), String> {
+pub fn queue_set_paused(paused: bool, state: State<'_, RuntimeManagerState>) -> Result<(), String> {
     send_to_runtime(
         &state,
         serde_json::json!({
@@ -529,9 +509,7 @@ pub fn queue_set_paused(
 }
 
 #[tauri::command]
-pub fn stop_runtime(
-    state: State<'_, RuntimeManagerState>,
-) -> Result<RuntimeStatus, String> {
+pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStatus, String> {
     let mut guard = state
         .process
         .lock()

@@ -241,12 +241,20 @@ core/
   Device link             link_*.py — phone to PC on the local network, TLS 1.3
                           with a pre-shared key. See docs/QRONOS_DEVICE_LINK.md
 
+  Vision                  screen_capture.py — one picture of the screen,
+                          through the permission gate. windows_ocr.py reads it
+                          for free as a hint the model checks against.
+                          vision_worker.py describes; the Heavy Brain reasons.
+                          See docs/qronos_vision.md
+
 security/
   permissions.py          Risk levels and permission decisions
+  watching.py             A grant that lasts, visibly, and ends by itself
 
 docs/
   QRONOS_DEVICE_LINK.md     Phone link, Layer 1 and Layer 2
   qronos_project_context.md Product direction and constraints
+  qronos_vision.md          What Qronos can see, and what it costs
   qronos_wake_word_spec.md  Wake-word specification
   voice_trigger_spec.md     Voice trigger specification
 

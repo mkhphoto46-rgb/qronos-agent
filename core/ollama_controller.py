@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 
 import requests
 
+from core import vision_image
 from core.brain_runtime import (
     BrainMessage,
     BrainRuntime,
@@ -162,12 +163,17 @@ class OllamaController(BrainRuntime):
     def _build_messages(
         prompt: str,
         messages: Sequence[BrainMessage] | None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict]:
         """
         Convert runtime-neutral Qronos messages to Ollama messages.
 
         Structured conversation messages take precedence over the legacy
         single prompt.
+
+        A message carrying pictures gains an ``images`` field holding them
+        base64-encoded, which is what this API wants. A message carrying none
+        does not gain the field at all — so every request Qronos already
+        sends goes out byte-identical, and a test says so.
         """
 
         if messages is not None:
@@ -176,13 +182,23 @@ class OllamaController(BrainRuntime):
                     "messages must not be empty."
                 )
 
-            return [
-                {
+            built: list[dict] = []
+
+            for message in messages:
+                entry: dict = {
                     "role": message.role.value,
                     "content": message.content,
                 }
-                for message in messages
-            ]
+
+                if message.images:
+                    entry["images"] = [
+                        vision_image.as_prepared(image).base64
+                        for image in message.images
+                    ]
+
+                built.append(entry)
+
+            return built
 
         cleaned_prompt = prompt.strip()
 
@@ -261,6 +277,23 @@ class OllamaController(BrainRuntime):
             )
 
             response.raise_for_status()
+
+        except requests.HTTPError as exc:
+            # A model that was never downloaded and a server that is not
+            # running produce the same sentence otherwise, and they send a
+            # person to two completely different places: one to `ollama pull`,
+            # the other to check whether anything is running at all.
+            if exc.response is not None and exc.response.status_code == 404:
+                raise RuntimeError(
+                    f"The model {model_name} is not installed on this "
+                    "machine. Qronos downloads the models it needs; if this "
+                    "one is missing, that download has not happened yet."
+                ) from exc
+
+            raise RuntimeError(
+                "Could not send request to model: "
+                f"{model_name}"
+            ) from exc
 
         except requests.RequestException as exc:
             raise RuntimeError(

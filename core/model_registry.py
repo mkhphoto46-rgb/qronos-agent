@@ -51,6 +51,30 @@ MODELS = {
         priority=2,
         context_tokens=16_384,
     ),
+    # The eyes. Listed here so the model store knows to keep it and not to
+    # evict it, and so its context is declared rather than left to the server
+    # — this one ships a 262,144 default, which is the exact trap the note
+    # above describes.
+    #
+    # 4,096 tokens because a screenshot at the size Qronos sends costs about
+    # 1,080 of them and the question and answer are short. Measured, and
+    # measured to be honoured: /api/ps reports 4,096 rather than the default.
+    #
+    # 4.6 GB because that is the peak *during generation*, not the load
+    # delta — +4,475 MiB above idle on an RTX 5080. Taking the load figure
+    # instead is the mistake already made once on the voice runtime, where it
+    # let a model onto a card it could only crawl on.
+    #
+    # Note it is a model without being a TaskClass. TaskClass answers "which
+    # brain reasons about this", and the answer for vision is "none of them" —
+    # it describes, and the heavy brain reasons about the description.
+    "vision": ModelProfile(
+        name="qwen3-vl:4b-instruct",
+        role="vision",
+        estimated_vram_gb=4.6,
+        priority=3,
+        context_tokens=4_096,
+    ),
 }
 
 

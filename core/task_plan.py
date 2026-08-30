@@ -3,15 +3,35 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.task_router import TaskType
+from core.vision_image import PreparedImage
 
 
 @dataclass(frozen=True)
 class PlanStep:
-    """One step in a Qronos task plan."""
+    """
+    One step in a Qronos task plan.
+
+    ``images`` holds the pictures the step is about — a screen capture, a
+    camera frame, a file the user pointed at. Until now a step was an order, a
+    type and a sentence, with nowhere to put the thing the sentence refers to,
+    so "what is in this picture" arrived at a worker with no picture.
+
+    A file is held as a path and a capture as an already-prepared picture, for
+    the reasons :class:`core.brain_runtime.BrainMessage` gives. Neither prints
+    its contents: a plan is shown in logs and in the desktop's step list.
+    """
 
     order: int
     task_type: TaskType
     description: str
+    images: tuple[str | PreparedImage, ...] = ()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.images, str):
+            raise TypeError(
+                "images is a sequence of pictures, not one picture. A bare "
+                "string would be read as one path per character."
+            )
 
 
 @dataclass
@@ -25,12 +45,14 @@ class TaskPlan:
         self,
         task_type: TaskType,
         description: str,
+        images: tuple[str | PreparedImage, ...] = (),
     ) -> None:
         self.steps.append(
             PlanStep(
                 order=len(self.steps) + 1,
                 task_type=task_type,
                 description=description,
+                images=images,
             )
         )
 

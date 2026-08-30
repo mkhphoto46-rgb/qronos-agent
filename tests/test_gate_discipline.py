@@ -25,10 +25,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Modules that carry out changes to the machine. Empty today. A worker added
-# under core/ that performs actions belongs here, and the test below then
-# requires it to reach the permission gate.
-EXECUTOR_MODULES: tuple[str, ...] = ()
+# Modules that carry out changes to the machine. A worker added under core/
+# that performs actions belongs here, and the test below then requires it to
+# reach the permission gate.
+#
+# This list was empty for a long time, which made the rule below true and
+# vacuous. core.screen_capture is the first entry, and it arrived here the
+# intended way: it imported ctypes, the test failed, and somebody had to
+# decide which list it belonged in.
+EXECUTOR_MODULES: tuple[str, ...] = (
+    "core.screen_capture",
+)
 
 # The one sanctioned route to performing an action.
 GATE_MODULE = "security.gate"
@@ -74,6 +81,9 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     ),
     "core.runtime_bridge": (
         "Reconfigures its own stdio streams."
+    ),
+    "core.windows_ocr": (
+        "Runs PowerShell to reach Windows' text recogniser, which only reads."
     ),
 }
 
@@ -169,6 +179,66 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
         for name, reason in KNOWN_SYSTEM_MODULES.items():
             with self.subTest(module=name):
                 self.assertTrue(reason.strip())
+
+
+class TestTheAuditTrailIsWiredInProduction(unittest.TestCase):
+    """
+    "Every decision is recorded" was a claim about the test suite.
+
+    ``set_default_audit_sink`` existed, worked, and was called from
+    ``tests/test_gate.py`` and from nowhere else. So in a real run the gate had
+    no default sink, and an executor that omitted the audit argument produced
+    no trail — silently, and indistinguishably from a call that was never made.
+
+    Static, like the rest of this file, because the alternative is starting the
+    voice runtime, which needs a microphone.
+    """
+
+    SINK_INSTALLER = "set_default_audit_sink"
+
+    def installers(self) -> tuple[str, ...]:
+        return tuple(
+            module_name(path)
+            for path in product_modules()
+            if self.SINK_INSTALLER in path.read_text(encoding="utf-8")
+        )
+
+    def test_something_outside_the_tests_installs_the_sink(self) -> None:
+        callers = [
+            name
+            for name in self.installers()
+            if name != GATE_MODULE
+        ]
+
+        self.assertTrue(
+            callers,
+            "Nothing in core/ or security/ installs the gate's default audit "
+            "sink, so in production no decision is recorded unless every "
+            "caller remembers to pass one.",
+        )
+
+    def test_the_runtime_bridge_installs_it_while_preparing(self) -> None:
+        # Specifically in prepare(), not at import: installing a sink as a
+        # side effect of importing a module would write to the user's audit
+        # file from any script that happened to import the bridge.
+        source = (ROOT / "core" / "runtime_bridge.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+
+        prepare = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "prepare"
+        )
+
+        called = {
+            node.func.id
+            for node in ast.walk(prepare)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        self.assertIn(self.SINK_INSTALLER, called)
 
 
 if __name__ == "__main__":

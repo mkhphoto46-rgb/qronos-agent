@@ -18,6 +18,23 @@ ASCII markers on word boundaries and Persian markers as substrings — the right
 rule for each, because Persian is written without the spacing that makes a
 boundary meaningful. The web layer already routes queries this way; this module
 now does the same.
+
+The third is precedence, and it made VISION unreachable for most of the
+requests that need it. COMPUTER is checked before VISION and its keywords
+include ``file``, ``app``, ``windows`` and ``فایل`` — so "read the file name in
+this screenshot" and "what is on my screen" both went to COMPUTER or fell
+through to FAST, and never once reached the model that can actually look.
+
+Reordering is not the fix: "open the photo app" contains ``photo`` and is
+genuinely a COMPUTER request. What separates the two is that a real vision
+request names both an **act of looking** and a **thing to look at** — read *the
+screen*, describe *this picture*, what is on *my display*. "Open the photo app"
+names a thing to look at and no act of looking, so it stays COMPUTER. That
+compound rule is checked ahead of COMPUTER; the looser single keywords stay
+where they were, behind it.
+
+It is checked *after* BROWSER, deliberately. "Go to the site and look at the
+chart" has to navigate before there is anything to look at.
 """
 
 from __future__ import annotations
@@ -119,6 +136,64 @@ class TaskRouter:
         "پیام بفرست",
     )
 
+    #: An act of looking. Half of the compound rule; on its own it means
+    #: nothing, because "read the third chapter" is not a vision request.
+    VISION_VERBS = _markers(
+        "look at",
+        "look on",
+        "read",
+        "see",
+        "watch",
+        "describe",
+        "what is on",
+        "what's on",
+        "what is in",
+        "what's in",
+        "what do you see",
+        "what can you see",
+        "show me what",
+        "check",
+        "ocr",
+        # Persian
+        "نگاه کن",
+        "ببین",
+        "می‌بینی",
+        "بخوان",
+        "توصیف کن",
+        "چه چیزی",
+        "چی هست",
+    )
+
+    #: A thing to look at. The other half. On its own it means nothing either,
+    #: because "the photo app" is a thing to look at inside a request to open
+    #: an application.
+    VISION_SUBJECTS = _markers(
+        "screen",
+        "screenshot",
+        "display",
+        "desktop",
+        "monitor",
+        "image",
+        "picture",
+        "photo",
+        "camera",
+        "webcam",
+        "window",
+        "frame",
+        "this",
+        # Persian
+        "صفحه",
+        "نمایشگر",
+        "دسکتاپ",
+        "عکس",
+        "تصویر",
+        "دوربین",
+        "وب‌کم",
+        "پنجره",
+        "اسکرین‌شات",
+        "این",
+    )
+
     VISION_KEYWORDS = _markers(
         "image",
         "photo",
@@ -204,6 +279,18 @@ class TaskRouter:
                 reason="The request appears to require browser interaction.",
             )
 
+        # Ahead of COMPUTER, because COMPUTER's keywords otherwise swallow
+        # every request that mentions a file, an application or a window while
+        # asking Qronos to look at it. See the module docstring.
+        if self._looks_like_vision(text):
+            return RouteDecision(
+                task_type=TaskType.VISION,
+                reason=(
+                    "The request asks Qronos to look at something and says "
+                    "what."
+                ),
+            )
+
         if self._contains_any(text, self.COMPUTER_KEYWORDS):
             return RouteDecision(
                 task_type=TaskType.COMPUTER,
@@ -226,6 +313,19 @@ class TaskRouter:
             task_type=TaskType.FAST,
             reason="The request appears suitable for fast handling.",
         )
+
+    def _looks_like_vision(self, text: str) -> bool:
+        """
+        True when the request names both an act of looking and a thing to
+        look at.
+
+        Both halves, never one. A single half is what the looser
+        ``VISION_KEYWORDS`` list is for, and that one is checked last precisely
+        because it is easy to trip by accident.
+        """
+        return self._contains_any(
+            text, self.VISION_VERBS
+        ) and self._contains_any(text, self.VISION_SUBJECTS)
 
     @staticmethod
     def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:

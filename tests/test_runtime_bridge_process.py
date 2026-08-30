@@ -124,6 +124,101 @@ class BridgeProcessTestCase(unittest.TestCase):
         self.bridge.close()
 
 
+class TestLookingAtTheScreenThroughTheProcess(BridgeProcessTestCase):
+    """
+    The vision action, through a real process and a real pipe.
+
+    Only the paths that touch nothing. Approving a capture would photograph
+    whatever the person running the suite has open, and it would start the
+    microphone stack on the way — which is why saying no comes before
+    ``prepare`` in the runtime, and why that ordering is worth a test here
+    rather than only in process.
+    """
+
+    def look(self, **fields) -> dict:
+        payload = {
+            "command": "action",
+            "actionId": "qronos.look_at_screen",
+        }
+        payload.update(fields)
+
+        self.bridge.send(payload)
+
+        return payload
+
+    def test_the_action_is_recognised_rather_than_warned_about(self) -> None:
+        self.look(approved=False, question="What is on my screen?")
+
+        received = self.bridge.read_until("runtime_action_received")
+
+        self.assertIsNotNone(received)
+        self.assertEqual(received["message"], "qronos.look_at_screen")
+
+    def test_saying_no_ends_the_turn_cleanly(self) -> None:
+        self.look(approved=False, question="What is on my screen?")
+
+        declined = self.bridge.read_until("voice_screen_declined")
+
+        self.assertIsNotNone(declined, "the bridge never said it declined")
+        self.assertEqual(declined["status"], "ready")
+
+    def test_saying_no_is_not_an_error(self) -> None:
+        """
+        A person exercising a permission is the permission working, and the
+        desktop must not show it as a fault.
+        """
+        self.look(approved=False, question="What is on my screen?")
+
+        declined = self.bridge.read_until("voice_screen_declined")
+
+        self.assertIsNotNone(declined)
+        self.assertNotEqual(declined["status"], "error")
+
+    def test_omitting_the_answer_is_the_same_as_saying_no(self) -> None:
+        self.look(question="What is on my screen?")
+
+        self.assertIsNotNone(self.bridge.read_until("voice_screen_declined"))
+
+    def test_a_request_with_nothing_asked_is_an_error(self) -> None:
+        self.look(approved=False)
+
+        failed = self.bridge.read_until("runtime_error")
+
+        self.assertIsNotNone(failed)
+        self.assertIn("what to look for", failed["message"])
+
+    def test_declining_starts_nothing(self) -> None:
+        """
+        No microphone, no speech runtime, no model. If any of those started,
+        this would be the test that noticed — the runtime would report them
+        preparing before it reported anything else.
+        """
+        self.look(approved=False, question="What is on my screen?")
+
+        seen = []
+
+        while True:
+            event = self.bridge.read_event(timeout=5.0)
+
+            if event is None:
+                break
+
+            seen.append(event["eventType"])
+
+            if event["eventType"] == "voice_screen_declined":
+                break
+
+        self.assertNotIn("runtime_preparing", seen)
+
+    def test_the_bridge_is_still_usable_afterwards(self) -> None:
+        self.look(approved=False, question="What is on my screen?")
+        self.bridge.read_until("voice_screen_declined")
+
+        self.bridge.send({"command": "ping"})
+
+        self.assertIsNotNone(self.bridge.read_until("runtime_pong"))
+
+
 class TestTheBridgeSpeaks(BridgeProcessTestCase):
     def test_it_announces_itself_on_startup(self) -> None:
         # Asserted in setUp. The desktop waits for this before sending

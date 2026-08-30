@@ -227,6 +227,120 @@ class TestMarkersAreNormalised(unittest.TestCase):
             with self.subTest(table=name):
                 self.assertTrue(persian, f"{name} has no Persian markers")
 
+    def test_both_halves_of_the_vision_rule_have_persian_markers(self) -> None:
+        for name in ("VISION_VERBS", "VISION_SUBJECTS"):
+            persian = [
+                marker
+                for marker in getattr(TaskRouter, name)
+                if not marker.isascii()
+            ]
+
+            with self.subTest(table=name):
+                self.assertTrue(persian, f"{name} has no Persian markers")
+
+
+class TestVisionReachesVision(unittest.TestCase):
+    """
+    The defect this rule exists for.
+
+    COMPUTER is checked before VISION and its keywords include ``file``,
+    ``app``, ``windows`` and ``فایل``. So the ordinary ways of asking Qronos to
+    look at something — which nearly all mention a file, an application or a
+    window — went to COMPUTER, or fell through to FAST, and never reached the
+    model that can actually look.
+    """
+
+    def setUp(self) -> None:
+        self.router = TaskRouter()
+
+    def route(self, text: str) -> TaskType:
+        return self.router.route(text).task_type
+
+    def test_reading_a_screenshot_that_mentions_a_file_is_vision(self) -> None:
+        # "file" is a COMPUTER keyword, and COMPUTER is checked first.
+        self.assertEqual(
+            self.route("read the file name in this screenshot"),
+            TaskType.VISION,
+        )
+
+    def test_asking_what_is_on_the_screen_is_vision(self) -> None:
+        self.assertEqual(
+            self.route("what is on my screen"),
+            TaskType.VISION,
+        )
+
+    def test_looking_at_a_window_is_vision(self) -> None:
+        self.assertEqual(
+            self.route("look at this window and tell me the error"),
+            TaskType.VISION,
+        )
+
+    def test_describing_a_picture_is_vision(self) -> None:
+        self.assertEqual(
+            self.route("describe this picture"),
+            TaskType.VISION,
+        )
+
+    def test_the_persian_forms_reach_it_too(self) -> None:
+        for request in (
+            "از صفحه بخوان",
+            "به این عکس نگاه کن",
+            "به این پنجره نگاه کن",
+            "چه چیزی روی صفحه است",
+        ):
+            with self.subTest(request=request):
+                self.assertEqual(self.route(request), TaskType.VISION)
+
+
+class TestVisionDoesNotStealOtherRequests(unittest.TestCase):
+    """
+    The other half, and the reason the fix is a compound rule rather than a
+    reordering.
+
+    Reordering would have been one line and would have sent "open the photo
+    app" to a model that cannot open anything.
+    """
+
+    def setUp(self) -> None:
+        self.router = TaskRouter()
+
+    def route(self, text: str) -> TaskType:
+        return self.router.route(text).task_type
+
+    def test_opening_an_application_named_after_a_picture_is_computer(
+        self,
+    ) -> None:
+        self.assertEqual(self.route("open the photo app"), TaskType.COMPUTER)
+
+    def test_closing_a_window_is_computer(self) -> None:
+        # Both halves of a vision subject are here — "this" and "window" — and
+        # no act of looking, which is exactly the distinction being drawn.
+        self.assertEqual(self.route("close this window"), TaskType.COMPUTER)
+
+    def test_opening_a_file_is_computer_in_persian_too(self) -> None:
+        self.assertEqual(self.route("این فایل را باز کن"), TaskType.COMPUTER)
+
+    def test_reading_a_chapter_is_not_looking_at_anything(self) -> None:
+        # "read" is an act of looking and there is no thing to look at, so the
+        # compound rule does not fire and this stays where it was.
+        self.assertEqual(
+            self.route("read the third chapter carefully"),
+            TaskType.HEAVY,
+        )
+
+    def test_navigation_still_wins_because_it_has_to_happen_first(self) -> None:
+        # There is nothing to look at until the page has loaded.
+        self.assertEqual(
+            self.route("go to the site and look at the chart"),
+            TaskType.BROWSER,
+        )
+
+    def test_a_thing_to_look_at_alone_does_not_make_it_vision(self) -> None:
+        self.assertNotEqual(self.route("run this app"), TaskType.VISION)
+
+    def test_an_act_of_looking_alone_does_not_make_it_vision(self) -> None:
+        self.assertNotEqual(self.route("check my email"), TaskType.VISION)
+
 
 if __name__ == "__main__":
     unittest.main()
