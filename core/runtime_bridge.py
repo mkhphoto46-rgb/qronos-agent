@@ -1091,10 +1091,14 @@ class QronosRuntime:
         payload: dict[str, Any],
     ) -> None:
         """
-        Persist one voice-turn latency report under the project E: runtime.
+        Persist voice diagnostics without losing earlier reports.
 
-        Diagnostics must never break a voice turn. If writing fails, emit only
-        a warning and continue.
+        ``voice_latency_latest.json`` remains the convenient latest-event
+        snapshot. Every write is also archived under a unique filename so
+        later follow-up timeouts, runtime errors, or successful turns can
+        never erase earlier diagnostic evidence.
+
+        Diagnostics must never break a voice turn.
         """
         try:
             VOICE_LATENCY_LOG_PATH.parent.mkdir(
@@ -1102,12 +1106,27 @@ class QronosRuntime:
                 exist_ok=True,
             )
 
+            rendered = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+            )
+
             VOICE_LATENCY_LOG_PATH.write_text(
-                json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+                rendered,
+                encoding="utf-8",
+            )
+
+            archive_path = (
+                VOICE_LATENCY_LOG_PATH.parent
+                / (
+                    "voice_latency_"
+                    f"{time.time_ns()}.json"
+                )
+            )
+
+            archive_path.write_text(
+                rendered,
                 encoding="utf-8",
             )
 
@@ -1416,20 +1435,28 @@ class QronosRuntime:
                 or all_audio_ready
             )
 
-            playback_elapsed_during_generation = max(
-                0.0,
-                all_audio_ready
-                - first_audio_ready,
-            )
-
+            # Reliability-first playback guard.
+            #
+            # The desktop player owns actual audio playback. The backend only
+            # knows when generated WAV chunks become available; it does not
+            # know the exact moment the desktop media engine starts playing
+            # them or whether there are small gaps between queued chunks.
+            #
+            # Do not subtract TTS generation time from the playback duration.
+            # Doing so can open the follow-up microphone before desktop
+            # playback has actually finished, and the desktop intentionally
+            # stops active Qronos audio when a new voice-listening turn begins.
+            #
+            # Until an explicit desktop -> runtime playback-complete
+            # acknowledgement is implemented, wait conservatively for the
+            # complete generated audio duration.
             playback_seconds = max(
                 0.0,
                 float(
                     chunked[
                         "totalAudioSeconds"
                     ]
-                )
-                - playback_elapsed_during_generation,
+                ),
             )
 
             report.update(
