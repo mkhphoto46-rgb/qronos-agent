@@ -60,6 +60,7 @@ from core.task_router import TaskRouter, TaskType
 from core.vision_ocr import read_screen_text
 from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
+from core.whisper_hybrid_runtime import WhisperHybridRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
 from core.web_worker import WebResearchWorker
 from security.gate import set_default_audit_sink
@@ -379,7 +380,11 @@ class QronosRuntime:
         self.audio_input: AudioInput | None = None
         self.vad_runtime: WhisperCppVADRuntime | None = None
         self.command_recorder: CommandRecorder | None = None
-        self.speech_runtime: WhisperCppRuntime | None = None
+        self.speech_runtime: (
+            WhisperHybridRuntime
+            | WhisperCppRuntime
+            | None
+        ) = None
         self.voice_output: ChatterboxRuntime | None = None
         self.task_router: TaskRouter | None = None
         self.action_audit: ActionAuditLog | None = None
@@ -512,7 +517,7 @@ class QronosRuntime:
 
         audio_input = AudioInput()
         vad_runtime = WhisperCppVADRuntime()
-        speech_runtime = WhisperCppRuntime()
+        speech_runtime = WhisperHybridRuntime()
         voice_output = ChatterboxRuntime()
 
         if not vad_runtime.health_check():
@@ -608,6 +613,52 @@ class QronosRuntime:
                 + " missing."
             )
 
+    def _warm_speech_runtime_async(
+        self,
+    ) -> None:
+        speech = self.speech_runtime
+
+        if speech is None:
+            return
+
+        warm = getattr(
+            speech,
+            "warm_async",
+            None,
+        )
+
+        if callable(warm):
+            try:
+                warm()
+
+            except Exception:
+                # Warm-up is an optimization only.
+                #
+                # The hybrid runtime keeps the validated CLI fallback,
+                # so warm failure must never cancel a user's voice turn.
+                pass
+
+    def _release_speech_runtime(
+        self,
+    ) -> None:
+        speech = self.speech_runtime
+
+        if speech is None:
+            return
+
+        shutdown = getattr(
+            speech,
+            "shutdown",
+            None,
+        )
+
+        if callable(shutdown):
+            try:
+                shutdown()
+
+            except Exception:
+                pass
+
     @property
     def wake_listener_running(self) -> bool:
         thread = self._wake_thread
@@ -667,6 +718,9 @@ class QronosRuntime:
             thread.join(timeout=0.75)
 
         self._wake_thread = None
+
+        # Stopping wake listening also releases persistent STT resources.
+        self._release_speech_runtime()
 
     def _wake_listener_loop(self) -> None:
         """
@@ -728,6 +782,10 @@ class QronosRuntime:
                 )
 
                 trigger.pause()
+
+                # Load persistent Whisper while the user is speaking.
+                # Recording time hides most or all of model startup latency.
+                self._warm_speech_runtime_async()
 
                 self._notify(
                     "wake_word_detected",
@@ -844,6 +902,10 @@ class QronosRuntime:
 
                 if self._wake_stop.is_set():
                     break
+
+                # The interactive session is finished. Release
+                # persistent STT VRAM before returning to idle wake listening.
+                self._release_speech_runtime()
 
                 # Resume the existing wake-word pipeline.
                 # OpenWakeWord resume() resets its rolling
@@ -1659,9 +1721,17 @@ class QronosRuntime:
         return playback_seconds
 
     def push_to_talk(self) -> None:
-        self._run_voice_turn(
-            trigger_source="push_to_talk",
-        )
+        # Warm Whisper concurrently with command recording.
+        self._warm_speech_runtime_async()
+
+        try:
+            self._run_voice_turn(
+                trigger_source="push_to_talk",
+            )
+
+        finally:
+            # Push-to-talk is one explicit turn, so do not retain VRAM.
+            self._release_speech_runtime()
 
 
     def look_at_screen(
@@ -1810,6 +1880,7 @@ class QronosRuntime:
 
     def close(self) -> None:
         self.stop_wake_listener()
+        self._release_speech_runtime()
 
         # The scheduler first, and before anything that could raise. Its
         # thread writes to stdout, and a write after main() has returned is a

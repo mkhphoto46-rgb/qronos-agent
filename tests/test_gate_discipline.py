@@ -58,6 +58,9 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     "core.whisper_cpp_runtime": (
         "Runs the whisper binary to transcribe an audio file."
     ),
+    "core.whisper_server_runtime": (
+        "Starts and stops only the bundled local whisper.cpp STT server."
+    ),
     "core.whisper_cpp_vad_runtime": (
         "Runs the whisper binary for voice activity detection."
     ),

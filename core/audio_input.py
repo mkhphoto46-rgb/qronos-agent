@@ -33,8 +33,27 @@ class AudioInput:
         self._stream: Any | None = None
 
     def start(self) -> None:
-        if self._stream is not None:
+        if self.is_running():
             return
+
+        # A PortAudio stream object can survive after the underlying input
+        # stream has become inactive. Treat that state as stale instead of
+        # assuming a non-None object is usable. Multi-turn voice sessions may
+        # otherwise fail on the next read with "Audio input is not running."
+        stale_stream = self._stream
+
+        if stale_stream is not None:
+            try:
+                stale_stream.stop()
+            except Exception:
+                pass
+
+            try:
+                stale_stream.close()
+            except Exception:
+                pass
+
+            self._stream = None
 
         sd = _get_sounddevice()
 
