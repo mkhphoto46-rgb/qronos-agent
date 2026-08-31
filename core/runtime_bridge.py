@@ -55,6 +55,7 @@ from core.resource_governor import ResourceGovernor, Weight
 from core.resource_policy import ResourceDecision
 from core.safe_queue import SafeQueue
 from core.task_plan import TaskPlan
+from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.task_router import TaskRouter, TaskType
 from core.vision_ocr import read_screen_text
 from core.vision_worker import build_vision_worker
@@ -1336,36 +1337,49 @@ class QronosRuntime:
                 self._write_latency_report(report)
                 return 0.0
 
-            plan = TaskPlan(
-                goal=transcript
-            )
-            plan.add_step(
-                task_type=route.task_type,
-                description=transcript,
+            arithmetic_answer = (
+                solve_simple_arithmetic(
+                    transcript
+                )
+                if route.task_type is TaskType.FAST
+                else None
             )
 
             brain_started = time.perf_counter()
 
-            results = self.orchestrator.execute_plan(
-                plan
-            )
+            if arithmetic_answer is not None:
+                response = (
+                    arithmetic_answer.spoken_text
+                )
+            else:
+                plan = TaskPlan(
+                    goal=transcript
+                )
+                plan.add_step(
+                    task_type=route.task_type,
+                    description=transcript,
+                )
+
+                results = self.orchestrator.execute_plan(
+                    plan
+                )
+
+                if not results:
+                    raise RuntimeError(
+                        "Qronos did not return an execution result."
+                    )
+
+                result = results[-1]
+
+                if not result.success:
+                    raise RuntimeError(
+                        result.error
+                        or "Qronos task failed."
+                    )
+
+                response = result.output.strip()
 
             brain_finished = time.perf_counter()
-
-            if not results:
-                raise RuntimeError(
-                    "Qronos did not return an execution result."
-                )
-
-            result = results[-1]
-
-            if not result.success:
-                raise RuntimeError(
-                    result.error
-                    or "Qronos task failed."
-                )
-
-            response = result.output.strip()
 
             if not response:
                 raise RuntimeError(
