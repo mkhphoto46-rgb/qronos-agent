@@ -200,5 +200,111 @@ class TestAudioInput(unittest.TestCase):
         self.assertFalse(audio.is_running())
 
 
+class _FakeStream:
+    def __init__(
+        self,
+        *,
+        active: bool = False,
+    ) -> None:
+        self.active = active
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.close_calls = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+        self.active = True
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        self.active = False
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.active = False
+
+    def read(
+        self,
+        _frame_size: int,
+    ):
+        raise AssertionError(
+            "read() is not needed by this regression test."
+        )
+
+
+class _FakeSoundDevice:
+    def __init__(
+        self,
+        replacement: _FakeStream,
+    ) -> None:
+        self.replacement = replacement
+        self.input_stream_calls = 0
+
+    def InputStream(
+        self,
+        **_kwargs,
+    ) -> _FakeStream:
+        self.input_stream_calls += 1
+        return self.replacement
+
+
+def test_start_replaces_an_inactive_stale_stream() -> None:
+    audio = AudioInput()
+
+    stale = _FakeStream(
+        active=False,
+    )
+
+    replacement = _FakeStream(
+        active=False,
+    )
+
+    fake_sd = _FakeSoundDevice(
+        replacement
+    )
+
+    audio._stream = stale
+
+    with patch(
+        "core.audio_input._get_sounddevice",
+        return_value=fake_sd,
+    ):
+        audio.start()
+
+    assert stale.close_calls == 1
+    assert fake_sd.input_stream_calls == 1
+    assert replacement.start_calls == 1
+    assert audio._stream is replacement
+    assert audio.is_running() is True
+
+
+def test_start_keeps_an_already_active_stream() -> None:
+    audio = AudioInput()
+
+    active = _FakeStream(
+        active=True,
+    )
+
+    replacement = _FakeStream(
+        active=False,
+    )
+
+    fake_sd = _FakeSoundDevice(
+        replacement
+    )
+
+    audio._stream = active
+
+    with patch(
+        "core.audio_input._get_sounddevice",
+        return_value=fake_sd,
+    ):
+        audio.start()
+
+    assert active.close_calls == 0
+    assert fake_sd.input_stream_calls == 0
+    assert audio._stream is active
+
+
 if __name__ == "__main__":
     unittest.main()

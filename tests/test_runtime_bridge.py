@@ -128,6 +128,14 @@ class FakeSpeechRuntime:
         self.error = error
         self.temp_dir = temp_dir or Path(".")
         self.languages: list[str | None] = []
+        self.warms = 0
+        self.shutdowns = 0
+
+    def warm_async(self) -> None:
+        self.warms += 1
+
+    def shutdown(self) -> None:
+        self.shutdowns += 1
 
     def health_check(self) -> bool:
         return True
@@ -448,6 +456,27 @@ class TestPushToTalkSequence(unittest.TestCase):
         captured_events(runtime.push_to_talk)
 
         self.assertEqual(speech.languages, ["fa"])
+
+    def test_push_to_talk_warms_and_releases_stt(self) -> None:
+        speech = FakeSpeechRuntime()
+
+        runtime = prepared_runtime(
+            speech=speech
+        )
+
+        captured_events(
+            runtime.push_to_talk
+        )
+
+        self.assertEqual(
+            speech.warms,
+            1,
+        )
+
+        self.assertEqual(
+            speech.shutdowns,
+            1,
+        )
 
     def test_the_microphone_is_stopped_when_the_turn_ends(self) -> None:
         runtime = prepared_runtime()

@@ -566,6 +566,28 @@ pub fn shutdown(app: &AppHandle) {
         return;
     };
 
+    // Give the Python runtime the same graceful-shutdown opportunity used by
+    // stop_runtime(). This matters because Python owns child resources such as
+    // the persistent whisper-server process. Killing Python immediately after
+    // writing "shutdown" can orphan those children and leave GPU memory and
+    // localhost ports allocated after the desktop has exited.
     let _ = write_runtime_command(&mut process, "shutdown");
+
+    for _ in 0..20 {
+        match process.child.try_wait() {
+            Ok(Some(_)) => {
+                return;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                break;
+            }
+        }
+    }
+
+    // Shutdown is bounded: if Python does not exit within roughly one second,
+    // force-stop only the runtime process owned by this manager.
     let _ = process.child.kill();
 }
