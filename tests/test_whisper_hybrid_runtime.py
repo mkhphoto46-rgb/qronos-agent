@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
+import unittest
 from pathlib import Path
 
-from core.whisper_hybrid_runtime import (
-    WhisperHybridRuntime,
-)
+from core.whisper_hybrid_runtime import WhisperHybridRuntime
 
 
 class FakeServerRuntime:
@@ -24,14 +24,10 @@ class FakeServerRuntime:
 
         self.is_running = False
 
-    def health_check(
-        self,
-    ) -> bool:
+    def health_check(self) -> bool:
         return True
 
-    def prepare(
-        self,
-    ) -> None:
+    def prepare(self) -> None:
         self.prepare_calls += 1
 
         if self.error is not None:
@@ -50,12 +46,9 @@ class FakeServerRuntime:
             raise self.error
 
         self.is_running = True
-
         return self.transcript
 
-    def shutdown(
-        self,
-    ) -> None:
+    def shutdown(self) -> None:
         self.shutdown_calls += 1
         self.is_running = False
 
@@ -68,12 +61,9 @@ class FakeFallbackRuntime:
     ) -> None:
         self.transcript = transcript
         self.healthy = healthy
-
         self.calls = 0
 
-    def health_check(
-        self,
-    ) -> bool:
+    def health_check(self) -> bool:
         return self.healthy
 
     def transcribe_file(
@@ -85,223 +75,188 @@ class FakeFallbackRuntime:
         return self.transcript
 
 
-def make_audio(
-    tmp_path: Path,
-) -> Path:
-    audio = (
-        tmp_path
-        / "command.wav"
-    )
-
-    audio.write_bytes(
-        b"RIFF-test"
-    )
-
+def make_audio(tmp_path: Path) -> Path:
+    audio = tmp_path / "command.wav"
+    audio.write_bytes(b"RIFF-test")
     return audio
 
 
-def test_server_is_primary_backend(
-    tmp_path: Path,
-) -> None:
-    server = FakeServerRuntime(
-        transcript="سلام",
-    )
+class TestWhisperHybridRuntime(unittest.TestCase):
+    def test_server_is_primary_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
 
-    fallback = FakeFallbackRuntime()
+            server = FakeServerRuntime(transcript="سلام")
+            fallback = FakeFallbackRuntime()
 
-    runtime = WhisperHybridRuntime(
-        server_runtime=server,
-        fallback_runtime=fallback,
-        temp_dir=tmp_path,
-    )
-
-    transcript = runtime.transcribe_file(
-        make_audio(tmp_path),
-        language="fa",
-    )
-
-    assert transcript == "سلام"
-    assert runtime.last_backend == "whisper_server"
-    assert server.transcribe_calls == 1
-    assert fallback.calls == 0
-
-
-def test_cli_is_used_when_server_fails(
-    tmp_path: Path,
-) -> None:
-    server = FakeServerRuntime(
-        error=RuntimeError(
-            "server failed"
-        )
-    )
-
-    fallback = FakeFallbackRuntime(
-        transcript="سلام از fallback",
-    )
-
-    runtime = WhisperHybridRuntime(
-        server_runtime=server,
-        fallback_runtime=fallback,
-        temp_dir=tmp_path,
-    )
-
-    transcript = runtime.transcribe_file(
-        make_audio(tmp_path),
-        language="fa",
-    )
-
-    assert transcript == "سلام از fallback"
-    assert (
-        runtime.last_backend
-        == "whisper_cli_fallback"
-    )
-
-    assert fallback.calls == 1
-    assert server.shutdown_calls == 1
-
-
-def test_warm_async_starts_server(
-    tmp_path: Path,
-) -> None:
-    server = FakeServerRuntime()
-
-    runtime = WhisperHybridRuntime(
-        server_runtime=server,
-        fallback_runtime=FakeFallbackRuntime(),
-        temp_dir=tmp_path,
-    )
-
-    runtime.warm_async()
-
-    deadline = (
-        time.monotonic()
-        + 1.0
-    )
-
-    while (
-        server.prepare_calls == 0
-        and time.monotonic() < deadline
-    ):
-        time.sleep(
-            0.01
-        )
-
-    assert server.prepare_calls == 1
-
-
-def test_warm_failure_does_not_raise_to_caller(
-    tmp_path: Path,
-) -> None:
-    server = FakeServerRuntime(
-        error=RuntimeError(
-            "warm failed"
-        )
-    )
-
-    runtime = WhisperHybridRuntime(
-        server_runtime=server,
-        fallback_runtime=FakeFallbackRuntime(),
-        temp_dir=tmp_path,
-    )
-
-    runtime.warm_async()
-
-    deadline = (
-        time.monotonic()
-        + 1.0
-    )
-
-    while (
-        runtime.warm_error is None
-        and time.monotonic() < deadline
-    ):
-        time.sleep(
-            0.01
-        )
-
-    assert isinstance(
-        runtime.warm_error,
-        RuntimeError,
-    )
-
-
-def test_shutdown_cancels_a_stale_warm_worker(
-    tmp_path: Path,
-) -> None:
-    prepare_started = threading.Event()
-    allow_prepare_to_finish = threading.Event()
-
-    class DelayedServerRuntime(
-        FakeServerRuntime
-    ):
-        def prepare(
-            self,
-        ) -> None:
-            self.prepare_calls += 1
-            prepare_started.set()
-
-            allow_prepare_to_finish.wait(
-                timeout=1.0
+            runtime = WhisperHybridRuntime(
+                server_runtime=server,
+                fallback_runtime=fallback,
+                temp_dir=tmp_path,
             )
 
-            self.is_running = True
+            transcript = runtime.transcribe_file(
+                make_audio(tmp_path),
+                language="fa",
+            )
 
-    server = DelayedServerRuntime()
+            self.assertEqual(transcript, "سلام")
+            self.assertEqual(
+                runtime.last_backend,
+                "whisper_server",
+            )
+            self.assertEqual(server.transcribe_calls, 1)
+            self.assertEqual(fallback.calls, 0)
 
-    runtime = WhisperHybridRuntime(
-        server_runtime=server,
-        fallback_runtime=FakeFallbackRuntime(),
-        temp_dir=tmp_path,
-    )
+    def test_cli_is_used_when_server_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
 
-    runtime.warm_async()
+            server = FakeServerRuntime(
+                error=RuntimeError("server failed")
+            )
 
-    assert prepare_started.wait(
-        timeout=1.0
-    )
+            fallback = FakeFallbackRuntime(
+                transcript="سلام از fallback"
+            )
 
-    runtime.shutdown()
+            runtime = WhisperHybridRuntime(
+                server_runtime=server,
+                fallback_runtime=fallback,
+                temp_dir=tmp_path,
+            )
 
-    allow_prepare_to_finish.set()
+            transcript = runtime.transcribe_file(
+                make_audio(tmp_path),
+                language="fa",
+            )
 
-    deadline = (
-        time.monotonic()
-        + 1.0
-    )
+            self.assertEqual(
+                transcript,
+                "سلام از fallback",
+            )
+            self.assertEqual(
+                runtime.last_backend,
+                "whisper_cli_fallback",
+            )
+            self.assertEqual(fallback.calls, 1)
+            self.assertEqual(server.shutdown_calls, 1)
 
-    while (
-        server.is_running
-        and time.monotonic() < deadline
-    ):
-        time.sleep(
-            0.01
-        )
+    def test_warm_async_starts_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = FakeServerRuntime()
 
-    warm_thread = runtime._warm_thread
+            runtime = WhisperHybridRuntime(
+                server_runtime=server,
+                fallback_runtime=FakeFallbackRuntime(),
+                temp_dir=Path(temp_dir),
+            )
 
-    if warm_thread is not None:
-        warm_thread.join(
-            timeout=1.0
-        )
+            runtime.warm_async()
 
-    assert server.is_running is False
+            deadline = time.monotonic() + 1.0
 
-    # One call is the explicit shutdown above. The second is the stale warm
-    # worker cleaning up the process it finished starting afterwards.
-    assert server.shutdown_calls >= 2
+            while (
+                server.prepare_calls == 0
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertEqual(server.prepare_calls, 1)
+
+    def test_warm_failure_does_not_raise_to_caller(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = FakeServerRuntime(
+                error=RuntimeError("warm failed")
+            )
+
+            runtime = WhisperHybridRuntime(
+                server_runtime=server,
+                fallback_runtime=FakeFallbackRuntime(),
+                temp_dir=Path(temp_dir),
+            )
+
+            runtime.warm_async()
+
+            deadline = time.monotonic() + 1.0
+
+            while (
+                runtime.warm_error is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertIsInstance(
+                runtime.warm_error,
+                RuntimeError,
+            )
+
+    def test_shutdown_cancels_a_stale_warm_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prepare_started = threading.Event()
+            allow_prepare_to_finish = threading.Event()
+
+            class DelayedServerRuntime(FakeServerRuntime):
+                def prepare(self) -> None:
+                    self.prepare_calls += 1
+                    prepare_started.set()
+
+                    allow_prepare_to_finish.wait(
+                        timeout=1.0
+                    )
+
+                    self.is_running = True
+
+            server = DelayedServerRuntime()
+
+            runtime = WhisperHybridRuntime(
+                server_runtime=server,
+                fallback_runtime=FakeFallbackRuntime(),
+                temp_dir=Path(temp_dir),
+            )
+
+            runtime.warm_async()
+
+            self.assertTrue(
+                prepare_started.wait(timeout=1.0)
+            )
+
+            runtime.shutdown()
+            allow_prepare_to_finish.set()
+
+            deadline = time.monotonic() + 1.0
+
+            while (
+                server.is_running
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            warm_thread = runtime._warm_thread
+
+            if warm_thread is not None:
+                warm_thread.join(timeout=1.0)
+
+            self.assertFalse(server.is_running)
+            self.assertGreaterEqual(
+                server.shutdown_calls,
+                2,
+            )
+
+    def test_shutdown_releases_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = FakeServerRuntime()
+
+            runtime = WhisperHybridRuntime(
+                server_runtime=server,
+                fallback_runtime=FakeFallbackRuntime(),
+                temp_dir=Path(temp_dir),
+            )
+
+            runtime.shutdown()
+
+            self.assertEqual(server.shutdown_calls, 1)
 
 
-def test_shutdown_releases_server(
-    tmp_path: Path,
-) -> None:
-    server = FakeServerRuntime()
-
-    runtime = WhisperHybridRuntime(
-        server_runtime=server,
-        fallback_runtime=FakeFallbackRuntime(),
-        temp_dir=tmp_path,
-    )
-
-    runtime.shutdown()
-
-    assert server.shutdown_calls == 1
+if __name__ == "__main__":
+    unittest.main()

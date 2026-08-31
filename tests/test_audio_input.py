@@ -248,62 +248,62 @@ class _FakeSoundDevice:
         return self.replacement
 
 
-def test_start_replaces_an_inactive_stale_stream() -> None:
-    audio = AudioInput()
+class TestAudioInputRestart(unittest.TestCase):
+    def test_start_replaces_an_inactive_stale_stream(self) -> None:
+        audio = AudioInput()
 
-    stale = _FakeStream(
-        active=False,
-    )
+        stale = _FakeStream(
+            active=False,
+        )
 
-    replacement = _FakeStream(
-        active=False,
-    )
+        replacement = _FakeStream(
+            active=False,
+        )
 
-    fake_sd = _FakeSoundDevice(
-        replacement
-    )
+        fake_sd = _FakeSoundDevice(
+            replacement
+        )
 
-    audio._stream = stale
+        audio._stream = stale
 
-    with patch(
-        "core.audio_input._get_sounddevice",
-        return_value=fake_sd,
-    ):
-        audio.start()
+        with patch(
+            "core.audio_input._get_sounddevice",
+            return_value=fake_sd,
+        ):
+            audio.start()
 
-    assert stale.close_calls == 1
-    assert fake_sd.input_stream_calls == 1
-    assert replacement.start_calls == 1
-    assert audio._stream is replacement
-    assert audio.is_running() is True
+        self.assertEqual(stale.close_calls, 1)
+        self.assertEqual(fake_sd.input_stream_calls, 1)
+        self.assertEqual(replacement.start_calls, 1)
+        self.assertIs(audio._stream, replacement)
+        self.assertTrue(audio.is_running())
 
+    def test_start_keeps_an_already_active_stream(self) -> None:
+        audio = AudioInput()
 
-def test_start_keeps_an_already_active_stream() -> None:
-    audio = AudioInput()
+        active = _FakeStream(
+            active=True,
+        )
 
-    active = _FakeStream(
-        active=True,
-    )
+        replacement = _FakeStream(
+            active=False,
+        )
 
-    replacement = _FakeStream(
-        active=False,
-    )
+        fake_sd = _FakeSoundDevice(
+            replacement
+        )
 
-    fake_sd = _FakeSoundDevice(
-        replacement
-    )
+        audio._stream = active
 
-    audio._stream = active
+        with patch(
+            "core.audio_input._get_sounddevice",
+            return_value=fake_sd,
+        ):
+            audio.start()
 
-    with patch(
-        "core.audio_input._get_sounddevice",
-        return_value=fake_sd,
-    ):
-        audio.start()
-
-    assert active.close_calls == 0
-    assert fake_sd.input_stream_calls == 0
-    assert audio._stream is active
+        self.assertEqual(active.close_calls, 0)
+        self.assertEqual(fake_sd.input_stream_calls, 0)
+        self.assertIs(audio._stream, active)
 
 
 if __name__ == "__main__":

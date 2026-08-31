@@ -782,7 +782,7 @@ class TestRoutingIsReported(unittest.TestCase):
         ), patch(
             "core.runtime_bridge.WhisperCppVADRuntime"
         ) as vad_type, patch(
-            "core.runtime_bridge.WhisperCppRuntime"
+            "core.runtime_bridge.WhisperHybridRuntime"
         ) as speech_type, patch(
             "core.runtime_bridge.ChatterboxRuntime"
         ) as voice_type:
