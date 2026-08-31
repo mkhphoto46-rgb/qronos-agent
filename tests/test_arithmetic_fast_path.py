@@ -137,6 +137,26 @@ class ArithmeticFastPathTests(unittest.TestCase):
 
         self.assertIsNone(answer)
 
+    def test_adversarial_non_calculations_fall_back(self) -> None:
+        cases = [
+            "فرق جمع و ضرب چیست؟",
+            "تقسیم را برایم توضیح بده",
+            "چرا دو به علاوه دو مثال معروفی است؟",
+            "دو به علاوه دو یعنی چه؟",
+            "آیا دو به علاوه دو همیشه چهار می‌شود؟",
+            "مثالی با سه ضربدر چهار بزن",
+            "عبارت پنج منهای دو را توضیح بده",
+            "هشت تقسیم بر دو را به من آموزش بده",
+            "به نظرت دو به علاوه دو سوال ساده‌ای است؟",
+            "اگر بگویم دو به علاوه دو، منظورم چیست؟",
+        ]
+
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertIsNone(
+                    solve_simple_arithmetic(text)
+                )
+
     def test_larger_persian_numbers(self) -> None:
         answer = solve_simple_arithmetic(
             "بیست و سه به علاوه نوزده چند میشه؟"
