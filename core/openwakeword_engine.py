@@ -16,6 +16,12 @@ DEFAULT_MODEL_PATH = (
 
 DEFAULT_THRESHOLD = 0.660167
 DEFAULT_FRAME_SIZE = 1_280
+DEFAULT_CONFIRMATION_FRAMES = 2
+
+# Silero VAD filters non-speech audio before it can become a
+# wake-word activation. 0.5 is the standard openWakeWord
+# reference setting and will be validated on the real microphone.
+DEFAULT_VAD_THRESHOLD = 0.50
 
 # openWakeWord uses 80 ms frames at the standard 16 kHz / 1280-sample
 # configuration. Thirteen frames provide about one second of silent
@@ -68,6 +74,7 @@ class OpenWakeWordEngine:
         model_factory: ModelFactory | None = None,
         require_external_data: bool = True,
         warmup_frames: int = DEFAULT_WARMUP_FRAMES,
+        confirmation_frames: int = DEFAULT_CONFIRMATION_FRAMES,
     ) -> None:
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(
@@ -82,6 +89,11 @@ class OpenWakeWordEngine:
         if warmup_frames < 0:
             raise ValueError(
                 "warmup_frames must not be negative."
+            )
+
+        if confirmation_frames <= 0:
+            raise ValueError(
+                "confirmation_frames must be greater than zero."
             )
 
         self.model_path = Path(
@@ -107,8 +119,12 @@ class OpenWakeWordEngine:
         self.warmup_frames = (
             warmup_frames
         )
+        self.confirmation_frames = int(
+            confirmation_frames
+        )
 
         self.last_score = 0.0
+        self._confirmation_streak = 0
 
         self._model_factory = (
             model_factory
@@ -196,6 +212,7 @@ class OpenWakeWordEngine:
                 )
             ],
             inference_framework="onnx",
+            vad_threshold=DEFAULT_VAD_THRESHOLD,
         )
 
         try:
@@ -215,6 +232,7 @@ class OpenWakeWordEngine:
 
         self._model = model
         self.last_score = 0.0
+        self._confirmation_streak = 0
         self._paused = False
         self._running = True
 
@@ -228,6 +246,7 @@ class OpenWakeWordEngine:
 
         self._model = None
         self.last_score = 0.0
+        self._confirmation_streak = 0
         self._paused = False
         self._running = False
 
@@ -264,7 +283,9 @@ class OpenWakeWordEngine:
         )
 
         # Keep last_score available for diagnostics until the next real
-        # microphone frame is processed.
+        # microphone frame is processed, but never carry wake-confirmation
+        # evidence across a pause/resume boundary.
+        self._confirmation_streak = 0
         self._paused = False
 
     def is_running(self) -> bool:
@@ -345,10 +366,21 @@ class OpenWakeWordEngine:
             ]
         )
 
-        return (
-            self.last_score
-            >= self.threshold
-        )
+        if self.last_score >= self.threshold:
+            self._confirmation_streak += 1
+        else:
+            self._confirmation_streak = 0
+
+        if (
+            self._confirmation_streak
+            < self.confirmation_frames
+        ):
+            return False
+
+        # Consume the confirmation so this exact activation cannot stay
+        # latched if process_audio() is called again before pause().
+        self._confirmation_streak = 0
+        return True
 
 
 if __name__ == "__main__":

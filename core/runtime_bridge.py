@@ -72,6 +72,12 @@ WAKE_LISTENER_STOP_ACTION = "qronos.wake_listener_stop"
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
 FOLLOWUP_PLAYBACK_GUARD_SECONDS = 0.25
+
+# A wake-word candidate needs stronger speech evidence than an
+# already-established follow-up turn. This prevents short wind/noise
+# bursts from becoming phantom commands after a false wake.
+WAKE_MIN_COMMAND_SPEECH_SECONDS = 0.40
+
 AUDIO_SPECTRUM_BANDS = 32
 EMIT_LOCK = threading.Lock()
 
@@ -761,11 +767,38 @@ class QronosRuntime:
                         detected_at_perf=(
                             wake_detected_perf
                         ),
+                        wake_score=float(
+                            engine.last_score
+                        ),
                     )
                 )
 
+                # A wake-word candidate is not enough to establish an
+                # interactive conversation. If no valid spoken turn was
+                # completed after the wake event, close any session that
+                # may have been opened and return directly to wake-word
+                # listening. This prevents wind/noise false wakes from
+                # falling through into unrestricted follow-up listening.
+                if playback_seconds <= 0:
+                    if (
+                        self.conversation_session
+                        is not None
+                        and self.conversation_session.is_active
+                    ):
+                        self.conversation_session.close()
+
+                    self._notify(
+                        "conversation_session_closed",
+                        "ready",
+                        (
+                            "Wake candidate cancelled because "
+                            "no valid speech turn was completed."
+                        ),
+                    )
+
                 while (
-                    not self._wake_stop.is_set()
+                    playback_seconds > 0
+                    and not self._wake_stop.is_set()
                     and self.conversation_session
                     is not None
                     and self.conversation_session.is_active
@@ -811,6 +844,10 @@ class QronosRuntime:
                 if self._wake_stop.is_set():
                     break
 
+                # Resume the existing wake-word pipeline.
+                # OpenWakeWord resume() resets its rolling
+                # prediction/audio buffers and performs its
+                # warm-up path without rebuilding the engine.
                 self.audio_input.start()
                 trigger.resume()
 
@@ -1078,10 +1115,12 @@ class QronosRuntime:
             # interfere with a voice turn.
             pass
 
+
     def _run_voice_turn(
         self,
         trigger_source: str,
         detected_at_perf: float | None = None,
+        wake_score: float | None = None,
     ) -> float:
         """
         Capture one user command, run the existing Brain path, synthesize it,
@@ -1121,6 +1160,12 @@ class QronosRuntime:
             ),
         }
 
+        if wake_score is not None:
+            report["wakeScore"] = round(
+                float(wake_score),
+                6,
+            )
+
         try:
             self.prepare()
             self._require_prepared()
@@ -1145,6 +1190,56 @@ class QronosRuntime:
 
             self.audio_input.stop()
             self._clear_audio_spectrum()
+
+            # A false wake must never turn a tiny burst of wind/noise into
+            # an LLM request. Follow-up turns intentionally keep the
+            # recorder's normal minimum so short replies such as "yes",
+            # "no", or a person's name remain usable once a conversation
+            # has already been established.
+            if (
+                trigger_source == "wake_word"
+                and float(recording.speech_seconds)
+                < WAKE_MIN_COMMAND_SPEECH_SECONDS
+            ):
+                report["wakeSpeechEvidenceRejected"] = True
+                report["recordingAudioSeconds"] = round(
+                    float(recording.duration_seconds),
+                    3,
+                )
+                report["recordingSpeechSeconds"] = round(
+                    float(recording.speech_seconds),
+                    3,
+                )
+                report["peakSpeechProbability"] = round(
+                    float(recording.peak_speech_probability),
+                    6,
+                )
+                report["closedAtEpoch"] = round(
+                    time.time(),
+                    6,
+                )
+
+                self._write_latency_report(
+                    report
+                )
+
+                if (
+                    self.conversation_session
+                    is not None
+                    and self.conversation_session.is_active
+                ):
+                    self.conversation_session.close()
+
+                self._notify(
+                    "conversation_session_closed",
+                    "ready",
+                    (
+                        "Wake candidate rejected because "
+                        "speech evidence was too short."
+                    ),
+                )
+
+                return 0.0
 
             self._notify(
                 "voice_transcribing",
