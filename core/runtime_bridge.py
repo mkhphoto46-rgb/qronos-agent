@@ -55,6 +55,7 @@ from core.resource_governor import ResourceGovernor, Weight
 from core.resource_policy import ResourceDecision
 from core.safe_queue import SafeQueue
 from core.task_plan import TaskPlan
+from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.task_router import TaskRouter, TaskType
 from core.vision_ocr import read_screen_text
 from core.vision_worker import build_vision_worker
@@ -72,6 +73,12 @@ WAKE_LISTENER_STOP_ACTION = "qronos.wake_listener_stop"
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
 FOLLOWUP_PLAYBACK_GUARD_SECONDS = 0.25
+
+# A wake-word candidate needs stronger speech evidence than an
+# already-established follow-up turn. This prevents short wind/noise
+# bursts from becoming phantom commands after a false wake.
+WAKE_MIN_COMMAND_SPEECH_SECONDS = 0.40
+
 AUDIO_SPECTRUM_BANDS = 32
 EMIT_LOCK = threading.Lock()
 
@@ -761,11 +768,38 @@ class QronosRuntime:
                         detected_at_perf=(
                             wake_detected_perf
                         ),
+                        wake_score=float(
+                            engine.last_score
+                        ),
                     )
                 )
 
+                # A wake-word candidate is not enough to establish an
+                # interactive conversation. If no valid spoken turn was
+                # completed after the wake event, close any session that
+                # may have been opened and return directly to wake-word
+                # listening. This prevents wind/noise false wakes from
+                # falling through into unrestricted follow-up listening.
+                if playback_seconds <= 0:
+                    if (
+                        self.conversation_session
+                        is not None
+                        and self.conversation_session.is_active
+                    ):
+                        self.conversation_session.close()
+
+                    self._notify(
+                        "conversation_session_closed",
+                        "ready",
+                        (
+                            "Wake candidate cancelled because "
+                            "no valid speech turn was completed."
+                        ),
+                    )
+
                 while (
-                    not self._wake_stop.is_set()
+                    playback_seconds > 0
+                    and not self._wake_stop.is_set()
                     and self.conversation_session
                     is not None
                     and self.conversation_session.is_active
@@ -811,6 +845,10 @@ class QronosRuntime:
                 if self._wake_stop.is_set():
                     break
 
+                # Resume the existing wake-word pipeline.
+                # OpenWakeWord resume() resets its rolling
+                # prediction/audio buffers and performs its
+                # warm-up path without rebuilding the engine.
                 self.audio_input.start()
                 trigger.resume()
 
@@ -1053,10 +1091,14 @@ class QronosRuntime:
         payload: dict[str, Any],
     ) -> None:
         """
-        Persist one voice-turn latency report under the project E: runtime.
+        Persist voice diagnostics without losing earlier reports.
 
-        Diagnostics must never break a voice turn. If writing fails, emit only
-        a warning and continue.
+        ``voice_latency_latest.json`` remains the convenient latest-event
+        snapshot. Every write is also archived under a unique filename so
+        later follow-up timeouts, runtime errors, or successful turns can
+        never erase earlier diagnostic evidence.
+
+        Diagnostics must never break a voice turn.
         """
         try:
             VOICE_LATENCY_LOG_PATH.parent.mkdir(
@@ -1064,12 +1106,27 @@ class QronosRuntime:
                 exist_ok=True,
             )
 
+            rendered = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+            )
+
             VOICE_LATENCY_LOG_PATH.write_text(
-                json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+                rendered,
+                encoding="utf-8",
+            )
+
+            archive_path = (
+                VOICE_LATENCY_LOG_PATH.parent
+                / (
+                    "voice_latency_"
+                    f"{time.time_ns()}.json"
+                )
+            )
+
+            archive_path.write_text(
+                rendered,
                 encoding="utf-8",
             )
 
@@ -1078,10 +1135,12 @@ class QronosRuntime:
             # interfere with a voice turn.
             pass
 
+
     def _run_voice_turn(
         self,
         trigger_source: str,
         detected_at_perf: float | None = None,
+        wake_score: float | None = None,
     ) -> float:
         """
         Capture one user command, run the existing Brain path, synthesize it,
@@ -1121,6 +1180,12 @@ class QronosRuntime:
             ),
         }
 
+        if wake_score is not None:
+            report["wakeScore"] = round(
+                float(wake_score),
+                6,
+            )
+
         try:
             self.prepare()
             self._require_prepared()
@@ -1145,6 +1210,56 @@ class QronosRuntime:
 
             self.audio_input.stop()
             self._clear_audio_spectrum()
+
+            # A false wake must never turn a tiny burst of wind/noise into
+            # an LLM request. Follow-up turns intentionally keep the
+            # recorder's normal minimum so short replies such as "yes",
+            # "no", or a person's name remain usable once a conversation
+            # has already been established.
+            if (
+                trigger_source == "wake_word"
+                and float(recording.speech_seconds)
+                < WAKE_MIN_COMMAND_SPEECH_SECONDS
+            ):
+                report["wakeSpeechEvidenceRejected"] = True
+                report["recordingAudioSeconds"] = round(
+                    float(recording.duration_seconds),
+                    3,
+                )
+                report["recordingSpeechSeconds"] = round(
+                    float(recording.speech_seconds),
+                    3,
+                )
+                report["peakSpeechProbability"] = round(
+                    float(recording.peak_speech_probability),
+                    6,
+                )
+                report["closedAtEpoch"] = round(
+                    time.time(),
+                    6,
+                )
+
+                self._write_latency_report(
+                    report
+                )
+
+                if (
+                    self.conversation_session
+                    is not None
+                    and self.conversation_session.is_active
+                ):
+                    self.conversation_session.close()
+
+                self._notify(
+                    "conversation_session_closed",
+                    "ready",
+                    (
+                        "Wake candidate rejected because "
+                        "speech evidence was too short."
+                    ),
+                )
+
+                return 0.0
 
             self._notify(
                 "voice_transcribing",
@@ -1241,36 +1356,49 @@ class QronosRuntime:
                 self._write_latency_report(report)
                 return 0.0
 
-            plan = TaskPlan(
-                goal=transcript
-            )
-            plan.add_step(
-                task_type=route.task_type,
-                description=transcript,
+            arithmetic_answer = (
+                solve_simple_arithmetic(
+                    transcript
+                )
+                if route.task_type is TaskType.FAST
+                else None
             )
 
             brain_started = time.perf_counter()
 
-            results = self.orchestrator.execute_plan(
-                plan
-            )
+            if arithmetic_answer is not None:
+                response = (
+                    arithmetic_answer.spoken_text
+                )
+            else:
+                plan = TaskPlan(
+                    goal=transcript
+                )
+                plan.add_step(
+                    task_type=route.task_type,
+                    description=transcript,
+                )
+
+                results = self.orchestrator.execute_plan(
+                    plan
+                )
+
+                if not results:
+                    raise RuntimeError(
+                        "Qronos did not return an execution result."
+                    )
+
+                result = results[-1]
+
+                if not result.success:
+                    raise RuntimeError(
+                        result.error
+                        or "Qronos task failed."
+                    )
+
+                response = result.output.strip()
 
             brain_finished = time.perf_counter()
-
-            if not results:
-                raise RuntimeError(
-                    "Qronos did not return an execution result."
-                )
-
-            result = results[-1]
-
-            if not result.success:
-                raise RuntimeError(
-                    result.error
-                    or "Qronos task failed."
-                )
-
-            response = result.output.strip()
 
             if not response:
                 raise RuntimeError(
@@ -1307,20 +1435,28 @@ class QronosRuntime:
                 or all_audio_ready
             )
 
-            playback_elapsed_during_generation = max(
-                0.0,
-                all_audio_ready
-                - first_audio_ready,
-            )
-
+            # Reliability-first playback guard.
+            #
+            # The desktop player owns actual audio playback. The backend only
+            # knows when generated WAV chunks become available; it does not
+            # know the exact moment the desktop media engine starts playing
+            # them or whether there are small gaps between queued chunks.
+            #
+            # Do not subtract TTS generation time from the playback duration.
+            # Doing so can open the follow-up microphone before desktop
+            # playback has actually finished, and the desktop intentionally
+            # stops active Qronos audio when a new voice-listening turn begins.
+            #
+            # Until an explicit desktop -> runtime playback-complete
+            # acknowledgement is implemented, wait conservatively for the
+            # complete generated audio duration.
             playback_seconds = max(
                 0.0,
                 float(
                     chunked[
                         "totalAudioSeconds"
                     ]
-                )
-                - playback_elapsed_during_generation,
+                ),
             )
 
             report.update(

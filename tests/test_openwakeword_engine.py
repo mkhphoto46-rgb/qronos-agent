@@ -140,6 +140,7 @@ class TestOpenWakeWordEngine(
                     "inference_framework": (
                         "onnx"
                     ),
+                    "vad_threshold": 0.50,
                 }
             ],
         )
@@ -228,21 +229,31 @@ class TestOpenWakeWordEngine(
             0.65,
         )
 
-    def test_score_at_threshold_triggers(
+    def test_score_at_threshold_triggers_after_confirmation(
         self,
     ) -> None:
         self.fake_model.score = 0.66
 
         self.engine.start()
 
-        detected = (
+        first_detected = (
             self.engine.process_audio(
                 self.make_audio_frame()
             )
         )
 
+        second_detected = (
+            self.engine.process_audio(
+                self.make_audio_frame()
+            )
+        )
+
+        self.assertFalse(
+            first_detected
+        )
+
         self.assertTrue(
-            detected
+            second_detected
         )
 
         self.assertEqual(
