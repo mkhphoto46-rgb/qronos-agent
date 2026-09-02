@@ -390,12 +390,38 @@ pub fn start_runtime(
 
     spawn_runtime_reader(app, stdout);
 
-    *guard = Some(RuntimeProcess { child, stdin });
+    /*
+     * Wake listening is a runtime invariant, not a frontend timing concern.
+     *
+     * Queue the wake-listener action directly into the child's stdin as soon
+     * as the runtime process exists. The OS pipe safely buffers this command
+     * until runtime_bridge reaches its command loop.
+     *
+     * The frontend may still send the same action after runtime_ready as a
+     * recovery path; start_wake_listener() is idempotent.
+     */
+    let mut runtime_process = RuntimeProcess { child, stdin };
+
+    if let Err(error) = write_runtime_payload(
+        &mut runtime_process,
+        serde_json::json!({
+            "command": "action",
+            "actionId": "qronos.wake_listener_start"
+        }),
+    ) {
+        let _ = runtime_process.child.kill();
+
+        return Err(format!(
+            "Qronos runtime started but wake-listener bootstrap failed: {error}"
+        ));
+    }
+
+    *guard = Some(runtime_process);
 
     Ok(RuntimeStatus {
         running: true,
         status: "starting".to_string(),
-        message: "Qronos runtime process started.".to_string(),
+        message: "Qronos runtime process started with native wake bootstrap.".to_string(),
     })
 }
 
@@ -413,9 +439,10 @@ pub fn ping_runtime(state: State<'_, RuntimeManagerState>) -> Result<(), String>
     write_runtime_command(process, "ping")
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn send_runtime_action(
     action_id: String,
+    playback_id: Option<u64>,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<(), String> {
     let cleaned = action_id.trim();
@@ -424,13 +451,20 @@ pub fn send_runtime_action(
         return Err("Runtime action id must not be empty.".to_string());
     }
 
-    send_to_runtime(
-        &state,
-        serde_json::json!({
-            "command": "action",
-            "actionId": cleaned
-        }),
-    )
+    let mut payload = serde_json::json!({
+        "command": "action",
+        "actionId": cleaned
+    });
+
+    if let Some(playback_id) = playback_id {
+        if playback_id == 0 {
+            return Err("Playback id must be positive.".to_string());
+        }
+
+        payload["playbackId"] = serde_json::json!(playback_id);
+    }
+
+    send_to_runtime(&state, payload)
 }
 
 // ---------------------------------------------------------------------------

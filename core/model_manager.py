@@ -23,6 +23,43 @@ from core.resource_policy import (
 )
 
 
+
+
+
+
+def _gpu_for_capacity_admission(
+    gpu: GpuStatus | None,
+) -> GpuStatus | None:
+    """
+    Return GPU telemetry suitable for model capacity admission.
+
+    Global GPU utilization is a contention signal, not a capacity signal.
+    On Windows/NVIDIA it cannot reliably identify whether the load belongs
+    to the user, Qronos, desktop composition, TTS, STT or another process.
+
+    External/user contention is already represented separately by
+    ResourcePressure and ActivityMode.
+
+    Capacity admission must therefore continue enforcing:
+    - VRAM occupancy
+    - GPU temperature
+    - CPU usage
+    - RAM usage
+
+    while raw global GPU utilization must not independently refuse a model.
+    """
+    if gpu is None:
+        return None
+
+    return GpuStatus(
+        name=gpu.name,
+        temperature_c=gpu.temperature_c,
+        gpu_utilization_percent=None,
+        vram_used_mb=gpu.vram_used_mb,
+        vram_total_mb=gpu.vram_total_mb,
+    )
+
+
 class TaskClass(Enum):
     FAST = "fast"
     HEAVY = "heavy"
@@ -94,24 +131,35 @@ class ModelManager:
             task_class.value
         )
 
-        decision = evaluate_resources(
-            system=system,
-            gpu=gpu,
+        capacity_gpu = _gpu_for_capacity_admission(
+            gpu
         )
 
-        if self._activity_blocks(
+        base_decision = evaluate_resources(
+            system=system,
+            gpu=capacity_gpu,
+        )
+
+        decision = base_decision
+
+        activity_blocked = self._activity_blocks(
             task_class=task_class,
             activity_mode=activity_mode,
-        ):
+        )
+
+        if activity_blocked:
             decision = ResourceDecision.BLOCK
 
         # Never load either model while the user's system is already under
         # measured pressure. Qronos waits for safe headroom instead.
-        if (
+        pressure_blocked = (
             resource_pressure
             is not ResourcePressure.NORMAL
-        ):
+        )
+
+        if pressure_blocked:
             decision = ResourceDecision.BLOCK
+
 
         return ModelSelection(
             model=model,

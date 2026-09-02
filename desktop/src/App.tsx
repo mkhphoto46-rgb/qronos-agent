@@ -854,6 +854,11 @@ function App() {
     };
   }, [viewPhase]);
 
+  const voicePlaybackIdRef =
+    useRef<number | null>(
+      null,
+    );
+
   const voicePlayerRef =
     useRef<QronosVoicePlayer | null>(
       null,
@@ -875,6 +880,37 @@ function App() {
             state === "stopped" ||
             state === "error"
           ) {
+            if (
+              (
+                state === "ended" ||
+                state === "error"
+              ) &&
+              voicePlaybackIdRef.current !==
+                null
+            ) {
+              const playbackId =
+                voicePlaybackIdRef.current;
+
+              voicePlaybackIdRef.current =
+                null;
+
+              void invoke(
+                "send_runtime_action",
+                {
+                  actionId:
+                    "qronos.voice_playback_complete",
+                  playbackId,
+                },
+              ).catch(
+                (error) => {
+                  console.error(
+                    "[Qronos Voice Playback] completion acknowledgement failed:",
+                    error,
+                  );
+                },
+              );
+            }
+
             setAudioFrame({
               level: 0,
               bands: Array.from(
@@ -1067,6 +1103,7 @@ function App() {
                     event.payload.message,
                   ) as {
                     path?: unknown;
+                    playbackId?: unknown;
                   };
 
                   if (
@@ -1078,6 +1115,18 @@ function App() {
                     throw new Error(
                       "voice_audio_ready did not contain a valid path.",
                     );
+                  }
+
+                  if (
+                    typeof parsed.playbackId ===
+                      "number" &&
+                    Number.isInteger(
+                      parsed.playbackId,
+                    ) &&
+                    parsed.playbackId > 0
+                  ) {
+                    voicePlaybackIdRef.current =
+                      parsed.playbackId;
                   }
 
                   const player =
@@ -1131,12 +1180,28 @@ function App() {
                 break;
 
               case "runtime_ready":
-                // Asking for the queue is also what starts it. Nothing is
-                // sampled or scheduled until somebody wants it.
+                // start_runtime() only means that the Python process was
+                // spawned. runtime_ready is the authoritative signal that
+                // the bridge is ready to accept startup actions.
                 void invoke(
                   "queue_list",
                 ).catch(
                   () => undefined,
+                );
+
+                void invoke(
+                  "send_runtime_action",
+                  {
+                    actionId:
+                      "qronos.wake_listener_start",
+                  },
+                ).catch(
+                  (error) => {
+                    console.error(
+                      "[Qronos Wake Word] ready-start failed:",
+                      error,
+                    );
+                  },
                 );
                 break;
 
@@ -1229,8 +1294,15 @@ function App() {
             await invoke<RuntimeStatus>(
               "start_runtime",
             );
+
+            // The newly spawned runtime will start Wake when it emits
+            // runtime_ready. Do not race startup by sending the action here.
+            return;
           }
 
+          // A runtime that was already alive may have emitted runtime_ready
+          // before this React effect subscribed. Start Wake directly in that
+          // case. The backend start operation is idempotent.
           await invoke(
             "send_runtime_action",
             {

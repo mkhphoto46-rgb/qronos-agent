@@ -38,11 +38,11 @@ class ModelProfile:
 # worse than no number.
 MODELS = {
     "fast": ModelProfile(
-        name="qwen3:4b-instruct",
+        name="hf.co/unsloth/gemma-3n-E4B-it-GGUF:Q5_K_M",
         role="fast_brain",
-        estimated_vram_gb=3.4,
+        estimated_vram_gb=3.6,
         priority=1,
-        context_tokens=8_192,
+        context_tokens=4_096,
     ),
     "heavy": ModelProfile(
         name="qwen3:14b",

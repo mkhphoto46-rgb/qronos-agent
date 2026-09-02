@@ -56,6 +56,9 @@ from core.resource_policy import ResourceDecision
 from core.safe_queue import SafeQueue
 from core.task_plan import TaskPlan
 from core.arithmetic_fast_path import solve_simple_arithmetic
+from core.compute_estimator import ComputeEstimator
+from core.intent_gate import IntentGate
+from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.vision_ocr import read_screen_text
 from core.vision_worker import build_vision_worker
@@ -71,14 +74,35 @@ PUSH_TO_TALK_ACTION = "qronos.push_to_talk"
 LOOK_AT_SCREEN_ACTION = "qronos.look_at_screen"
 WAKE_LISTENER_START_ACTION = "qronos.wake_listener_start"
 WAKE_LISTENER_STOP_ACTION = "qronos.wake_listener_stop"
+
+
+
+
+
+VOICE_PLAYBACK_COMPLETE_ACTION = "qronos.voice_playback_complete"
+
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
 FOLLOWUP_PLAYBACK_GUARD_SECONDS = 0.25
+
+# Desktop owns actual audio playback. Python waits for an explicit playback
+# completion acknowledgement instead of guessing from WAV duration.
+#
+# This limit is only a deadlock failsafe for a crashed/disconnected desktop.
+# It does NOT close the conversation.
+PLAYBACK_ACK_FAILSAFE_SECONDS = 300.0
 
 # A wake-word candidate needs stronger speech evidence than an
 # already-established follow-up turn. This prevents short wind/noise
 # bursts from becoming phantom commands after a false wake.
 WAKE_MIN_COMMAND_SPEECH_SECONDS = 0.40
+
+VOICE_RETRY_RESPONSE = (
+    "این درخواست اجرا نشد. دوباره بگو."
+)
+VOICE_STT_RETRY_RESPONSE = (
+    "متوجه نشدم. دوباره بگو."
+)
 
 AUDIO_SPECTRUM_BANDS = 32
 EMIT_LOCK = threading.Lock()
@@ -387,6 +411,22 @@ class QronosRuntime:
         ) = None
         self.voice_output: ChatterboxRuntime | None = None
         self.task_router: TaskRouter | None = None
+
+        # Shadow routing diagnostics are intentionally non-authoritative.
+        # They classify the real transcript and record what the future routing
+        # stack would choose, while TaskRouter remains the only component that
+        # controls the current production path.
+        self.intent_gate = IntentGate()
+        self.compute_estimator = ComputeEstimator()
+
+        # Pay the classifiers' one-time Python/regex/cache setup cost before
+        # the user sends the first command.  Live shadow measurements showed
+        # a repeatable ~8-10 ms first-use spike while warm calls stayed near
+        # or below 1 ms.  Synchronous startup warmup is preferable here:
+        # it happens before runtime_ready, costs only once, and guarantees
+        # the first real transcript never races an unfinished background warmup.
+        self._prewarm_routing_classifiers()
+
         self.action_audit: ActionAuditLog | None = None
         self.screen_capture: ScreenCapture | None = None
         self.last_foreground_window: int | None = None
@@ -398,6 +438,18 @@ class QronosRuntime:
         self.voice_trigger: VoiceTriggerService | None = None
         self._wake_thread: threading.Thread | None = None
         self._wake_stop = threading.Event()
+
+        # Playback lifecycle is synchronized with the desktop media engine.
+        # One ID identifies one complete Qronos response, even when that
+        # response contains several sequential TTS chunks.
+        self._voice_playback_complete = threading.Event()
+        self._voice_playback_id = 0
+        self._pending_playback_id: int | None = None
+
+        # A real spoken turn must be distinguished from a wake candidate
+        # that never produced valid speech. Brain/resource/TTS failures
+        # after genuine speech must never be treated as false wakes.
+        self._last_voice_turn_had_valid_speech_evidence = False
 
     def ensure_scheduler(self) -> QueueScheduler:
         """
@@ -466,6 +518,102 @@ class QronosRuntime:
     def _set_busy(self, value: bool) -> None:
         with self._lock:
             self._busy = value
+
+    def _prewarm_routing_classifiers(self) -> None:
+        """Warm deterministic routing before the first user command.
+
+        The Gate and Estimator remain shadow-only at this stage.  Warmup is
+        deliberately best-effort so a diagnostic classifier can never block
+        Qronos startup while the legacy TaskRouter is still authoritative.
+        """
+        samples = (
+            "سلام",
+            "پایتخت کانادا چیه؟",
+            "چرا آسمان آبیه؟",
+            "دو به علاوه دو چند میشه؟",
+        )
+
+        try:
+            for sample in samples:
+                routing_input = RoutingInput.from_text(
+                    sample
+                )
+                self.intent_gate.classify(
+                    routing_input
+                )
+                self.compute_estimator.estimate(
+                    routing_input
+                )
+        except Exception:
+            # Shadow diagnostics are non-authoritative.  Runtime startup must
+            # remain available even if warmup itself ever regresses.
+            pass
+
+    def _routing_shadow(
+        self,
+        transcript: str,
+    ) -> dict[str, Any]:
+        """Classify one real transcript without changing its production route.
+
+        This is diagnostic-only. Any failure is captured in the returned payload
+        instead of escaping into the voice turn, and TaskRouter remains the sole
+        authority for selected_task_type until the Resolver is separately approved.
+        """
+        started = time.perf_counter()
+
+        try:
+            routing_input = RoutingInput.from_text(
+                transcript
+            )
+            intent = self.intent_gate.classify(
+                routing_input
+            )
+            compute = self.compute_estimator.estimate(
+                routing_input
+            )
+
+            return {
+                "primaryIntent": intent.primary_intent.value,
+                "requiredIntents": [
+                    item.value
+                    for item in intent.required_intents
+                ],
+                "intentConfidence": round(
+                    float(intent.confidence),
+                    6,
+                ),
+                "accuracyRisk": intent.accuracy_risk.value,
+                "intentSignals": list(
+                    intent.signals
+                ),
+                "computeLevel": compute.level.value,
+                "computeScore": int(
+                    compute.score
+                ),
+                "computeConfidence": round(
+                    float(compute.confidence),
+                    6,
+                ),
+                "computeFactors": list(
+                    compute.factors
+                ),
+                "elapsedMs": round(
+                    (time.perf_counter() - started)
+                    * 1000.0,
+                    6,
+                ),
+                "authoritative": False,
+            }
+        except Exception as exc:
+            return {
+                "error": str(exc),
+                "elapsedMs": round(
+                    (time.perf_counter() - started)
+                    * 1000.0,
+                    6,
+                ),
+                "authoritative": False,
+            }
 
     def _emit_audio_spectrum(
         self,
@@ -665,6 +813,7 @@ class QronosRuntime:
         return thread is not None and thread.is_alive()
 
     def start_wake_listener(self) -> None:
+
         """
         Start the low-cost Qronos wake-word loop.
 
@@ -690,10 +839,16 @@ class QronosRuntime:
             )
             self._wake_thread = thread
 
+
         thread.start()
+
 
     def stop_wake_listener(self) -> None:
         self._wake_stop.set()
+
+        # Unblock a wake thread that may currently be waiting for the desktop
+        # to finish speaking.
+        self._voice_playback_complete.set()
 
         audio = self.audio_input
         if audio is not None:
@@ -722,7 +877,135 @@ class QronosRuntime:
         # Stopping wake listening also releases persistent STT resources.
         self._release_speech_runtime()
 
+    def _begin_voice_playback_wait(self) -> int:
+        """
+        Start tracking one complete desktop playback group.
+
+        Every TTS chunk belonging to the same assistant response receives the
+        same playback id. The follow-up microphone may open only after the
+        desktop reports that this complete group has finished playing.
+        """
+        with self._lock:
+            self._voice_playback_id += 1
+            playback_id = self._voice_playback_id
+            self._pending_playback_id = playback_id
+            self._voice_playback_complete.clear()
+
+        return playback_id
+
+    def mark_voice_playback_complete(
+        self,
+        playback_id: int,
+    ) -> bool:
+        """
+        Accept one desktop playback-complete acknowledgement.
+
+        Stale acknowledgements are ignored so a late desktop event from an old
+        response can never unlock listening for a newer response.
+        """
+        with self._lock:
+            if (
+                self._pending_playback_id
+                is None
+                or playback_id
+                != self._pending_playback_id
+            ):
+                return False
+
+            self._voice_playback_complete.set()
+            return True
+
+    def _wait_for_voice_playback_complete(
+        self,
+    ) -> bool:
+        """
+        Wait until the desktop confirms that the complete response finished.
+
+        The normal path has no guessed playback duration. The five-minute
+        failsafe only prevents a permanently dead desktop from deadlocking the
+        wake thread. A failsafe expiry does not close the conversation.
+        """
+        with self._lock:
+            playback_id = (
+                self._pending_playback_id
+            )
+
+        if playback_id is None:
+            return True
+
+        deadline = (
+            time.monotonic()
+            + PLAYBACK_ACK_FAILSAFE_SECONDS
+        )
+
+        while not self._wake_stop.is_set():
+            remaining = (
+                deadline
+                - time.monotonic()
+            )
+
+            if remaining <= 0:
+                break
+
+            if self._voice_playback_complete.wait(
+                timeout=min(
+                    0.25,
+                    remaining,
+                )
+            ):
+                with self._lock:
+                    if (
+                        self._pending_playback_id
+                        == playback_id
+                    ):
+                        self._pending_playback_id = None
+
+                    self._voice_playback_complete.clear()
+
+                return True
+
+        if self._wake_stop.is_set():
+            return False
+
+        with self._lock:
+            if (
+                self._pending_playback_id
+                == playback_id
+            ):
+                self._pending_playback_id = None
+
+            self._voice_playback_complete.clear()
+
+        self._notify(
+            "voice_playback_ack_timeout",
+            "warning",
+            (
+                "Desktop did not confirm voice playback completion "
+                "before the playback acknowledgement failsafe expired."
+            ),
+        )
+
+        return False
+
+    def _should_continue_followup_session(self) -> bool:
+        """
+        Return True while the current interactive conversation should continue.
+
+        Conversation lifetime is deliberately independent of generated audio
+        duration. A turn may fail before producing audio while the conversation
+        itself is still valid and should return to follow-up listening.
+
+        The session ends only when another lifecycle path explicitly closes it,
+        such as the no-speech follow-up timeout or runtime shutdown.
+        """
+        return (
+            not self._wake_stop.is_set()
+            and self.conversation_session is not None
+            and self.conversation_session.is_active
+        )
+
     def _wake_listener_loop(self) -> None:
+
         """
         Run the wake gate and the interactive multi-turn voice session.
 
@@ -735,15 +1018,22 @@ class QronosRuntime:
         current desktop playback path has no acoustic echo cancellation.
         """
         try:
+
             self.prepare()
+
+
             self._require_prepared()
+
 
             if self.audio_input is None:
                 raise RuntimeError(
                     "Qronos microphone is not prepared for wake-word listening."
                 )
 
+
             engine = OpenWakeWordEngine()
+
+
             trigger = VoiceTriggerService(
                 wake_word="Qronos",
                 engine=engine,
@@ -752,8 +1042,12 @@ class QronosRuntime:
             self.wake_engine = engine
             self.voice_trigger = trigger
 
+
             trigger.start()
+
+
             self.audio_input.start()
+
 
             self._notify(
                 "wake_word_listening",
@@ -838,13 +1132,15 @@ class QronosRuntime:
                 # may have been opened and return directly to wake-word
                 # listening. This prevents wind/noise false wakes from
                 # falling through into unrestricted follow-up listening.
-                if playback_seconds <= 0:
-                    if (
-                        self.conversation_session
-                        is not None
-                        and self.conversation_session.is_active
-                    ):
-                        self.conversation_session.close()
+                if (
+                    playback_seconds <= 0
+                    and not
+                    self._last_voice_turn_had_valid_speech_evidence
+                    and self.conversation_session
+                    is not None
+                    and self.conversation_session.is_active
+                ):
+                    self.conversation_session.close()
 
                     self._notify(
                         "conversation_session_closed",
@@ -855,18 +1151,9 @@ class QronosRuntime:
                         ),
                     )
 
-                while (
-                    playback_seconds > 0
-                    and not self._wake_stop.is_set()
-                    and self.conversation_session
-                    is not None
-                    and self.conversation_session.is_active
-                ):
+                while self._should_continue_followup_session():
                     if playback_seconds > 0:
-                        self._wake_stop.wait(
-                            playback_seconds
-                            + FOLLOWUP_PLAYBACK_GUARD_SECONDS
-                        )
+                        self._wait_for_voice_playback_complete()
 
                     if self._wake_stop.is_set():
                         break
@@ -921,6 +1208,7 @@ class QronosRuntime:
                 )
 
         except Exception as exc:
+
             if not self._wake_stop.is_set():
                 self._notify(
                     "runtime_error",
@@ -1013,6 +1301,7 @@ class QronosRuntime:
     def _synthesize_response_chunks(
         self,
         response: str,
+        playback_id: int | None = None,
     ) -> dict[str, Any]:
         """
         Synthesize one complete Brain response as sequential semantic chunks.
@@ -1098,35 +1387,42 @@ class QronosRuntime:
                 daemon=True,
             ).start()
 
+            audio_payload: dict[str, Any] = {
+                "path": str(
+                    utterance.audio_path
+                ),
+                "audioSeconds": round(
+                    utterance.audio_seconds,
+                    3,
+                ),
+                "generationSeconds": round(
+                    utterance.took_seconds,
+                    3,
+                ),
+                "rtf": round(
+                    utterance.real_time_factor,
+                    3,
+                ),
+                "chunkIndex": index,
+                "chunkNumber": index + 1,
+                "chunkCount": len(chunks),
+                "isFirstChunk": index == 0,
+                "isLastChunk": (
+                    index
+                    == len(chunks) - 1
+                ),
+            }
+
+            if playback_id is not None:
+                audio_payload[
+                    "playbackId"
+                ] = playback_id
+
             self._notify(
                 "voice_audio_ready",
                 "ready",
                 json.dumps(
-                    {
-                        "path": str(
-                            utterance.audio_path
-                        ),
-                        "audioSeconds": round(
-                            utterance.audio_seconds,
-                            3,
-                        ),
-                        "generationSeconds": round(
-                            utterance.took_seconds,
-                            3,
-                        ),
-                        "rtf": round(
-                            utterance.real_time_factor,
-                            3,
-                        ),
-                        "chunkIndex": index,
-                        "chunkNumber": index + 1,
-                        "chunkCount": len(chunks),
-                        "isFirstChunk": index == 0,
-                        "isLastChunk": (
-                            index
-                            == len(chunks) - 1
-                        ),
-                    },
+                    audio_payload,
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ),
@@ -1198,6 +1494,111 @@ class QronosRuntime:
             pass
 
 
+    def _cancel_pending_voice_playback_wait(
+        self,
+    ) -> None:
+        """
+        Forget an unfinished playback group after a failed voice turn.
+
+        This prevents a TTS/runtime failure from leaving a stale playback ID
+        that could interfere with the next valid desktop acknowledgement.
+        """
+        with self._lock:
+            self._pending_playback_id = None
+            self._voice_playback_complete.clear()
+
+
+    def _recover_valid_voice_turn_failure(
+        self,
+        report: dict[str, Any],
+        *,
+        user_message_added: bool,
+        assistant_message_added: bool,
+    ) -> float:
+        """
+        Speak a short local recovery message after genuine user speech fails
+        before a usable assistant response has been produced.
+
+        No Brain is called here. The purpose is to stop recoverable
+        Brain/resource failures from becoming a silent follow-up window and
+        then an apparently random session close.
+        """
+        if (
+            not self._last_voice_turn_had_valid_speech_evidence
+            or assistant_message_added
+            or self.conversation_session is None
+            or not self.conversation_session.is_active
+            or self.voice_output is None
+        ):
+            return 0.0
+
+        recovery_response = (
+            VOICE_RETRY_RESPONSE
+            if user_message_added
+            else VOICE_STT_RETRY_RESPONSE
+        )
+
+        playback_id: int | None = None
+
+        try:
+            self.conversation_session.begin_responding()
+
+            if user_message_added:
+                self.conversation_session.add_assistant_message(
+                    recovery_response
+                )
+
+            self._notify(
+                "voice_response",
+                "ready",
+                recovery_response,
+            )
+
+            playback_id = (
+                self._begin_voice_playback_wait()
+            )
+
+            chunked = (
+                self._synthesize_response_chunks(
+                    recovery_response,
+                    playback_id=playback_id,
+                )
+            )
+
+            playback_seconds = max(
+                0.0,
+                float(
+                    chunked[
+                        "totalAudioSeconds"
+                    ]
+                ),
+            )
+
+            report[
+                "recoveryResponse"
+            ] = recovery_response
+
+            report[
+                "recoveryGeneratedAudioSeconds"
+            ] = round(
+                playback_seconds,
+                3,
+            )
+
+            return playback_seconds
+
+        except Exception as recovery_exc:
+            self._cancel_pending_voice_playback_wait()
+
+            report[
+                "recoveryError"
+            ] = str(
+                recovery_exc
+            )
+
+            return 0.0
+
+
     def _run_voice_turn(
         self,
         trigger_source: str,
@@ -1227,6 +1628,9 @@ class QronosRuntime:
 
         self._set_busy(True)
         playback_seconds = 0.0
+        user_message_added = False
+        assistant_message_added = False
+        self._last_voice_turn_had_valid_speech_evidence = False
 
         turn_started_perf = (
             detected_at_perf
@@ -1272,6 +1676,29 @@ class QronosRuntime:
 
             self.audio_input.stop()
             self._clear_audio_spectrum()
+
+            report.update(
+                {
+                    "recordingAudioSeconds": round(
+                        float(
+                            recording.duration_seconds
+                        ),
+                        3,
+                    ),
+                    "recordingSpeechSeconds": round(
+                        float(
+                            recording.speech_seconds
+                        ),
+                        3,
+                    ),
+                    "peakSpeechProbability": round(
+                        float(
+                            recording.peak_speech_probability
+                        ),
+                        6,
+                    ),
+                }
+            )
 
             # A false wake must never turn a tiny burst of wind/noise into
             # an LLM request. Follow-up turns intentionally keep the
@@ -1323,6 +1750,8 @@ class QronosRuntime:
 
                 return 0.0
 
+            self._last_voice_turn_had_valid_speech_evidence = True
+
             self._notify(
                 "voice_transcribing",
                 "processing",
@@ -1348,38 +1777,13 @@ class QronosRuntime:
                     "Speech recognition returned an empty command."
                 )
 
+            report["transcript"] = transcript
+
             self._notify(
                 "voice_transcript",
                 "processing",
                 transcript,
             )
-
-            if (
-                trigger_source == "followup"
-                and _is_conversation_end_phrase(
-                    transcript
-                )
-            ):
-                if (
-                    self.conversation_session
-                    is not None
-                    and self.conversation_session.is_active
-                ):
-                    self.conversation_session.close()
-
-                self._notify(
-                    "conversation_session_closed",
-                    "ready",
-                    "Conversation ended by user.",
-                )
-
-                self._notify(
-                    "voice_turn_complete",
-                    "ready",
-                    "Follow-up session ended.",
-                )
-
-                return 0.0
 
             if not self.conversation_session.is_active:
                 self.conversation_session.start()
@@ -1387,7 +1791,15 @@ class QronosRuntime:
             self.conversation_session.add_user_message(
                 transcript
             )
+            user_message_added = True
             self.conversation_session.begin_processing()
+
+            # Observe the future Gate + Estimator on the exact real STT transcript.
+            # This result is written only to diagnostics; it cannot select a worker.
+            routing_shadow = self._routing_shadow(
+                transcript
+            )
+            report["routingShadow"] = routing_shadow
 
             route_started = time.perf_counter()
 
@@ -1395,15 +1807,32 @@ class QronosRuntime:
                 transcript
             )
 
+            routed_task_type = route.task_type
+            selected_task_type = routed_task_type
+
+            report["route"] = (
+                routed_task_type.value
+            )
+            report["selectedRoute"] = (
+                selected_task_type.value
+            )
+
+            routing_shadow["legacyRoute"] = (
+                routed_task_type.value
+            )
+            routing_shadow["selectedRoute"] = (
+                selected_task_type.value
+            )
+
             route_finished = time.perf_counter()
 
             self._notify(
                 "voice_routed",
                 "processing",
-                route.task_type.value,
+                routed_task_type.value,
             )
 
-            if route.task_type is TaskType.VISION:
+            if selected_task_type is TaskType.VISION:
                 self.pending_look = transcript
                 self.conversation_session.begin_listening()
 
@@ -1422,7 +1851,7 @@ class QronosRuntime:
                 solve_simple_arithmetic(
                     transcript
                 )
-                if route.task_type is TaskType.FAST
+                if selected_task_type is TaskType.FAST
                 else None
             )
 
@@ -1437,7 +1866,7 @@ class QronosRuntime:
                     goal=transcript
                 )
                 plan.add_step(
-                    task_type=route.task_type,
+                    task_type=selected_task_type,
                     description=transcript,
                 )
 
@@ -1471,6 +1900,7 @@ class QronosRuntime:
             self.conversation_session.add_assistant_message(
                 response
             )
+            assistant_message_added = True
 
             self._notify(
                 "voice_response",
@@ -1480,9 +1910,14 @@ class QronosRuntime:
 
             tts_started = time.perf_counter()
 
+            playback_id = (
+                self._begin_voice_playback_wait()
+            )
+
             chunked = (
                 self._synthesize_response_chunks(
-                    response
+                    response,
+                    playback_id=playback_id,
                 )
             )
 
@@ -1524,7 +1959,8 @@ class QronosRuntime:
             report.update(
                 {
                     "transcript": transcript,
-                    "route": route.task_type.value,
+                    "route": routed_task_type.value,
+                    "selectedRoute": selected_task_type.value,
                     "response": response,
                     "recordingAudioSeconds": round(
                         float(
@@ -1645,7 +2081,11 @@ class QronosRuntime:
             )
 
         except TimeoutError as exc:
-            if trigger_source == "followup":
+            if (
+                trigger_source == "followup"
+                and str(exc)
+                == "No speech was detected before the start timeout."
+            ):
                 report["followupTimedOut"] = True
                 report["closedAtEpoch"] = round(
                     time.time(),
@@ -1677,14 +2117,28 @@ class QronosRuntime:
                 6,
             )
 
-            self._write_latency_report(
-                report
-            )
-
             self._notify(
                 "runtime_error",
                 "error",
                 str(exc),
+            )
+
+            self._cancel_pending_voice_playback_wait()
+
+            playback_seconds = (
+                self._recover_valid_voice_turn_failure(
+                    report,
+                    user_message_added=(
+                        user_message_added
+                    ),
+                    assistant_message_added=(
+                        assistant_message_added
+                    ),
+                )
+            )
+
+            self._write_latency_report(
+                report
             )
 
         except Exception as exc:
@@ -1694,14 +2148,28 @@ class QronosRuntime:
                 6,
             )
 
-            self._write_latency_report(
-                report
-            )
-
             self._notify(
                 "runtime_error",
                 "error",
                 str(exc),
+            )
+
+            self._cancel_pending_voice_playback_wait()
+
+            playback_seconds = (
+                self._recover_valid_voice_turn_failure(
+                    report,
+                    user_message_added=(
+                        user_message_added
+                    ),
+                    assistant_message_added=(
+                        assistant_message_added
+                    ),
+                )
+            )
+
+            self._write_latency_report(
+                report
             )
 
         finally:
@@ -2087,7 +2555,10 @@ def handle_action(
     )
 
     if action_id == WAKE_LISTENER_START_ACTION:
+
         runtime.start_wake_listener()
+
+
         return
 
     if action_id == WAKE_LISTENER_STOP_ACTION:
@@ -2097,6 +2568,50 @@ def handle_action(
             "ready",
             "Qronos wake-word listener stopped.",
         )
+        return
+
+    if action_id == VOICE_PLAYBACK_COMPLETE_ACTION:
+        raw_playback_id = payload.get(
+            "playbackId",
+            0,
+        )
+
+        try:
+            playback_id = int(
+                raw_playback_id
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Playback completion needs a valid playbackId."
+            ) from exc
+
+        if playback_id <= 0:
+            raise ValueError(
+                "Playback completion needs a positive playbackId."
+            )
+
+        accepted = (
+            runtime.mark_voice_playback_complete(
+                playback_id
+            )
+        )
+
+        if accepted:
+            emit(
+                "voice_playback_acknowledged",
+                "ready",
+                str(playback_id),
+            )
+        else:
+            emit(
+                "runtime_warning",
+                "warning",
+                (
+                    "Ignored stale voice playback completion: "
+                    f"{playback_id}"
+                ),
+            )
+
         return
 
     if action_id == PUSH_TO_TALK_ACTION:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from core.load_signal import SustainedLoadMonitor
 from core.resource_guard import GpuStatus, read_gpu_status
+from core.telemetry_cache import Snapshot
 from core.resource_ownership import (
     GLOBAL_RESOURCE_LEDGER,
     ResourceLedger,
@@ -79,6 +80,61 @@ def read_gpu_for_external_pressure(
         gpu_utilization_percent=None,
         vram_used_mb=gpu.vram_used_mb,
         vram_total_mb=gpu.vram_total_mb,
+    )
+
+
+def snapshot_for_external_pressure(
+    snapshot: Snapshot,
+    ledger: ResourceLedger = GLOBAL_RESOURCE_LEDGER,
+) -> Snapshot:
+    """
+    Return an ActivityGuard-safe view of one raw telemetry snapshot.
+
+    Capacity/admission decisions must still use the raw snapshot. This view is
+    only for classifying external/user pressure. While Qronos owns admitted
+    GPU work, global GPU utilization cannot be attributed safely, so it is
+    suppressed; known Qronos-reserved VRAM is subtracted from used VRAM.
+
+    CPU, RAM and GPU temperature stay untouched. Those signals can still
+    represent real machine pressure and must continue protecting the user.
+    """
+    gpu = snapshot.gpu
+
+    own_vram_mb = (
+        qronos_reserved_vram_mb(
+            ledger
+        )
+    )
+
+    if (
+        gpu is None
+        or own_vram_mb <= 0
+    ):
+        return snapshot
+
+    adjusted_vram_used_mb = (
+        None
+        if gpu.vram_used_mb is None
+        else max(
+            0,
+            int(gpu.vram_used_mb)
+            - own_vram_mb,
+        )
+    )
+
+    adjusted_gpu = GpuStatus(
+        name=gpu.name,
+        temperature_c=gpu.temperature_c,
+        gpu_utilization_percent=None,
+        vram_used_mb=adjusted_vram_used_mb,
+        vram_total_mb=gpu.vram_total_mb,
+    )
+
+    return Snapshot(
+        system=snapshot.system,
+        gpu=adjusted_gpu,
+        taken_at=snapshot.taken_at,
+        stale=snapshot.stale,
     )
 
 

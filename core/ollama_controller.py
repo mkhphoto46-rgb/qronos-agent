@@ -14,6 +14,12 @@ from core.brain_runtime import (
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
+# Interactive local inference must never hold Qronos indefinitely.
+#
+# This is a safety ceiling, not a performance target. Fast/Heavy-specific
+# limits can be split later after benchmark data exists.
+CHAT_TIMEOUT_SECONDS = 90
+
 
 # Temporary compatibility alias.
 # Existing tests and development code can keep importing
@@ -273,10 +279,19 @@ class OllamaController(BrainRuntime):
             response = requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
-                timeout=600,
+                timeout=CHAT_TIMEOUT_SECONDS,
             )
 
             response.raise_for_status()
+
+        except requests.Timeout as exc:
+            raise TimeoutError(
+                (
+                    "Qronos Brain exceeded the "
+                    f"{CHAT_TIMEOUT_SECONDS}-second "
+                    f"safety deadline: {model_name}"
+                )
+            ) from exc
 
         except requests.HTTPError as exc:
             # A model that was never downloaded and a server that is not

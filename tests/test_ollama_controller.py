@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import requests
+
 import unittest
 from unittest.mock import Mock, patch
 
@@ -297,7 +299,7 @@ class TestOllamaController(unittest.TestCase):
                     "num_predict": 20,
                 },
             },
-            timeout=600,
+            timeout=90,
         )
 
     @patch("core.ollama_controller.requests.post")
@@ -350,6 +352,33 @@ class TestOllamaController(unittest.TestCase):
         self.assertEqual(
             str(context.exception),
             "Could not send request to model: qwen3:4b",
+        )
+
+
+    @patch(
+        "core.ollama_controller.requests.post"
+    )
+    def test_chat_timeout_surfaces_as_timeout_error(
+        self,
+        mock_post,
+    ) -> None:
+        mock_post.side_effect = (
+            requests.Timeout(
+                "simulated timeout"
+            )
+        )
+
+        with self.assertRaises(
+            TimeoutError
+        ) as context:
+            self.controller.chat(
+                model_name="qwen3:4b",
+                prompt="test",
+            )
+
+        self.assertIn(
+            "90-second",
+            str(context.exception),
         )
 
 

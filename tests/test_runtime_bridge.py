@@ -344,6 +344,34 @@ class TestParsePayload(unittest.TestCase):
 
 
 class TestHandleAction(unittest.TestCase):
+    def test_playback_completion_action_releases_pending_playback(self) -> None:
+        runtime = prepared_runtime()
+
+        playback_id = (
+            runtime._begin_voice_playback_wait()
+        )
+
+        events = captured_events(
+            lambda: runtime_bridge.handle_action(
+                runtime,
+                {
+                    "actionId":
+                        runtime_bridge.VOICE_PLAYBACK_COMPLETE_ACTION,
+                    "playbackId":
+                        playback_id,
+                },
+            )
+        )
+
+        self.assertIn(
+            "voice_playback_acknowledged",
+            event_types(events),
+        )
+
+        self.assertTrue(
+            runtime._wait_for_voice_playback_complete()
+        )
+
     def test_an_empty_action_id_is_rejected(self) -> None:
         runtime = prepared_runtime()
 
@@ -643,6 +671,158 @@ class TestPushToTalkFailures(unittest.TestCase):
 
         self.assertIn("runtime_error", event_types(events))
         self.assertIn("microphone disappeared", events[-2]["message"])
+
+    def test_followup_brain_timeout_keeps_conversation_active_with_spoken_retry(
+        self,
+    ) -> None:
+        runtime = prepared_runtime(
+            orchestrator=FakeOrchestrator(
+                error=TimeoutError(
+                    "brain request timed out"
+                )
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="followup"
+        )
+
+        self.assertGreater(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertTrue(
+            runtime.conversation_session.is_active
+        )
+
+        self.assertTrue(
+            runtime._should_continue_followup_session()
+        )
+
+        self.assertTrue(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
+
+        self.assertEqual(
+            runtime.voice_output.calls[-1],
+            runtime_bridge.VOICE_RETRY_RESPONSE,
+        )
+
+    def test_followup_resource_block_keeps_conversation_active_with_spoken_retry(
+        self,
+    ) -> None:
+        runtime = prepared_runtime(
+            orchestrator=FakeOrchestrator(
+                results=[
+                    StepResult(
+                        order=1,
+                        success=False,
+                        output="",
+                        error=(
+                            "Qronos blocked this task because the current "
+                            "resource state is normal and the resource "
+                            "policy returned block."
+                        ),
+                    )
+                ]
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="followup"
+        )
+
+        self.assertGreater(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertTrue(
+            runtime.conversation_session.is_active
+        )
+
+        self.assertTrue(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
+
+        self.assertEqual(
+            runtime.voice_output.calls[-1],
+            runtime_bridge.VOICE_RETRY_RESPONSE,
+        )
+
+    def test_wake_turn_with_valid_speech_is_not_marked_as_false_wake_after_brain_failure(
+        self,
+    ) -> None:
+        runtime = prepared_runtime(
+            orchestrator=FakeOrchestrator(
+                results=[
+                    StepResult(
+                        order=1,
+                        success=False,
+                        output="",
+                        error=(
+                            "recoverable brain failure"
+                        ),
+                    )
+                ]
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="wake_word"
+        )
+
+        self.assertGreater(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertTrue(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
+
+        self.assertTrue(
+            runtime.conversation_session.is_active
+        )
+
+    def test_followup_no_speech_timeout_closes_conversation(self) -> None:
+        runtime = prepared_runtime(
+            recorder=FakeCommandRecorder(
+                error=TimeoutError(
+                    "No speech was detected before the start timeout."
+                )
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="followup"
+        )
+
+        self.assertEqual(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertFalse(
+            runtime.conversation_session.is_active
+        )
+
+        self.assertFalse(
+            runtime._should_continue_followup_session()
+        )
+
+        self.assertFalse(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
 
     def test_the_runtime_is_free_again_after_a_failure(self) -> None:
         # A turn that failed must not leave the runtime marked busy, or every

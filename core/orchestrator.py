@@ -24,6 +24,13 @@ from core.resource_guard import (
     read_system_status_since_last_call,
 )
 from core.resource_policy import ResourceDecision
+from core.resource_context import snapshot_for_external_pressure
+from core.resource_ownership import (
+    GLOBAL_RESOURCE_LEDGER,
+    ResourceBudget,
+    ResourceOwner,
+    WorkloadPriority,
+)
 from core.telemetry_cache import TelemetryCache
 from core.task_plan import PlanStep, TaskPlan
 from core.workers import Unavailable, WorkerRegistry
@@ -34,20 +41,29 @@ You are Qronos, the user's personal AI assistant.
 
 Identity rules:
 - Your name and product identity are Qronos.
-- Always present yourself as Qronos.
-- If asked what AI you are, what model you are, who your underlying
-  model provider is, what LLM powers you, or similar questions, identify
-  yourself only as Qronos, the user's personal AI assistant.
-- Do not claim to be Qwen or any other underlying model.
-- Do not reveal, speculate about, or volunteer internal model names,
-  provider names, runtime implementation details, model routing details,
-  or hidden infrastructure.
-- Fast Brain and Heavy Brain are internal implementation concepts and
-  must not alter your identity. You are Qronos in every mode.
+- Keep that identity internally consistent in every Brain mode.
+- Do not introduce yourself, state your name, or describe yourself in ordinary answers.
+- Do not begin ordinary answers with a greeting, self-introduction, or identity statement.
+- If the user explicitly greets you, a brief natural greeting is allowed, but do not reintroduce yourself unless they ask who or what you are.
+- Mention that you are Qronos only when the user explicitly asks about your name, identity, or which assistant they are speaking with.
+- If asked what AI you are, what model you are, who your underlying model provider is, what LLM powers you, or similar questions, identify yourself only as Qronos, the user's personal AI assistant.
+- Do not claim to be Qwen, Gemma, or any other underlying model.
+- Do not reveal, speculate about, or volunteer internal model names, provider names, runtime implementation details, model routing details, or hidden infrastructure.
+- Fast Brain and Heavy Brain are internal implementation concepts and must not alter your identity.
 
-Behavior rules:
-- Answer in the language used by the user unless they request another
-  language.
+Language rules:
+- Answer in the same dominant language as the user's current message unless the user explicitly requests another language.
+- When the user writes or speaks Persian, answer in Persian.
+- Do not switch from Persian to Arabic merely because both languages use similar scripts or because the Persian input is informal, colloquial, noisy, or imperfect.
+- Natural English technical terms inside a Persian response are allowed when they are clearer or conventionally used.
+- If the language of the current message is genuinely ambiguous, prefer the established language of the current conversation.
+
+Response rules:
+- Answer the user's request directly.
+- Do not repeat or paraphrase the user's question before answering unless clarification is genuinely necessary.
+- For simple questions, prefer the shortest complete correct answer.
+- If one short sentence fully answers the question, use one short sentence.
+- Do not repeat the same answer in multiple forms.
 - Be accurate and helpful.
 - Do not invent facts when information is uncertain.
 - Preserve conversational context from the supplied message history.
@@ -113,7 +129,11 @@ class Orchestrator:
         self.activity_guard = (
             activity_guard
             if activity_guard is not None
-            else ActivityGuard(snapshot_reader=self.telemetry.current)
+            else ActivityGuard(
+                snapshot_reader=lambda: snapshot_for_external_pressure(
+                    self.telemetry.current()
+                )
+            )
         )
 
         # Empty unless something registers a worker, so an orchestrator
@@ -263,35 +283,51 @@ class Orchestrator:
                 )
             )
 
-            response = self.runtime.chat(
-                model_name=(
-                    selection.model.name
-                ),
-                messages=messages,
-                think=(
-                    task_class
-                    is TaskClass.HEAVY
-                ),
-                num_predict=(
-                    512
-                    if task_class
-                    is TaskClass.HEAVY
-                    else 256
-                ),
-                num_ctx=(
-                    selection.model.context_tokens
-                ),
-                # Nothing is kept warm. Both brains are unloaded the moment
-                # they have answered, so Qronos holds no VRAM between turns.
-                # The cost is roughly 1.7 s on a Fast turn and under a second
-                # on a Heavy one; the saving is 3.4 GB and 10.2 GB of somebody
-                # else's graphics card. See core/model_manager.py.
-                keep_alive="0",
+            reservation = self._reserve_brain_resources(
+                selection.model.name,
+                selection.model.estimated_vram_gb,
             )
 
-            self.runtime.stop_model(
-                selection.model.name
-            )
+            try:
+                response = self.runtime.chat(
+                    model_name=(
+                        selection.model.name
+                    ),
+                    messages=messages,
+                    think=(
+                        task_class
+                        is TaskClass.HEAVY
+                    ),
+                    num_predict=(
+                        512
+                        if task_class
+                        is TaskClass.HEAVY
+                        else 256
+                    ),
+                    num_ctx=(
+                        selection.model.context_tokens
+                    ),
+                    # Nothing is kept warm. Both brains are unloaded the moment
+                    # they have answered, so Qronos holds no VRAM between turns.
+                    keep_alive="0",
+                )
+            finally:
+                # Resource cleanup must run on success, model failure and
+                # request timeout. Cleanup failure must not hide the original
+                # model result/error.
+                try:
+                    self.runtime.stop_model(
+                        selection.model.name
+                    )
+                except Exception:
+                    try:
+                        self.runtime.unload_all()
+                    except Exception:
+                        pass
+
+                self._release_brain_resources(
+                    reservation.reservation_id
+                )
 
             return StepResult(
                 order=step.order,
@@ -324,15 +360,35 @@ class Orchestrator:
                 )
             )
 
-        return self.runtime.chat(
-            model_name=selection.model.name,
-            prompt=prompt,
-            think=False,
-            num_predict=768,
-            # Web answers are occasional and can fill VRAM. Unload after the
-            # request so the next voice turn is not blocked by our own model.
-            keep_alive="0",
+        reservation = self._reserve_brain_resources(
+            selection.model.name,
+            selection.model.estimated_vram_gb,
         )
+
+        try:
+            return self.runtime.chat(
+                model_name=selection.model.name,
+                prompt=prompt,
+                think=False,
+                num_predict=768,
+                # Web answers are occasional and can fill VRAM. Unload after
+                # the request so the next voice turn is not blocked.
+                keep_alive="0",
+            )
+        finally:
+            try:
+                self.runtime.stop_model(
+                    selection.model.name
+                )
+            except Exception:
+                try:
+                    self.runtime.unload_all()
+                except Exception:
+                    pass
+
+            self._release_brain_resources(
+                reservation.reservation_id
+            )
 
     def _prepare_resources(
         self,
@@ -376,10 +432,11 @@ class Orchestrator:
             self.runtime.unload_all()
 
             # The pressure that triggered cleanup may have been caused by
-            # Qronos's own resident model. Reusing that stale value makes the
-            # retry fail even after VRAM has been released.
-            refreshed_activity = self.activity_guard.detect()
+            # Qronos's own resident model. Invalidate the shared raw snapshot
+            # before ActivityGuard reclassifies pressure; otherwise it can
+            # reuse the exact pre-unload reading that caused the refusal.
             self.telemetry.invalidate()
+            refreshed_activity = self.activity_guard.detect()
             snapshot = self.telemetry.current()
             system = snapshot.system
             gpu = snapshot.gpu
@@ -399,6 +456,51 @@ class Orchestrator:
             return retry
 
         return selection
+
+    def _reserve_brain_resources(
+        self,
+        model_name: str,
+        estimated_vram_gb: float,
+    ):
+        """Register admitted Brain VRAM as a Qronos-owned workload."""
+        return GLOBAL_RESOURCE_LEDGER.reserve(
+            owner=ResourceOwner.QRONOS,
+            workload=f"brain:{model_name}",
+            priority=WorkloadPriority.ACTIVE_QRONOS_REQUEST,
+            budget=ResourceBudget(
+                vram_mb=max(
+                    0,
+                    int(
+                        round(
+                            float(estimated_vram_gb)
+                            * 1024.0
+                        )
+                    ),
+                )
+            ),
+            allow_duplicate_workload=True,
+        )
+
+    def _release_brain_resources(
+        self,
+        reservation_id: str,
+    ) -> None:
+        """
+        Release Brain ownership and force the next telemetry read fresh.
+        """
+        try:
+            GLOBAL_RESOURCE_LEDGER.release(
+                reservation_id
+            )
+
+        except Exception:
+            # Ownership bookkeeping must never replace the user's real
+            # Brain result with a cleanup error.
+            pass
+
+        finally:
+            self.telemetry.invalidate()
+
 
     @staticmethod
     def _resource_error(

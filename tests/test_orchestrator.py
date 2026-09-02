@@ -424,7 +424,7 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         mock_stop.assert_called_once_with(
-            "qwen3:4b-instruct",
+            get_model("fast").name,
         )
 
     def test_normal_heavy_brain_thinks_and_unloads(self) -> None:
@@ -463,7 +463,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(results[0].success)
         self.assertEqual(
             mock_chat.call_args.kwargs["model_name"],
-            "qwen3:14b",
+            get_model("heavy").name,
         )
         self.assertTrue(
             mock_chat.call_args.kwargs["think"],
@@ -477,7 +477,7 @@ class TestOrchestrator(unittest.TestCase):
             "0",
         )
         mock_stop.assert_called_once_with(
-            "qwen3:14b",
+            get_model("heavy").name,
         )
 
     def test_gaming_fast_brain_is_on_demand(self) -> None:
@@ -521,7 +521,7 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         mock_stop.assert_called_once_with(
-            "qwen3:4b-instruct",
+            get_model("fast").name,
         )
 
     def test_prepare_resources_retries_after_unloading_models(self) -> None:
