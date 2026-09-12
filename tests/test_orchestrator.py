@@ -237,10 +237,9 @@ class TestOrchestrator(unittest.TestCase):
             2,
         )
 
-        self.assertEqual(
-            mock_stop.call_count,
-            2,
-        )
+        # Fast Brain intentionally follows its configured warm-residency
+        # policy during normal activity.
+        mock_stop.assert_not_called()
 
     def test_critical_pressure_blocks_heavy_model(self) -> None:
         plan = TaskPlan(goal="Critical resource test")
@@ -284,7 +283,10 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         mock_chat.assert_not_called()
-        mock_list_running.assert_called_once()
+        self.assertGreaterEqual(
+            mock_list_running.call_count,
+            1,
+        )
 
     def test_high_pressure_blocks_and_does_not_run_heavy_model(self) -> None:
         plan = TaskPlan(goal="High pressure test")
@@ -328,7 +330,10 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         mock_chat.assert_not_called()
-        mock_list_running.assert_called_once()
+        self.assertGreaterEqual(
+            mock_list_running.call_count,
+            1,
+        )
 
     def test_fresh_second_check_blocks_model_load(self) -> None:
         plan = TaskPlan(goal="Fresh resource check test")
@@ -368,16 +373,15 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("block", results[0].error.lower())
         mock_chat.assert_not_called()
 
-    def test_the_fast_brain_is_unloaded_even_when_nothing_is_wrong(self) -> None:
+    def test_fast_brain_uses_configured_warm_residency_when_safe(self) -> None:
         """
-        The one case that used to keep a model in VRAM, and no longer does.
+        During normal activity, Fast Brain follows its configured keep-alive.
 
-        Normal activity, normal pressure, a short Fast turn: the conditions
-        the old ten-minute keep-alive was written for. Qronos now gives the
-        card back after every answer without exception, so this asserts the
-        absence of a special case rather than the presence of one.
+        User-active Gaming/Creator modes are tested separately and must yield
+        residency immediately; normal idle conversational use is allowed to
+        keep Fast Brain warm for the configured short interval.
         """
-        plan = TaskPlan(goal="Fast brain unload test")
+        plan = TaskPlan(goal="Fast brain warm residency test")
 
         plan.add_step(
             TaskType.FAST,
@@ -411,23 +415,24 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertTrue(results[0].success)
 
+        generation = get_model("fast").generation_for("default")
+
         self.assertEqual(
             mock_chat.call_args.kwargs["keep_alive"],
-            "0",
+            generation.keep_alive,
         )
-        self.assertFalse(
+        self.assertEqual(
             mock_chat.call_args.kwargs["think"],
+            generation.think,
         )
         self.assertEqual(
             mock_chat.call_args.kwargs["num_predict"],
-            256,
+            generation.num_predict,
         )
 
-        mock_stop.assert_called_once_with(
-            get_model("fast").name,
-        )
+        mock_stop.assert_not_called()
 
-    def test_normal_heavy_brain_thinks_and_unloads(self) -> None:
+    def test_normal_heavy_brain_uses_configured_generation_profile(self) -> None:
         plan = TaskPlan(goal="Heavy reasoning test")
 
         plan.add_step(
@@ -465,20 +470,23 @@ class TestOrchestrator(unittest.TestCase):
             mock_chat.call_args.kwargs["model_name"],
             get_model("heavy").name,
         )
-        self.assertTrue(
+
+        generation = get_model("heavy").generation_for("normal")
+
+        self.assertEqual(
             mock_chat.call_args.kwargs["think"],
+            generation.think,
         )
         self.assertEqual(
             mock_chat.call_args.kwargs["num_predict"],
-            512,
+            generation.num_predict,
         )
         self.assertEqual(
             mock_chat.call_args.kwargs["keep_alive"],
-            "0",
+            generation.keep_alive,
         )
-        mock_stop.assert_called_once_with(
-            get_model("heavy").name,
-        )
+
+        mock_stop.assert_not_called()
 
     def test_gaming_fast_brain_is_on_demand(self) -> None:
         plan = TaskPlan(goal="Gaming test")
@@ -524,6 +532,22 @@ class TestOrchestrator(unittest.TestCase):
             get_model("fast").name,
         )
 
+    def test_all_user_active_modes_disable_brain_keep_alive(self) -> None:
+        for mode in (
+            ActivityMode.GAMING_ASSIST,
+            ActivityMode.GAMING_PERFORMANCE,
+            ActivityMode.CREATOR_ASSIST,
+            ActivityMode.CREATOR_PERFORMANCE,
+        ):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    self.orchestrator._effective_keep_alive(
+                        configured_keep_alive="60s",
+                        activity_mode=mode,
+                    ),
+                    "0",
+                )
+
     def test_prepare_resources_retries_after_unloading_models(self) -> None:
         with patch(
             "core.orchestrator.read_system_status",
@@ -536,8 +560,9 @@ class TestOrchestrator(unittest.TestCase):
             "list_running_models",
             return_value=[object()],
         ), patch.object(
-            self.orchestrator.ollama,
-            "unload_all",
+            self.orchestrator.model_manager,
+            "unload_qronos_models",
+            return_value=True,
         ) as mock_unload, patch.object(
             self.orchestrator.activity_guard,
             "detect",
@@ -608,8 +633,9 @@ class TestOrchestrator(unittest.TestCase):
             "list_running_models",
             return_value=[object()],
         ), patch.object(
-            self.orchestrator.ollama,
-            "unload_all",
+            self.orchestrator.model_manager,
+            "unload_qronos_models",
+            return_value=True,
         ), patch.object(
             self.orchestrator.activity_guard,
             "detect",

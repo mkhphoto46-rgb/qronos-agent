@@ -368,7 +368,10 @@ class Orchestrator:
 
             think_value = generation.think
             generation_budget = generation.num_predict
-            keep_alive = generation.keep_alive
+            keep_alive = self._effective_keep_alive(
+                configured_keep_alive=generation.keep_alive,
+                activity_mode=live_state.mode,
+            )
 
             reservation = self._reserve_brain_resources(
                 selection.model.name,
@@ -752,6 +755,30 @@ class Orchestrator:
                         )
 
             self.telemetry.invalidate()
+
+
+    @staticmethod
+    def _effective_keep_alive(
+        configured_keep_alive: str,
+        activity_mode: ActivityMode,
+    ) -> str:
+        """
+        Yield Brain residency immediately while the user is actively gaming
+        or creating.
+
+        Normal and idle conversational use keep the model profile's configured
+        short warm-residency policy. User-active modes always win over model
+        warmth so Qronos cannot hold VRAM after answering.
+        """
+        if activity_mode in {
+            ActivityMode.GAMING_ASSIST,
+            ActivityMode.GAMING_PERFORMANCE,
+            ActivityMode.CREATOR_ASSIST,
+            ActivityMode.CREATOR_PERFORMANCE,
+        }:
+            return "0"
+
+        return configured_keep_alive
 
 
     def _generation_effort(

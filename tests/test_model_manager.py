@@ -4,6 +4,7 @@ import unittest
 
 from core.activity_guard import ActivityMode, ResourcePressure
 from core.model_manager import ModelManager, TaskClass
+from core.model_registry import get_model
 from core.resource_guard import GpuStatus, SystemStatus
 from core.resource_policy import ResourceDecision
 
@@ -44,7 +45,7 @@ class TestModelManager(unittest.TestCase):
             self.make_gpu(),
         )
 
-        self.assertEqual(result.model.name, "qwen3:4b-instruct")
+        self.assertEqual(result.model.name, get_model("fast").name)
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
 
     def test_heavy_model_selection(self) -> None:
@@ -54,7 +55,7 @@ class TestModelManager(unittest.TestCase):
             self.make_gpu(),
         )
 
-        self.assertEqual(result.model.name, "qwen3:14b")
+        self.assertEqual(result.model.name, get_model("heavy").name)
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
 
     def test_heavy_model_blocked_when_vram_is_critical(self) -> None:
