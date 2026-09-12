@@ -18,12 +18,16 @@ import { listen } from "@tauri-apps/api/event";
 import {
   QronosVoicePlayer,
 } from "./audio/QronosVoicePlayer";
+import {
+  sendConversationMessage,
+  useConversationStore,
+} from "./conversationStore";
+import { useLibraryStore } from "./libraryStore";
+import {
+  refreshSettings,
+  useSettingsStore,
+} from "./settingsStore";
 
-import SmartQueuePanel from "./components/SmartQueuePanel";
-import type {
-  QueueRefusal,
-  QueueSnapshot,
-} from "./components/SmartQueuePanel";
 import "./App.css";
 
 import ConversationSpine from "./components/ConversationSpine";
@@ -133,33 +137,25 @@ const subtitleByScenario: Record<
 };
 
 function App() {
-  // The queue. Whole state each time rather than a delta, with a revision to
-  // drop anything that arrives out of order — the bridge sends it that way
-  // because a delta stream cannot recover from one mangled line.
-  const [
-    queueSnapshot,
-    setQueueSnapshot,
-  ] = useState<QueueSnapshot | null>(
-    null,
-  );
+  const {
+    pendingRequestId,
+  } =
+    useConversationStore();
+
+  const { unreadCount: libraryUnreadCount } = useLibraryStore();
+  const settingsState = useSettingsStore();
+  const [conversationFocusMessageId, setConversationFocusMessageId] = useState<string | null>(null);
 
   const [
-    queueRefusal,
-    setQueueRefusal,
-  ] = useState<QueueRefusal | null>(
-    null,
-  );
+    homeDraft,
+    setHomeDraft,
+  ] =
+    useState("");
 
-  // The status line's text comes from a scenario lookup and has no free-text
-  // channel. This is the only way in, and it is temporary by design: the
-  // queue is a thing that happened, not a mode Qronos is in.
-  const [
-    statusOverride,
-    setStatusOverride,
-  ] = useState<{
-    label: string;
-    subtitle: string;
-  } | null>(null);
+  const homeComposerRef =
+    useRef<HTMLTextAreaElement | null>(
+      null,
+    );
 
   const [
     scenario,
@@ -168,6 +164,11 @@ function App() {
     useState<DebugScenario>(
       "idle",
     );
+
+  const [
+    runtimePaused,
+    setRuntimePaused,
+  ] = useState(false);
 
   const [
     audioFrame,
@@ -188,6 +189,27 @@ function App() {
     setUiScale,
   ] =
     useState(1);
+
+  const userScalePercent =
+    typeof settingsState.values["appearance.ui_scale_percent"] === "number"
+      ? Math.max(
+          90,
+          Math.min(
+            110,
+            Math.round(
+              settingsState.values["appearance.ui_scale_percent"] as number,
+            ),
+          ),
+        )
+      : 100;
+
+  const keepInTray =
+    settingsState.values["system.keep_in_tray"] === true;
+
+  const outputDeviceId =
+    typeof settingsState.values["voice.output_device_id"] === "string"
+      ? (settingsState.values["voice.output_device_id"] as string)
+      : "";
 
   const [
     viewPhase,
@@ -1180,15 +1202,13 @@ function App() {
                 break;
 
               case "runtime_ready":
+                // A new Python runtime always starts unpaused. Global pause is
+                // deliberately temporary and never survives runtime restart.
+                setRuntimePaused(false);
+
                 // start_runtime() only means that the Python process was
                 // spawned. runtime_ready is the authoritative signal that
                 // the bridge is ready to accept startup actions.
-                void invoke(
-                  "queue_list",
-                ).catch(
-                  () => undefined,
-                );
-
                 void invoke(
                   "send_runtime_action",
                   {
@@ -1205,56 +1225,42 @@ function App() {
                 );
                 break;
 
-              case "queue_changed":
+              case "runtime_pause_changed": {
                 try {
-                  const next = JSON.parse(
+                  const parsed = JSON.parse(
                     event.payload.message,
-                  ) as QueueSnapshot;
+                  ) as {
+                    paused?: unknown;
+                  };
 
-                  setQueueSnapshot(
-                    (current) =>
-                      current &&
-                      current.revision >
-                        next.revision
-                        ? current
-                        : next,
+                  const paused =
+                    parsed.paused === true;
+
+                  setRuntimePaused(
+                    paused,
                   );
-                } catch {
-                  // A queue we cannot read is better ignored than shown
-                  // wrongly; the next event carries the whole state again.
-                }
-                break;
 
-              case "queue_task_queued":
-                setStatusOverride({
-                  label:
-                    "کار سنگین نگه داشته شد",
-                  subtitle:
-                    "WORK QUEUED — MACHINE BUSY",
-                });
+                  if (paused) {
+                    voicePlayerRef.current?.stop();
 
-                window.setTimeout(
-                  () => {
-                    setStatusOverride(
-                      null,
+                    setAudioFrame({
+                      level: 0,
+                      bands: Array.from(
+                        { length: 32 },
+                        () => 0,
+                      ),
+                    });
+
+                    setScenario(
+                      "idle",
                     );
-                  },
-                  6000,
-                );
-                break;
-
-              case "queue_override_refused":
-                try {
-                  setQueueRefusal(
-                    JSON.parse(
-                      event.payload
-                        .message,
-                    ) as QueueRefusal,
-                  );
+                  }
                 } catch {
-                  // Same reasoning as above.
+                  // Ignore malformed pause telemetry; the control remains
+                  // authoritative only when the runtime sends valid state.
                 }
                 break;
+              }
 
               case "voice_turn_complete":
                 if (
@@ -1435,71 +1441,153 @@ function App() {
   const statusLabel =
     useMemo(
       () =>
-        statusOverride?.label ??
         statusByScenario[
           scenario
         ],
-      [
-        scenario,
-        statusOverride,
-      ],
+      [scenario],
     );
 
   const statusSubtitle =
     useMemo(
       () =>
-        statusOverride?.subtitle ??
         subtitleByScenario[
           scenario
         ],
-      [
-        scenario,
-        statusOverride,
-      ],
+      [scenario],
     );
 
-  // Work waiting for the machine to free up. Drives the badge, so a queued
-  // task is visible without having to be on the permissions screen.
-  const waitingCount =
-    useMemo(
-      () =>
-        (
-          queueSnapshot?.tasks ?? []
-        ).filter(
-          (task) =>
-            task.state ===
-              "queued" ||
-            task.state === "paused",
-        ).length,
-      [queueSnapshot],
-    );
-
-  const sendQueueCommand =
+  const setRuntimePause =
     useCallback(
-      (
-        command: string,
-        args: Record<
-          string,
-          unknown
-        > = {},
+      async (
+        paused: boolean,
       ) => {
-        void invoke(
-          command,
-          args,
-        ).catch(
-          () => undefined,
-        );
+        try {
+          await invoke(
+            "runtime_set_paused",
+            { paused },
+          );
+
+          /*
+           * IPC accepted and flushed the command. Reflect the requested state
+           * immediately so the same control can always Pause -> Active.
+           * runtime_pause_changed remains authoritative and reconciles the
+           * state after Python processes the command.
+           *
+           * Wake resume is intentionally not a second frontend command:
+           * Python owns the full Pause/Resume lifecycle atomically.
+           */
+          setRuntimePaused(
+            paused,
+          );
+        } catch (error) {
+          console.error(
+            "[Qronos Runtime Pause]",
+            error,
+          );
+        }
       },
       [],
     );
+
+  const sendHomeMessage =
+    useCallback(
+      async () => {
+        const text =
+          homeDraft.trim();
+
+        if (
+          !text ||
+          pendingRequestId
+        ) {
+          return;
+        }
+
+        setHomeDraft("");
+
+        if (
+          homeComposerRef.current
+        ) {
+          homeComposerRef.current.style.height =
+            "24px";
+        }
+
+        await sendConversationMessage(
+          text,
+        );
+      },
+      [
+        homeDraft,
+        pendingRequestId,
+      ],
+    );
+
+  useEffect(() => {
+    void refreshSettings().catch((error) => {
+      console.error(
+        "[Qronos Settings] startup refresh failed:",
+        error,
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    if (settingsState.loading) {
+      return;
+    }
+
+    const player =
+      voicePlayerRef.current;
+
+    if (!player) {
+      return;
+    }
+
+    void player
+      .setOutputDeviceId(
+        outputDeviceId,
+      )
+      .catch((error) => {
+        console.error(
+          "[Qronos Voice Output] selected device could not be applied; system default is active:",
+          error,
+        );
+      });
+  }, [
+    outputDeviceId,
+    settingsState.loading,
+  ]);
+
+  useEffect(() => {
+    if (settingsState.loading) {
+      return;
+    }
+
+    void invoke(
+      "set_keep_in_tray",
+      {
+        enabled: keepInTray,
+      },
+    ).catch((error) => {
+      console.error(
+        "[Qronos System Tray] startup apply failed:",
+        error,
+      );
+    });
+  }, [
+    keepInTray,
+    settingsState.loading,
+  ]);
 
   useEffect(() => {
     const updateScale =
       () => {
         /*
-         * Single shared desktop scale.
-         * 1600 × 900 is the reference composition.
-         * Every major UI region consumes this same value.
+         * One shared desktop scale remains authoritative for every major
+         * Qronos region. 1600 × 900 is still the approved 100% reference.
+         *
+         * The old implementation hard-capped at 1, which made 4K displays
+         * physically tiny. Default 100% stays at 1 on ordinary 1080p-class
+         * windows, then grows smoothly on genuinely high-resolution windows.
          */
         const widthScale =
           window.innerWidth /
@@ -1509,13 +1597,42 @@ function App() {
           window.innerHeight /
           900;
 
+        const fitScale =
+          Math.min(
+            widthScale,
+            heightScale,
+          );
+
+        const automaticScale =
+          fitScale <= 1.25
+            ? Math.min(
+                1,
+                fitScale,
+              )
+            : Math.min(
+                2.15,
+                1 +
+                  (
+                    fitScale -
+                    1.25
+                  ) *
+                    0.9,
+              );
+
+        const preferredScale =
+          automaticScale *
+          (
+            userScalePercent /
+            100
+          );
+
         const next =
           Math.max(
             0.62,
             Math.min(
-              1,
-              widthScale,
-              heightScale,
+              2.4,
+              fitScale,
+              preferredScale,
             ),
           );
 
@@ -1539,7 +1656,7 @@ function App() {
         updateScale,
       );
     };
-  }, []);
+  }, [userScalePercent]);
 
   useEffect(() => {
     return () => {
@@ -1630,9 +1747,6 @@ function App() {
 
       <section className="core-zone">
         <div className="orb-shell">
-          <div className="orb-ring orb-ring-1" />
-          <div className="orb-ring orb-ring-2" />
-
           <QronosOrb
             size={460}
             state={orbState}
@@ -1703,10 +1817,19 @@ function App() {
           </button>
 
           <textarea
+            ref={homeComposerRef}
             className="command-input"
             rows={1}
             placeholder="از کرونوس بپرس..."
             aria-label="دستور کرونوس"
+            value={homeDraft}
+            onChange={(
+              event,
+            ) => {
+              setHomeDraft(
+                event.currentTarget.value,
+              );
+            }}
             onInput={(
               event,
             ) => {
@@ -1728,12 +1851,33 @@ function App() {
                   nextHeight,
                 )}px`;
             }}
+            onKeyDown={(
+              event,
+            ) => {
+              if (
+                event.key ===
+                  "Enter" &&
+                !event.shiftKey
+              ) {
+                event.preventDefault();
+                void sendHomeMessage();
+              }
+            }}
           />
 
           <button
             type="button"
             className="command-action command-action-send"
             aria-label="ارسال"
+            onClick={() => {
+              void sendHomeMessage();
+            }}
+            disabled={
+              !homeDraft.trim() ||
+              Boolean(
+                pendingRequestId,
+              )
+            }
           >
             <svg
               viewBox="0 0 24 24"
@@ -1817,6 +1961,8 @@ function App() {
         onClose={
           returnHome
         }
+        focusMessageId={conversationFocusMessageId}
+        onFocusConsumed={() => setConversationFocusMessageId(null)}
       />
 
       <LibraryView
@@ -1847,43 +1993,18 @@ function App() {
         onClose={
           returnHome
         }
+        onShowConversation={(messageId) => {
+          setConversationFocusMessageId(messageId);
+          openConversations();
+        }}
       />
 
       <PermissionsView
-        smartQueue={
-          <SmartQueuePanel
-            snapshot={
-              queueSnapshot
-            }
-            refusal={
-              queueRefusal
-            }
-            onOverride={(
-              taskId,
-            ) =>
-              sendQueueCommand(
-                "queue_override",
-                { taskId },
-              )
-            }
-            onCancel={(taskId) =>
-              sendQueueCommand(
-                "queue_cancel",
-                { taskId },
-              )
-            }
-            onTogglePaused={(
-              paused,
-            ) =>
-              sendQueueCommand(
-                "queue_set_paused",
-                { paused },
-              )
-            }
-            onDismissRefusal={() =>
-              setQueueRefusal(null)
-            }
-          />
+        runtimePaused={
+          runtimePaused
+        }
+        onToggleRuntimePaused={
+          setRuntimePause
         }
         phase={
           settingsEntrySource === "permissions" &&
@@ -1904,6 +2025,7 @@ function App() {
           returnHome
         }
       />
+
 
       <SettingsView
         phase={
@@ -1975,8 +2097,9 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            خانه
+          <span className="nav-label">
+            <strong>خانه</strong>
+            <small>Home</small>
           </span>
         </button>
 
@@ -2010,8 +2133,9 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            گفتگوها
+          <span className="nav-label">
+            <strong>گفتگوها</strong>
+            <small>Chat</small>
           </span>
         </button>
 
@@ -2052,8 +2176,18 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            کتابخانه
+          {libraryUnreadCount > 0 && (
+            <span
+              className="nav-notification-badge"
+              aria-label={`${libraryUnreadCount} مورد جدید در کتابخانه`}
+            >
+              {libraryUnreadCount > 99 ? "99+" : libraryUnreadCount}
+            </span>
+          )}
+
+          <span className="nav-label">
+            <strong>کتابخانه</strong>
+            <small>Library</small>
           </span>
         </button>
 
@@ -2088,17 +2222,9 @@ function App() {
             </svg>
           </span>
 
-          {waitingCount > 0 && (
-            <span
-              className="nav-notification-badge"
-              aria-label={`${waitingCount} کار در انتظار`}
-            >
-              {waitingCount}
-            </span>
-          )}
-
-          <span>
-            مجوزها
+          <span className="nav-label">
+            <strong>مجوزها</strong>
+            <small>Permissions</small>
           </span>
         </button>
 
@@ -2146,8 +2272,9 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            تنظیمات
+          <span className="nav-label">
+            <strong>تنظیمات</strong>
+            <small>Settings</small>
           </span>
         </button>
       </nav>

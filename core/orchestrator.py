@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -13,10 +15,13 @@ from core.brain_runtime import (
     BrainMessageRole,
     BrainRuntime,
 )
+from core.compute_estimator import ComputeEstimator, ComputeLevel
 from core.model_manager import (
     ModelManager,
     TaskClass,
 )
+from core.model_registry import get_model
+from core.memory_runtime import MemoryRuntime
 from core.ollama_controller import OllamaController
 from core.resource_guard import (
     read_gpu_status,
@@ -70,6 +75,20 @@ Response rules:
 """.strip()
 
 
+FORCE_BRAIN_ENV = "QRONOS_FORCE_BRAIN"
+HEAVY_EFFORT_ENV = "QRONOS_HEAVY_EFFORT"
+
+
+def _keep_alive_enabled(value: str) -> bool:
+    return value.strip().lower() not in {
+        "",
+        "0",
+        "0s",
+        "0m",
+        "0h",
+    }
+
+
 @dataclass(frozen=True)
 class StepResult:
     """Result of one executed task step."""
@@ -101,6 +120,7 @@ class Orchestrator:
         activity_guard: ActivityGuard | None = None,
         workers: WorkerRegistry | None = None,
         telemetry: TelemetryCache | None = None,
+        memory_runtime: MemoryRuntime | None = None,
     ) -> None:
         self.runtime = (
             runtime
@@ -136,6 +156,15 @@ class Orchestrator:
             )
         )
 
+        self.memory_runtime = memory_runtime
+        if (
+            self.memory_runtime is None
+            and MemoryRuntime.enabled_by_environment()
+        ):
+            self.memory_runtime = MemoryRuntime(
+                activity_guard=self.activity_guard,
+            )
+
         # Empty unless something registers a worker, so an orchestrator
         # built the old way behaves exactly as it did before.
         self.workers = (
@@ -143,6 +172,18 @@ class Orchestrator:
             if workers is not None
             else WorkerRegistry()
         )
+
+        # ComputeEstimator is now authoritative only for Heavy effort
+        # (eco/normal/deep). Intent Gate + Resolver authority remains a
+        # separate routing stage, so this change does not silently replace
+        # the current worker/router behavior.
+        self.compute_estimator = ComputeEstimator()
+
+        # Warm-model ownership must survive across turns.  The global resource
+        # ledger is process-local, so a model preloaded by the PowerShell helper
+        # (or kept alive by Ollama after a previous turn) has to be adopted by
+        # the Python runtime before ActivityGuard classifies GPU pressure.
+        self._resident_brain_reservations: dict[str, str] = {}
 
     def execute_plan(
         self,
@@ -165,6 +206,11 @@ class Orchestrator:
         results: list[StepResult] = []
 
         for step in plan.steps:
+            # Adopt any configured Fast/Heavy model that is already resident
+            # before pressure classification.  This prevents a Qronos-owned
+            # warm model from being mistaken for new external/user GPU load.
+            self._sync_resident_brain_ownership()
+
             activity_state = (
                 self.activity_guard.detect()
             )
@@ -205,6 +251,20 @@ class Orchestrator:
         task_class = self._get_task_class(
             step
         )
+
+        # Generic evaluation override. This is deliberately role-based rather
+        # than model-name-based so Qronos remains modular when either brain is
+        # replaced later. Worker routes remain untouched.
+        forced_brain = os.environ.get(
+            FORCE_BRAIN_ENV,
+            "auto",
+        ).strip().lower()
+
+        if task_class is not None:
+            if forced_brain == "fast":
+                task_class = TaskClass.FAST
+            elif forced_brain == "heavy":
+                task_class = TaskClass.HEAVY
 
         if task_class is None:
             return self._execute_with_worker(
@@ -269,6 +329,20 @@ class Orchestrator:
                     ),
                 )
 
+            memory_context = ""
+            if self.memory_runtime is not None:
+                try:
+                    memory_result = self.memory_runtime.context_for_query(
+                        step.description,
+                        activity_mode=live_state.mode,
+                        resource_pressure=live_state.resource_pressure,
+                    )
+                    memory_context = memory_result.context
+                except Exception:
+                    # User Memory is optional context. It must never turn a
+                    # valid Brain request into a failed request.
+                    memory_context = ""
+
             messages = (
                 self._build_brain_messages(
                     description=(
@@ -280,8 +354,21 @@ class Orchestrator:
                     conversation_messages=(
                         conversation_messages
                     ),
+                    memory_context=memory_context,
                 )
             )
+
+            generation_effort = self._generation_effort(
+                task_class=task_class,
+                description=step.description,
+            )
+            generation = selection.model.generation_for(
+                generation_effort
+            )
+
+            think_value = generation.think
+            generation_budget = generation.num_predict
+            keep_alive = generation.keep_alive
 
             reservation = self._reserve_brain_resources(
                 selection.model.name,
@@ -294,40 +381,41 @@ class Orchestrator:
                         selection.model.name
                     ),
                     messages=messages,
-                    think=(
-                        task_class
-                        is TaskClass.HEAVY
-                    ),
-                    num_predict=(
-                        512
-                        if task_class
-                        is TaskClass.HEAVY
-                        else 256
-                    ),
+                    think=think_value,
+                    num_predict=generation_budget,
                     num_ctx=(
                         selection.model.context_tokens
                     ),
-                    # Nothing is kept warm. Both brains are unloaded the moment
-                    # they have answered, so Qronos holds no VRAM between turns.
-                    keep_alive="0",
+                    keep_alive=keep_alive,
                 )
             finally:
-                # Resource cleanup must run on success, model failure and
-                # request timeout. Cleanup failure must not hide the original
-                # model result/error.
-                try:
-                    self.runtime.stop_model(
-                        selection.model.name
-                    )
-                except Exception:
+                # Model residency and resource ownership have the same lifetime.
+                # If keep_alive is enabled, retain the reservation while Ollama
+                # actually keeps this model resident.  A later role swap or
+                # keep-alive expiry is reconciled by _sync_resident_brain_ownership.
+                if not _keep_alive_enabled(keep_alive):
                     try:
-                        self.runtime.unload_all()
+                        self.runtime.stop_model(
+                            selection.model.name
+                        )
                     except Exception:
-                        pass
+                        try:
+                            self.model_manager.unload_qronos_models()
+                        except Exception:
+                            pass
 
-                self._release_brain_resources(
-                    reservation.reservation_id
-                )
+                    self._release_brain_resources(
+                        reservation.reservation_id
+                    )
+                else:
+                    self._sync_resident_brain_ownership()
+
+                    if not self.model_manager.is_model_resident(
+                        selection.model.name
+                    ):
+                        self._release_brain_resources(
+                            reservation.reservation_id
+                        )
 
             return StepResult(
                 order=step.order,
@@ -342,6 +430,23 @@ class Orchestrator:
                 output="",
                 error=str(exc),
             )
+
+    def release_brains_for_voice_phase(self) -> bool:
+        """
+        Yield only configured Qronos Fast/Heavy models for the next GPU voice
+        phase.
+
+        This is intentionally narrower than runtime.unload_all(): unrelated
+        Ollama models owned by the user are never touched. Warm ownership is
+        reconciled immediately so ActivityGuard cannot keep stale Brain VRAM
+        reservations after the physical model has yielded the slot.
+        """
+        changed = self.model_manager.unload_qronos_models()
+
+        self._sync_resident_brain_ownership()
+        self.telemetry.invalidate()
+
+        return changed
 
     def answer_web_prompt(self, prompt: str) -> str:
         """Run Web Research's evidence prompt through the guarded Fast Brain."""
@@ -397,73 +502,205 @@ class Orchestrator:
         resource_pressure: ResourcePressure,
     ):
         """
-        Prepare resources and return the selected model.
+        Prepare the one available Qronos brain slot, then evaluate admission.
+
+        On the 8 GB development GPU, Fast and Heavy are logically available
+        together but are not allowed to accumulate in VRAM together. Only
+        configured Qronos models are swapped; unrelated Ollama models are not
+        touched.
         """
+
+        slot_changed = self.model_manager.prepare_model_slot(
+            task_class
+        )
+
+        if slot_changed:
+            # Release ownership for the model that was just evicted before
+            # reclassifying pressure for the target role.
+            self._sync_resident_brain_ownership()
+            self.telemetry.invalidate()
+            refreshed = self.activity_guard.detect()
+            activity_mode = refreshed.mode
+            resource_pressure = refreshed.resource_pressure
 
         snapshot = self.telemetry.current()
         system = snapshot.system
         gpu = snapshot.gpu
 
-        selection = (
-            self.model_manager.select_model(
-                task_class=task_class,
-                system=system,
-                gpu=gpu,
-                activity_mode=activity_mode,
-                resource_pressure=(
-                    resource_pressure
-                ),
-            )
+        selection = self.model_manager.select_model(
+            task_class=task_class,
+            system=system,
+            gpu=gpu,
+            activity_mode=activity_mode,
+            resource_pressure=resource_pressure,
         )
 
-        if (
-            selection.decision
-            is ResourceDecision.ALLOW
-        ):
+        if selection.decision is ResourceDecision.ALLOW:
             return selection
 
-        # WARN and BLOCK are both handled conservatively for now.
-        # WARN will later become an approval workflow.
-        running_models = (
-            self.runtime.list_running_models()
+        # If the currently resident Qronos model still cannot be admitted,
+        # unload Qronos-owned models only, refresh telemetry and retry once.
+        # Never unload unrelated Ollama models owned by the user.
+        changed = self.model_manager.unload_qronos_models()
+
+        if not changed:
+            return selection
+
+        self.telemetry.invalidate()
+        refreshed_activity = self.activity_guard.detect()
+        snapshot = self.telemetry.current()
+
+        return self.model_manager.select_model(
+            task_class=task_class,
+            system=snapshot.system,
+            gpu=snapshot.gpu,
+            activity_mode=refreshed_activity.mode,
+            resource_pressure=refreshed_activity.resource_pressure,
         )
 
-        if running_models:
-            self.runtime.unload_all()
+    @staticmethod
+    def _brain_profiles_by_name():
+        profiles = {}
 
-            # The pressure that triggered cleanup may have been caused by
-            # Qronos's own resident model. Invalidate the shared raw snapshot
-            # before ActivityGuard reclassifies pressure; otherwise it can
-            # reuse the exact pre-unload reading that caused the refusal.
-            self.telemetry.invalidate()
-            refreshed_activity = self.activity_guard.detect()
-            snapshot = self.telemetry.current()
-            system = snapshot.system
-            gpu = snapshot.gpu
+        for role in ("fast", "heavy"):
+            model = get_model(role)
+            profiles[model.name] = model
 
-            retry = (
-                self.model_manager.select_model(
-                    task_class=task_class,
-                    system=system,
-                    gpu=gpu,
-                    activity_mode=refreshed_activity.mode,
-                    resource_pressure=(
-                        refreshed_activity.resource_pressure
-                    ),
-                )
+        return profiles
+
+    def _running_brain_names(self) -> set[str]:
+        try:
+            running = {
+                item.name
+                for item in self.runtime.list_running_models()
+                if item.name
+            }
+        except Exception:
+            return set()
+
+        return running.intersection(
+            self._brain_profiles_by_name().keys()
+        )
+
+    def _active_brain_reservation(self, model_name: str):
+        workload = f"brain:{model_name}"
+
+        for reservation in GLOBAL_RESOURCE_LEDGER.active(
+            ResourceOwner.QRONOS
+        ):
+            if reservation.workload == workload:
+                return reservation
+
+        return None
+
+    def _sync_resident_brain_ownership(self) -> None:
+        """
+        Reconcile actual Ollama Fast/Heavy residency with ResourceLedger.
+
+        The PowerShell preloader runs in a different process, and Ollama can
+        also keep a model warm after a completed turn.  In both cases the
+        Python ledger must adopt the resident model before ActivityGuard reads
+        pressure; otherwise Qronos can classify its own VRAM/GPU activity as
+        external load and evict the Heavy Brain it is about to use.
+        """
+
+        running_names = self._running_brain_names()
+        profiles = self._brain_profiles_by_name()
+        changed = False
+
+        for model_name, reservation_id in list(
+            self._resident_brain_reservations.items()
+        ):
+            if model_name in running_names:
+                continue
+
+            self._release_brain_resources(
+                reservation_id,
+                forget_mapping=False,
+            )
+            self._resident_brain_reservations.pop(
+                model_name,
+                None,
+            )
+            changed = True
+
+        for model_name in running_names:
+            reservation_id = self._resident_brain_reservations.get(
+                model_name
             )
 
-            return retry
+            if reservation_id is not None:
+                active = GLOBAL_RESOURCE_LEDGER.get(
+                    reservation_id
+                )
 
-        return selection
+                if (
+                    active is not None
+                    and active in GLOBAL_RESOURCE_LEDGER.active(
+                        ResourceOwner.QRONOS
+                    )
+                ):
+                    continue
+
+                self._resident_brain_reservations.pop(
+                    model_name,
+                    None,
+                )
+
+            existing = self._active_brain_reservation(
+                model_name
+            )
+
+            if existing is not None:
+                self._resident_brain_reservations[
+                    model_name
+                ] = existing.reservation_id
+                continue
+
+            profile = profiles[model_name]
+            reservation = GLOBAL_RESOURCE_LEDGER.reserve(
+                owner=ResourceOwner.QRONOS,
+                workload=f"brain:{model_name}",
+                priority=WorkloadPriority.INTERACTIVE_WARM,
+                budget=ResourceBudget(
+                    vram_mb=max(
+                        0,
+                        int(
+                            round(
+                                float(profile.estimated_vram_gb)
+                                * 1024.0
+                            )
+                        ),
+                    )
+                ),
+                allow_duplicate_workload=False,
+            )
+            self._resident_brain_reservations[
+                model_name
+            ] = reservation.reservation_id
+            changed = True
+
+        if changed:
+            self.telemetry.invalidate()
 
     def _reserve_brain_resources(
         self,
         model_name: str,
         estimated_vram_gb: float,
     ):
-        """Register admitted Brain VRAM as a Qronos-owned workload."""
-        return GLOBAL_RESOURCE_LEDGER.reserve(
+        """Reserve or reuse ownership for one Fast/Heavy brain."""
+
+        existing = self._active_brain_reservation(
+            model_name
+        )
+
+        if existing is not None:
+            self._resident_brain_reservations[
+                model_name
+            ] = existing.reservation_id
+            return existing
+
+        reservation = GLOBAL_RESOURCE_LEDGER.reserve(
             owner=ResourceOwner.QRONOS,
             workload=f"brain:{model_name}",
             priority=WorkloadPriority.ACTIVE_QRONOS_REQUEST,
@@ -478,16 +715,21 @@ class Orchestrator:
                     ),
                 )
             ),
-            allow_duplicate_workload=True,
+            allow_duplicate_workload=False,
         )
+        self._resident_brain_reservations[
+            model_name
+        ] = reservation.reservation_id
+        self.telemetry.invalidate()
+        return reservation
 
     def _release_brain_resources(
         self,
         reservation_id: str,
+        *,
+        forget_mapping: bool = True,
     ) -> None:
-        """
-        Release Brain ownership and force the next telemetry read fresh.
-        """
+        """Release Brain ownership and invalidate cached telemetry."""
         try:
             GLOBAL_RESOURCE_LEDGER.release(
                 reservation_id
@@ -499,8 +741,49 @@ class Orchestrator:
             pass
 
         finally:
+            if forget_mapping:
+                for model_name, tracked_id in list(
+                    self._resident_brain_reservations.items()
+                ):
+                    if tracked_id == reservation_id:
+                        self._resident_brain_reservations.pop(
+                            model_name,
+                            None,
+                        )
+
             self.telemetry.invalidate()
 
+
+    def _generation_effort(
+        self,
+        task_class: TaskClass,
+        description: str,
+    ) -> str:
+        if task_class is TaskClass.FAST:
+            return "default"
+
+        override = os.environ.get(
+            HEAVY_EFFORT_ENV,
+            "auto",
+        ).strip().lower()
+
+        if override in {"eco", "normal", "deep"}:
+            return override
+
+        estimate = self.compute_estimator.estimate(
+            description
+        )
+
+        if estimate.level is ComputeLevel.HEAVY_DEEP:
+            return "deep"
+
+        if estimate.level is ComputeLevel.HEAVY_NORMAL:
+            return "normal"
+
+        # A capability-sensitive request can legitimately route to Heavy while
+        # requiring little raw compute. In that case Heavy ECO is the correct
+        # execution profile.
+        return "eco"
 
     @staticmethod
     def _resource_error(
@@ -622,6 +905,7 @@ class Orchestrator:
         conversation_messages: (
             Sequence[BrainMessage] | None
         ) = None,
+        memory_context: str = "",
     ) -> list[BrainMessage]:
         """
         Build the complete model context for one Qronos step.
@@ -640,6 +924,14 @@ class Orchestrator:
                 content=QRONOS_SYSTEM_PROMPT,
             )
         ]
+
+        if memory_context.strip():
+            messages.append(
+                BrainMessage(
+                    role=BrainMessageRole.SYSTEM,
+                    content=memory_context.strip(),
+                )
+            )
 
         if conversation_messages:
             for message in conversation_messages:

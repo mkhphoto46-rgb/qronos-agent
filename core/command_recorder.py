@@ -5,7 +5,7 @@ import wave
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 import numpy as np
 
@@ -331,6 +331,7 @@ class CommandRecorder:
         self,
         output_path: str | Path,
         on_audio_spectrum: AudioSpectrumCallback | None = None,
+        initial_frames: Iterable[bytes] | None = None,
     ) -> CommandRecordingResult:
         destination = Path(
             output_path
@@ -414,11 +415,24 @@ class CommandRecorder:
         if started_here:
             self.audio_input.start()
 
+        # Wake detection can become ready before the heavier command VAD is
+        # prepared. During that short background warm-up the Wake thread keeps
+        # reading the already-open microphone and hands those frames here.
+        # Consume them before touching the live stream so a user who says a
+        # command immediately after "Qronos" never loses the first words.
+        buffered_frames: deque[bytes] = deque(
+            bytes(frame)
+            for frame in (initial_frames or ())
+        )
+
         try:
             while True:
-                frame = (
-                    self.audio_input.read_frame()
-                )
+                if buffered_frames:
+                    frame = buffered_frames.popleft()
+                else:
+                    frame = (
+                        self.audio_input.read_frame()
+                    )
 
                 if on_audio_spectrum is not None:
                     try:

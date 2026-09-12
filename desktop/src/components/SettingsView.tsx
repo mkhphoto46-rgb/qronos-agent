@@ -6,6 +6,30 @@ import {
 } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+import {
+  approveMemory,
+  deleteMemory,
+  rebuildMemoryIndex,
+  refreshMemory,
+  retryPendingMemory,
+  setMemoryEnabled,
+  supersedeMemory,
+  useMemoryStore,
+} from "../memoryStore";
+
+import {
+  refreshSettings,
+  setSetting,
+  useSettingsStore,
+  type SettingValue,
+} from "../settingsStore";
+
+import {
+  type AudioOutputDevice,
+  type AudioOutputDevicesResponse,
+} from "../audio/audioOutput";
 
 import "./SettingsView.css";
 
@@ -44,7 +68,7 @@ type SectionDefinition = {
 const sections: SectionDefinition[] = [
   { id: "general", group: "GENERAL", label: "عمومی", english: "General", icon: "01", keywords: ["theme", "language", "startup", "update", "ظاهر", "زبان", "شروع"] },
   { id: "hotkeys", group: "GENERAL", label: "کلیدهای میانبر", english: "Hotkeys & Shortcuts", icon: "02", keywords: ["hotkey", "shortcut", "keyboard", "کلید", "میانبر", "کیبورد"] },
-  { id: "voice", group: "QRONOS", label: "صدا و Wake Word", english: "Voice & Wake Word", icon: "03", keywords: ["voice", "wake", "microphone", "sensitivity", "صدا", "میکروفون", "حساسیت"] },
+  { id: "voice", group: "QRONOS", label: "صدا و Wake Word", english: "Voice & Wake Word", icon: "03", keywords: ["voice", "wake", "microphone", "speaker", "output", "sensitivity", "صدا", "میکروفون", "خروجی", "حساسیت"] },
   { id: "behavior", group: "QRONOS", label: "رفتار و شخصی‌سازی", english: "Behavior", icon: "04", keywords: ["response", "thinking", "instructions", "پاسخ", "رفتار", "دستور"] },
   { id: "memory", group: "QRONOS", label: "حافظه", english: "Memory", icon: "05", keywords: ["memory", "remember", "حافظه", "یادآوری"] },
   { id: "performance", group: "SYSTEM", label: "عملکرد", english: "Performance", icon: "06", keywords: ["eco", "balanced", "performance", "priority", "عملکرد", "منابع"] },
@@ -66,6 +90,27 @@ type HotkeyBinding = {
 };
 
 type HotkeySettings = { schemaVersion: number; bindings: HotkeyBinding[] };
+
+type MicrophoneDevice = {
+  id: string;
+  name: string;
+  hostApi: string;
+  deviceIndex: number | null;
+  isDefault: boolean;
+  maxInputChannels: number;
+};
+
+type AudioDevicesResponse = {
+  ok: boolean;
+  devices: MicrophoneDevice[];
+  selectedDeviceId?: string;
+  selectionRemapped?: boolean;
+};
+
+type SystemIntegrationSnapshot = {
+  launchAtStartup: boolean;
+  keepInTray: boolean;
+};
 
 const fallbackHotkeys: HotkeySettings = { schemaVersion: 1, bindings: [] };
 
@@ -124,8 +169,8 @@ function SettingRow({
 function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SectionId>("general");
   const [query, setQuery] = useState("");
-  const [wakeWord, setWakeWord] = useState(true);
-  const [memory, setMemory] = useState(true);
+  const [sensitivityDraft, setSensitivityDraft] = useState(56);
+  const voiceMutationRef = useRef(false);
   const [webSources, setWebSources] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [notificationEvents, setNotificationEvents] = useState<Record<string, boolean>>({
@@ -135,16 +180,38 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     Warnings: true,
     Updates: true,
   });
-  // Both start off and stay off. Neither is implemented — there is no
-  // startup registration and no tray icon in tauri.conf.json — and a
-  // switch showing ON for a feature that does not exist is worse than an
-  // absent switch, because the user believes it and stops looking.
   const [launchAtStartup, setLaunchAtStartup] = useState(false);
   const [tray, setTray] = useState(false);
+  const [systemIntegrationLoading, setSystemIntegrationLoading] = useState(true);
+  const [microphones, setMicrophones] = useState<MicrophoneDevice[]>([
+    {
+      id: "",
+      name: "Default Microphone",
+      hostApi: "Windows Default",
+      deviceIndex: null,
+      isDefault: true,
+      maxInputChannels: 1,
+    },
+  ]);
+  const [microphonesLoading, setMicrophonesLoading] = useState(false);
+  const [canonicalInputDeviceId, setCanonicalInputDeviceId] = useState("");
+  const [inputLevel, setInputLevel] = useState(0);
+  const [outputDevices, setOutputDevices] = useState<AudioOutputDevice[]>([
+    {
+      id: "",
+      name: "System Default Output",
+      hostApi: "Windows / system default",
+      deviceIndex: null,
+      isDefault: true,
+      maxOutputChannels: 2,
+      defaultSampleRate: 0,
+    },
+  ]);
+  const [outputDevicesLoading, setOutputDevicesLoading] = useState(false);
+  const [canonicalOutputDeviceId, setCanonicalOutputDeviceId] = useState("");
   const [theme, setTheme] = useState("System");
   const [uiLanguage, setUiLanguage] = useState("فارسی");
   const [responseLanguage, setResponseLanguage] = useState("Auto");
-  const [sensitivity, setSensitivity] = useState(56);
   const [responseLength, setResponseLength] = useState("Balanced");
   const [thinkingMode, setThinkingMode] = useState("Adaptive");
   const [performance, setPerformance] = useState("Balanced");
@@ -156,6 +223,321 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
   const [capturingAction, setCapturingAction] = useState<string | null>(null);
   const [capturedShortcut, setCapturedShortcut] = useState("");
   const captureRef = useRef<HTMLDivElement | null>(null);
+
+  const memoryState = useMemoryStore();
+  const settingsState = useSettingsStore();
+
+  const wakeWord =
+    typeof settingsState.values["voice.wake_word_enabled"] === "boolean"
+      ? (settingsState.values["voice.wake_word_enabled"] as boolean)
+      : true;
+
+  const wakeSensitivity =
+    typeof settingsState.values["voice.wake_sensitivity"] === "number"
+      ? Math.max(
+          0,
+          Math.min(
+            100,
+            Math.round(
+              settingsState.values["voice.wake_sensitivity"] as number,
+            ),
+          ),
+        )
+      : 56;
+
+  const voiceLanguageCode =
+    typeof settingsState.values["voice.language"] === "string"
+      ? (settingsState.values["voice.language"] as string)
+      : "fa";
+
+  const voiceLanguageLabel =
+    voiceLanguageCode === "auto"
+      ? "Persian + English"
+      : voiceLanguageCode === "en"
+        ? "English"
+        : "Persian";
+
+  const inputDeviceId =
+    typeof settingsState.values["voice.input_device_id"] === "string"
+      ? (settingsState.values["voice.input_device_id"] as string)
+      : "";
+
+  const microphoneSelectValue =
+    microphones.some((device) => device.id === inputDeviceId)
+      ? inputDeviceId
+      : microphones.some((device) => device.id === canonicalInputDeviceId)
+        ? canonicalInputDeviceId
+        : inputDeviceId;
+
+  const outputDeviceId =
+    typeof settingsState.values["voice.output_device_id"] === "string"
+      ? (settingsState.values["voice.output_device_id"] as string)
+      : "";
+
+  const outputSelectValue =
+    outputDevices.some((device) => device.id === outputDeviceId)
+      ? outputDeviceId
+      : outputDevices.some((device) => device.id === canonicalOutputDeviceId)
+        ? canonicalOutputDeviceId
+        : outputDeviceId;
+
+  const uiScalePercent =
+    typeof settingsState.values["appearance.ui_scale_percent"] === "number"
+      ? Math.max(
+          90,
+          Math.min(
+            110,
+            Math.round(
+              settingsState.values["appearance.ui_scale_percent"] as number,
+            ),
+          ),
+        )
+      : 100;
+
+  const persistedTray =
+    settingsState.values["system.keep_in_tray"] === true;
+
+  const refreshSystemIntegration = async () => {
+    setSystemIntegrationLoading(true);
+
+    try {
+      const state = await invoke<SystemIntegrationSnapshot>(
+        "get_system_integration_state",
+      );
+      setLaunchAtStartup(state.launchAtStartup);
+      setTray(state.keepInTray);
+    } catch (error) {
+      console.error("[Qronos System Integration] refresh failed:", error);
+    } finally {
+      setSystemIntegrationLoading(false);
+    }
+  };
+
+  const refreshMicrophones = async () => {
+    setMicrophonesLoading(true);
+
+    try {
+      const result = await invoke<AudioDevicesResponse>(
+        "settings_command",
+        {
+          operation: "audio_devices",
+          payload: {},
+        },
+      );
+
+      if (!result.ok || !Array.isArray(result.devices)) {
+        throw new Error("Microphone backend returned an invalid device list.");
+      }
+
+      setMicrophones(result.devices);
+      setCanonicalInputDeviceId(
+        typeof result.selectedDeviceId === "string"
+          ? result.selectedDeviceId
+          : "",
+      );
+    } catch (error) {
+      console.error("[Qronos Microphone] enumeration failed:", error);
+      showToast(String(error));
+    } finally {
+      setMicrophonesLoading(false);
+    }
+  };
+
+  const refreshOutputDevices = async () => {
+    setOutputDevicesLoading(true);
+
+    try {
+      const result = await invoke<AudioOutputDevicesResponse>(
+        "settings_command",
+        {
+          operation: "audio_output_devices",
+          payload: {},
+        },
+      );
+
+      if (!result.ok || !Array.isArray(result.devices)) {
+        throw new Error(
+          "Audio output backend returned an invalid device list.",
+        );
+      }
+
+      setOutputDevices(result.devices);
+      setCanonicalOutputDeviceId(
+        typeof result.selectedDeviceId === "string"
+          ? result.selectedDeviceId
+          : "",
+      );
+    } catch (error) {
+      console.error(
+        "[Qronos Voice Output] native enumeration failed:",
+        error,
+      );
+
+      setOutputDevices([
+        {
+          id: "",
+          name: "System Default Output",
+          hostApi: "Windows / system default",
+          deviceIndex: null,
+          isDefault: true,
+          maxOutputChannels: 2,
+          defaultSampleRate: 0,
+        },
+      ]);
+      setCanonicalOutputDeviceId("");
+      showToast(String(error));
+    } finally {
+      setOutputDevicesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (phase === "settings" || phase === "entering-settings") {
+      void refreshMemory();
+      void refreshSettings().catch(() => undefined);
+      void refreshSystemIntegration();
+      void refreshMicrophones();
+      void refreshOutputDevices();
+    }
+  }, [phase]);
+
+  useEffect(() => {
+    if (
+      activeSection !== "voice" ||
+      (phase !== "settings" && phase !== "entering-settings")
+    ) {
+      return;
+    }
+
+    const refreshNativeAudioDevices = () => {
+      void refreshMicrophones();
+      void refreshOutputDevices();
+    };
+
+    const handleWindowFocus = () => {
+      refreshNativeAudioDevices();
+    };
+
+    const handleDeviceChange = () => {
+      refreshNativeAudioDevices();
+    };
+
+    window.addEventListener(
+      "focus",
+      handleWindowFocus,
+    );
+
+    navigator.mediaDevices?.addEventListener(
+      "devicechange",
+      handleDeviceChange,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "focus",
+        handleWindowFocus,
+      );
+
+      navigator.mediaDevices?.removeEventListener(
+        "devicechange",
+        handleDeviceChange,
+      );
+    };
+  }, [activeSection, phase]);
+
+  useEffect(() => {
+    setSensitivityDraft(wakeSensitivity);
+  }, [wakeSensitivity, settingsState.revision]);
+
+  useEffect(() => {
+    if (
+      activeSection !== "voice" ||
+      (phase !== "settings" && phase !== "entering-settings")
+    ) {
+      setInputLevel(0);
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let meterStarted = false;
+
+    const connect = async () => {
+      unlisten = await listen<{
+        eventType: string;
+        status: string;
+        message: string;
+      }>(
+        "qronos://runtime-event",
+        (event) => {
+          if (event.payload.eventType !== "microphone_input_level") {
+            return;
+          }
+
+          try {
+            const payload = JSON.parse(event.payload.message) as {
+              level?: unknown;
+              active?: unknown;
+            };
+
+            const level =
+              typeof payload.level === "number"
+                ? Math.max(0, Math.min(1, payload.level))
+                : 0;
+
+            if (!disposed) {
+              setInputLevel(level);
+            }
+          } catch {
+            if (!disposed) {
+              setInputLevel(0);
+            }
+          }
+        },
+      );
+
+      const status = await invoke<{ running: boolean }>(
+        "get_runtime_status",
+      );
+
+      if (!status.running || disposed) {
+        return;
+      }
+
+      await invoke(
+        "send_runtime_action",
+        {
+          actionId: "qronos.input_meter_start",
+        },
+      );
+
+      meterStarted = true;
+    };
+
+    void connect().catch((error) => {
+      console.error("[Qronos Microphone Meter]", error);
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      setInputLevel(0);
+
+      if (meterStarted) {
+        void invoke(
+          "send_runtime_action",
+          {
+            actionId: "qronos.input_meter_stop",
+          },
+        ).catch(() => undefined);
+      }
+    };
+  }, [activeSection, phase]);
+
+  const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
+  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
+  const [editingMemoryValue, setEditingMemoryValue] = useState("");
+  const [memoryBusy, setMemoryBusy] = useState(false);
 
   useEffect(() => {
     invoke<HotkeySettings>("get_hotkey_settings")
@@ -184,6 +566,206 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     window.setTimeout(() => setToast(""), 1900);
   };
 
+  const reloadVoiceSettingsInRuntime = async () => {
+    const status = await invoke<{ running: boolean }>(
+      "get_runtime_status",
+    );
+
+    if (!status.running) {
+      return false;
+    }
+
+    await invoke(
+      "send_runtime_action",
+      {
+        actionId: "qronos.settings_reload",
+      },
+    );
+
+    return true;
+  };
+
+  const applyVoiceSetting = async (
+    key: string,
+    value: SettingValue,
+    successMessage: string,
+  ) => {
+    if (voiceMutationRef.current) {
+      return;
+    }
+
+    voiceMutationRef.current = true;
+
+    try {
+      await setSetting(
+        key,
+        value,
+      );
+
+      try {
+        const appliedNow =
+          await reloadVoiceSettingsInRuntime();
+
+        showToast(
+          appliedNow
+            ? successMessage
+            : `${successMessage} در اجرای بعدی Runtime اعمال می‌شود.`,
+        );
+      } catch (runtimeError) {
+        console.error(
+          "[Qronos Settings] runtime apply failed:",
+          runtimeError,
+        );
+
+        showToast(
+          "تنظیم ذخیره شد؛ Runtime فعلی نتوانست آن را اعمال کند و با اجرای بعدی اعمال می‌شود.",
+        );
+      }
+    } catch (error) {
+      console.error(
+        "[Qronos Settings] save failed:",
+        error,
+      );
+
+      void refreshSettings().catch(
+        () => undefined,
+      );
+
+      showToast(
+        String(error),
+      );
+    } finally {
+      voiceMutationRef.current = false;
+    }
+  };
+
+  const applyOutputSetting = async (
+    deviceId: string,
+    successMessage: string,
+  ) => {
+    try {
+      await setSetting(
+        "voice.output_device_id",
+        deviceId,
+      );
+      await refreshOutputDevices();
+      showToast(successMessage);
+    } catch (error) {
+      console.error(
+        "[Qronos Voice Output] selection failed:",
+        error,
+      );
+      showToast(String(error));
+    }
+  };
+
+  const commitWakeSensitivity = (
+    next: number,
+  ) => {
+    const cleaned = Math.max(
+      0,
+      Math.min(
+        100,
+        Math.round(next),
+      ),
+    );
+
+    setSensitivityDraft(cleaned);
+
+    if (cleaned === wakeSensitivity) {
+      return;
+    }
+
+    void applyVoiceSetting(
+      "voice.wake_sensitivity",
+      cleaned,
+      "حساسیت Wake Word ذخیره و اعمال شد.",
+    );
+  };
+
+  const setLaunchWithWindows = async (
+    enabled: boolean,
+  ) => {
+    try {
+      const state = await invoke<SystemIntegrationSnapshot>(
+        "set_launch_at_startup",
+        { enabled },
+      );
+
+      setLaunchAtStartup(state.launchAtStartup);
+      setTray(state.keepInTray);
+      showToast(
+        state.launchAtStartup
+          ? "اجرای Qronos همراه Windows فعال شد."
+          : "اجرای Qronos همراه Windows غیرفعال شد.",
+      );
+    } catch (error) {
+      showToast(String(error));
+      void refreshSystemIntegration();
+    }
+  };
+
+  const setKeepInTray = async (
+    enabled: boolean,
+  ) => {
+    const previous = persistedTray;
+
+    try {
+      const state = await invoke<SystemIntegrationSnapshot>(
+        "set_keep_in_tray",
+        { enabled },
+      );
+
+      try {
+        await setSetting(
+          "system.keep_in_tray",
+          state.keepInTray,
+        );
+      } catch (persistError) {
+        await invoke<SystemIntegrationSnapshot>(
+          "set_keep_in_tray",
+          { enabled: previous },
+        ).catch(() => undefined);
+
+        throw persistError;
+      }
+
+      setTray(state.keepInTray);
+      showToast(
+        state.keepInTray
+          ? "System Tray فعال شد."
+          : "System Tray غیرفعال شد.",
+      );
+    } catch (error) {
+      showToast(String(error));
+      void refreshSettings().catch(() => undefined);
+      void refreshSystemIntegration();
+    }
+  };
+
+  const setInterfaceScale = async (
+    label: string,
+  ) => {
+    const parsed = Number(
+      label.replace("%", ""),
+    );
+
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+
+    try {
+      await setSetting(
+        "appearance.ui_scale_percent",
+        Math.round(parsed),
+      );
+      showToast("مقیاس رابط ذخیره شد.");
+    } catch (error) {
+      showToast(String(error));
+      void refreshSettings().catch(() => undefined);
+    }
+  };
+
   const chooseSection = (id: SectionId) => {
     setActiveSection(id);
     setQuery("");
@@ -206,7 +788,13 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
           <Select value={theme} onChange={setTheme} options={["System", "Dark", "Light"]} />
         </SettingRow>
         <SettingRow title="مقیاس رابط" description="اندازه عناصر رابط کاربری.">
-          <Select value="100%" onChange={() => undefined} options={["90%", "100%", "110%"]} />
+          <Select
+            value={`${uiScalePercent}%`}
+            onChange={(next) => {
+              void setInterfaceScale(next);
+            }}
+            options={["90%", "100%", "110%"]}
+          />
         </SettingRow>
       </SettingGroup>
       <SettingGroup title="LANGUAGE" index="02">
@@ -218,11 +806,25 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
         </SettingRow>
       </SettingGroup>
       <SettingGroup title="STARTUP" index="03">
-        <SettingRow title="اجرا همراه Windows" description="هنوز در دسترس نیست — Qronos پس از ورود شما آماده شود.">
-          <Toggle checked={launchAtStartup} onChange={setLaunchAtStartup} label="Launch with Windows" disabled />
+        <SettingRow title="اجرا همراه Windows" description="پس از ورود به Windows، Qronos به‌صورت خودکار اجرا شود.">
+          <Toggle
+            checked={launchAtStartup}
+            onChange={(next) => {
+              void setLaunchWithWindows(next);
+            }}
+            label="Launch with Windows"
+            disabled={systemIntegrationLoading}
+          />
         </SettingRow>
-        <SettingRow title="حفظ در System Tray" description="هنوز در دسترس نیست — با بستن پنجره، Qronos در پس‌زمینه فعال بماند.">
-          <Toggle checked={tray} onChange={setTray} label="Keep in system tray" disabled />
+        <SettingRow title="حفظ در System Tray" description="با بستن پنجره، Qronos در پس‌زمینه فعال بماند و از Tray باز شود.">
+          <Toggle
+            checked={tray}
+            onChange={(next) => {
+              void setKeepInTray(next);
+            }}
+            label="Keep in system tray"
+            disabled={systemIntegrationLoading}
+          />
         </SettingRow>
       </SettingGroup>
       <SettingGroup title="ABOUT QRONOS" index="04">
@@ -239,14 +841,52 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
       <SectionHeader kicker="VOICE INTERACTION" title="صدا و Wake Word" description="نحوه شنیدن و پاسخ صوتی Qronos را کنترل کنید." />
       <SettingGroup title="WAKE WORD" index="01">
         <SettingRow title="Wake Word" description="فعال‌سازی محلی Qronos با عبارت آموزش‌دیده." accent>
-          <Toggle checked={wakeWord} onChange={setWakeWord} label="Wake Word" />
+          <Toggle
+            checked={wakeWord}
+            onChange={(next) => {
+              void applyVoiceSetting(
+                "voice.wake_word_enabled",
+                next,
+                next
+                  ? "Wake Word فعال شد."
+                  : "Wake Word غیرفعال شد.",
+              );
+            }}
+            label="Wake Word"
+          />
         </SettingRow>
         <SettingRow title="عبارت بیدارباش" description="این مدل برای عبارت ثابت Qronos آموزش دیده است.">
           <div className="settings-locked-value"><span>QRONOS</span><small>LOCKED</small></div>
         </SettingRow>
         <SettingRow title="حساسیت تشخیص" description="تعادل بین تشخیص بهتر و فعال‌شدن ناخواسته.">
           <div className="settings-slider-wrap">
-            <input aria-label="Wake Word sensitivity" type="range" min="0" max="100" value={sensitivity} onChange={(event) => setSensitivity(Number(event.target.value))} />
+            <input
+              aria-label="Wake Word sensitivity"
+              type="range"
+              min="0"
+              max="100"
+              value={sensitivityDraft}
+              onChange={(event) => {
+                setSensitivityDraft(
+                  Number(event.target.value),
+                );
+              }}
+              onPointerUp={(event) => {
+                commitWakeSensitivity(
+                  Number(event.currentTarget.value),
+                );
+              }}
+              onKeyUp={(event) => {
+                commitWakeSensitivity(
+                  Number(event.currentTarget.value),
+                );
+              }}
+              onBlur={(event) => {
+                commitWakeSensitivity(
+                  Number(event.currentTarget.value),
+                );
+              }}
+            />
             <div><span>LOW</span><strong>BALANCED</strong><span>HIGH</span></div>
           </div>
         </SettingRow>
@@ -256,17 +896,117 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
         </div>
       </SettingGroup>
       <SettingGroup title="INPUT & RECOGNITION" index="02">
-        <SettingRow title="میکروفون" description="دستگاه ورودی پیش‌فرض Windows.">
-          <Select value="Default Microphone" onChange={() => undefined} options={["Default Microphone"]} />
+        <SettingRow title="میکروفون" description="دستگاه ورودی صوتی Windows برای Qronos.">
+          <label className="settings-select">
+            <select
+              value={microphoneSelectValue}
+              disabled={microphonesLoading}
+              onChange={(event) => {
+                setCanonicalInputDeviceId(event.target.value);
+                void applyVoiceSetting(
+                  "voice.input_device_id",
+                  event.target.value,
+                  "میکروفون ورودی ذخیره و اعمال شد.",
+                );
+              }}
+            >
+              {inputDeviceId &&
+                !microphones.some(
+                  (device) => device.id === microphoneSelectValue,
+                ) && (
+                  <option value={inputDeviceId}>
+                    Unavailable microphone — using system default
+                  </option>
+                )}
+              {microphones.map((device) => (
+                <option
+                  key={device.id || "__default__"}
+                  value={device.id}
+                >
+                  {device.id
+                    ? `${device.name}${device.isDefault ? " • SYSTEM DEFAULT" : ""}`
+                    : "Default Microphone"}
+                </option>
+              ))}
+            </select>
+            <span>⌄</span>
+          </label>
         </SettingRow>
-        <div className="settings-level-meter"><span>INPUT LEVEL</span><div>{Array.from({ length: 18 }, (_, i) => <i key={i} className={i < 11 ? "active" : ""} />)}</div><small>LIVE PREVIEW</small></div>
+        <div className="settings-level-meter">
+          <span>INPUT LEVEL</span>
+          <div>
+            {Array.from({ length: 18 }, (_, i) => (
+              <i
+                key={i}
+                className={
+                  i < Math.round(inputLevel * 18)
+                    ? "active"
+                    : ""
+                }
+              />
+            ))}
+          </div>
+          <small>LIVE PREVIEW</small>
+        </div>
         <SettingRow title="زبان تشخیص" description="تشخیص خودکار گفتار فارسی و انگلیسی.">
-          <Select value="Persian + English" onChange={() => undefined} options={["Persian + English", "Persian", "English"]} />
+          <Select
+            value={voiceLanguageLabel}
+            onChange={(next) => {
+              const language =
+                next === "Persian + English"
+                  ? "auto"
+                  : next === "English"
+                    ? "en"
+                    : "fa";
+
+              void applyVoiceSetting(
+                "voice.language",
+                language,
+                "زبان تشخیص گفتار ذخیره و اعمال شد.",
+              );
+            }}
+            options={["Persian + English", "Persian", "English"]}
+          />
         </SettingRow>
       </SettingGroup>
       <SettingGroup title="VOICE OUTPUT" index="03">
-        <SettingRow title="صدای Qronos" description="صدای پیش‌فرض خروجی.">
-          <Select value="Qronos Default" onChange={() => undefined} options={["Qronos Default"]} />
+        <SettingRow title="دستگاه خروجی" description="اسپیکر یا هدفونی که پاسخ صوتی Qronos از آن پخش می‌شود.">
+          <label className="settings-select">
+            <select
+              value={outputSelectValue}
+              disabled={outputDevicesLoading}
+              onChange={(event) => {
+                const next = event.target.value;
+
+                void applyOutputSetting(
+                  next,
+                  next
+                    ? "دستگاه خروجی صدای Qronos ذخیره و اعمال شد."
+                    : "خروجی صدای Qronos روی System Default قرار گرفت.",
+                );
+              }}
+            >
+              {outputDeviceId &&
+                !outputDevices.some(
+                  (device) => device.id === outputDeviceId,
+                ) && (
+                  <option value={outputDeviceId}>
+                    Unavailable output — using system default
+                  </option>
+                )}
+              {outputDevices.map((device) => (
+                <option
+                  key={device.id || "__system_output__"}
+                  value={device.id}
+                >
+                  {device.id
+                    ? `${device.name} • ${device.hostApi}`
+                    : device.name}
+                </option>
+              ))}
+            </select>
+            <span>⌄</span>
+          </label>
         </SettingRow>
         <SettingRow title="سرعت صدا" description="سرعت پخش پاسخ‌های صوتی.">
           <div className="settings-mini-slider"><input aria-label="Voice speed" type="range" min="70" max="130" defaultValue="100" /><strong>1.0×</strong></div>
@@ -376,19 +1116,317 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     </>
   );
 
-  const renderMemory = () => (
-    <>
-      <SectionHeader kicker="PERSISTENT CONTEXT" title="حافظه" description="اطلاعات ماندگاری را که Qronos برای گفتگوهای بعدی نگه می‌دارد مدیریت کنید." />
-      <SettingGroup title="MEMORY CONTROL" index="01">
-        <SettingRow title="Qronos Memory" description="استفاده از اطلاعات ماندگار در گفتگوهای آینده." accent><Toggle checked={memory} onChange={setMemory} label="Qronos Memory" /></SettingRow>
-      </SettingGroup>
-      <div className="settings-empty-system">
-        <div className="settings-dna-mark"><i /><i /><i /></div>
-        <span>MEMORY MANAGER</span><strong>آماده اتصال به Memory Service</strong><p>تعداد و محتوای حافظه‌ها فقط پس از اتصال داده واقعی نمایش داده می‌شود.</p>
-        <button type="button" disabled>MANAGE MEMORY</button>
-      </div>
-    </>
-  );
+  const runMemoryAction = async (
+    action: () => Promise<void>,
+    successMessage?: string,
+  ) => {
+    try {
+      setMemoryBusy(true);
+      await action();
+      if (successMessage) showToast(successMessage);
+    } catch (error) {
+      showToast(
+        `Memory: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setMemoryBusy(false);
+    }
+  };
+
+  const beginMemoryEdit = (id: string, value: string) => {
+    setEditingMemoryId(id);
+    setEditingMemoryValue(value);
+  };
+
+  const saveMemoryEdit = async () => {
+    const id = editingMemoryId;
+    const value = editingMemoryValue.trim();
+    if (!id || !value) return;
+
+    await runMemoryAction(
+      async () => {
+        await supersedeMemory(id, value);
+        setEditingMemoryId(null);
+        setEditingMemoryValue("");
+      },
+      "اصلاح حافظه ثبت شد",
+    );
+  };
+
+  const renderMemory = () => {
+    const {
+      enabled,
+      counts,
+      provider,
+      index,
+      memories,
+      loading,
+      error,
+      databasePath,
+      vectorPath,
+    } = memoryState;
+
+    const providerLabel = provider.ready
+      ? "LOCAL EMBEDDING READY"
+      : provider.reason === "embedding_model_not_installed"
+        ? "EMBEDDING MODEL NOT INSTALLED"
+        : provider.reason === "loading"
+          ? "CHECKING EMBEDDING"
+          : "EMBEDDING OFFLINE";
+
+    const activeMemories = memories.filter(
+      (item) => item.status !== "SUPERSEDED",
+    );
+
+    return (
+      <>
+        <SectionHeader kicker="PERSISTENT CONTEXT" title="حافظه" description="اطلاعات ماندگاری را که Qronos برای گفتگوهای بعدی نگه می‌دارد مدیریت کنید." />
+
+        <SettingGroup title="MEMORY CONTROL" index="01">
+          <SettingRow
+            title="Qronos Memory"
+            description="استفاده از حافظه‌های فعال در گفتگوهای آینده. خاموش کردن این گزینه داده‌ها را حذف نمی‌کند."
+            accent
+          >
+            <Toggle
+              checked={enabled}
+              onChange={(next) =>
+                void runMemoryAction(
+                  () => setMemoryEnabled(next),
+                  next ? "Memory فعال شد" : "Memory غیرفعال شد",
+                )
+              }
+              label="Qronos Memory"
+              disabled={loading || memoryBusy}
+            />
+          </SettingRow>
+
+          <SettingRow
+            title="Vector Index"
+            description="هر Memory فعال باید embedding محلی معتبر داشته باشد؛ Vector Index منبع حقیقت نیست و قابل بازسازی است."
+          >
+            <div className="settings-memory-index-state">
+              <strong className={index.healthy ? "ready" : "attention"}>
+                {index.healthy ? "HEALTHY" : "ATTENTION"}
+              </strong>
+              <span>
+                {index.count} VECTOR
+                {index.dimensions > 0 ? ` • ${index.dimensions}D` : ""}
+              </span>
+            </div>
+          </SettingRow>
+        </SettingGroup>
+
+        <div className="settings-empty-system settings-memory-system">
+          <div className="settings-dna-mark"><i /><i /><i /></div>
+          <span>MEMORY MANAGER</span>
+          <strong>
+            {loading
+              ? "در حال خواندن Memory Service..."
+              : error
+                ? "Memory Service در دسترس نیست"
+                : `${counts.active} حافظه فعال`}
+          </strong>
+          <p>
+            {error
+              ? error
+              : `${providerLabel} • ${counts.pendingEmbedding} منتظر Vector • ${counts.pendingReview} منتظر بررسی`}
+          </p>
+
+          <div className="settings-memory-summary">
+            <div>
+              <span>ACTIVE</span>
+              <strong>{counts.active}</strong>
+            </div>
+            <div>
+              <span>PENDING</span>
+              <strong>{counts.pendingEmbedding + counts.pendingReview}</strong>
+            </div>
+            <div>
+              <span>INDEX</span>
+              <strong>{index.count}</strong>
+            </div>
+          </div>
+
+          <div className="settings-memory-manager-actions">
+            <button
+              type="button"
+              className="settings-memory-manage-button"
+              disabled={loading || Boolean(error)}
+              onClick={() => setMemoryManagerOpen((current) => !current)}
+            >
+              {memoryManagerOpen ? "CLOSE MANAGER" : "MANAGE MEMORY"}
+            </button>
+
+            <button
+              type="button"
+              className="settings-memory-secondary-button"
+              disabled={memoryBusy}
+              onClick={() =>
+                void runMemoryAction(
+                  () => refreshMemory(),
+                  "Memory refresh شد",
+                )
+              }
+            >
+              REFRESH
+            </button>
+          </div>
+
+          {memoryManagerOpen && (
+            <div className="settings-memory-manager">
+              <header>
+                <div>
+                  <span>CANONICAL MEMORY</span>
+                  <strong>{provider.model || "NO EMBEDDING MODEL"}</strong>
+                </div>
+                <small>
+                  {provider.localOnly ? "LOCAL ONLY" : "REMOTE BLOCKED"}
+                </small>
+              </header>
+
+              <div className="settings-memory-paths">
+                <span title={databasePath}>DB • {databasePath || "—"}</span>
+                <span title={vectorPath}>VECTOR • {vectorPath || "—"}</span>
+              </div>
+
+              <div className="settings-memory-list">
+                {activeMemories.length === 0 ? (
+                  <div className="settings-memory-empty">
+                    هنوز حافظه‌ای ثبت نشده است.
+                  </div>
+                ) : (
+                  activeMemories.map((item) => (
+                    <article
+                      key={item.id}
+                      className={`settings-memory-item settings-memory-${item.status.toLowerCase()}`}
+                    >
+                      {editingMemoryId === item.id ? (
+                        <div className="settings-memory-editor">
+                          <textarea
+                            value={editingMemoryValue}
+                            onChange={(event) =>
+                              setEditingMemoryValue(event.target.value)
+                            }
+                            maxLength={8000}
+                          />
+                          <div>
+                            <button
+                              type="button"
+                              disabled={memoryBusy || !editingMemoryValue.trim()}
+                              onClick={() => void saveMemoryEdit()}
+                            >
+                              SAVE REVISION
+                            </button>
+                            <button
+                              type="button"
+                              disabled={memoryBusy}
+                              onClick={() => {
+                                setEditingMemoryId(null);
+                                setEditingMemoryValue("");
+                              }}
+                            >
+                              CANCEL
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="settings-memory-item-copy">
+                            <strong>{item.value}</strong>
+                            <span>
+                              {item.category.toUpperCase()}
+                              {" • "}
+                              {item.scopeType.toUpperCase()}
+                              {item.scopeKey ? `:${item.scopeKey}` : ""}
+                              {" • "}
+                              {Math.round(item.confidence * 100)}%
+                              {" • "}
+                              {item.evidenceType.toUpperCase()}
+                            </span>
+                          </div>
+
+                          <div className="settings-memory-item-state">
+                            <small>{item.status.replace(/_/g, " ")}</small>
+                            {item.status === "PENDING_REVIEW" && (
+                              <button
+                                type="button"
+                                disabled={memoryBusy}
+                                onClick={() =>
+                                  void runMemoryAction(
+                                    () => approveMemory(item.id),
+                                    "Memory برای Vectorization تأیید شد",
+                                  )
+                                }
+                              >
+                                APPROVE
+                              </button>
+                            )}
+                            {item.status === "ACTIVE" && (
+                              <button
+                                type="button"
+                                disabled={memoryBusy}
+                                onClick={() =>
+                                  beginMemoryEdit(item.id, item.value)
+                                }
+                              >
+                                EDIT
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="danger"
+                              disabled={memoryBusy}
+                              onClick={() =>
+                                void runMemoryAction(
+                                  () => deleteMemory(item.id),
+                                  "Memory حذف شد",
+                                )
+                              }
+                            >
+                              DELETE
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </article>
+                  ))
+                )}
+              </div>
+
+              <footer>
+                <button
+                  type="button"
+                  disabled={memoryBusy || !provider.ready || counts.pendingEmbedding === 0}
+                  onClick={() =>
+                    void runMemoryAction(
+                      () => retryPendingMemory(),
+                      "Pending Memory بررسی شد",
+                    )
+                  }
+                >
+                  RETRY PENDING
+                </button>
+
+                <button
+                  type="button"
+                  disabled={memoryBusy || !provider.ready}
+                  onClick={() =>
+                    void runMemoryAction(
+                      () => rebuildMemoryIndex(),
+                      "Vector Index بازسازی شد",
+                    )
+                  }
+                >
+                  REBUILD INDEX
+                </button>
+              </footer>
+            </div>
+          )}
+        </div>
+      </>
+    );
+  };
 
   const renderPerformance = () => (
     <>

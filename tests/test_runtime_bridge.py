@@ -53,6 +53,7 @@ from core.runtime_bridge import (
     parse_payload,
 )
 from core.task_router import TaskRouter, TaskType
+from core.settings_service import DEFAULT_DEFINITIONS, SettingsService
 
 
 class FakeClock:
@@ -185,7 +186,11 @@ class FakeOrchestrator:
         self.error = error
         self.plans: list[Any] = []
 
-    def execute_plan(self, plan: Any) -> list[StepResult]:
+    def execute_plan(
+        self,
+        plan: Any,
+        conversation_messages=None,
+    ) -> list[StepResult]:
         self.plans.append(plan)
 
         if self.error is not None:
@@ -242,7 +247,16 @@ def prepared_runtime(
     attributes in is enough to make the real code path run without touching
     hardware. Nothing is patched.
     """
-    runtime = QronosRuntime()
+    # Unit tests must never inherit the user's production Settings file.
+    # In particular, voice.language can legitimately be "auto", "fa", or "en"
+    # in production. Use shipped in-memory defaults so this helper is
+    # deterministic and cannot make a user's preference fail an unrelated test.
+    runtime = QronosRuntime(
+        settings=SettingsService(
+            DEFAULT_DEFINITIONS,
+            path=None,
+        )
+    )
 
     runtime.audio_input = FakeAudioInput()
     runtime.vad_runtime = object()
@@ -443,10 +457,15 @@ class TestPushToTalkSequence(unittest.TestCase):
         events = captured_events(runtime.push_to_talk)
         types = event_types(events)
 
-        # The spectrum frames are interleaved and counted separately; what
-        # matters here is that the milestones arrive in this order.
+        # Spectrum frames and canonical history events are additive.
+        # The PTT contract itself is the ordered voice milestone sequence.
         milestones = [
-            name for name in types if not name.startswith("voice_audio")
+            name
+            for name in types
+            if (
+                name.startswith("voice_")
+                and not name.startswith("voice_audio")
+            )
         ]
 
         self.assertEqual(
@@ -460,6 +479,22 @@ class TestPushToTalkSequence(unittest.TestCase):
                 "voice_synthesizing",
                 "voice_turn_complete",
             ],
+        )
+
+        canonical_messages = [
+            json.loads(event["message"])
+            for event in events
+            if event["eventType"]
+            == "conversation_message_added"
+        ]
+
+        self.assertEqual(
+            [message["role"] for message in canonical_messages],
+            ["user", "qronos"],
+        )
+        self.assertEqual(
+            [message["source"] for message in canonical_messages],
+            ["voice", "voice"],
         )
 
     def test_the_transcript_reaches_the_interface_unchanged(self) -> None:

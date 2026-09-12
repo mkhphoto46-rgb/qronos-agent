@@ -1,6 +1,11 @@
 import {
   convertFileSrc,
+  invoke,
 } from "@tauri-apps/api/core";
+
+import {
+  isNativeAudioOutputDeviceId,
+} from "./audioOutput";
 
 export type VoicePlaybackSpeed =
   | "slow"
@@ -215,6 +220,12 @@ export class QronosVoicePlayer {
     VoicePlaybackSpeed =
       "normal";
 
+  private outputDeviceId = "";
+
+  private nativePlaybackActive = false;
+
+  private nativePlaybackStartedAtMs = 0;
+
   private generation = 0;
 
   private queue: string[] = [];
@@ -288,6 +299,7 @@ export class QronosVoicePlayer {
       this.state === "loading" ||
       this.state === "playing" ||
       this.state === "paused" ||
+      this.nativePlaybackActive ||
       this.queue.length > 0
     );
   }
@@ -303,6 +315,20 @@ export class QronosVoicePlayer {
     }
   }
 
+  getOutputDeviceId():
+    string {
+    return this.outputDeviceId;
+  }
+
+  async setOutputDeviceId(
+    deviceId: string,
+  ): Promise<void> {
+    // The system-default route stays in the WebView player. Explicit devices
+    // are native PortAudio endpoints and are applied when each WAV starts.
+    this.outputDeviceId =
+      deviceId.trim();
+  }
+
   async playPath(
     inputPath: string,
   ): Promise<void> {
@@ -313,6 +339,7 @@ export class QronosVoicePlayer {
 
     if (
       this.audio !== null ||
+      this.nativePlaybackActive ||
       this.state === "loading" ||
       this.state === "playing" ||
       this.state === "paused"
@@ -376,6 +403,8 @@ export class QronosVoicePlayer {
     this.stopSpectrumLoop();
     this.emitSilentSpectrum();
     this.spectrum = null;
+    this.nativePlaybackActive = false;
+    this.nativePlaybackStartedAtMs = 0;
 
     const audio =
       this.audio;
@@ -424,6 +453,113 @@ export class QronosVoicePlayer {
   }
 
   private async startPath(
+    path: string,
+  ): Promise<void> {
+    if (
+      isNativeAudioOutputDeviceId(
+        this.outputDeviceId,
+      )
+    ) {
+      try {
+        await this.startNativePath(
+          path,
+        );
+        return;
+      } catch (value) {
+        const error =
+          value instanceof Error
+            ? value
+            : new Error(String(value));
+
+        // A selected endpoint may disappear between enumeration and playback.
+        // Fail open for this response instead of making Qronos silent.
+        this.nativePlaybackActive = false;
+        this.nativePlaybackStartedAtMs = 0;
+        this.stopSpectrumLoop();
+        this.emitSilentSpectrum();
+        this.onError?.(error);
+      }
+    }
+
+    await this.startHtmlPath(
+      path,
+    );
+  }
+
+  private async startNativePath(
+    path: string,
+  ): Promise<void> {
+    const generation =
+      this.generation;
+
+    this.audio = null;
+    this.spectrum = null;
+    this.nativePlaybackActive = true;
+    this.nativePlaybackStartedAtMs =
+      performance.now();
+
+    this.setState(
+      "loading",
+    );
+
+    void this.loadSpectrumSidecarWithRetry(
+      path,
+      generation,
+    );
+
+    this.setState(
+      "playing",
+    );
+
+    this.onPlaybackStarted?.(
+      this.nativePlaybackStartedAtMs,
+    );
+
+    this.startSpectrumLoop(
+      generation,
+    );
+
+    try {
+      await invoke(
+        "native_audio_output_play",
+        {
+          path,
+          deviceId:
+            this.outputDeviceId,
+        },
+      );
+    } catch (value) {
+      if (
+        generation !==
+        this.generation
+      ) {
+        return;
+      }
+
+      this.nativePlaybackActive = false;
+      this.nativePlaybackStartedAtMs = 0;
+      throw value;
+    }
+
+    if (
+      generation !==
+      this.generation
+    ) {
+      return;
+    }
+
+    this.nativePlaybackActive = false;
+    this.nativePlaybackStartedAtMs = 0;
+    this.stopSpectrumLoop();
+    this.emitSilentSpectrum();
+    this.spectrum = null;
+
+    await this.startNextQueuedPath(
+      generation,
+    );
+  }
+
+  private async startHtmlPath(
     path: string,
   ): Promise<void> {
     const generation =
@@ -749,14 +885,42 @@ export class QronosVoicePlayer {
     }
   }
 
+  private playbackPositionSeconds():
+    number | null {
+    if (this.audio) {
+      return this.audio.currentTime;
+    }
+
+    if (
+      this.nativePlaybackActive &&
+      this.nativePlaybackStartedAtMs > 0
+    ) {
+      return Math.max(
+        0,
+        (
+          performance.now() -
+          this.nativePlaybackStartedAtMs
+        ) / 1000,
+      );
+    }
+
+    return null;
+  }
+
   private emitSpectrumFrame():
     void {
     if (
-      !this.audio ||
       !this.spectrum ||
       this.spectrum.frames.length ===
         0
     ) {
+      return;
+    }
+
+    const position =
+      this.playbackPositionSeconds();
+
+    if (position === null) {
       return;
     }
 
@@ -767,7 +931,7 @@ export class QronosVoicePlayer {
           this.spectrum.frames.length -
             1,
           Math.floor(
-            this.audio.currentTime /
+            position /
               this.spectrum.frameSeconds,
           ),
         ),

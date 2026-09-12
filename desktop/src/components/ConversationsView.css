@@ -2377,3 +2377,198 @@
       1 !important;
   }
 }
+
+/* =========================================================
+   TEXT CHAT V1 — REAL RUNTIME STATES
+   ========================================================= */
+
+.conversations-empty-state {
+  align-self: center;
+
+  width:
+    min(
+      520px,
+      78%
+    );
+
+  margin:
+    auto;
+
+  padding:
+    26px
+    28px;
+
+  border:
+    1px solid
+    rgba(
+      74,
+      190,
+      226,
+      0.12
+    );
+
+  border-radius:
+    18px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(
+        8,
+        25,
+        34,
+        0.44
+      ),
+      rgba(
+        15,
+        12,
+        34,
+        0.34
+      )
+    );
+
+  text-align:
+    center;
+
+  direction:
+    rtl;
+
+  pointer-events:
+    none;
+}
+
+.conversations-empty-state span {
+  display:
+    block;
+
+  margin-bottom:
+    8px;
+
+  color:
+    rgba(
+      93,
+      218,
+      244,
+      0.68
+    );
+
+  font-size:
+    9px;
+
+  letter-spacing:
+    0.18em;
+}
+
+.conversations-empty-state strong {
+  display:
+    block;
+
+  color:
+    rgba(
+      239,
+      249,
+      252,
+      0.94
+    );
+
+  font-size:
+    15px;
+
+  font-weight:
+    600;
+}
+
+.conversations-empty-state p {
+  margin:
+    8px
+    0
+    0;
+
+  color:
+    rgba(
+      168,
+      194,
+      205,
+      0.68
+    );
+
+  font-size:
+    11px;
+
+  line-height:
+    1.8;
+}
+
+.conversation-message-pending {
+  opacity:
+    0.66;
+
+  animation:
+    qronosTextPendingPulse
+    1.45s
+    ease-in-out
+    infinite;
+}
+
+.conversation-message-error {
+  border-color:
+    rgba(
+      255,
+      142,
+      142,
+      0.2
+    ) !important;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(
+        52,
+        20,
+        30,
+        0.48
+      ),
+      rgba(
+        28,
+        16,
+        35,
+        0.42
+      )
+    ) !important;
+}
+
+.conversations-composer-input:disabled {
+  opacity:
+    0.58;
+
+  cursor:
+    wait;
+}
+
+@keyframes qronosTextPendingPulse {
+  0%,
+  100% {
+    filter:
+      brightness(0.94);
+  }
+
+  50% {
+    filter:
+      brightness(1.08);
+  }
+}
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .conversation-message-pending {
+    animation:
+      none;
+  }
+}
+
+
+/* Library provenance jump target */
+.conversation-message-source-focus{animation:qronosSourceConversationFocus 2.4s ease-out both!important}
+@keyframes qronosSourceConversationFocus{0%{box-shadow:0 0 0 1px rgba(97,229,255,.85),0 0 48px rgba(68,207,245,.3);filter:brightness(1.28)}18%{transform:translateX(0) scale(1.018)}100%{box-shadow:0 0 28px rgba(0,0,0,.07);filter:brightness(1);transform:none}}

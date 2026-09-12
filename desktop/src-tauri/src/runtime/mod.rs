@@ -13,6 +13,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const RUNTIME_EVENT_NAME: &str = "qronos://runtime-event";
 
+const MAX_TEXT_MESSAGE_CHARS: usize = 16_000;
+const MAX_TEXT_REQUEST_ID_CHARS: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeEvent {
@@ -37,6 +40,11 @@ struct RuntimeProcess {
 pub struct RuntimeManagerState {
     process: Mutex<Option<RuntimeProcess>>,
 
+    // Settings mutations run through a short-lived Python CLI process. Serialize
+    // them here so two UI requests cannot both read the same old file and then
+    // race to overwrite each other.
+    settings_command: Mutex<()>,
+
     /// None when there is no source checkout to run the Python side from,
     /// which is every installed copy until the runtime is packaged.
     project_root: Option<PathBuf>,
@@ -46,6 +54,7 @@ impl RuntimeManagerState {
     pub fn new(project_root: Option<PathBuf>) -> Self {
         Self {
             process: Mutex::new(None),
+            settings_command: Mutex::new(()),
             project_root,
         }
     }
@@ -328,6 +337,9 @@ pub fn start_runtime(
         .arg("-m")
         .arg("core.runtime_bridge")
         .current_dir(project_root)
+        .env("PYTHONUTF8", "1")
+        .env("QRONOS_MEMORY_RUNTIME", "1")
+        .env("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -467,6 +479,423 @@ pub fn send_runtime_action(
     send_to_runtime(&state, payload)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn library_command(
+    operation: String,
+    payload: Option<serde_json::Value>,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<serde_json::Value, String> {
+    let cleaned = operation.trim();
+    if cleaned.is_empty() {
+        return Err("Library operation must not be empty.".to_string());
+    }
+    let root = state.require_root()?;
+    let python = resolve_python(root)?;
+    let script = root.join("core").join("library_cli.py");
+    if !script.is_file() {
+        return Err(format!("Qronos Library backend is missing: {}", script.display()));
+    }
+    let mut command = Command::new(python);
+    command
+        .arg(script)
+        .arg(cleaned)
+        .current_dir(root)
+        .env("PYTHONUTF8", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().map_err(|error| format!("Could not start Qronos Library backend: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let body = payload.unwrap_or_else(|| serde_json::json!({}));
+        write!(stdin, "{}", body).map_err(|error| format!("Could not send Library payload: {error}"))?;
+    }
+    let output = child.wait_with_output().map_err(|error| format!("Library backend failed to finish: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stdout.is_empty() {
+        return Err(if stderr.is_empty() { "Library backend returned no data.".to_string() } else { stderr });
+    }
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("Invalid Library backend response: {error}; output={stdout}"))?;
+    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let message = value.get("error").and_then(|v| v.as_str()).unwrap_or(&stderr);
+        return Err(if message.is_empty() { "Library operation failed.".to_string() } else { message.to_string() });
+    }
+    Ok(value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn memory_command(
+    operation: String,
+    payload: Option<serde_json::Value>,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<serde_json::Value, String> {
+    let cleaned = operation.trim();
+    if cleaned.is_empty() {
+        return Err("Memory operation must not be empty.".to_string());
+    }
+    let root = state.require_root()?;
+    let python = resolve_python(root)?;
+    let script = root.join("core").join("memory_cli.py");
+    if !script.is_file() {
+        return Err(format!("Qronos Memory backend is missing: {}", script.display()));
+    }
+    let mut command = Command::new(python);
+    command
+        .arg(script)
+        .arg(cleaned)
+        .current_dir(root)
+        .env("PYTHONUTF8", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start Qronos Memory backend: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let body = payload.unwrap_or_else(|| serde_json::json!({}));
+        write!(stdin, "{}", body)
+            .map_err(|error| format!("Could not send Memory payload: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Memory backend failed to finish: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stdout.is_empty() {
+        return Err(if stderr.is_empty() {
+            "Memory backend returned no data.".to_string()
+        } else {
+            stderr
+        });
+    }
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("Invalid Memory backend response: {error}; output={stdout}"))?;
+    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let message = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&stderr);
+        return Err(if message.is_empty() {
+            "Memory operation failed.".to_string()
+        } else {
+            message.to_string()
+        });
+    }
+    Ok(value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn native_audio_output_play(
+    path: String,
+    device_id: String,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<serde_json::Value, String> {
+    let cleaned_path = path.trim();
+    let cleaned_device = device_id.trim();
+
+    if cleaned_path.is_empty() {
+        return Err("Native audio playback path must not be empty.".to_string());
+    }
+
+    if cleaned_device.is_empty() {
+        return Err(
+            "Native audio playback needs an explicit output device.".to_string(),
+        );
+    }
+
+    let root = state.require_root()?;
+    let python = resolve_python(root)?;
+    let script = root.join("core").join("audio_output_cli.py");
+
+    if !script.is_file() {
+        return Err(format!(
+            "Qronos native audio output backend is missing: {}",
+            script.display()
+        ));
+    }
+
+    let mut command = Command::new(python);
+    command
+        .arg(script)
+        .arg("play")
+        .current_dir(root)
+        .env("PYTHONUTF8", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!(
+            "Could not start Qronos native audio output backend: {error}"
+        ))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let body = serde_json::json!({
+            "path": cleaned_path,
+            "deviceId": cleaned_device,
+        });
+
+        write!(stdin, "{}", body).map_err(|error| format!(
+            "Could not send native audio output payload: {error}"
+        ))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!(
+            "Native audio output backend failed to finish: {error}"
+        ))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if stdout.is_empty() {
+        return Err(if stderr.is_empty() {
+            "Native audio output backend returned no data.".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!(
+            "Invalid native audio output response: {error}; output={stdout}"
+        )
+    })?;
+
+    if !output.status.success()
+        || value.get("ok").and_then(|value| value.as_bool()) == Some(false)
+    {
+        let message = value
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&stderr);
+
+        return Err(if message.is_empty() {
+            "Native audio output playback failed.".to_string()
+        } else {
+            message.to_string()
+        });
+    }
+
+    Ok(value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn settings_command(
+    operation: String,
+    payload: Option<serde_json::Value>,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<serde_json::Value, String> {
+    let cleaned = operation.trim();
+
+    if cleaned.is_empty() {
+        return Err("Settings operation must not be empty.".to_string());
+    }
+
+    let _settings_guard = state
+        .settings_command
+        .lock()
+        .map_err(|_| "Settings command lock failed.".to_string())?;
+
+    let root = state.require_root()?;
+    let python = resolve_python(root)?;
+    let script = root.join("core").join("settings_cli.py");
+
+    if !script.is_file() {
+        return Err(format!(
+            "Qronos Settings backend is missing: {}",
+            script.display()
+        ));
+    }
+
+    let mut command = Command::new(python);
+    command
+        .arg(script)
+        .arg(cleaned)
+        .current_dir(root)
+        .env("PYTHONUTF8", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start Qronos Settings backend: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let body = payload.unwrap_or_else(|| serde_json::json!({}));
+
+        write!(stdin, "{}", body)
+            .map_err(|error| format!("Could not send Settings payload: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Settings backend failed to finish: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if stdout.is_empty() {
+        return Err(if stderr.is_empty() {
+            "Settings backend returned no data.".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("Invalid Settings backend response: {error}; output={stdout}")
+    })?;
+
+    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let message = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&stderr);
+
+        return Err(if message.is_empty() {
+            "Settings operation failed.".to_string()
+        } else {
+            message.to_string()
+        });
+    }
+
+    Ok(value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn permissions_command(
+    operation: String,
+    payload: Option<serde_json::Value>,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<serde_json::Value, String> {
+    let cleaned = operation.trim();
+    if cleaned.is_empty() {
+        return Err("Permissions operation must not be empty.".to_string());
+    }
+
+    let root = state.require_root()?;
+    let python = resolve_python(root)?;
+    let script = root.join("core").join("permissions_cli.py");
+
+    if !script.is_file() {
+        return Err(format!(
+            "Qronos Permissions backend is missing: {}",
+            script.display()
+        ));
+    }
+
+    let mut command = Command::new(python);
+    command
+        .arg(script)
+        .arg(cleaned)
+        .current_dir(root)
+        .env("PYTHONUTF8", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start Qronos Permissions backend: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let body = payload.unwrap_or_else(|| serde_json::json!({}));
+        write!(stdin, "{}", body)
+            .map_err(|error| format!("Could not send Permissions payload: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Permissions backend failed to finish: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if stdout.is_empty() {
+        return Err(if stderr.is_empty() {
+            "Permissions backend returned no data.".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("Invalid Permissions backend response: {error}; output={stdout}")
+    })?;
+
+    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let message = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&stderr);
+
+        return Err(if message.is_empty() {
+            "Permissions operation failed.".to_string()
+        } else {
+            message.to_string()
+        });
+    }
+
+    Ok(value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn send_text_message(
+    text: String,
+    request_id: String,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let cleaned_text = text.trim();
+    let cleaned_request_id = request_id.trim();
+
+    if cleaned_text.is_empty() {
+        return Err("Text message must not be empty.".to_string());
+    }
+
+    if cleaned_text.chars().count() > MAX_TEXT_MESSAGE_CHARS {
+        return Err(format!(
+            "Text message exceeds the {MAX_TEXT_MESSAGE_CHARS} character limit."
+        ));
+    }
+
+    if cleaned_request_id.is_empty() {
+        return Err("Text request id must not be empty.".to_string());
+    }
+
+    if cleaned_request_id.chars().count() > MAX_TEXT_REQUEST_ID_CHARS {
+        return Err(format!(
+            "Text request id exceeds the {MAX_TEXT_REQUEST_ID_CHARS} character limit."
+        ));
+    }
+
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "text_message",
+            "text": cleaned_text,
+            "requestId": cleaned_request_id
+        }),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The smart queue.
 //
@@ -537,6 +966,17 @@ pub fn queue_set_paused(paused: bool, state: State<'_, RuntimeManagerState>) -> 
         &state,
         serde_json::json!({
             "command": "queue_set_paused",
+            "paused": paused
+        }),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn runtime_set_paused(paused: bool, state: State<'_, RuntimeManagerState>) -> Result<(), String> {
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "runtime_set_paused",
             "paused": paused
         }),
     )

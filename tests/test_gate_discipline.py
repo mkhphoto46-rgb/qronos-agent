@@ -49,6 +49,15 @@ DANGEROUS_IMPORTS = frozenset({"subprocess", "shutil", "winreg", "ctypes"})
 # the reason. Anything not listed has to be justified by adding it here, which
 # is the point: the list is short and someone has to look at it.
 KNOWN_SYSTEM_MODULES: dict[str, str] = {
+    "core.artifact_registry": (
+        "Its shutil/subprocess/ctypes use serves direct user-controlled Library "
+        "operations reached through the Tauri library_command control plane, "
+        "not model/runtime action execution."
+    ),
+    "core.memory_runtime": (
+        "Starts, supervises, and stops only Qronos's dedicated local CPU-only "
+        "Memory embedding sidecar and its ownership metadata."
+    ),
     "core.link_devices": (
         "Runs icacls to restrict the device key file to its owner."
     ),

@@ -4396,19 +4396,27 @@ function QronosOrb({
 
   return (
     <>
-      <canvas
-        ref={coreCanvasRef}
-        aria-label={`Qronos Orb ${state}`}
-        style={{
-          position: "absolute",
-          left: "50%",
-          top: "50%",
-          transform:
-            "translate(-50%, -50%)",
-          zIndex: 4,
-          pointerEvents: "none",
-        }}
-      />
+      <div
+        className="qronos-orb-anchor"
+        data-qronos-oracle-anchor="true"
+      >
+        <div className="orb-ring orb-ring-1" />
+        <div className="orb-ring orb-ring-2" />
+
+        <canvas
+          ref={coreCanvasRef}
+          aria-label={`Qronos Orb ${state}`}
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            transform:
+              "translate(-50%, -50%)",
+            zIndex: 4,
+            pointerEvents: "none",
+          }}
+        />
+      </div>
 
       {typeof document !==
         "undefined" &&

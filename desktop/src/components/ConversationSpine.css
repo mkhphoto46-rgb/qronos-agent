@@ -514,6 +514,13 @@
   font-size: clamp(18px, 23.808px, 21px);
   line-height: 1.92;
   font-weight: 430;
+
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  max-height: calc(1.92em * 3);
+  overflow: hidden;
 }
 
 .memory-pocket-copy-zone ::selection {

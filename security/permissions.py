@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
+from core.permission_control import effective_level_name
+
 
 class PermissionLevel(IntEnum):
     """Five authorization levels for Qronos actions."""
@@ -334,13 +336,37 @@ def get_permission_policy(
     return ACTION_POLICIES[category]
 
 
+def get_effective_permission_policy(
+    category: ActionCategory,
+) -> PermissionPolicy:
+    """Return the default policy combined with the persisted user override."""
+
+    default = get_permission_policy(category)
+    level_name = effective_level_name(
+        category.value,
+        default.level.name,
+    )
+
+    try:
+        level = PermissionLevel[level_name]
+    except KeyError:
+        level = PermissionLevel.FORBIDDEN
+
+    return PermissionPolicy(
+        category=default.category,
+        level=level,
+        reversible=default.reversible,
+        description=default.description,
+    )
+
+
 def evaluate_action(
     category: ActionCategory,
 ) -> PermissionDecision:
-    """Evaluate one categorized action against the default policy."""
+    """Evaluate one categorized action against the effective policy."""
 
     return evaluate_permission(
-        get_permission_policy(category).level,
+        get_effective_permission_policy(category).level,
     )
 
 

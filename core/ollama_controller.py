@@ -178,7 +178,7 @@ class OllamaController(BrainRuntime):
 
         A message carrying pictures gains an ``images`` field holding them
         base64-encoded, which is what this API wants. A message carrying none
-        does not gain the field at all — so every request Qronos already
+        does not gain the field at all â€” so every request Qronos already
         sends goes out byte-identical, and a test says so.
         """
 
@@ -225,7 +225,7 @@ class OllamaController(BrainRuntime):
         model_name: str,
         prompt: str = "",
         messages: Sequence[BrainMessage] | None = None,
-        think: bool = False,
+        think: bool | str = False,
         num_predict: Optional[int] = None,
         num_ctx: Optional[int] = None,
         keep_alive: str = "5m",
@@ -238,6 +238,20 @@ class OllamaController(BrainRuntime):
         Legacy single-turn callers can continue passing prompt.
         """
 
+        if isinstance(think, str):
+            cleaned_think = think.strip().lower()
+            if cleaned_think not in {"low", "medium", "high"}:
+                raise ValueError(
+                    "GPT-OSS reasoning level must be low, medium, or high."
+                )
+            think_value: bool | str = cleaned_think
+        elif isinstance(think, bool):
+            think_value = think
+        else:
+            raise TypeError(
+                "think must be a bool or one of: low, medium, high."
+            )
+
         options: dict[str, int] = {}
 
         if num_predict is not None:
@@ -247,7 +261,7 @@ class OllamaController(BrainRuntime):
 
         # Without this the server picks its own context, which for these
         # models is 262144 tokens and costs more than ten gigabytes of key
-        # and value cache — for a 2.3 GB model. Left unset, Qronos fills the
+        # and value cache â€” for a 2.3 GB model. Left unset, Qronos fills the
         # card and then refuses its own next request.
         if num_ctx is not None:
             options["num_ctx"] = num_ctx
@@ -262,7 +276,7 @@ class OllamaController(BrainRuntime):
         payload: dict = {
             "model": model_name,
             "messages": ollama_messages,
-            "think": think,
+            "think": think_value,
             "stream": False,
             "keep_alive": keep_alive,
             "options": options,
@@ -270,7 +284,7 @@ class OllamaController(BrainRuntime):
 
         # Structured output. A caller that needs a particular shape back
         # can constrain generation to it rather than describing it in the
-        # prompt and hoping — which is how the web research layer came to
+        # prompt and hoping â€” which is how the web research layer came to
         # discard every answer it produced.
         if response_format is not None:
             payload["format"] = response_format
@@ -317,16 +331,39 @@ class OllamaController(BrainRuntime):
             ) from exc
 
         data = response.json()
+        message = data.get("message", {})
 
-        return str(
-            data.get(
-                "message",
-                {},
-            ).get(
+        if not isinstance(message, dict):
+            message = {}
+
+        content = str(
+            message.get(
                 "content",
                 "",
             )
+            or ""
         )
+
+        thinking = str(
+            message.get(
+                "thinking",
+                "",
+            )
+            or ""
+        )
+
+        if (
+            not content.strip()
+            and thinking.strip()
+            and str(data.get("done_reason", "")) == "length"
+        ):
+            raise RuntimeError(
+                "GPT-OSS used the full generation budget for reasoning "
+                "before producing a final answer. Increase the live-test "
+                "budget or use a lower reasoning level."
+            )
+
+        return content
 
 
 if __name__ == "__main__":

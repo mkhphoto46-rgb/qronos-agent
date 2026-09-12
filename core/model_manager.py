@@ -5,11 +5,13 @@ from enum import Enum
 
 from core.activity_guard import (
     ActivityMode,
+    ActivityGuard,
     ResourcePressure,
 )
 from core.brain_runtime import BrainRuntime
 from core.model_registry import (
     ModelProfile,
+    configured_model_names,
     get_model,
 )
 from core.ollama_controller import OllamaController
@@ -23,43 +25,6 @@ from core.resource_policy import (
 )
 
 
-
-
-
-
-def _gpu_for_capacity_admission(
-    gpu: GpuStatus | None,
-) -> GpuStatus | None:
-    """
-    Return GPU telemetry suitable for model capacity admission.
-
-    Global GPU utilization is a contention signal, not a capacity signal.
-    On Windows/NVIDIA it cannot reliably identify whether the load belongs
-    to the user, Qronos, desktop composition, TTS, STT or another process.
-
-    External/user contention is already represented separately by
-    ResourcePressure and ActivityMode.
-
-    Capacity admission must therefore continue enforcing:
-    - VRAM occupancy
-    - GPU temperature
-    - CPU usage
-    - RAM usage
-
-    while raw global GPU utilization must not independently refuse a model.
-    """
-    if gpu is None:
-        return None
-
-    return GpuStatus(
-        name=gpu.name,
-        temperature_c=gpu.temperature_c,
-        gpu_utilization_percent=None,
-        vram_used_mb=gpu.vram_used_mb,
-        vram_total_mb=gpu.vram_total_mb,
-    )
-
-
 class TaskClass(Enum):
     FAST = "fast"
     HEAVY = "heavy"
@@ -67,57 +32,149 @@ class TaskClass(Enum):
 
 @dataclass(frozen=True)
 class ModelSelection:
-    """
-    Which model to run, and whether the machine has room to run it.
-
-    There is deliberately no "keep this one loaded" field. Nothing Qronos
-    loads stays loaded: every model is unloaded as soon as it has answered.
-    See :class:`ModelManager` for the measurements behind that.
-    """
+    """Which configured brain should run, and whether it is admitted."""
 
     model: ModelProfile
     decision: ResourceDecision
+    already_resident: bool = False
 
 
 class ModelManager:
     """
-    Choose models while respecting activity and resource pressure.
+    Select and swap modular Qronos brains without allowing two large brain
+    models to accumulate in VRAM.
 
-    Models are on demand, without exception. The Fast Brain used to be kept
-    warm for ten minutes after answering, on the reasoning that loading is
-    what makes a voice assistant feel slow. Measured on the development card,
-    that trade does not pay for itself:
-
-        Fast Brain, 8,192-token context, measured 2026-08-28
-            resident                3,442 MiB, permanently
-            saved per turn          about 1.7 s
-            whole turn, loaded      2.5 s
-            whole turn, from cold   4.2 s
-
-    Three and a half gigabytes held continuously, so that an occasional turn
-    is under two seconds quicker, is not a good use of somebody else's
-    graphics card. It is also the difference between Qronos owning a fifth of
-    a 16 GB card at rest and owning none of it.
-
-    The saving is smaller than it looks, too, because the operating system
-    caches the weights file in RAM. The 1.7 s above is a copy from memory
-    onto the card. Only the first load after a restart reads the disk, and no
-    keep-alive policy helps with that one.
+    Important distinction:
+    - configured Qronos models may be unloaded during a role swap;
+    - unrelated Ollama models are never touched;
+    - a resident target model is evaluated after discounting its own estimated
+      VRAM footprint, preventing Qronos from self-throttling on its own warm
+      Heavy Brain.
     """
 
     def __init__(
         self,
         runtime: BrainRuntime | None = None,
     ) -> None:
-        self.runtime = (
-            runtime
-            if runtime is not None
-            else OllamaController()
+        self.runtime = runtime if runtime is not None else OllamaController()
+
+        # Temporary compatibility alias for existing code/tests.
+        self.ollama = self.runtime
+
+    def _running_names(self) -> set[str]:
+        try:
+            return {
+                item.name
+                for item in self.runtime.list_running_models()
+                if item.name
+            }
+        except Exception:
+            return set()
+
+    def is_model_resident(self, model_name: str) -> bool:
+        return model_name in self._running_names()
+
+    def prepare_model_slot(self, task_class: TaskClass) -> bool:
+        """
+        Make room for the requested brain by unloading only other models that
+        belong to Qronos's configured profile set.
+
+        Returns True when at least one model was unloaded.
+        """
+
+        target = get_model(task_class.value)
+        qronos_names = configured_model_names()
+        changed = False
+
+        for running_name in self._running_names():
+            if running_name == target.name:
+                continue
+
+            if running_name not in qronos_names:
+                continue
+
+            self.runtime.stop_model(running_name)
+            changed = True
+
+        return changed
+
+    def unload_qronos_models(self, except_name: str | None = None) -> bool:
+        qronos_names = configured_model_names()
+        changed = False
+
+        for running_name in self._running_names():
+            if except_name and running_name == except_name:
+                continue
+
+            if running_name not in qronos_names:
+                continue
+
+            self.runtime.stop_model(running_name)
+            changed = True
+
+        return changed
+
+    @staticmethod
+    def _gpu_for_capacity_admission(
+        gpu: GpuStatus | None,
+        model: ModelProfile,
+        already_resident: bool,
+    ) -> GpuStatus | None:
+        """
+        Build capacity telemetry without counting an already-resident target
+        model against itself.
+
+        GPU utilization is intentionally omitted here. ActivityGuard handles
+        contention separately; this admission snapshot is about capacity,
+        temperature, RAM and VRAM.
+        """
+
+        if gpu is None:
+            return None
+
+        used_mb = gpu.vram_used_mb
+
+        if already_resident and used_mb is not None:
+            own_estimate_mb = int(round(model.estimated_vram_gb * 1024.0))
+            used_mb = max(0, used_mb - own_estimate_mb)
+
+        return GpuStatus(
+            name=gpu.name,
+            temperature_c=gpu.temperature_c,
+            gpu_utilization_percent=None,
+            vram_used_mb=used_mb,
+            vram_total_mb=gpu.vram_total_mb,
         )
 
-        # Temporary compatibility alias.
-        # Remove after the MVP migration away from Ollama-specific naming.
-        self.ollama = self.runtime
+    @staticmethod
+    def _resident_pressure_is_only_self_load(
+        resource_pressure: ResourcePressure,
+        base_decision: ResourceDecision,
+        gpu: GpuStatus | None,
+    ) -> bool:
+        """
+        Permit reuse of an already-resident model only when the HIGH pressure
+        can plausibly be explained by the model's own VRAM residency.
+
+        CRITICAL pressure is never ignored. A hot/busy GPU is not treated as
+        self-only pressure because the active user workload keeps priority.
+        """
+
+        if resource_pressure is not ResourcePressure.HIGH:
+            return False
+
+        if base_decision is not ResourceDecision.ALLOW:
+            return False
+
+        if (
+            gpu is not None
+            and gpu.gpu_utilization_percent is not None
+            and gpu.gpu_utilization_percent
+            >= ActivityGuard.HIGH_GPU_UTILIZATION_PERCENT
+        ):
+            return False
+
+        return True
 
     def select_model(
         self,
@@ -127,43 +184,44 @@ class ModelManager:
         activity_mode: ActivityMode = ActivityMode.NORMAL,
         resource_pressure: ResourcePressure = ResourcePressure.NORMAL,
     ) -> ModelSelection:
-        model = get_model(
-            task_class.value
-        )
+        model = get_model(task_class.value)
+        already_resident = self.is_model_resident(model.name)
 
-        capacity_gpu = _gpu_for_capacity_admission(
-            gpu
+        capacity_gpu = self._gpu_for_capacity_admission(
+            gpu=gpu,
+            model=model,
+            already_resident=already_resident,
         )
 
         base_decision = evaluate_resources(
             system=system,
             gpu=capacity_gpu,
         )
-
         decision = base_decision
 
-        activity_blocked = self._activity_blocks(
+        if self._activity_blocks(
             task_class=task_class,
             activity_mode=activity_mode,
-        )
-
-        if activity_blocked:
+        ):
             decision = ResourceDecision.BLOCK
 
-        # Never load either model while the user's system is already under
-        # measured pressure. Qronos waits for safe headroom instead.
-        pressure_blocked = (
-            resource_pressure
-            is not ResourcePressure.NORMAL
-        )
+        if resource_pressure is not ResourcePressure.NORMAL:
+            may_reuse_own_resident = (
+                already_resident
+                and self._resident_pressure_is_only_self_load(
+                    resource_pressure=resource_pressure,
+                    base_decision=base_decision,
+                    gpu=gpu,
+                )
+            )
 
-        if pressure_blocked:
-            decision = ResourceDecision.BLOCK
-
+            if not may_reuse_own_resident:
+                decision = ResourceDecision.BLOCK
 
         return ModelSelection(
             model=model,
             decision=decision,
+            already_resident=already_resident,
         )
 
     def can_start(
@@ -174,16 +232,14 @@ class ModelManager:
         activity_mode: ActivityMode = ActivityMode.NORMAL,
         resource_pressure: ResourcePressure = ResourcePressure.NORMAL,
     ) -> bool:
-        selection = self.select_model(
-            task_class=task_class,
-            system=system,
-            gpu=gpu,
-            activity_mode=activity_mode,
-            resource_pressure=resource_pressure,
-        )
-
         return (
-            selection.decision
+            self.select_model(
+                task_class=task_class,
+                system=system,
+                gpu=gpu,
+                activity_mode=activity_mode,
+                resource_pressure=resource_pressure,
+            ).decision
             is ResourceDecision.ALLOW
         )
 
@@ -207,4 +263,4 @@ class ModelManager:
 
 
 if __name__ == "__main__":
-    print("Qronos Model Manager: ready")
+    print("Qronos Model Manager: modular brain slots ready")

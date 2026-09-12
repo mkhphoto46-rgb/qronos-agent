@@ -40,7 +40,7 @@ from security.permissions import (
     PermissionDecision,
     PermissionPolicy,
     evaluate_action,
-    get_permission_policy,
+    get_effective_permission_policy,
 )
 
 
@@ -236,7 +236,7 @@ def require(
 
 def _policy_for(category: ActionCategory) -> PermissionPolicy | None:
     try:
-        return get_permission_policy(category)
+        return get_effective_permission_policy(category)
     except KeyError:
         return None
 

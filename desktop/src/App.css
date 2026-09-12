@@ -4103,3 +4103,47 @@ button {
   .bottom-nav {
   pointer-events: auto;
 }
+
+
+/* =========================================================
+   SETTINGS STAGE 2B — ORACLE ANCHOR + BILINGUAL NAV
+   The Oracle rings and core canvas now share one local anchor.
+   No numeric visual offset is used.
+   ========================================================= */
+
+.qronos-orb-anchor {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.nav-item > .nav-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: inherit;
+  line-height: 1;
+}
+
+.nav-item > .nav-label strong {
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.nav-item > .nav-label small {
+  color: currentColor;
+  opacity: 0.56;
+  font-size: 7px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}

@@ -12,6 +12,12 @@ import type {
 } from "react";
 
 import OracleDnaSpine from "./OracleDnaSpine";
+import {
+  useConversationStore,
+} from "../conversationStore";
+import type {
+  ConversationMessage,
+} from "../conversationStore";
 
 import type {
   OracleMemoryAnchor,
@@ -22,13 +28,9 @@ import type {
 import "./ConversationSpine.css";
 import "./ConversationMemoryMotion.css";
 
-type ConversationRole =
-  | "user"
-  | "qronos";
-
 type Conversation = {
   id: string;
-  role: ConversationRole;
+  role: ConversationMessage["role"];
   time: string;
   text: string;
   spinePosition: number;
@@ -56,32 +58,12 @@ type ParticleOrigin = {
 const OPEN_DURATION = 760;
 const CLOSE_DURATION = 620;
 
-const conversations: Conversation[] = [
-  {
-    id: "conversation-3",
-    role: "qronos",
-    time: "19:34",
-    text:
-      "ساختار Context به شکل DNA طراحی شده تا هر گفت‌وگو به صورت یک Memory Node زنده داخل جریان حافظه دیده شود و بدون شلوغ کردن رابط کاربری، آخرین گفتگوها همیشه در دسترس باشند.",
-    spinePosition: 0.24,
-  },
-  {
-    id: "conversation-2",
-    role: "user",
-    time: "19:21",
-    text:
-      "وقتی Memory انتخاب می‌شود، می‌خواهم نود مربوط به آن باز شود و متن گفتگو از همان نقطه ظاهر شود؛ نه این‌که یک کارت مستقل و جدا از ساختار DNA روی صفحه قرار بگیرد.",
-    spinePosition: 0.5,
-  },
-  {
-    id: "conversation-1",
-    role: "qronos",
-    time: "19:06",
-    text:
-      "ساختار اصلی رابط همان Oracle مرکزی باقی می‌ماند. Memory Pocket فقط حافظه انتخاب‌شده را از دل DNA آشکار می‌کند و تاریخچه کامل همچنان در بخش Conversations قرار می‌گیرد.",
-    spinePosition: 0.76,
-  },
-];
+const MEMORY_SPINE_POSITIONS =
+  [
+    0.24,
+    0.5,
+    0.76,
+  ] as const;
 
 function buildPocketParticles(): MemoryPocketParticle[] {
   return Array.from(
@@ -188,6 +170,37 @@ function getPocketPosition(
 }
 
 function ConversationSpine() {
+  const {
+    messages,
+  } =
+    useConversationStore();
+
+  const conversations =
+    useMemo<Conversation[]>(
+      () =>
+        messages
+          .filter(
+            (message) =>
+              !message.pending &&
+              !message.error,
+          )
+          .slice(-3)
+          .reverse()
+          .map(
+            (message, index) => ({
+              id: message.id,
+              role: message.role,
+              time: message.time,
+              text: message.text,
+              spinePosition:
+                MEMORY_SPINE_POSITIONS[
+                  index
+                ] ?? 0.76,
+            }),
+          ),
+      [messages],
+    );
+
   const [
     displayedId,
     setDisplayedId,
@@ -264,7 +277,7 @@ function ConversationSpine() {
               conversation.role,
           }),
         ),
-      [],
+      [conversations],
     );
 
   const displayedConversation =
@@ -275,7 +288,10 @@ function ConversationSpine() {
             conversation.id ===
             displayedId,
         ) ?? null,
-      [displayedId],
+      [
+        conversations,
+        displayedId,
+      ],
     );
 
   const pocketStyle =

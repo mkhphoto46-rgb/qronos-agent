@@ -30,8 +30,8 @@ class BrainMessage:
     A message may carry pictures as well as words, in either of the two forms
     a picture arrives in. A file the user pointed at is a **path**, held as one
     so a megabyte of base64 never lands in a log line or a traceback. A screen
-    capture was never a file and must not become one — it is held in memory,
-    encoded, sent and dropped — so it arrives as an already-prepared picture,
+    capture was never a file and must not become one â€” it is held in memory,
+    encoded, sent and dropped â€” so it arrives as an already-prepared picture,
     which describes itself rather than printing itself.
 
     Encoding is the runtime adapter's business either way, because the
@@ -45,7 +45,7 @@ class BrainMessage:
     def __post_init__(self) -> None:
         if not self.content.strip() and not self.images:
             raise ValueError(
-                "A brain message must carry something — either words or "
+                "A brain message must carry something â€” either words or "
                 "at least one picture."
             )
 
@@ -107,7 +107,7 @@ class BrainRuntime(ABC):
         model_name: str,
         prompt: str = "",
         messages: Sequence[BrainMessage] | None = None,
-        think: bool = False,
+        think: bool | str = False,
         num_predict: int | None = None,
         num_ctx: int | None = None,
         keep_alive: str = "5m",

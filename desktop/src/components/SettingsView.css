@@ -1031,3 +1031,339 @@
   .settings-hotkey-row { grid-template-columns: 1fr; gap: 10px; }
   .settings-hotkey-controls { justify-content: flex-start; flex-wrap: wrap; }
 }
+
+/* =========================================================
+   MEMORY SERVICE — REAL LOCAL FOUNDATION V1
+   Appended only; existing Settings geometry remains unchanged.
+   ========================================================= */
+
+.settings-memory-index-state {
+  min-width: 132px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  direction: ltr;
+}
+
+.settings-memory-index-state strong {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.settings-memory-index-state strong.ready {
+  color: rgba(73, 238, 185, 0.9);
+}
+
+.settings-memory-index-state strong.attention {
+  color: rgba(255, 196, 82, 0.9);
+}
+
+.settings-memory-index-state span {
+  color: rgba(135, 177, 196, 0.54);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+}
+
+.settings-memory-system {
+  justify-content: flex-start;
+  min-height: 290px;
+  padding-top: 26px;
+}
+
+.settings-memory-summary {
+  width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  margin: 0 0 14px;
+  overflow: hidden;
+  border: 1px solid rgba(74, 177, 216, 0.08);
+  border-radius: 9px;
+  background: rgba(4, 18, 27, 0.28);
+}
+
+.settings-memory-summary > div {
+  min-height: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(10, 33, 45, 0.28);
+}
+
+.settings-memory-summary span {
+  color: rgba(118, 174, 194, 0.46);
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+}
+
+.settings-memory-summary strong {
+  color: rgba(211, 240, 248, 0.88);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-memory-manager-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.settings-empty-system .settings-memory-manage-button:not(:disabled),
+.settings-empty-system .settings-memory-secondary-button:not(:disabled),
+.settings-memory-manager button:not(:disabled) {
+  border-color: rgba(75, 190, 222, 0.16);
+  color: rgba(181, 222, 236, 0.78);
+  background: rgba(9, 35, 47, 0.48);
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.settings-empty-system .settings-memory-manage-button:not(:disabled):hover,
+.settings-empty-system .settings-memory-secondary-button:not(:disabled):hover,
+.settings-memory-manager button:not(:disabled):hover {
+  border-color: rgba(78, 220, 249, 0.3);
+  color: rgba(230, 250, 255, 0.96);
+  background: rgba(12, 48, 62, 0.58);
+  transform: translateY(-1px);
+}
+
+.settings-memory-manager {
+  width: min(640px, 100%);
+  margin-top: 16px;
+  padding: 13px;
+  border: 1px solid rgba(76, 179, 215, 0.1);
+  border-radius: 11px;
+  background: rgba(3, 15, 23, 0.5);
+  text-align: left;
+  direction: ltr;
+}
+
+.settings-memory-manager > header {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid rgba(75, 170, 206, 0.07);
+}
+
+.settings-memory-manager > header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-memory-manager > header span {
+  color: rgba(90, 209, 239, 0.62);
+  font-size: 6px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+
+.settings-memory-manager > header strong {
+  overflow: hidden;
+  color: rgba(225, 244, 251, 0.9);
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-memory-manager > header small {
+  flex: 0 0 auto;
+  color: rgba(69, 231, 179, 0.66);
+  font-size: 6px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.settings-memory-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(75, 170, 206, 0.06);
+}
+
+.settings-memory-paths span {
+  overflow: hidden;
+  color: rgba(126, 167, 184, 0.43);
+  font-size: 6.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-memory-list {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(64, 179, 219, 0.18) transparent;
+}
+
+.settings-memory-list::-webkit-scrollbar {
+  width: 3px;
+}
+
+.settings-memory-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(64, 179, 219, 0.2);
+}
+
+.settings-memory-empty {
+  padding: 24px 12px;
+  color: rgba(126, 165, 181, 0.43);
+  font-size: 8px;
+  text-align: center;
+  direction: rtl;
+}
+
+.settings-memory-item {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 4px;
+  border-bottom: 1px solid rgba(71, 155, 189, 0.055);
+}
+
+.settings-memory-item:last-child {
+  border-bottom: 0;
+}
+
+.settings-memory-item-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  direction: rtl;
+  text-align: right;
+}
+
+.settings-memory-item-copy strong {
+  overflow: hidden;
+  color: rgba(216, 237, 245, 0.82);
+  font-size: 8.5px;
+  font-weight: 500;
+  line-height: 1.65;
+  text-overflow: ellipsis;
+}
+
+.settings-memory-item-copy span {
+  color: rgba(112, 164, 183, 0.42);
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.settings-memory-item-state {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.settings-memory-item-state small {
+  max-width: 104px;
+  color: rgba(96, 204, 224, 0.58);
+  font-size: 5.8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-align: right;
+}
+
+.settings-memory-manager .settings-memory-item-state button,
+.settings-memory-manager footer button,
+.settings-memory-editor button {
+  height: 27px;
+  padding: 0 9px;
+  font-size: 5.8px;
+  letter-spacing: 0.09em;
+}
+
+.settings-memory-manager button.danger:not(:disabled) {
+  border-color: rgba(255, 91, 106, 0.12);
+  color: rgba(255, 130, 140, 0.68);
+  background: rgba(83, 20, 29, 0.18);
+}
+
+.settings-memory-manager button.danger:not(:disabled):hover {
+  border-color: rgba(255, 91, 106, 0.3);
+  color: rgba(255, 176, 183, 0.92);
+  background: rgba(99, 25, 34, 0.3);
+}
+
+.settings-memory-editor {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-memory-editor textarea {
+  min-height: 76px;
+  resize: vertical;
+  padding: 9px 11px;
+  outline: 0;
+  border: 1px solid rgba(79, 177, 211, 0.12);
+  border-radius: 8px;
+  color: rgba(221, 240, 247, 0.88);
+  background: rgba(6, 24, 34, 0.58);
+  font: inherit;
+  font-size: 8px;
+  line-height: 1.7;
+  direction: rtl;
+}
+
+.settings-memory-editor textarea:focus {
+  border-color: rgba(85, 221, 249, 0.27);
+  box-shadow: 0 0 20px rgba(54, 211, 241, 0.045);
+}
+
+.settings-memory-editor > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.settings-memory-manager > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(75, 170, 206, 0.06);
+}
+
+.settings-memory-manager button:disabled,
+.settings-empty-system .settings-memory-manage-button:disabled,
+.settings-empty-system .settings-memory-secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+@media (max-height: 760px) {
+  .settings-memory-list {
+    max-height: 190px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-memory-manager button,
+  .settings-memory-editor textarea {
+    transition: none;
+  }
+}

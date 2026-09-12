@@ -27,16 +27,19 @@ if hasattr(sys.stderr, "reconfigure"):
     )
 
 from core.action_audit import ActionAuditLog
-from core.audio_input import AudioInput
+from core.audio_input import AudioConfig, AudioInput, resolve_input_device
 from core.chatterbox_runtime import ChatterboxRuntime
 from core.command_recorder import CommandRecorder, CommandRecorderConfig
 from core.conversation_session import ConversationSession
+from core.conversation_history import ConversationHistory
 from core.hard_floor import required_vram_mb
 from core.load_signal import LoadSample, SustainedLoadMonitor
 from core.resource_context import build_sustained_load_monitor
 from core.model_registry import MODELS
 from core.openwakeword_engine import OpenWakeWordEngine
 from core.orchestrator import Orchestrator
+from core.spoken_normalizer import normalise_spoken_text
+from core.settings_service import DEFAULT_DEFINITIONS, DEFAULT_SETTINGS_PATH, SettingsService
 from core.screen_capture import (
     Capture,
     CaptureRefused,
@@ -74,6 +77,15 @@ PUSH_TO_TALK_ACTION = "qronos.push_to_talk"
 LOOK_AT_SCREEN_ACTION = "qronos.look_at_screen"
 WAKE_LISTENER_START_ACTION = "qronos.wake_listener_start"
 WAKE_LISTENER_STOP_ACTION = "qronos.wake_listener_stop"
+SETTINGS_RELOAD_ACTION = "qronos.settings_reload"
+INPUT_METER_START_ACTION = "qronos.input_meter_start"
+INPUT_METER_STOP_ACTION = "qronos.input_meter_stop"
+TEXT_MESSAGE_COMMAND = "text_message"
+RUNTIME_SET_PAUSED_COMMAND = "runtime_set_paused"
+DESKTOP_WAKE_BOOTSTRAP_ENV = "QRONOS_DESKTOP_WAKE_BOOTSTRAP"
+CONVERSATION_HISTORY_REQUEST_ACTION = "qronos.conversation_history_request"
+MAX_TEXT_MESSAGE_LENGTH = 16_000
+MAX_TEXT_REQUEST_ID_LENGTH = 128
 
 
 
@@ -84,6 +96,9 @@ VOICE_PLAYBACK_COMPLETE_ACTION = "qronos.voice_playback_complete"
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
 FOLLOWUP_PLAYBACK_GUARD_SECONDS = 0.25
+WAKE_STARTUP_RETRY_DELAYS_SECONDS = (0.35, 0.8, 1.6)
+WAKE_COMMAND_PREP_BUFFER_LIMIT_SECONDS = 30.0
+WAKE_COMMAND_PREP_RETRY_DELAYS_SECONDS = (0.0, 0.5, 1.5)
 
 # Desktop owns actual audio playback. Python waits for an explicit playback
 # completion acknowledgement instead of guessing from WAV duration.
@@ -105,6 +120,100 @@ VOICE_STT_RETRY_RESPONSE = (
 )
 
 AUDIO_SPECTRUM_BANDS = 32
+
+# The accepted production Wake threshold is 0.660167. The UI sensitivity slider
+# is intentionally constrained to a conservative band around it rather than
+# exposing 0.0..1.0 directly. Higher user sensitivity means a lower threshold.
+WAKE_SENSITIVITY_DEFAULT = 56
+WAKE_THRESHOLD_ACCEPTED = 0.660167
+WAKE_THRESHOLD_LOW_SENSITIVITY = 0.72
+WAKE_THRESHOLD_HIGH_SENSITIVITY = 0.62
+
+
+def wake_sensitivity_to_threshold(
+    sensitivity: int | float,
+) -> float:
+    value = max(
+        0.0,
+        min(
+            100.0,
+            float(sensitivity),
+        ),
+    )
+
+    if value <= WAKE_SENSITIVITY_DEFAULT:
+        span = float(WAKE_SENSITIVITY_DEFAULT)
+        ratio = 0.0 if span == 0.0 else value / span
+        threshold = (
+            WAKE_THRESHOLD_LOW_SENSITIVITY
+            + (
+                WAKE_THRESHOLD_ACCEPTED
+                - WAKE_THRESHOLD_LOW_SENSITIVITY
+            )
+            * ratio
+        )
+    else:
+        span = 100.0 - float(WAKE_SENSITIVITY_DEFAULT)
+        ratio = (
+            value - float(WAKE_SENSITIVITY_DEFAULT)
+        ) / span
+        threshold = (
+            WAKE_THRESHOLD_ACCEPTED
+            + (
+                WAKE_THRESHOLD_HIGH_SENSITIVITY
+                - WAKE_THRESHOLD_ACCEPTED
+            )
+            * ratio
+        )
+
+    return round(
+        threshold,
+        6,
+    )
+
+
+def _runtime_settings_path() -> Path:
+    override = os.environ.get(
+        "QRONOS_SETTINGS_PATH",
+        "",
+    ).strip()
+
+    return (
+        Path(override)
+        if override
+        else DEFAULT_SETTINGS_PATH
+    )
+
+
+def _desktop_wake_bootstrap_enabled() -> bool:
+    """
+    Return True only for the real desktop runtime process.
+
+    Raw bridge tests intentionally remain side-effect free. The Tauri desktop
+    sets this flag so Wake becomes a startup invariant before runtime_ready.
+    """
+    return (
+        os.environ.get(
+            DESKTOP_WAKE_BOOTSTRAP_ENV,
+            "",
+        ).strip()
+        == "1"
+    )
+
+
+def _preload_openwakeword_for_desktop() -> None:
+    """
+    Import OpenWakeWord on the main startup thread before Wake is launched.
+
+    openwakeword.__init__ imports sklearn/scipy. Doing that work before the
+    stdin command loop prevents the first Wake thread from competing with
+    desktop startup work and keeps the wake gate on the highest-priority path.
+    """
+    from openwakeword.model import Model as _WakeModel
+
+    _ = _WakeModel
+
+
 EMIT_LOCK = threading.Lock()
 
 CONVERSATION_END_PHRASES = {
@@ -386,20 +495,65 @@ class RuntimeEvent:
     message: str
 
 
+def _text_event_message(
+    request_id: str,
+    **fields: Any,
+) -> str:
+    payload: dict[str, Any] = {
+        "requestId": request_id,
+    }
+    payload.update(fields)
+
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 class QronosRuntime:
     def __init__(
         self,
         scheduler: QueueScheduler | None = None,
         notify: Callable[[str, str, str], None] | None = None,
+        settings: SettingsService | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._busy = False
+        # Global pause is deliberately process-local. It is never persisted,
+        # so a Qronos runtime restart always returns to the active state.
+        self._runtime_paused = False
+        # Remember whether Wake was alive before the active -> paused
+        # transition so a later Resume can restore what Pause suspended.
+        # This is also process-local and therefore resets on restart.
+        self._resume_wake_after_pause = False
 
         # Resolved here rather than as a default argument, because emit() is
         # defined below this class and a default is evaluated at definition
         # time — which would be a NameError at import.
         self._notify = notify if notify is not None else emit
         self._scheduler = scheduler
+
+        self.settings = (
+            settings
+            if settings is not None
+            else SettingsService(
+                DEFAULT_DEFINITIONS,
+                path=_runtime_settings_path(),
+                on_problem=lambda message: self._notify(
+                    "settings_warning",
+                    "warning",
+                    message,
+                ),
+            )
+        )
+        self._pending_wake_settings_reconcile = False
+        self._pending_audio_input_reconcile = False
+        self._active_input_device_id = ""
+        self._input_meter_enabled = False
+        self._input_meter_last_emit = 0.0
+        self._input_meter_thread: threading.Thread | None = None
+        self._input_meter_stop = threading.Event()
 
         self.audio_input: AudioInput | None = None
         self.vad_runtime: WhisperCppVADRuntime | None = None
@@ -409,6 +563,15 @@ class QronosRuntime:
             | WhisperCppRuntime
             | None
         ) = None
+
+        # One Voice turn can have nested cleanup paths: _run_voice_turn()
+        # releases STT before Brain execution, while push_to_talk() keeps a
+        # final safety cleanup for failures that happen before transcription.
+        # Track whether the current warmed STT generation has already yielded
+        # so the second cleanup is an idempotent no-op rather than a duplicate
+        # shutdown.
+        self._speech_runtime_released = False
+
         self.voice_output: ChatterboxRuntime | None = None
         self.task_router: TaskRouter | None = None
 
@@ -433,11 +596,29 @@ class QronosRuntime:
         self.pending_look: str | None = None
         self.orchestrator: Orchestrator | None = None
         self.conversation_session: ConversationSession | None = None
+        self.conversation_history = ConversationHistory()
 
         self.wake_engine: OpenWakeWordEngine | None = None
         self.voice_trigger: VoiceTriggerService | None = None
         self._wake_thread: threading.Thread | None = None
         self._wake_stop = threading.Event()
+
+        # Thread liveness is not Wake readiness. This Event is set only
+        # after OpenWakeWord and the selected microphone are genuinely accepting
+        # wake frames; command VAD/STT warm-up is explicitly outside this gate.
+        self._wake_ready = threading.Event()
+        self._wake_start_retry_count = 0
+        self._wake_retry_thread: threading.Thread | None = None
+
+        # Wake detection and command recognition have different cold-start
+        # requirements. OpenWakeWord + microphone must become available first.
+        # The heavier VAD/recorder/STT capture layer warms after Wake is live.
+        # A dedicated event/lock makes this split deterministic and prevents
+        # duplicate VAD preparation when PTT or a very early wake races it.
+        self._wake_command_prepare_lock = threading.Lock()
+        self._wake_command_ready = threading.Event()
+        self._wake_command_prepare_thread: threading.Thread | None = None
+        self._wake_command_prepare_error: str | None = None
 
         # Playback lifecycle is synchronized with the desktop media engine.
         # One ID identifies one complete Qronos response, even when that
@@ -515,9 +696,401 @@ class QronosRuntime:
         with self._lock:
             return self._busy
 
+    @property
+    def runtime_paused(self) -> bool:
+        with self._lock:
+            return self._runtime_paused
+
+    @property
+    def wake_word_enabled(self) -> bool:
+        return bool(
+            self.settings.get(
+                "voice.wake_word_enabled"
+            )
+        )
+
+    @property
+    def voice_language(self) -> str:
+        value = str(
+            self.settings.get(
+                "voice.language"
+            )
+        ).strip().lower()
+
+        return (
+            value
+            if value in {
+                "auto",
+                "fa",
+                "en",
+            }
+            else "fa"
+        )
+
+    @property
+    def wake_sensitivity(self) -> int:
+        return int(
+            self.settings.get(
+                "voice.wake_sensitivity"
+            )
+        )
+
+    @property
+    def wake_threshold(self) -> float:
+        return wake_sensitivity_to_threshold(
+            self.wake_sensitivity
+        )
+
+    @property
+    def input_device_id(self) -> str:
+        value = self.settings.get(
+            "voice.input_device_id"
+        )
+        return str(value or "").strip()
+
+    def _resolved_input_device_index(
+        self,
+        device_id: str | None = None,
+    ) -> int | None:
+        requested = (
+            self.input_device_id
+            if device_id is None
+            else str(device_id or "").strip()
+        )
+
+        try:
+            return resolve_input_device(
+                requested
+            )
+        except LookupError as exc:
+            self._notify(
+                "microphone_selection_warning",
+                "warning",
+                str(exc),
+            )
+            return None
+
+    def _new_audio_input_from_settings(
+        self,
+    ) -> AudioInput:
+        requested = self.input_device_id
+        device_index = (
+            self._resolved_input_device_index(
+                requested
+            )
+        )
+        self._active_input_device_id = (
+            requested
+        )
+        return AudioInput(
+            AudioConfig(
+                device=device_index,
+            )
+        )
+
+    def _replace_audio_input_from_settings(
+        self,
+    ) -> None:
+        old_audio = self.audio_input
+
+        if old_audio is not None:
+            try:
+                old_audio.stop()
+            except Exception:
+                pass
+
+        audio_input = (
+            self._new_audio_input_from_settings()
+        )
+        self.audio_input = audio_input
+
+        if self.vad_runtime is not None:
+            self.command_recorder = (
+                CommandRecorder(
+                    audio_input=audio_input,
+                    vad_runtime=self.vad_runtime,
+                    config=CommandRecorderConfig(
+                        silence_seconds=0.96,
+                        start_timeout_seconds=(
+                            FOLLOWUP_START_TIMEOUT_SECONDS
+                        ),
+                    ),
+                )
+            )
+
+        self._pending_audio_input_reconcile = False
+
+    def _reconcile_audio_input_without_wake(
+        self,
+    ) -> None:
+        # A Settings meter may temporarily own the selected microphone while
+        # Wake is disabled. Stop that exclusive stream, swap the configured
+        # AudioInput, then resume the meter on the newly selected device.
+        meter_was_enabled = (
+            self._input_meter_enabled
+        )
+        self._stop_standalone_input_meter()
+        self._replace_audio_input_from_settings()
+
+        if (
+            meter_was_enabled
+            and not self.runtime_paused
+        ):
+            self._start_standalone_input_meter()
+
+    def _reconcile_audio_input_in_wake_thread(
+        self,
+    ) -> None:
+        if not self._pending_audio_input_reconcile:
+            return
+
+        if self.audio_input is None:
+            self._replace_audio_input_from_settings()
+            return
+
+        was_running = self.audio_input.is_running()
+
+        self._replace_audio_input_from_settings()
+
+        if (
+            was_running
+            and not self._wake_stop.is_set()
+        ):
+            self.audio_input.start()
+
+        self._notify(
+            "microphone_selection_applied",
+            "ready",
+            json.dumps(
+                {
+                    "deviceId":
+                        self._active_input_device_id,
+                    "usingSystemDefault":
+                        self.audio_input.config.device
+                        is None,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+
+    def _reconcile_wake_setting(self) -> None:
+        if self.runtime_paused:
+            with self._lock:
+                self._resume_wake_after_pause = (
+                    self.wake_word_enabled
+                )
+            return
+
+        if self.wake_word_enabled:
+            if not self.wake_listener_running:
+                self.start_wake_listener()
+            return
+
+        if self.wake_listener_running:
+            self.stop_wake_listener()
+
+    def reload_settings(
+        self,
+        settings: SettingsService | None = None,
+    ) -> None:
+        previous_input_device_id = (
+            self.input_device_id
+        )
+
+        next_settings = (
+            settings
+            if settings is not None
+            else SettingsService(
+                DEFAULT_DEFINITIONS,
+                path=_runtime_settings_path(),
+                on_problem=lambda message: self._notify(
+                    "settings_warning",
+                    "warning",
+                    message,
+                ),
+            )
+        )
+
+        if next_settings.write_blocked_reason is not None:
+            self._notify(
+                "settings_apply_failed",
+                "warning",
+                next_settings.write_blocked_reason,
+            )
+            return
+
+        with self._lock:
+            self.settings = next_settings
+            busy = self._busy
+
+            if busy:
+                self._pending_wake_settings_reconcile = True
+
+        input_changed = (
+            previous_input_device_id
+            != self.input_device_id
+        )
+
+        if input_changed:
+            self._pending_audio_input_reconcile = True
+
+        engine = self.wake_engine
+        if engine is not None:
+            engine.threshold = self.wake_threshold
+
+        if (
+            input_changed
+            and not busy
+            and not self.wake_listener_running
+        ):
+            self._reconcile_audio_input_without_wake()
+
+        if not busy:
+            self._reconcile_wake_setting()
+
+        self._notify(
+            "settings_applied",
+            "ready",
+            json.dumps(
+                {
+                    "wakeWordEnabled":
+                        self.wake_word_enabled,
+                    "wakeSensitivity":
+                        self.wake_sensitivity,
+                    "wakeThreshold":
+                        self.wake_threshold,
+                    "voiceLanguage":
+                        self.voice_language,
+                    "inputDeviceId":
+                        self.input_device_id,
+                    "inputDeviceReconcileDeferred":
+                        bool(
+                            self._pending_audio_input_reconcile
+                            and self.wake_listener_running
+                        ),
+                    "wakeReconcileDeferred":
+                        busy,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+
     def _set_busy(self, value: bool) -> None:
+        reconcile = False
+
         with self._lock:
             self._busy = value
+
+            if (
+                not value
+                and self._pending_wake_settings_reconcile
+            ):
+                self._pending_wake_settings_reconcile = False
+                reconcile = True
+
+        if reconcile:
+            self._reconcile_wake_setting()
+
+        if (
+            not value
+            and self._pending_audio_input_reconcile
+            and not self.wake_listener_running
+        ):
+            self._reconcile_audio_input_without_wake()
+
+    def _notify_runtime_pause_state(self) -> None:
+        self._notify(
+            "runtime_pause_changed",
+            "paused" if self.runtime_paused else "ready",
+            _compact(
+                {
+                    "paused": self.runtime_paused,
+                    "temporary": True,
+                    "resetsOnRestart": True,
+                }
+            ),
+        )
+
+    def _reject_if_runtime_paused(self, channel: str) -> bool:
+        if not self.runtime_paused:
+            return False
+
+        self._notify(
+            "runtime_paused_rejected",
+            "paused",
+            _compact(
+                {
+                    "channel": channel,
+                    "temporary": True,
+                }
+            ),
+        )
+        return True
+
+    def _require_runtime_active(self, channel: str) -> None:
+        if self.runtime_paused:
+            raise RuntimeError(
+                f"Qronos runtime is temporarily paused; {channel} is unavailable."
+            )
+
+    def set_runtime_paused(self, paused: bool) -> None:
+        if not isinstance(paused, bool):
+            raise ValueError(
+                "runtime_set_paused needs paused to be true or false."
+            )
+
+        # Capture the Wake state before the transition. Repeated Pause commands
+        # must not erase the original resume intent after Wake has been stopped.
+        wake_was_running = self.wake_listener_running if paused else False
+
+        with self._lock:
+            was_paused = self._runtime_paused
+
+            if paused and not was_paused:
+                self._resume_wake_after_pause = wake_was_running
+
+            self._runtime_paused = paused
+            busy = self._busy
+            scheduler = self._scheduler
+
+            resume_wake = (
+                not paused
+                and was_paused
+                and self._resume_wake_after_pause
+            )
+
+            if not paused:
+                self._resume_wake_after_pause = False
+
+        # The queue follows the global runtime state, but this command never
+        # creates the queue merely to pause it.
+        if scheduler is not None:
+            scheduler.set_paused(paused)
+
+        if paused:
+            # Stop accepting new voice input immediately and release idle voice
+            # resources. An already-running non-cancellable model call is not
+            # force-killed; downstream checkpoints suppress later phases.
+            self._stop_standalone_input_meter()
+            self.stop_wake_listener()
+            self._release_speech_runtime()
+
+            if not busy:
+                self._release_brains_for_voice_phase()
+                self._release_voice_output_runtime()
+
+        elif resume_wake:
+            # Resume is owned by the runtime itself rather than a second
+            # frontend action. This makes Pause -> Active a single lifecycle
+            # transition and prevents Wake from remaining stopped after Resume.
+            self.start_wake_listener()
+
+        elif self._input_meter_enabled:
+            self._start_standalone_input_meter()
+
+        self._notify_runtime_pause_state()
 
     def _prewarm_routing_classifiers(self) -> None:
         """Warm deterministic routing before the first user command.
@@ -644,6 +1217,11 @@ class QronosRuntime:
             ),
         )
 
+        if self._input_meter_enabled:
+            self._emit_input_meter_level(
+                payload["level"]
+            )
+
     def _clear_audio_spectrum(self) -> None:
         self._emit_audio_spectrum(
             0.0,
@@ -653,90 +1231,824 @@ class QronosRuntime:
             ),
         )
 
+    def _emit_input_meter_level(
+        self,
+        level: float,
+        *,
+        active: bool = True,
+        force: bool = False,
+    ) -> None:
+        if (
+            not self._input_meter_enabled
+            and not force
+        ):
+            return
+
+        now = time.monotonic()
+
+        if (
+            not force
+            and now - self._input_meter_last_emit
+            < 0.10
+        ):
+            return
+
+        self._input_meter_last_emit = now
+
+        self._notify(
+            "microphone_input_level",
+            "listening" if active else "ready",
+            json.dumps(
+                {
+                    "level": round(
+                        max(
+                            0.0,
+                            min(
+                                1.0,
+                                float(level),
+                            ),
+                        ),
+                        4,
+                    ),
+                    "active": bool(active),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+
+    @staticmethod
+    def _frame_input_level(
+        frame: bytes,
+    ) -> float:
+        samples = np.frombuffer(
+            frame,
+            dtype=np.int16,
+        ).astype(
+            np.float32,
+            copy=False,
+        )
+
+        if samples.size == 0:
+            return 0.0
+
+        normalized = samples / 32768.0
+        rms = float(
+            np.sqrt(
+                np.mean(
+                    normalized *
+                    normalized
+                )
+            )
+        )
+
+        # Speech RMS is naturally much lower than full-scale PCM. A small
+        # display-only gain makes ordinary speech visible without changing the
+        # audio sent to Wake/VAD/STT.
+        return max(
+            0.0,
+            min(
+                1.0,
+                rms * 4.0,
+            ),
+        )
+
+    def _maybe_emit_input_meter_frame(
+        self,
+        frame: bytes,
+    ) -> None:
+        if not self._input_meter_enabled:
+            return
+
+        self._emit_input_meter_level(
+            self._frame_input_level(
+                frame
+            )
+        )
+
+    def _standalone_input_meter_loop(
+        self,
+    ) -> None:
+        audio: AudioInput | None = None
+
+        try:
+            audio = (
+                self._new_audio_input_from_settings()
+            )
+            audio.start()
+
+            while (
+                self._input_meter_enabled
+                and not
+                self._input_meter_stop.is_set()
+                and not
+                self.wake_listener_running
+                and not
+                self.runtime_paused
+            ):
+                frame = audio.read_frame()
+                self._maybe_emit_input_meter_frame(
+                    frame
+                )
+
+        except Exception as exc:
+            if (
+                self._input_meter_enabled
+                and not self.runtime_paused
+            ):
+                self._notify(
+                    "microphone_meter_warning",
+                    "warning",
+                    str(exc),
+                )
+
+        finally:
+            if audio is not None:
+                try:
+                    audio.stop()
+                except Exception:
+                    pass
+
+            self._emit_input_meter_level(
+                0.0,
+                active=False,
+                force=True,
+            )
+
+            if (
+                self._input_meter_thread
+                is threading.current_thread()
+            ):
+                self._input_meter_thread = None
+
+    def _start_standalone_input_meter(
+        self,
+    ) -> None:
+        if (
+            not self._input_meter_enabled
+            or self.runtime_paused
+            or self.wake_listener_running
+        ):
+            return
+
+        thread = self._input_meter_thread
+        if (
+            thread is not None
+            and thread.is_alive()
+        ):
+            return
+
+        self._input_meter_stop.clear()
+
+        thread = threading.Thread(
+            target=self._standalone_input_meter_loop,
+            name="qronos-input-meter",
+            daemon=True,
+        )
+        self._input_meter_thread = thread
+        thread.start()
+
+    def _stop_standalone_input_meter(
+        self,
+    ) -> None:
+        self._input_meter_stop.set()
+
+        thread = self._input_meter_thread
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not
+            threading.current_thread()
+        ):
+            thread.join(timeout=0.75)
+
+        if (
+            thread is not
+            threading.current_thread()
+        ):
+            self._input_meter_thread = None
+
+    def start_input_meter(self) -> None:
+        self._input_meter_enabled = True
+        self._input_meter_last_emit = 0.0
+
+        if not self.wake_listener_running:
+            self._start_standalone_input_meter()
+
+    def stop_input_meter(self) -> None:
+        self._input_meter_enabled = False
+        self._stop_standalone_input_meter()
+        self._emit_input_meter_level(
+            0.0,
+            active=False,
+            force=True,
+        )
+
+    def _record_conversation_message(
+        self,
+        *,
+        role: str,
+        text: str,
+        source: str,
+        request_id: str = "",
+    ) -> None:
+        message = self.conversation_history.append(
+            role=role,
+            text=text,
+            source=source,
+            request_id=request_id,
+        )
+
+        self._notify(
+            "conversation_message_added",
+            "ready",
+            json.dumps(
+                message.to_public_dict(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def emit_conversation_history_snapshot(
+        self,
+    ) -> None:
+        self._notify(
+            "conversation_history_snapshot",
+            "ready",
+            self.conversation_history.snapshot_json(),
+        )
+
+    def _conversation_brain_context(
+        self,
+    ):
+        return (
+            self.conversation_history.brain_context()
+        )
+
+    def _ensure_text_runtime(self) -> None:
+        """
+        Prepare only the collaborators needed for typed Fast/Heavy turns.
+
+        Text Chat must not warm the microphone, Whisper, VAD, or Chatterbox.
+        If the full voice runtime is already prepared, reuse its router and
+        orchestrator instead of constructing parallel Brain state.
+        """
+        if self.task_router is None:
+            self.task_router = TaskRouter()
+
+        if self.orchestrator is None:
+            self.orchestrator = Orchestrator()
+
+    def run_text_turn(
+        self,
+        text: str,
+        request_id: str,
+    ) -> None:
+        """
+        Execute one typed request through the production TaskRouter/Orchestrator.
+
+        V1 intentionally supports only FAST and HEAVY. Vision, browser, and
+        computer-action text turns need their own permission/approval contracts
+        and are not silently executed through the chat box.
+        """
+        cleaned_text = (text or "").strip()
+        cleaned_request_id = (request_id or "").strip()
+
+        if self.runtime_paused:
+            self._notify(
+                "text_error",
+                "paused",
+                _text_event_message(
+                    cleaned_request_id,
+                    error="Qronos runtime is temporarily paused.",
+                ),
+            )
+            return
+
+        if self.is_busy:
+            self._notify(
+                "text_error",
+                "busy",
+                _text_event_message(
+                    cleaned_request_id,
+                    error=(
+                        "Qronos is already processing another request. "
+                        "Try again after the current turn finishes."
+                    ),
+                ),
+            )
+            return
+
+        self._set_busy(True)
+        started = time.perf_counter()
+        route_name = ""
+
+        try:
+            if not cleaned_text:
+                raise ValueError(
+                    "Text message must not be empty."
+                )
+
+            if (
+                len(cleaned_text)
+                > MAX_TEXT_MESSAGE_LENGTH
+            ):
+                raise ValueError(
+                    "Text message exceeds the "
+                    f"{MAX_TEXT_MESSAGE_LENGTH} character limit."
+                )
+
+            if not cleaned_request_id:
+                raise ValueError(
+                    "Text request id must not be empty."
+                )
+
+            if (
+                len(cleaned_request_id)
+                > MAX_TEXT_REQUEST_ID_LENGTH
+            ):
+                raise ValueError(
+                    "Text request id exceeds the "
+                    f"{MAX_TEXT_REQUEST_ID_LENGTH} character limit."
+                )
+
+            self._ensure_text_runtime()
+
+            if (
+                self.task_router is None
+                or self.orchestrator is None
+            ):
+                raise RuntimeError(
+                    "Qronos text runtime did not prepare correctly."
+                )
+
+            conversation_context = (
+                self._conversation_brain_context()
+            )
+
+            self._record_conversation_message(
+                role="user",
+                text=cleaned_text,
+                source="text",
+                request_id=cleaned_request_id,
+            )
+
+            self._notify(
+                "text_request_started",
+                "processing",
+                _text_event_message(
+                    cleaned_request_id,
+                    text=cleaned_text,
+                ),
+            )
+
+            route = self.task_router.route(
+                cleaned_text
+            )
+            selected_task_type = route.task_type
+            route_name = (
+                selected_task_type.value
+            )
+
+            self._notify(
+                "text_routed",
+                "processing",
+                _text_event_message(
+                    cleaned_request_id,
+                    route=route_name,
+                ),
+            )
+
+            if selected_task_type not in (
+                TaskType.FAST,
+                TaskType.HEAVY,
+            ):
+                raise RuntimeError(
+                    "Text Chat V1 currently supports Fast and Heavy "
+                    "responses only. Vision, browser, and computer "
+                    "actions remain behind their dedicated approval paths."
+                )
+
+            arithmetic_answer = (
+                solve_simple_arithmetic(
+                    cleaned_text
+                )
+                if selected_task_type
+                is TaskType.FAST
+                else None
+            )
+
+            if arithmetic_answer is not None:
+                response = (
+                    arithmetic_answer.spoken_text
+                )
+            else:
+                plan = TaskPlan(
+                    goal=cleaned_text
+                )
+                plan.add_step(
+                    task_type=selected_task_type,
+                    description=cleaned_text,
+                )
+
+                self._require_runtime_active("text execution")
+
+                results = (
+                    self.orchestrator.execute_plan(
+                        plan,
+                        conversation_messages=(
+                            conversation_context
+                        ),
+                    )
+                )
+
+                self._require_runtime_active("text response")
+
+                self._require_runtime_active("voice response")
+
+                if not results:
+                    raise RuntimeError(
+                        "Qronos did not return an execution result."
+                    )
+
+                result = results[-1]
+
+                if not result.success:
+                    raise RuntimeError(
+                        result.error
+                        or "Qronos task failed."
+                    )
+
+                response = (
+                    result.output.strip()
+                )
+
+            if not response:
+                raise RuntimeError(
+                    "Qronos returned an empty response."
+                )
+
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
+
+            self._record_conversation_message(
+                role="assistant",
+                text=response,
+                source="text",
+                request_id=cleaned_request_id,
+            )
+
+            self._notify(
+                "text_response",
+                "ready",
+                _text_event_message(
+                    cleaned_request_id,
+                    text=response,
+                    route=route_name,
+                    elapsedSeconds=round(
+                        elapsed,
+                        3,
+                    ),
+                ),
+            )
+
+        except Exception as exc:
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
+
+            self._notify(
+                "text_error",
+                "error",
+                _text_event_message(
+                    cleaned_request_id,
+                    error=str(exc),
+                    route=route_name,
+                    elapsedSeconds=round(
+                        elapsed,
+                        3,
+                    ),
+                ),
+            )
+
+        finally:
+            self._set_busy(False)
+
+    def prepare_wake_gate(self) -> None:
+        """Prepare only what is required to hear the Qronos wake word."""
+        if self.audio_input is None:
+            self.audio_input = (
+                self._new_audio_input_from_settings()
+            )
+
+        if self.conversation_session is None:
+            self.conversation_session = (
+                ConversationSession()
+            )
+
+    def prepare_wake_capture(self) -> None:
+        """
+        Prepare command capture without making Wake readiness depend on it.
+
+        This path is intentionally heavier than ``prepare_wake_gate`` because
+        Whisper.cpp VAD can have a noticeable cold start. It is serialized so
+        a background Wake warm-up, PTT, and an early spoken turn cannot create
+        duplicate VAD/recorder instances.
+        """
+        self.prepare_wake_gate()
+
+        if (
+            self.vad_runtime is not None
+            and self.command_recorder is not None
+            and self.speech_runtime is not None
+        ):
+            self._wake_command_prepare_error = None
+            self._wake_command_ready.set()
+            return
+
+        with self._wake_command_prepare_lock:
+            if (
+                self.vad_runtime is not None
+                and self.command_recorder is not None
+                and self.speech_runtime is not None
+            ):
+                self._wake_command_prepare_error = None
+                self._wake_command_ready.set()
+                return
+
+            try:
+                if self.vad_runtime is None:
+                    vad_runtime = (
+                        WhisperCppVADRuntime()
+                    )
+
+                    if not vad_runtime.health_check():
+                        raise RuntimeError(
+                            "Qronos VAD runtime is not ready."
+                        )
+
+                    vad_runtime.prepare()
+                    self.vad_runtime = vad_runtime
+
+                if self.command_recorder is None:
+                    self.command_recorder = (
+                        CommandRecorder(
+                            audio_input=self.audio_input,
+                            vad_runtime=self.vad_runtime,
+                            config=CommandRecorderConfig(
+                                silence_seconds=0.96,
+                                start_timeout_seconds=(
+                                    FOLLOWUP_START_TIMEOUT_SECONDS
+                                ),
+                            ),
+                        )
+                    )
+
+                if self.speech_runtime is None:
+                    self.speech_runtime = (
+                        WhisperHybridRuntime()
+                    )
+
+            except Exception as exc:
+                self._wake_command_prepare_error = str(exc)
+                self._wake_command_ready.clear()
+                raise
+
+            self._wake_command_prepare_error = None
+            self._wake_command_ready.set()
+
+    def _warm_wake_command_capture_async(self) -> None:
+        """Warm VAD/recorder/STT after the wake gate is already listening."""
+        if self._wake_command_ready.is_set():
+            return
+
+        thread = self._wake_command_prepare_thread
+        if thread is not None and thread.is_alive():
+            return
+
+        def worker() -> None:
+            last_error: Exception | None = None
+
+            for delay in WAKE_COMMAND_PREP_RETRY_DELAYS_SECONDS:
+                if self._wake_stop.is_set():
+                    return
+
+                if delay > 0 and self._wake_stop.wait(delay):
+                    return
+
+                try:
+                    self.prepare_wake_capture()
+                    self._notify(
+                        "voice_capture_ready",
+                        "ready",
+                        "Qronos command capture is warmed.",
+                    )
+                    return
+                except Exception as exc:
+                    last_error = exc
+
+            if last_error is not None and not self._wake_stop.is_set():
+                self._notify(
+                    "runtime_warning",
+                    "warning",
+                    "Command capture warm-up failed while Wake remains active: "
+                    + str(last_error),
+                )
+
+        worker_thread = threading.Thread(
+            target=worker,
+            name="qronos-wake-command-prewarm",
+            daemon=True,
+        )
+        self._wake_command_prepare_thread = worker_thread
+        worker_thread.start()
+
+    def _buffer_wake_command_audio_until_capture_ready(
+        self,
+    ) -> tuple[bytes, ...]:
+        """
+        Keep microphone ownership and buffer post-wake speech while VAD warms.
+
+        Normally the background warm-up has already completed by the time the
+        user says Qronos. This fallback is what makes a *very early* wake safe:
+        the microphone keeps being drained instead of losing the first command
+        words while the heavier VAD initialization finishes.
+        """
+        if self._wake_command_ready.is_set():
+            return ()
+
+        if self.audio_input is None:
+            raise RuntimeError(
+                "Qronos microphone is unavailable while command capture warms."
+            )
+
+        frame_duration = (
+            self.audio_input.config.frame_size
+            / self.audio_input.config.sample_rate
+        )
+        max_frames = max(
+            1,
+            int(
+                WAKE_COMMAND_PREP_BUFFER_LIMIT_SECONDS
+                / frame_duration
+            ),
+        )
+
+        buffered: list[bytes] = []
+        deadline = (
+            time.perf_counter()
+            + WAKE_COMMAND_PREP_BUFFER_LIMIT_SECONDS
+        )
+
+        while not self._wake_command_ready.is_set():
+            if self._wake_stop.is_set():
+                raise RuntimeError(
+                    "Wake listener stopped while command capture was warming."
+                )
+
+            if time.perf_counter() >= deadline:
+                raise TimeoutError(
+                    "Qronos command capture did not warm before the audio buffer limit."
+                )
+
+            thread = self._wake_command_prepare_thread
+            if (
+                self._wake_command_prepare_error
+                and (thread is None or not thread.is_alive())
+            ):
+                raise RuntimeError(
+                    "Qronos command capture warm-up failed: "
+                    + self._wake_command_prepare_error
+                )
+
+            frame = self.audio_input.read_frame()
+            buffered.append(bytes(frame))
+            self._maybe_emit_input_meter_frame(frame)
+
+            if len(buffered) >= max_frames:
+                raise TimeoutError(
+                    "Qronos command capture exceeded the buffered-audio safety limit."
+                )
+
+        return tuple(buffered)
+
     def prepare(self) -> None:
-        if self.audio_input is not None:
+        """
+        Prepare the full post-transcription processing/output runtime.
+
+        This deliberately calls ``prepare_wake_capture`` first but never makes
+        Wake readiness wait for TTS/Router/Orchestrator initialization.
+        """
+        self.prepare_wake_capture()
+
+        full_ready = all(
+            getattr(
+                self,
+                name,
+            )
+            is not None
+            for name in (
+                "voice_output",
+                "task_router",
+                "action_audit",
+                "screen_capture",
+                "orchestrator",
+            )
+        )
+
+        if full_ready:
             return
 
         emit(
             "runtime_preparing",
             "preparing",
-            "Preparing Qronos voice runtime.",
+            "Preparing Qronos processing runtime.",
         )
 
-        audio_input = AudioInput()
-        vad_runtime = WhisperCppVADRuntime()
-        speech_runtime = WhisperHybridRuntime()
-        voice_output = ChatterboxRuntime()
-
-        if not vad_runtime.health_check():
-            raise RuntimeError(
-                "Qronos VAD runtime is not ready."
+        if self.voice_output is None:
+            voice_output = (
+                ChatterboxRuntime()
             )
 
-        if not speech_runtime.health_check():
-            raise RuntimeError(
-                "Qronos speech runtime is not ready."
+            if not voice_output.health_check():
+                raise RuntimeError(
+                    "Qronos TTS runtime is not ready."
+                )
+
+            self.voice_output = voice_output
+
+        if self.task_router is None:
+            self.task_router = TaskRouter()
+
+        if self.action_audit is None:
+            self.action_audit = (
+                ActionAuditLog()
+            )
+            set_default_audit_sink(
+                self.action_audit.record_verdict
             )
 
-        if not voice_output.health_check():
-            raise RuntimeError(
-                "Qronos TTS runtime is not ready."
+        if self.screen_capture is None:
+            self.screen_capture = (
+                ScreenCapture(
+                    read_text=read_screen_text
+                )
             )
 
-        vad_runtime.prepare()
-
-        self.audio_input = audio_input
-        self.vad_runtime = vad_runtime
-        self.command_recorder = CommandRecorder(
-            audio_input=audio_input,
-            vad_runtime=vad_runtime,
-            config=CommandRecorderConfig(
-                silence_seconds=0.96,
-                start_timeout_seconds=(
-                    FOLLOWUP_START_TIMEOUT_SECONDS
-                ),
-            ),
-        )
-        self.speech_runtime = speech_runtime
-        self.voice_output = voice_output
-        self.task_router = TaskRouter()
-
-        self.action_audit = ActionAuditLog()
-        set_default_audit_sink(self.action_audit.record_verdict)
-
-        self.screen_capture = ScreenCapture(read_text=read_screen_text)
-
-        self.orchestrator = Orchestrator()
-        self.orchestrator.workers.register(
-            WebResearchWorker(
-                answer_fn=self.orchestrator.answer_web_prompt,
+        if self.orchestrator is None:
+            orchestrator = Orchestrator()
+            orchestrator.workers.register(
+                WebResearchWorker(
+                    answer_fn=(
+                        orchestrator.answer_web_prompt
+                    ),
+                )
             )
-        )
-        self.orchestrator.workers.register(
-            build_vision_worker(self.orchestrator.runtime)
-        )
-        self.conversation_session = ConversationSession()
+            orchestrator.workers.register(
+                build_vision_worker(
+                    orchestrator.runtime
+                )
+            )
+            self.orchestrator = (
+                orchestrator
+            )
 
         emit(
             "runtime_prepared",
             "ready",
-            "Qronos voice runtime is ready.",
+            "Qronos processing runtime is ready.",
         )
 
+    def _require_wake_capture_prepared(
+        self,
+    ) -> None:
+        missing = [
+            name
+            for name in (
+                "audio_input",
+                "vad_runtime",
+                "command_recorder",
+                "speech_runtime",
+                "conversation_session",
+            )
+            if getattr(
+                self,
+                name,
+            )
+            is None
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "Qronos voice capture runtime is not prepared: "
+                + ", ".join(missing)
+                + " missing."
+            )
+
     def _require_prepared(self) -> None:
-        """
-        Fail loudly when a collaborator is missing.
-
-        These were ``assert`` statements. Python removes ``assert`` entirely
-        under ``-O``, so in an optimised run the guard disappeared and the very
-        next line dereferenced ``None`` — a raw AttributeError from inside the
-        voice path rather than a message the user could act on. An explicit
-        check survives the flag, and the caller already turns a RuntimeError
-        into a ``runtime_error`` event the desktop displays.
-
-        This should be unreachable: ``prepare`` assigns all seven or raises.
-        It stays because the cost of being wrong is a crash mid-utterance.
-        """
         missing = [
             name
             for name in (
@@ -776,6 +2088,10 @@ class QronosRuntime:
         )
 
         if callable(warm):
+            # A new warm request starts a new STT residency generation. The
+            # next release must be allowed to shut that generation down.
+            self._speech_runtime_released = False
+
             try:
                 warm()
 
@@ -788,11 +2104,23 @@ class QronosRuntime:
 
     def _release_speech_runtime(
         self,
-    ) -> None:
+    ) -> bool:
+        """
+        Release persistent STT resources exactly once per warm generation.
+
+        _run_voice_turn() must yield Whisper before Brain execution on the
+        8 GB GPU. push_to_talk() also owns a final safety cleanup so failures
+        that happen before transcription cannot leak STT residency. Those two
+        cleanup paths intentionally converge here and are idempotent.
+        """
+        if self._speech_runtime_released:
+            return True
+
         speech = self.speech_runtime
 
         if speech is None:
-            return
+            self._speech_runtime_released = True
+            return True
 
         shutdown = getattr(
             speech,
@@ -805,33 +2133,231 @@ class QronosRuntime:
                 shutdown()
 
             except Exception:
-                pass
+                return False
+
+        try:
+            server_running = getattr(
+                speech,
+                "server_running",
+                None,
+            )
+
+            if (
+                server_running is not None
+                and bool(server_running)
+            ):
+                return False
+
+        except Exception:
+            pass
+
+        self._speech_runtime_released = True
+        return True
+
+    def _release_brains_for_voice_phase(
+        self,
+    ) -> None:
+        """
+        Yield configured Qronos Brain residency before another GPU voice phase.
+
+        Older/fake orchestrators used by tests may not expose the public seam;
+        in that case this is intentionally a no-op.
+        """
+        orchestrator = self.orchestrator
+
+        if orchestrator is None:
+            return
+
+        release = getattr(
+            orchestrator,
+            "release_brains_for_voice_phase",
+            None,
+        )
+
+        if callable(release):
+            release()
+
+    def _release_voice_output_runtime(
+        self,
+    ) -> bool:
+        """
+        Release TTS model residency after WAV generation.
+
+        Desktop playback consumes generated files, not the TTS model itself,
+        so keeping Chatterbox resident during playback only steals VRAM from
+        the next STT phase.
+        """
+        voice = self.voice_output
+
+        if voice is None:
+            return True
+
+        release = getattr(
+            voice,
+            "release",
+            None,
+        )
+
+        if not callable(release):
+            return True
+
+        try:
+            release()
+            return not bool(
+                getattr(
+                    voice,
+                    "is_loaded",
+                    False,
+                )
+            )
+
+        except Exception:
+            return False
 
     @property
     def wake_listener_running(self) -> bool:
         thread = self._wake_thread
         return thread is not None and thread.is_alive()
 
+    @property
+    def wake_listener_ready(self) -> bool:
+        return (
+            self.wake_listener_running
+            and self._wake_ready.is_set()
+        )
+
+    def _schedule_wake_start_retry(
+        self,
+        error: Exception,
+    ) -> bool:
+        """Retry a failed initial Wake startup without requiring a Settings write."""
+        if (
+            self._wake_stop.is_set()
+            or self.runtime_paused
+            or not self.wake_word_enabled
+        ):
+            return False
+
+        with self._lock:
+            if (
+                self._wake_start_retry_count
+                >= len(WAKE_STARTUP_RETRY_DELAYS_SECONDS)
+            ):
+                return False
+
+            attempt = self._wake_start_retry_count + 1
+            delay = WAKE_STARTUP_RETRY_DELAYS_SECONDS[
+                self._wake_start_retry_count
+            ]
+            self._wake_start_retry_count = attempt
+
+        self._notify(
+            "wake_word_retrying",
+            "warning",
+            json.dumps(
+                {
+                    "attempt": attempt,
+                    "delaySeconds": delay,
+                    "reason": str(error),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+
+        failed_wake_thread = threading.current_thread()
+
+        def retry() -> None:
+            if self._wake_stop.wait(delay):
+                return
+
+            if (
+                self.runtime_paused
+                or not self.wake_word_enabled
+            ):
+                return
+
+            # A startup exception is raised on the Wake thread itself. The old
+            # implementation could fire this retry while that failed thread was
+            # still inside its finally/cleanup path. start_wake_listener() then
+            # saw an alive _wake_thread and correctly refused a duplicate start,
+            # but no later retry remained; touching Wake sensitivity happened to
+            # start it again. Wait until the failed owner has completely exited
+            # before replacing it. This keeps one microphone owner at a time.
+            while failed_wake_thread.is_alive():
+                if self._wake_stop.wait(0.05):
+                    return
+
+            with self._lock:
+                if self._wake_thread is failed_wake_thread:
+                    self._wake_thread = None
+
+            if (
+                self.runtime_paused
+                or not self.wake_word_enabled
+                or self._wake_stop.is_set()
+            ):
+                return
+
+            self.start_wake_listener()
+
+        worker = threading.Thread(
+            target=retry,
+            name=f"qronos-wake-retry-{attempt}",
+            daemon=True,
+        )
+        self._wake_retry_thread = worker
+        worker.start()
+        return True
+
     def start_wake_listener(self) -> None:
 
         """
         Start the low-cost Qronos wake-word loop.
+
+        Thread liveness is deliberately not reported as listening readiness.
+        A duplicate start can arrive while the first thread is still preparing
+        the real Wake engine and microphone. During that startup window, return
+        silently and let _wake_listener_loop emit wake_word_listening only after
+        trigger.start() and audio_input.start() have both completed.
 
         The listener uses the same AudioInput object as command recording, but
         never reads from it concurrently. After detection, this thread pauses
         wake-word inference and immediately hands the already-open microphone
         to CommandRecorder, preserving the first phoneme of the user's command.
         """
+        if not self.wake_word_enabled:
+            self._wake_ready.clear()
+            self._notify(
+                "wake_word_disabled",
+                "ready",
+                "Wake Word is disabled in Qronos Settings.",
+            )
+            return
+
+        if self.runtime_paused:
+            self._reject_if_runtime_paused(
+                "wake_listener_start"
+            )
+            return
+
+        # The Settings meter may own the microphone only while Wake is absent.
+        # Stop that temporary owner before the persistent Wake stream opens.
+        self._stop_standalone_input_meter()
+
         with self._lock:
             if self._wake_thread is not None and self._wake_thread.is_alive():
-                self._notify(
-                    "wake_word_listening",
-                    "listening",
-                    "Qronos wake-word listener is already active.",
-                )
+                if self._wake_ready.is_set():
+                    self._notify(
+                        "wake_word_listening",
+                        "listening",
+                        "Qronos wake-word listener is already active.",
+                    )
                 return
 
             self._wake_stop.clear()
+            self._wake_ready.clear()
+
             thread = threading.Thread(
                 target=self._wake_listener_loop,
                 name="qronos-wake-word",
@@ -845,6 +2371,9 @@ class QronosRuntime:
 
     def stop_wake_listener(self) -> None:
         self._wake_stop.set()
+        self._wake_ready.clear()
+        with self._lock:
+            self._wake_start_retry_count = 0
 
         # Unblock a wake thread that may currently be waiting for the desktop
         # to finish speaking.
@@ -876,6 +2405,12 @@ class QronosRuntime:
 
         # Stopping wake listening also releases persistent STT resources.
         self._release_speech_runtime()
+
+        if (
+            self._input_meter_enabled
+            and not self.runtime_paused
+        ):
+            self._start_standalone_input_meter()
 
     def _begin_voice_playback_wait(self) -> int:
         """
@@ -1019,11 +2554,9 @@ class QronosRuntime:
         """
         try:
 
-            self.prepare()
+            wake_start_perf = time.perf_counter()
 
-
-            self._require_prepared()
-
+            self.prepare_wake_gate()
 
             if self.audio_input is None:
                 raise RuntimeError(
@@ -1031,7 +2564,9 @@ class QronosRuntime:
                 )
 
 
-            engine = OpenWakeWordEngine()
+            engine = OpenWakeWordEngine(
+                threshold=self.wake_threshold,
+            )
 
 
             trigger = VoiceTriggerService(
@@ -1049,19 +2584,45 @@ class QronosRuntime:
             self.audio_input.start()
 
 
+            self._wake_ready.set()
+            with self._lock:
+                self._wake_start_retry_count = 0
+
             self._notify(
                 "wake_word_listening",
                 "listening",
-                "Say Qronos to start a voice session.",
+                json.dumps(
+                    {
+                        "message": "Say Qronos to start a voice session.",
+                        "coldStartSeconds": round(
+                            time.perf_counter() - wake_start_perf,
+                            3,
+                        ),
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
             )
 
+            # Do not put VAD/recorder/STT on the wake critical path. Wake is
+            # already listening at this point; the heavier capture layer warms
+            # behind it and an early command is buffered if necessary.
+            self._warm_wake_command_capture_async()
+
             while not self._wake_stop.is_set():
+                if self._pending_audio_input_reconcile:
+                    self._reconcile_audio_input_in_wake_thread()
+
                 try:
                     frame = self.audio_input.read_frame()
                 except Exception:
                     if self._wake_stop.is_set():
                         break
                     raise
+
+                self._maybe_emit_input_meter_frame(
+                    frame
+                )
 
                 event = trigger.process_audio(
                     frame,
@@ -1075,7 +2636,21 @@ class QronosRuntime:
                     time.perf_counter()
                 )
 
+                self._wake_ready.clear()
                 trigger.pause()
+
+                # The 8 GB GPU has one Qronos high-VRAM phase slot.
+                # Yield any warm Fast/Heavy Brain before Whisper starts so
+                # STT does not overlap physically with Brain residency.
+                self._release_brains_for_voice_phase()
+
+                # If the user wakes Qronos before the command VAD has finished
+                # its background cold start, keep draining the open microphone
+                # into a bounded buffer. Those frames are consumed first by the
+                # recorder, so early commands are not clipped or discarded.
+                initial_command_frames = (
+                    self._buffer_wake_command_audio_until_capture_ready()
+                )
 
                 # Load persistent Whisper while the user is speaking.
                 # Recording time hides most or all of model startup latency.
@@ -1123,6 +2698,7 @@ class QronosRuntime:
                         wake_score=float(
                             engine.last_score
                         ),
+                        initial_frames=initial_command_frames,
                     )
                 )
 
@@ -1194,12 +2770,16 @@ class QronosRuntime:
                 # persistent STT VRAM before returning to idle wake listening.
                 self._release_speech_runtime()
 
+                if self._pending_audio_input_reconcile:
+                    self._reconcile_audio_input_in_wake_thread()
+
                 # Resume the existing wake-word pipeline.
                 # OpenWakeWord resume() resets its rolling
                 # prediction/audio buffers and performs its
                 # warm-up path without rebuilding the engine.
                 self.audio_input.start()
                 trigger.resume()
+                self._wake_ready.set()
 
                 self._notify(
                     "wake_word_listening",
@@ -1210,13 +2790,22 @@ class QronosRuntime:
         except Exception as exc:
 
             if not self._wake_stop.is_set():
-                self._notify(
-                    "runtime_error",
-                    "error",
-                    f"Wake-word listener failed: {exc}",
+                retry_scheduled = (
+                    self._schedule_wake_start_retry(
+                        exc
+                    )
                 )
 
+                if not retry_scheduled:
+                    self._notify(
+                        "runtime_error",
+                        "error",
+                        f"Wake-word listener failed: {exc}",
+                    )
+
         finally:
+            self._wake_ready.clear()
+
             trigger = self.voice_trigger
             if trigger is not None:
                 try:
@@ -1251,8 +2840,12 @@ class QronosRuntime:
             "Generating Qronos voice response.",
         )
 
-        utterance = self.voice_output.speak_to_file(
+        spoken_response = normalise_spoken_text(
             response
+        )
+
+        utterance = self.voice_output.speak_to_file(
+            spoken_response
         )
 
         def build_spectrum_sidecar() -> None:
@@ -1335,13 +2928,21 @@ class QronosRuntime:
         first_audio_ready_perf: float | None = None
         first_chunk_model_seconds = 0.0
         first_chunk_audio_seconds = 0.0
+        spoken_chunks: list[str] = []
 
         for index, chunk in enumerate(
             chunks
         ):
+            spoken_chunk = normalise_spoken_text(
+                chunk
+            )
+            spoken_chunks.append(
+                spoken_chunk
+            )
+
             utterance = (
                 self.voice_output.speak_to_file(
-                    chunk
+                    spoken_chunk
                 )
             )
 
@@ -1430,6 +3031,7 @@ class QronosRuntime:
 
         return {
             "chunks": chunks,
+            "spokenChunks": spoken_chunks,
             "chunkCount": len(chunks),
             "totalAudioSeconds":
                 total_audio_seconds,
@@ -1514,6 +3116,7 @@ class QronosRuntime:
         *,
         user_message_added: bool,
         assistant_message_added: bool,
+        rewarm_stt_after_tts: bool,
     ) -> float:
         """
         Speak a short local recovery message after genuine user speech fails
@@ -1554,6 +3157,10 @@ class QronosRuntime:
                 recovery_response,
             )
 
+            # A failed Brain turn may still have left a keep-alive model
+            # resident. The local recovery voice must get the GPU phase slot.
+            self._release_brains_for_voice_phase()
+
             playback_id = (
                 self._begin_voice_playback_wait()
             )
@@ -1564,6 +3171,21 @@ class QronosRuntime:
                     playback_id=playback_id,
                 )
             )
+
+            tts_released = (
+                self._release_voice_output_runtime()
+            )
+            report[
+                "recoveryTtsReleasedAfterSynthesis"
+            ] = bool(
+                tts_released
+            )
+
+            if (
+                tts_released
+                and rewarm_stt_after_tts
+            ):
+                self._warm_speech_runtime_async()
 
             playback_seconds = max(
                 0.0,
@@ -1604,6 +3226,7 @@ class QronosRuntime:
         trigger_source: str,
         detected_at_perf: float | None = None,
         wake_score: float | None = None,
+        initial_frames: tuple[bytes, ...] = (),
     ) -> float:
         """
         Capture one user command, run the existing Brain path, synthesize it,
@@ -1613,6 +3236,9 @@ class QronosRuntime:
         changing the execution order. That gives us a factual baseline before
         introducing semantic chunking or streaming.
         """
+        if self._reject_if_runtime_paused("voice"):
+            return 0.0
+
         try:
             self.last_foreground_window = foreground_window()
         except Exception:
@@ -1630,6 +3256,8 @@ class QronosRuntime:
         playback_seconds = 0.0
         user_message_added = False
         assistant_message_added = False
+        voice_request_id = ""
+        conversation_context = ()
         self._last_voice_turn_had_valid_speech_evidence = False
 
         turn_started_perf = (
@@ -1653,8 +3281,8 @@ class QronosRuntime:
             )
 
         try:
-            self.prepare()
-            self._require_prepared()
+            self.prepare_wake_capture()
+            self._require_wake_capture_prepared()
 
             self._notify(
                 "voice_listening",
@@ -1666,11 +3294,27 @@ class QronosRuntime:
 
             recording_started = time.perf_counter()
 
-            recording = self.command_recorder.record_to_file(
+            recording_path = (
                 self.speech_runtime.temp_dir
-                / "qronos_voice_command.wav",
-                on_audio_spectrum=self._emit_audio_spectrum,
+                / "qronos_voice_command.wav"
             )
+
+            # Preserve the established recorder call contract for ordinary
+            # PTT/follow-up turns. Only the very-early Wake path needs the new
+            # buffered-frame argument. This keeps existing recorder adapters
+            # and tests compatible while still protecting speech spoken before
+            # command VAD warm-up finishes.
+            if initial_frames:
+                recording = self.command_recorder.record_to_file(
+                    recording_path,
+                    on_audio_spectrum=self._emit_audio_spectrum,
+                    initial_frames=initial_frames,
+                )
+            else:
+                recording = self.command_recorder.record_to_file(
+                    recording_path,
+                    on_audio_spectrum=self._emit_audio_spectrum,
+                )
 
             recording_finished = time.perf_counter()
 
@@ -1763,12 +3407,35 @@ class QronosRuntime:
             transcript = (
                 self.speech_runtime.transcribe_file(
                     recording.audio_path,
-                    language="fa",
+                    language=self.voice_language,
                 )
                 .strip()
             )
 
             stt_finished = time.perf_counter()
+
+            stt_release_started = time.perf_counter()
+
+            if not self._release_speech_runtime():
+                raise RuntimeError(
+                    "Qronos could not release persistent STT GPU resources "
+                    "before Brain execution."
+                )
+
+            stt_release_finished = time.perf_counter()
+            report["sttReleasedBeforeBrain"] = True
+            report["sttReleaseSeconds"] = round(
+                stt_release_finished
+                - stt_release_started,
+                3,
+            )
+
+            # Heavy post-transcription collaborators are intentionally delayed
+            # until after the user's speech is already safely captured.
+            self.prepare()
+            self._require_prepared()
+
+            self._require_runtime_active("voice brain execution")
 
             transcript = normalise_qronos_invocation(transcript)
 
@@ -1778,6 +3445,20 @@ class QronosRuntime:
                 )
 
             report["transcript"] = transcript
+
+            conversation_context = (
+                self._conversation_brain_context()
+            )
+            voice_request_id = (
+                f"voice-{time.time_ns()}"
+            )
+
+            self._record_conversation_message(
+                role="user",
+                text=transcript,
+                source="voice",
+                request_id=voice_request_id,
+            )
 
             self._notify(
                 "voice_transcript",
@@ -1870,8 +3551,13 @@ class QronosRuntime:
                     description=transcript,
                 )
 
+                self._require_runtime_active("voice brain execution")
+
                 results = self.orchestrator.execute_plan(
-                    plan
+                    plan,
+                    conversation_messages=(
+                        conversation_context
+                    ),
                 )
 
                 if not results:
@@ -1896,17 +3582,37 @@ class QronosRuntime:
                     "Qronos returned an empty response."
                 )
 
+            brain_release_started = time.perf_counter()
+            self._release_brains_for_voice_phase()
+            brain_release_finished = time.perf_counter()
+
+            report["brainReleasedBeforeTts"] = True
+            report["brainReleaseSeconds"] = round(
+                brain_release_finished
+                - brain_release_started,
+                3,
+            )
+
             self.conversation_session.begin_responding()
             self.conversation_session.add_assistant_message(
                 response
             )
             assistant_message_added = True
 
+            self._record_conversation_message(
+                role="assistant",
+                text=response,
+                source="voice",
+                request_id=voice_request_id,
+            )
+
             self._notify(
                 "voice_response",
                 "ready",
                 response,
             )
+
+            self._require_runtime_active("voice output")
 
             tts_started = time.perf_counter()
 
@@ -1924,6 +3630,31 @@ class QronosRuntime:
             all_audio_ready = (
                 time.perf_counter()
             )
+
+            tts_release_started = time.perf_counter()
+            tts_released = (
+                self._release_voice_output_runtime()
+            )
+            tts_release_finished = time.perf_counter()
+
+            report["ttsReleasedAfterSynthesis"] = bool(
+                tts_released
+            )
+            report["ttsReleaseSeconds"] = round(
+                tts_release_finished
+                - tts_release_started,
+                3,
+            )
+
+            # Once TTS has yielded the GPU, warm STT while desktop playback
+            # consumes the already-generated WAV files. This restores the
+            # follow-up latency optimization without overlapping two large
+            # Qronos GPU phases.
+            if (
+                tts_released
+                and trigger_source != "push_to_talk"
+            ):
+                self._warm_speech_runtime_async()
 
             first_audio_ready = (
                 chunked[
@@ -1998,6 +3729,11 @@ class QronosRuntime:
                     "ttsChunks": list(
                         chunked[
                             "chunks"
+                        ]
+                    ),
+                    "ttsSpokenChunks": list(
+                        chunked[
+                            "spokenChunks"
                         ]
                     ),
                     "firstChunkAudioSeconds": round(
@@ -2134,6 +3870,10 @@ class QronosRuntime:
                     assistant_message_added=(
                         assistant_message_added
                     ),
+                    rewarm_stt_after_tts=(
+                        trigger_source
+                        != "push_to_talk"
+                    ),
                 )
             )
 
@@ -2165,6 +3905,10 @@ class QronosRuntime:
                     assistant_message_added=(
                         assistant_message_added
                     ),
+                    rewarm_stt_after_tts=(
+                        trigger_source
+                        != "push_to_talk"
+                    ),
                 )
             )
 
@@ -2189,6 +3933,14 @@ class QronosRuntime:
         return playback_seconds
 
     def push_to_talk(self) -> None:
+        # Never compete with the Settings-only meter for the microphone.
+        self._stop_standalone_input_meter()
+        self.prepare_wake_capture()
+        self._require_wake_capture_prepared()
+
+        # Serialize GPU phases before warming Whisper for an explicit turn.
+        self._release_brains_for_voice_phase()
+
         # Warm Whisper concurrently with command recording.
         self._warm_speech_runtime_async()
 
@@ -2201,6 +3953,13 @@ class QronosRuntime:
             # Push-to-talk is one explicit turn, so do not retain VRAM.
             self._release_speech_runtime()
 
+            if (
+                self._input_meter_enabled
+                and not self.wake_listener_running
+                and not self.runtime_paused
+            ):
+                self._start_standalone_input_meter()
+
 
     def look_at_screen(
         self,
@@ -2208,6 +3967,9 @@ class QronosRuntime:
         question: str = "",
         window_only: bool = False,
     ) -> None:
+        if self._reject_if_runtime_paused("screen"):
+            return
+
         if self.is_busy:
             self._notify(
                 "runtime_busy",
@@ -2347,6 +4109,8 @@ class QronosRuntime:
         )
 
     def close(self) -> None:
+        self._input_meter_enabled = False
+        self._stop_standalone_input_meter()
         self.stop_wake_listener()
         self._release_speech_runtime()
 
@@ -2554,6 +4318,39 @@ def handle_action(
         action_id,
     )
 
+    pause_safe_actions = {
+        CONVERSATION_HISTORY_REQUEST_ACTION,
+        VOICE_PLAYBACK_COMPLETE_ACTION,
+        WAKE_LISTENER_STOP_ACTION,
+        SETTINGS_RELOAD_ACTION,
+        INPUT_METER_STOP_ACTION,
+    }
+
+    if (
+        runtime.runtime_paused
+        and action_id not in pause_safe_actions
+    ):
+        runtime._reject_if_runtime_paused(
+            f"action:{action_id}"
+        )
+        return
+
+    if action_id == CONVERSATION_HISTORY_REQUEST_ACTION:
+        runtime.emit_conversation_history_snapshot()
+        return
+
+    if action_id == SETTINGS_RELOAD_ACTION:
+        runtime.reload_settings()
+        return
+
+    if action_id == INPUT_METER_START_ACTION:
+        runtime.start_input_meter()
+        return
+
+    if action_id == INPUT_METER_STOP_ACTION:
+        runtime.stop_input_meter()
+        return
+
     if action_id == WAKE_LISTENER_START_ACTION:
 
         runtime.start_wake_listener()
@@ -2643,6 +4440,71 @@ def handle_action(
     )
 
 
+def handle_text_message(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    text = str(
+        payload.get(
+            "text",
+            "",
+        )
+    ).strip()
+    request_id = str(
+        payload.get(
+            "requestId",
+            "",
+        )
+    ).strip()
+
+    if not text:
+        raise ValueError(
+            "Text message must not be empty."
+        )
+
+    if len(text) > MAX_TEXT_MESSAGE_LENGTH:
+        raise ValueError(
+            "Text message exceeds the "
+            f"{MAX_TEXT_MESSAGE_LENGTH} character limit."
+        )
+
+    if not request_id:
+        raise ValueError(
+            "Text request id must not be empty."
+        )
+
+    if (
+        len(request_id)
+        > MAX_TEXT_REQUEST_ID_LENGTH
+    ):
+        raise ValueError(
+            "Text request id exceeds the "
+            f"{MAX_TEXT_REQUEST_ID_LENGTH} character limit."
+        )
+
+    if runtime.runtime_paused:
+        runtime._notify(
+            "text_error",
+            "paused",
+            _text_event_message(
+                request_id,
+                error="Qronos runtime is temporarily paused.",
+            ),
+        )
+        return
+
+    worker = threading.Thread(
+        target=runtime.run_text_turn,
+        args=(
+            text,
+            request_id,
+        ),
+        name="qronos-text-turn",
+        daemon=True,
+    )
+    worker.start()
+
+
 #: The longest summary the desktop may submit. A queue entry is shown in a
 #: narrow panel, and an unbounded string arriving over a pipe is somebody
 #: else's memory to spend.
@@ -2715,6 +4577,9 @@ def handle_queue_submit(
     runtime: QronosRuntime,
     payload: dict[str, Any],
 ) -> None:
+    if runtime._reject_if_runtime_paused("queue_submit"):
+        return
+
     summary = str(payload.get("summary", "")).strip()
 
     if not summary:
@@ -2769,6 +4634,9 @@ def handle_queue_override(
     runtime: QronosRuntime,
     payload: dict[str, Any],
 ) -> None:
+    if runtime._reject_if_runtime_paused("queue_override"):
+        return
+
     """
     Run it anyway — if only politeness was in the way.
 
@@ -2788,13 +4656,34 @@ def handle_queue_set_paused(
     if not isinstance(paused, bool):
         raise ValueError("queue_set_paused needs paused to be true or false.")
 
+    if runtime.runtime_paused and not paused:
+        runtime._reject_if_runtime_paused("queue_resume")
+        return
+
     runtime.ensure_scheduler().set_paused(paused)
+
+
+def handle_runtime_set_paused(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    paused = payload.get("paused")
+
+    if not isinstance(paused, bool):
+        raise ValueError(
+            "runtime_set_paused needs paused to be true or false."
+        )
+
+    runtime.set_runtime_paused(paused)
 
 
 def handle_queue_debug_load(
     runtime: QronosRuntime,
     payload: dict[str, Any],
 ) -> None:
+    if runtime._reject_if_runtime_paused("queue_debug_load"):
+        return
+
     """
     Tell the monitor what to think the machine is doing.
 
@@ -2911,6 +4800,66 @@ class _DemonstrationWork:
 def main() -> int:
     runtime = QronosRuntime()
 
+    # The real desktop must not depend on a later Settings write or a frontend
+    # timing race to begin listening. Tauri marks the desktop process with an
+    # explicit environment flag; raw bridge tests keep their no-side-effect
+    # startup behavior because they do not set it.
+    if (
+        _desktop_wake_bootstrap_enabled()
+        and runtime.wake_word_enabled
+    ):
+        bootstrap_started = time.perf_counter()
+
+        try:
+            _preload_openwakeword_for_desktop()
+            runtime.start_wake_listener()
+
+            if runtime._wake_ready.wait(5.0):
+                emit(
+                    "wake_bootstrap_ready",
+                    "ready",
+                    json.dumps(
+                        {
+                            "seconds": round(
+                                time.perf_counter()
+                                - bootstrap_started,
+                                3,
+                            ),
+                            "beforeRuntimeReady": True,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                )
+            else:
+                emit(
+                    "wake_bootstrap_pending",
+                    "warning",
+                    json.dumps(
+                        {
+                            "seconds": round(
+                                time.perf_counter()
+                                - bootstrap_started,
+                                3,
+                            ),
+                            "beforeRuntimeReady": False,
+                            "listenerRunning":
+                                runtime.wake_listener_running,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                )
+        except Exception as exc:
+            # Wake retry/recovery remains inside QronosRuntime. A bootstrap
+            # failure must not prevent the rest of the desktop bridge from
+            # becoming usable.
+            emit(
+                "wake_bootstrap_failed",
+                "warning",
+                str(exc),
+            )
+
     emit(
         "runtime_ready",
         "ready",
@@ -2937,6 +4886,20 @@ def main() -> int:
                         "runtime_pong",
                         "ready",
                         "Qronos runtime bridge responded.",
+                    )
+                    continue
+
+                if command == RUNTIME_SET_PAUSED_COMMAND:
+                    handle_runtime_set_paused(
+                        runtime,
+                        payload,
+                    )
+                    continue
+
+                if command == TEXT_MESSAGE_COMMAND:
+                    handle_text_message(
+                        runtime,
+                        payload,
                     )
                     continue
 
