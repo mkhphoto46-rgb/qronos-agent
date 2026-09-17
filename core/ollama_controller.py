@@ -16,8 +16,9 @@ OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 # Interactive local inference must never hold Qronos indefinitely.
 #
-# This is a safety ceiling, not a performance target. Fast/Heavy-specific
-# limits can be split later after benchmark data exists.
+# This remains the conservative runtime default for callers that do not supply
+# an explicit role-aware deadline. Orchestrator supplies longer bounded
+# deadlines for Heavy Brain cold-load and deeper-reasoning requests.
 CHAT_TIMEOUT_SECONDS = 90
 
 
@@ -25,6 +26,43 @@ CHAT_TIMEOUT_SECONDS = 90
 # Existing tests and development code can keep importing
 # OllamaModelStatus while Qronos moves to runtime-neutral types.
 OllamaModelStatus = BrainRuntimeModelStatus
+
+
+def _safe_http_error_detail(
+    response,
+    *,
+    limit: int = 600,
+) -> str:
+    """Return bounded local Ollama error detail for diagnostics."""
+    if response is None:
+        return ""
+
+    detail = ""
+
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            detail = str(
+                data.get("error", "")
+                or ""
+            ).strip()
+    except Exception:
+        detail = ""
+
+    if not detail:
+        try:
+            detail = str(
+                response.text
+                or ""
+            ).strip()
+        except Exception:
+            detail = ""
+
+    detail = " ".join(
+        detail.split()
+    )
+
+    return detail[:limit]
 
 
 class OllamaController(BrainRuntime):
@@ -230,6 +268,7 @@ class OllamaController(BrainRuntime):
         num_ctx: Optional[int] = None,
         keep_alive: str = "5m",
         response_format: Optional[dict] = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         """
         Send one chat request through the Ollama development runtime.
@@ -237,6 +276,17 @@ class OllamaController(BrainRuntime):
         Multi-turn conversations use structured BrainMessage objects.
         Legacy single-turn callers can continue passing prompt.
         """
+
+        effective_timeout = (
+            float(CHAT_TIMEOUT_SECONDS)
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
+
+        if effective_timeout <= 0:
+            raise ValueError(
+                "timeout_seconds must be greater than zero."
+            )
 
         if isinstance(think, str):
             cleaned_think = think.strip().lower()
@@ -293,7 +343,7 @@ class OllamaController(BrainRuntime):
             response = requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
-                timeout=CHAT_TIMEOUT_SECONDS,
+                timeout=effective_timeout,
             )
 
             response.raise_for_status()
@@ -302,7 +352,7 @@ class OllamaController(BrainRuntime):
             raise TimeoutError(
                 (
                     "Qronos Brain exceeded the "
-                    f"{CHAT_TIMEOUT_SECONDS}-second "
+                    f"{effective_timeout:g}-second "
                     f"safety deadline: {model_name}"
                 )
             ) from exc
@@ -319,15 +369,39 @@ class OllamaController(BrainRuntime):
                     "one is missing, that download has not happened yet."
                 ) from exc
 
+            status = (
+                exc.response.status_code
+                if exc.response is not None
+                else "unknown"
+            )
+            detail = _safe_http_error_detail(
+                exc.response
+            )
+            suffix = (
+                f": {detail}"
+                if detail
+                else ""
+            )
+
             raise RuntimeError(
                 "Could not send request to model: "
-                f"{model_name}"
+                f"{model_name} (Ollama HTTP {status}{suffix})"
             ) from exc
 
         except requests.RequestException as exc:
+            detail = " ".join(
+                str(exc).split()
+            )[:600]
+            suffix = (
+                f": {detail}"
+                if detail
+                else ""
+            )
+
             raise RuntimeError(
                 "Could not send request to model: "
-                f"{model_name}"
+                f"{model_name} "
+                f"({type(exc).__name__}{suffix})"
             ) from exc
 
         data = response.json()

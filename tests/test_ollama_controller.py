@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import requests
 
 import unittest
@@ -23,12 +24,17 @@ class TestOllamaController(unittest.TestCase):
         response = Mock()
         response.status_code = status_code
         response.json.return_value = json_data
+        response.text = json.dumps(
+            json_data,
+            ensure_ascii=False,
+        )
 
         if status_code >= 400:
             from requests import HTTPError
 
             response.raise_for_status.side_effect = HTTPError(
-                f"HTTP {status_code}"
+                f"HTTP {status_code}",
+                response=response,
             )
         else:
             response.raise_for_status.return_value = None
@@ -351,7 +357,36 @@ class TestOllamaController(unittest.TestCase):
 
         self.assertEqual(
             str(context.exception),
-            "Could not send request to model: qwen3:4b",
+            (
+                "Could not send request to model: qwen3:4b "
+                "(RequestException: connection refused)"
+            ),
+        )
+
+    @patch("core.ollama_controller.requests.post")
+    def test_chat_http_error_preserves_bounded_ollama_detail(
+        self,
+        mock_post: Mock,
+    ) -> None:
+        mock_post.return_value = self.make_response(
+            {
+                "error": "model runner process has terminated",
+            },
+            status_code=500,
+        )
+
+        with self.assertRaises(RuntimeError) as context:
+            self.controller.chat(
+                model_name="qwen3:4b",
+                prompt="test",
+            )
+
+        self.assertEqual(
+            str(context.exception),
+            (
+                "Could not send request to model: qwen3:4b "
+                "(Ollama HTTP 500: model runner process has terminated)"
+            ),
         )
 
 

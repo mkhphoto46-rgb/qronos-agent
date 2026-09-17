@@ -1,4 +1,4 @@
-"""
+﻿"""
 The gate cannot be bypassed, checked structurally rather than by convention.
 
 Every other test in the security seam asks whether the gate answers correctly.
@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # intended way: it imported ctypes, the test failed, and somebody had to
 # decide which list it belonged in.
 EXECUTOR_MODULES: tuple[str, ...] = (
+    "core.file_executor",
+    "core.computer_executor",
     "core.screen_capture",
 )
 
@@ -69,6 +71,10 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     ),
     "core.whisper_server_runtime": (
         "Starts and stops only the bundled local whisper.cpp STT server."
+    ),
+    "core.windows_sidecar_guard": (
+        "Uses Windows named mutex and Job Object APIs only to prevent duplicate "
+        "Qronos voice sidecars and bind their lifetime to the owning Qronos process."
     ),
     "core.whisper_cpp_vad_runtime": (
         "Runs the whisper binary for voice activity detection."

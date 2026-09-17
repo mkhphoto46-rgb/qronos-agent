@@ -1,3 +1,4 @@
+
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -37,8 +38,18 @@ struct RuntimeProcess {
     stdin: ChildStdin,
 }
 
+struct NativeAudioPlaybackState {
+    child: Option<Child>,
+    stop_generation: u64,
+}
+
 pub struct RuntimeManagerState {
     process: Mutex<Option<RuntimeProcess>>,
+
+    // Native WASAPI playback runs in a short-lived Python child. Keep the
+    // exact child handle plus a cancellation generation so Stop Response
+    // cannot miss a race during process startup.
+    native_audio: Mutex<NativeAudioPlaybackState>,
 
     // Settings mutations run through a short-lived Python CLI process. Serialize
     // them here so two UI requests cannot both read the same old file and then
@@ -54,6 +65,10 @@ impl RuntimeManagerState {
     pub fn new(project_root: Option<PathBuf>) -> Self {
         Self {
             process: Mutex::new(None),
+            native_audio: Mutex::new(NativeAudioPlaybackState {
+                child: None,
+                stop_generation: 0,
+            }),
             settings_command: Mutex::new(()),
             project_root,
         }
@@ -455,6 +470,7 @@ pub fn ping_runtime(state: State<'_, RuntimeManagerState>) -> Result<(), String>
 pub fn send_runtime_action(
     action_id: String,
     playback_id: Option<u64>,
+    data: Option<serde_json::Value>,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<(), String> {
     let cleaned = action_id.trim();
@@ -474,6 +490,16 @@ pub fn send_runtime_action(
         }
 
         payload["playbackId"] = serde_json::json!(playback_id);
+    }
+
+    if let Some(data) = data {
+        if !data.is_object() {
+            return Err("Runtime action data must be a JSON object.".to_string());
+        }
+
+        // Keep caller-supplied fields nested. They can never overwrite the
+        // command or actionId chosen by the trusted Tauri command.
+        payload["data"] = data;
     }
 
     send_to_runtime(&state, payload)
@@ -589,8 +615,7 @@ pub fn memory_command(
     Ok(value)
 }
 
-#[tauri::command(rename_all = "camelCase")]
-pub fn native_audio_output_play(
+fn native_audio_output_play_blocking(
     path: String,
     device_id: String,
     state: State<'_, RuntimeManagerState>,
@@ -607,6 +632,33 @@ pub fn native_audio_output_play(
             "Native audio playback needs an explicit output device.".to_string(),
         );
     }
+
+    let start_generation = {
+        let mut audio = state
+            .native_audio
+            .lock()
+            .map_err(|_| "Native audio state lock failed.".to_string())?;
+
+        if let Some(child) = audio.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    audio.child = None;
+                }
+                Ok(None) => {
+                    return Err(
+                        "Qronos native audio output is already playing.".to_string(),
+                    );
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Could not inspect Qronos native audio output: {error}"
+                    ));
+                }
+            }
+        }
+
+        audio.stop_generation
+    };
 
     let root = state.require_root()?;
     let python = resolve_python(root)?;
@@ -649,14 +701,116 @@ pub fn native_audio_output_play(
         ))?;
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!(
-            "Native audio output backend failed to finish: {error}"
-        ))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Native audio output stdout was unavailable.".to_string())?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Native audio output stderr was unavailable.".to_string())?;
+
+    let cancelled_before_registration = {
+        let mut audio = state
+            .native_audio
+            .lock()
+            .map_err(|_| "Native audio state lock failed.".to_string())?;
+
+        if audio.stop_generation != start_generation {
+            let _ = child.kill();
+            true
+        } else {
+            audio.child = Some(child);
+            false
+        }
+    };
+
+    let stdout_reader = std::thread::spawn(move || {
+        BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+
+    let stderr_reader = std::thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+
+    if cancelled_before_registration {
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+
+        return Ok(serde_json::json!({
+            "ok": true,
+            "stopped": true,
+        }));
+    }
+
+    let status = loop {
+        let maybe_status = {
+            let mut audio = state
+                .native_audio
+                .lock()
+                .map_err(|_| "Native audio state lock failed.".to_string())?;
+
+            let child = audio
+                .child
+                .as_mut()
+                .ok_or_else(|| "Native audio process state was lost.".to_string())?;
+
+            child
+                .try_wait()
+                .map_err(|error| format!(
+                    "Could not inspect native audio output process: {error}"
+                ))?
+        };
+
+        if let Some(status) = maybe_status {
+            break status;
+        }
+
+        std::thread::sleep(
+            std::time::Duration::from_millis(20),
+        );
+    };
+
+    let stopped = {
+        let mut audio = state
+            .native_audio
+            .lock()
+            .map_err(|_| "Native audio state lock failed.".to_string())?;
+
+        let stopped =
+            audio.stop_generation != start_generation;
+
+        audio.child = None;
+        stopped
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let stderr = stderr_reader
+        .join()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    if stopped {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "stopped": true,
+        }));
+    }
 
     if stdout.is_empty() {
         return Err(if stderr.is_empty() {
@@ -666,13 +820,14 @@ pub fn native_audio_output_play(
         });
     }
 
-    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
-        format!(
-            "Invalid native audio output response: {error}; output={stdout}"
-        )
-    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|error| {
+            format!(
+                "Invalid native audio output response: {error}; output={stdout}"
+            )
+        })?;
 
-    if !output.status.success()
+    if !status.success()
         || value.get("ok").and_then(|value| value.as_bool()) == Some(false)
     {
         let message = value
@@ -688,6 +843,70 @@ pub fn native_audio_output_play(
     }
 
     Ok(value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn native_audio_output_play(
+    path: String,
+    device_id: String,
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<RuntimeManagerState>();
+
+        native_audio_output_play_blocking(
+            path,
+            device_id,
+            state,
+        )
+    })
+    .await
+    .map_err(|error| format!(
+        "Native audio output task failed: {error}"
+    ))?
+}
+
+#[tauri::command]
+pub fn native_audio_output_stop(
+    state: State<'_, RuntimeManagerState>,
+) -> Result<serde_json::Value, String> {
+    let killed = {
+        let mut audio = state
+            .native_audio
+            .lock()
+            .map_err(|_| "Native audio state lock failed.".to_string())?;
+
+        audio.stop_generation =
+            audio.stop_generation.wrapping_add(1);
+
+        match audio.child.as_mut() {
+            None => false,
+            Some(child) => {
+                match child.try_wait() {
+                    Ok(Some(_)) => false,
+                    Ok(None) => {
+                        child
+                            .kill()
+                            .map_err(|error| format!(
+                                "Could not stop Qronos native audio output: {error}"
+                            ))?;
+
+                        true
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "Could not inspect Qronos native audio output: {error}"
+                        ));
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "stopped": killed,
+    }))
 }
 
 #[tauri::command(rename_all = "camelCase")]

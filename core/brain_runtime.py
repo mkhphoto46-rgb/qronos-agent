@@ -112,6 +112,7 @@ class BrainRuntime(ABC):
         num_ctx: int | None = None,
         keep_alive: str = "5m",
         response_format: dict | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         """
         Generate a response with the requested brain.
@@ -120,6 +121,11 @@ class BrainRuntime(ABC):
 
         prompt remains available for single-turn callers and temporary
         backward compatibility while Qronos migrates to structured chat.
+
+        timeout_seconds lets higher-level policy choose a bounded deadline for
+        the requested Brain role. None means the runtime adapter's conservative
+        default. Keeping the deadline in this runtime-neutral contract prevents
+        role policy from depending on Ollama-specific implementation details.
         """
 
     @abstractmethod

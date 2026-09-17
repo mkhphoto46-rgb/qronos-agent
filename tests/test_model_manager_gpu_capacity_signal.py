@@ -40,7 +40,7 @@ class TestModelManagerGpuCapacitySignal(unittest.TestCase):
         *,
         utilization: int = 100,
         temperature: int = 45,
-        used_mb: int = 4665,
+        used_mb: int = 3000,
         total_mb: int = 8192,
     ) -> GpuStatus:
         return GpuStatus(
@@ -68,6 +68,27 @@ class TestModelManagerGpuCapacitySignal(unittest.TestCase):
         self.assertIs(
             result.decision,
             ResourceDecision.ALLOW,
+        )
+
+    def test_projected_fast_load_blocks_when_free_vram_is_too_small(
+        self,
+    ) -> None:
+
+        result = self.manager.select_model(
+            task_class=TaskClass.FAST,
+            system=self.system(),
+            gpu=self.gpu(
+                utilization=10,
+                used_mb=4665,
+                total_mb=8192,
+            ),
+            activity_mode=ActivityMode.NORMAL,
+            resource_pressure=ResourcePressure.NORMAL,
+        )
+
+        self.assertIs(
+            result.decision,
+            ResourceDecision.BLOCK,
         )
 
     def test_high_external_pressure_still_blocks(

@@ -28,7 +28,7 @@ class TestModelManager(unittest.TestCase):
     def make_gpu(
         self,
         temperature: int = 50,
-        vram_used: int = 2000,
+        vram_used: int = 1000,
     ) -> GpuStatus:
         return GpuStatus(
             name="NVIDIA GeForce RTX 3070 Ti",
@@ -67,6 +67,18 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(result.decision, ResourceDecision.BLOCK)
 
+    def test_fast_model_blocked_when_projected_vram_would_not_fit(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.FAST,
+            self.make_system(),
+            self.make_gpu(vram_used=4665),
+        )
+
+        self.assertEqual(
+            result.decision,
+            ResourceDecision.BLOCK,
+        )
+
     def test_fast_model_blocked_when_ram_is_critical(self) -> None:
         result = self.manager.select_model(
             TaskClass.FAST,
@@ -94,15 +106,16 @@ class TestModelManager(unittest.TestCase):
 
         self.assertTrue(allowed)
 
-    def test_gaming_assist_blocks_heavy_model(self) -> None:
+    def test_gaming_assist_allows_heavy_model_when_resources_are_safe(self) -> None:
         result = self.manager.select_model(
             TaskClass.HEAVY,
             self.make_system(),
             self.make_gpu(),
             ActivityMode.GAMING_ASSIST,
+            ResourcePressure.NORMAL,
         )
 
-        self.assertEqual(result.decision, ResourceDecision.BLOCK)
+        self.assertEqual(result.decision, ResourceDecision.ALLOW)
 
     def test_gaming_assist_allows_fast_model_on_demand(self) -> None:
         result = self.manager.select_model(
@@ -114,6 +127,17 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(result.decision, ResourceDecision.ALLOW)
 
+    def test_gaming_assist_still_blocks_heavy_under_high_pressure(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.GAMING_ASSIST,
+            ResourcePressure.HIGH,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.BLOCK)
+
     def test_gaming_performance_blocks_heavy_model(self) -> None:
         result = self.manager.select_model(
             TaskClass.HEAVY,
@@ -124,12 +148,24 @@ class TestModelManager(unittest.TestCase):
 
         self.assertEqual(result.decision, ResourceDecision.BLOCK)
 
-    def test_creator_assist_blocks_heavy_model(self) -> None:
+    def test_creator_assist_allows_heavy_model_when_resources_are_safe(self) -> None:
         result = self.manager.select_model(
             TaskClass.HEAVY,
             self.make_system(),
             self.make_gpu(),
             ActivityMode.CREATOR_ASSIST,
+            ResourcePressure.NORMAL,
+        )
+
+        self.assertEqual(result.decision, ResourceDecision.ALLOW)
+
+    def test_creator_assist_still_blocks_heavy_under_high_pressure(self) -> None:
+        result = self.manager.select_model(
+            TaskClass.HEAVY,
+            self.make_system(),
+            self.make_gpu(),
+            ActivityMode.CREATOR_ASSIST,
+            ResourcePressure.HIGH,
         )
 
         self.assertEqual(result.decision, ResourceDecision.BLOCK)
@@ -207,14 +243,6 @@ class TestModelManager(unittest.TestCase):
         )
 
     def test_a_selection_cannot_ask_for_a_model_to_be_kept_loaded(self) -> None:
-        """
-        Nothing Qronos loads stays loaded.
-
-        The Fast Brain used to be kept warm for ten minutes under exactly
-        these conditions — normal activity, normal pressure. It is not any
-        more, and the way to be sure is that there is no longer a field to
-        say so: a caller cannot resurrect the behaviour by setting a flag.
-        """
         result = self.manager.select_model(
             TaskClass.FAST,
             self.make_system(),
@@ -224,7 +252,6 @@ class TestModelManager(unittest.TestCase):
         )
 
         self.assertFalse(hasattr(result, "keep_loaded"))
-
 
 
 if __name__ == "__main__":

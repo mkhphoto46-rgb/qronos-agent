@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
 import threading
+import uuid
 import wave
 from pathlib import Path
 
@@ -27,6 +29,30 @@ if hasattr(sys.stderr, "reconfigure"):
     )
 
 from core.action_audit import ActionAuditLog
+from core.actions import ActionOutcome
+from core.file_action_parser import FileActionParseError, parse_file_action
+from core.file_executor import FileAction, FileExecutor, FileOperation, PreparedFileAction
+from core.file_resolver import (
+    KnownFolderFileResolver,
+    NamedFileAmbiguous,
+    NamedFileNotFound,
+    NamedFileParseError,
+    NamedFileSearchLimit,
+    NamedLocationNotFound,
+    NamedLocationParseError,
+    is_computer_capability_query,
+    parse_location_request,
+    parse_named_file_request,
+)
+from core.computer_action_parser import (
+    ComputerActionParseError,
+    parse_computer_action,
+)
+from core.computer_executor import (
+    ComputerAction,
+    ComputerExecutor,
+    ComputerOperation,
+)
 from core.audio_input import AudioConfig, AudioInput, resolve_input_device
 from core.chatterbox_runtime import ChatterboxRuntime
 from core.command_recorder import CommandRecorder, CommandRecorderConfig
@@ -63,6 +89,7 @@ from core.compute_estimator import ComputeEstimator
 from core.intent_gate import IntentGate
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
+from core.undo_journal import UndoJournal
 from core.vision_ocr import read_screen_text
 from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
@@ -70,6 +97,7 @@ from core.whisper_hybrid_runtime import WhisperHybridRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
 from core.web_worker import WebResearchWorker
 from security.gate import set_default_audit_sink
+from security.permissions import PermissionDecision
 from core.voice_trigger import VoiceTriggerService
 
 
@@ -84,14 +112,28 @@ TEXT_MESSAGE_COMMAND = "text_message"
 RUNTIME_SET_PAUSED_COMMAND = "runtime_set_paused"
 DESKTOP_WAKE_BOOTSTRAP_ENV = "QRONOS_DESKTOP_WAKE_BOOTSTRAP"
 CONVERSATION_HISTORY_REQUEST_ACTION = "qronos.conversation_history_request"
+FILE_ACTION_DECISION_ACTION = "qronos.file_action_decision"
+FILE_WRITE_APPROVAL_LEASE_SECONDS = 10 * 60.0
 MAX_TEXT_MESSAGE_LENGTH = 16_000
 MAX_TEXT_REQUEST_ID_LENGTH = 128
 
 
+@dataclass(frozen=True)
+class PendingFileTextAction:
+    token: str
+    prepared: PreparedFileAction
+    request_id: str
+    started_at: float
 
 
 
+
+
+
+
+VOICE_PLAYBACK_STARTED_ACTION = "qronos.voice_playback_started"
 VOICE_PLAYBACK_COMPLETE_ACTION = "qronos.voice_playback_complete"
+STOP_RESPONSE_ACTION = "qronos.stop_response"
 
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
@@ -117,6 +159,9 @@ VOICE_RETRY_RESPONSE = (
 )
 VOICE_STT_RETRY_RESPONSE = (
     "متوجه نشدم. دوباره بگو."
+)
+VOICE_COMPUTER_DEFERRED_RESPONSE = (
+    "این فرمان هنوز در Windows Control فعلی پشتیبانی نمی‌شود."
 )
 
 AUDIO_SPECTRUM_BANDS = 32
@@ -236,6 +281,14 @@ VOICE_LATENCY_LOG_PATH = (
     / "voice_latency_latest.json"
 )
 
+VOICE_PLAYBACK_TELEMETRY_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "runtime"
+    / "chatterbox"
+    / "temp"
+    / "voice_playback_latest.json"
+)
+
 
 def normalise_qronos_invocation(transcript: str) -> str:
     """Correct measured Whisper variants only when Qronos is addressed."""
@@ -244,6 +297,79 @@ def normalise_qronos_invocation(transcript: str) -> str:
         lambda match: f"{match.group('greeting') or ''}\u06a9\u0631\u0648\u0646\u0648\u0633",
         transcript,
         count=1,
+    )
+
+
+
+def _voice_action_transcript_quality(text: str) -> int:
+    """Score action-command structure without trying to repair arbitrary prose."""
+    n = re.sub(r"[\s\u200c]+", " ", (text or "").strip().lower())
+    if not n:
+        return 0
+
+    score = 0
+    if any(marker in n for marker in (
+        "باز کن", "بازش کن", "برو ", "ببند", "بیار جلو", "مینیمایز", "ماکسیمایز",
+        "open ", "launch ", "close ", "focus ", "minimize ", "maximize ", "go to",
+    )):
+        score += 6
+    if any(marker in n for marker in (
+        "دسکتاپ", "دسکتاب", "desktop", "دانلود", "downloads",
+        "documents", "اسناد", "درایو", "drive",
+    )):
+        score += 4
+    if any(marker in n for marker in (
+        "فایل", "نوت", "یادداشت", "file", "note", "document",
+        "داکیومنت", "دایکیومنت", "folder", "فولدر", "پوشه",
+    )):
+        score += 3
+    if any(marker in n for marker in (
+        "notepad", "نوت پد", "calculator", "paint", "explorer", "telegram", "تلگرام", "premiere", "پریمیر",
+    )):
+        score += 3
+    if is_computer_capability_query(text):
+        score -= 8
+    return score
+
+
+def _voice_transcript_looks_actionish(text: str) -> bool:
+    n = re.sub(r"[\s\u200c]+", " ", (text or "").strip().lower())
+    return any(marker in n for marker in (
+        "دسکتاپ", "دسکتاب", "desktop", "دانلود", "download",
+        "documents", "اسناد", "درایو", "drive", "فایل", "file",
+        "document", "داکیومنت", "دایکیومنت", "folder", "فولدر",
+        "notepad", "نوت پد", "calculator", "paint", "explorer", "telegram", "تلگرام", "premiere", "پریمیر",
+    ))
+
+
+def _windows_control_route_promotion(text: str) -> bool:
+    """Conservatively promote only explicit Windows-control commands."""
+    n = re.sub(r"[\s\u200c]+", " ", (text or "").strip().lower())
+    if not n:
+        return False
+    has_action = any(marker in n for marker in (
+        "باز کن", "بازش کن", "اجرا کن", "برو ", "ببند", "بیار جلو",
+        "مینیمایز", "ماکسیمایز", "فوکوس",
+        "open ", "launch ", "start ", "run ", "go to", "close ",
+        "focus ", "minimize ", "minimise ", "maximize ", "maximise ",
+    ))
+    has_target = any(marker in n for marker in (
+        "دسکتاپ", "دسکتاب", "desktop", "دانلود", "downloads", "download",
+        "documents", "اسناد", "درایو", "drive", "فایل", "file", "folder",
+        "فولدر", "پوشه", "notepad", "نوت پد", "calculator", "paint",
+        "explorer", "telegram", "تلگرام", "premiere", "پریمیر", "برنامه",
+        "نرم افزار", "نرم‌افزار", "app", "application",
+    ))
+    return bool(has_action and has_target)
+
+
+def _computer_capability_response() -> str:
+    return (
+        "می‌توانم پوشه‌ها و Driveهای محلی را باز کنم، فایل را با بخشی از اسمش "
+        "پیدا و باز کنم، و برنامه‌های نصب‌شده‌ای را که از Start Menu یا App Paths "
+        "شناخته می‌شوند باز کنم. برای پنجرهٔ برنامه هم Open، Close، Focus، "
+        "Minimize و Maximize پشتیبانی می‌شود. فرمان‌های Shell و Terminal همچنان "
+        "خارج از Windows Control هستند."
     )
 
 
@@ -402,27 +528,230 @@ def _write_voice_spectrum_sidecar(
     return sidecar
 
 
+def _analyze_voice_wav_quality(
+    audio_path: str | Path,
+) -> dict[str, float | int]:
+    """
+    Record objective PCM indicators that help separate generated-WAV artifacts
+    from playback-device artifacts. These metrics do not attempt to "score"
+    subjective voice quality.
+    """
+    source = Path(audio_path)
 
-TTS_FIRST_CHUNK_TARGET_CHARACTERS = 85
-TTS_LATER_CHUNK_TARGET_CHARACTERS = 125
-TTS_MIN_CHUNK_CHARACTERS = 32
+    with wave.open(
+        str(source),
+        "rb",
+    ) as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        sample_rate = wav_file.getframerate()
+        frame_count = wav_file.getnframes()
+        raw = wav_file.readframes(
+            frame_count
+        )
+
+    if sample_width != 2:
+        return {
+            "sampleRate": int(sample_rate),
+            "channels": int(channels),
+            "sampleWidthBytes": int(sample_width),
+        }
+
+    samples = np.frombuffer(
+        raw,
+        dtype=np.int16,
+    ).astype(np.float64)
+
+    if samples.size == 0:
+        return {
+            "sampleRate": int(sample_rate),
+            "channels": int(channels),
+            "sampleWidthBytes": int(sample_width),
+            "sampleCount": 0,
+        }
+
+    if channels > 1:
+        usable = (
+            samples.size
+            // channels
+            * channels
+        )
+        samples = (
+            samples[:usable]
+            .reshape(-1, channels)
+            .mean(axis=1)
+        )
+
+    normalized = (
+        samples / 32768.0
+    )
+
+    peak = float(
+        np.max(
+            np.abs(normalized)
+        )
+    )
+    rms = float(
+        np.sqrt(
+            np.mean(
+                normalized * normalized
+            )
+        )
+    )
+
+    clipped_fraction = float(
+        np.mean(
+            np.abs(samples) >= 32760.0
+        )
+    )
+    dc_offset = float(
+        np.mean(normalized)
+    )
+
+    peak_dbfs = (
+        20.0 * math.log10(peak)
+        if peak > 0.0
+        else -120.0
+    )
+    rms_dbfs = (
+        20.0 * math.log10(rms)
+        if rms > 0.0
+        else -120.0
+    )
+
+    # A large share of energy above ~8 kHz can correlate with hiss/static,
+    # though speech content and sample rate matter. Keep this diagnostic only.
+    high_frequency_ratio = 0.0
+
+    if (
+        sample_rate >= 20_000
+        and normalized.size >= 1024
+    ):
+        window = np.hanning(
+            normalized.size
+        )
+        spectrum = np.fft.rfft(
+            normalized * window
+        )
+        power = (
+            np.abs(spectrum) ** 2
+        )
+        freqs = np.fft.rfftfreq(
+            normalized.size,
+            d=1.0 / sample_rate,
+        )
+        total_power = float(
+            np.sum(power)
+        )
+
+        if total_power > 0.0:
+            high_frequency_ratio = float(
+                np.sum(
+                    power[
+                        freqs >= 8_000.0
+                    ]
+                )
+                / total_power
+            )
+
+    return {
+        "sampleRate": int(sample_rate),
+        "channels": int(channels),
+        "sampleWidthBytes": int(sample_width),
+        "sampleCount": int(
+            normalized.size
+        ),
+        "peakDbfs": round(
+            peak_dbfs,
+            3,
+        ),
+        "rmsDbfs": round(
+            rms_dbfs,
+            3,
+        ),
+        "clippedSamplePercent": round(
+            clipped_fraction * 100.0,
+            5,
+        ),
+        "dcOffset": round(
+            dc_offset,
+            6,
+        ),
+        "highFrequencyEnergyPercent": round(
+            high_frequency_ratio * 100.0,
+            3,
+        ),
+    }
+
+
+TTS_FIRST_CHUNK_TARGET_CHARACTERS = 260
+TTS_LATER_CHUNK_TARGET_CHARACTERS = 440
+TTS_MIN_FIRST_CHUNK_CHARACTERS = 230
+TTS_MIN_CHUNK_CHARACTERS = 96
+TTS_MAX_CHUNK_CHARACTERS = 520
+
+
+def _split_text_to_word_budget(
+    text: str,
+    max_characters: int,
+) -> tuple[str, str]:
+    """Split text at the largest word boundary that fits max_characters."""
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        (text or "").strip(),
+    )
+
+    if not cleaned:
+        return "", ""
+
+    if len(cleaned) <= max_characters:
+        return cleaned, ""
+
+    words = cleaned.split(" ")
+    prefix_words: list[str] = []
+    used = 0
+
+    for word in words:
+        added = len(word) if not prefix_words else len(word) + 1
+
+        if prefix_words and used + added > max_characters:
+            break
+
+        prefix_words.append(word)
+        used += added
+
+        if used >= max_characters:
+            break
+
+    if not prefix_words:
+        # A single pathological token can exceed the budget. Split it rather
+        # than allowing an unbounded TTS request.
+        return (
+            cleaned[:max_characters],
+            cleaned[max_characters:].lstrip(),
+        )
+
+    prefix = " ".join(prefix_words)
+    remainder = cleaned[len(prefix):].lstrip()
+
+    return prefix, remainder
 
 
 def _split_semantic_tts_chunks(
     text: str,
 ) -> list[str]:
     """
-    Split one finished Brain response into natural speech chunks.
+    Split one finished Brain response into bounded speech chunks.
 
-    The Brain response is still complete before this function runs. The goal is
-    only to reduce time-to-first-audio by letting Chatterbox synthesize and emit
-    the first meaningful phrase before the rest of the response.
-
-    Rules:
-    - prefer sentence boundaries
-    - then Persian/English clause punctuation
-    - avoid tiny standalone chunks such as "سلام!"
-    - keep the first chunk shorter than later chunks for lower TTFA
+    Continuity matters more than preserving every punctuation boundary.
+    R5 showed that a semantically neat but only ~145-character first chunk
+    could end before Chatterbox finished chunk 2, producing audible buffering.
+    R7 therefore:
+    - fills the first chunk to a real minimum before playback can start,
+    - still prefers punctuation when the buffer is already healthy,
+    - splits overlong clauses at word boundaries,
+    - caps every chunk so very long TTS requests do not degrade quality.
     """
     cleaned = re.sub(
         r"\s+",
@@ -433,7 +762,7 @@ def _split_semantic_tts_chunks(
     if not cleaned:
         return []
 
-    pieces = [
+    semantic_pieces = [
         piece.strip()
         for piece in re.split(
             r"(?<=[.!?؟؛])\s+|(?<=[،,:])\s+",
@@ -442,43 +771,117 @@ def _split_semantic_tts_chunks(
         if piece.strip()
     ]
 
-    if not pieces:
-        return [cleaned]
+    if not semantic_pieces:
+        semantic_pieces = [cleaned]
+
+    # No individual semantic piece may bypass the hard quality cap.
+    pieces: list[str] = []
+
+    for piece in semantic_pieces:
+        remainder = piece
+
+        while remainder:
+            prefix, remainder = (
+                _split_text_to_word_budget(
+                    remainder,
+                    TTS_MAX_CHUNK_CHARACTERS,
+                )
+            )
+
+            if prefix:
+                pieces.append(prefix)
 
     chunks: list[str] = []
     current = ""
+    pending = list(pieces)
 
-    for piece in pieces:
+    while pending:
+        piece = pending.pop(0)
+
         target = (
             TTS_FIRST_CHUNK_TARGET_CHARACTERS
             if not chunks
             else TTS_LATER_CHUNK_TARGET_CHARACTERS
         )
-
-        candidate = (
-            piece
-            if not current
-            else f"{current} {piece}"
+        minimum = (
+            TTS_MIN_FIRST_CHUNK_CHARACTERS
+            if not chunks
+            else TTS_MIN_CHUNK_CHARACTERS
         )
 
-        if (
-            current
-            and len(candidate) > target
-            and len(current) >= TTS_MIN_CHUNK_CHARACTERS
-        ):
-            chunks.append(current)
+        if not current:
             current = piece
+
         else:
-            current = candidate
+            candidate = f"{current} {piece}"
+
+            if len(candidate) <= target:
+                current = candidate
+            elif len(current) < minimum:
+                # R5's main failure mode: the first semantic sentence could
+                # be much shorter than the target. Borrow only enough words
+                # from the next piece to create a useful playback buffer
+                # instead of swallowing that whole next sentence.
+                needed = max(
+                    1,
+                    min(
+                        target - len(current) - 1,
+                        TTS_MAX_CHUNK_CHARACTERS
+                        - len(current)
+                        - 1,
+                    ),
+                )
+
+                prefix, remainder = (
+                    _split_text_to_word_budget(
+                        piece,
+                        needed,
+                    )
+                )
+
+                if prefix:
+                    current = (
+                        f"{current} {prefix}"
+                    ).strip()
+
+                if remainder:
+                    pending.insert(
+                        0,
+                        remainder,
+                    )
+            else:
+                chunks.append(current)
+                current = piece
+
+        if len(current) >= TTS_MAX_CHUNK_CHARACTERS:
+            prefix, remainder = (
+                _split_text_to_word_budget(
+                    current,
+                    TTS_MAX_CHUNK_CHARACTERS,
+                )
+            )
+            chunks.append(prefix)
+            current = ""
+
+            if remainder:
+                pending.insert(
+                    0,
+                    remainder,
+                )
 
     if current:
         chunks.append(current)
 
-    # Merge a tiny final fragment into the previous chunk so Chatterbox does
-    # not synthesize awkward one- or two-word tail utterances.
+    # Merge only a tiny final fragment when doing so stays below the hard cap.
     if (
         len(chunks) >= 2
         and len(chunks[-1]) < TTS_MIN_CHUNK_CHARACTERS
+        and (
+            len(chunks[-2])
+            + 1
+            + len(chunks[-1])
+            <= TTS_MAX_CHUNK_CHARACTERS
+        )
     ):
         chunks[-2] = (
             f"{chunks[-2]} {chunks[-1]}"
@@ -573,9 +976,14 @@ class QronosRuntime:
         self._speech_runtime_released = False
 
         self.voice_output: ChatterboxRuntime | None = None
+        self._voice_output_prewarm_thread: threading.Thread | None = None
+        self._voice_output_prewarm_error: str | None = None
         self.task_router: TaskRouter | None = None
 
-        # Shadow routing diagnostics are intentionally non-authoritative.
+        # Intent classification remains diagnostic. ComputeEstimator has one
+        # narrow production authority: it may promote an otherwise-FAST
+        # language request to HEAVY when multiple high-confidence complexity
+        # signals agree. Action / browser / vision routes are never overridden.
         # They classify the real transcript and record what the future routing
         # stack would choose, while TaskRouter remains the only component that
         # controls the current production path.
@@ -591,6 +999,16 @@ class QronosRuntime:
         self._prewarm_routing_classifiers()
 
         self.action_audit: ActionAuditLog | None = None
+        self.undo_journal: UndoJournal | None = None
+        self.file_executor: FileExecutor | None = None
+        self.file_resolver: KnownFolderFileResolver | None = None
+        self.computer_executor: ComputerExecutor | None = None
+        self.pending_file_actions: dict[str, PendingFileTextAction] = {}
+        # One explicit UI approval grants a short, process-local lease for
+        # ordinary reversible file-write actions. The window is fixed: auto-
+        # approved actions never extend it. Restart and global Pause revoke it.
+        self._file_write_approval_lease_until = 0.0
+        self._file_approval_clock = time.monotonic
         self.screen_capture: ScreenCapture | None = None
         self.last_foreground_window: int | None = None
         self.pending_look: str | None = None
@@ -626,6 +1044,13 @@ class QronosRuntime:
         self._voice_playback_complete = threading.Event()
         self._voice_playback_id = 0
         self._pending_playback_id: int | None = None
+        self._voice_playback_metrics: dict[int, dict[str, Any]] = {}
+
+        # User-visible Stop is separate from runtime Pause. Stop cancels only
+        # the current response/playback while leaving Wake and the conversation
+        # session alive. A running model HTTP request is not force-killed, but
+        # later response/TTS phases are suppressed at deterministic checkpoints.
+        self._voice_response_stop_requested = threading.Event()
 
         # A real spoken turn must be distinguished from a wake candidate
         # that never produced valid speech. Brain/resource/TTS failures
@@ -1070,6 +1495,7 @@ class QronosRuntime:
             scheduler.set_paused(paused)
 
         if paused:
+            self._clear_file_write_approval_lease("runtime_paused")
             # Stop accepting new voice input immediately and release idle voice
             # resources. An already-running non-cancellable model call is not
             # force-killed; downstream checkpoints suppress later phases.
@@ -1121,6 +1547,252 @@ class QronosRuntime:
             # Shadow diagnostics are non-authoritative.  Runtime startup must
             # remain available even if warmup itself ever regresses.
             pass
+
+    def _select_production_task_type(
+        self,
+        text: str,
+        routed_task_type: TaskType,
+        routing_shadow: dict[str, Any] | None = None,
+    ) -> tuple[TaskType, dict[str, Any]]:
+        """
+        Apply one conservative production promotion on top of TaskRouter.
+
+        TaskRouter remains authoritative for every non-FAST route. The compute
+        estimator may only promote FAST -> HEAVY, and only when complexity
+        evidence is strong enough to avoid turning ordinary short "why"
+        questions into expensive Heavy calls.
+        """
+        details: dict[str, Any] = {
+            "legacyRoute": routed_task_type.value,
+            "selectedRoute": routed_task_type.value,
+            "applied": False,
+        }
+
+        if routed_task_type is not TaskType.FAST:
+            return routed_task_type, details
+
+        # Windows Control v2: location/app action language must not fall through
+        # to FAST merely because legacy TaskRouter lacks a particular noun such
+        # as Drive/Downloads.  This promotion is deterministic and happens
+        # before any model runs.
+        if _windows_control_route_promotion(text):
+            details.update(
+                {
+                    "selectedRoute": TaskType.COMPUTER.value,
+                    "applied": True,
+                    "windowsControlPromotion": True,
+                }
+            )
+            return TaskType.COMPUTER, details
+
+        try:
+            shadow = routing_shadow or self._routing_shadow(
+                text
+            )
+
+            level = str(
+                shadow.get("computeLevel", "")
+            ).strip().lower()
+            score = int(
+                shadow.get("computeScore", 0)
+            )
+            confidence = float(
+                shadow.get("computeConfidence", 0.0)
+            )
+            factors = tuple(
+                str(item)
+                for item in shadow.get(
+                    "computeFactors",
+                    (),
+                )
+            )
+
+            strong_normal_or_deep = (
+                level
+                in {
+                    "heavy_normal",
+                    "heavy_deep",
+                }
+                and confidence >= 0.88
+            )
+
+            strong_eco = (
+                level == "heavy_eco"
+                and score >= 16
+                and confidence >= 0.88
+                and len(factors) >= 2
+            )
+
+            if (
+                strong_normal_or_deep
+                or strong_eco
+            ):
+                details.update(
+                    {
+                        "selectedRoute":
+                            TaskType.HEAVY.value,
+                        "applied": True,
+                        "computeLevel": level,
+                        "computeScore": score,
+                        "computeConfidence":
+                            round(
+                                confidence,
+                                6,
+                            ),
+                        "computeFactors":
+                            list(factors),
+                    }
+                )
+                return TaskType.HEAVY, details
+
+            details.update(
+                {
+                    "computeLevel": level,
+                    "computeScore": score,
+                    "computeConfidence":
+                        round(
+                            confidence,
+                            6,
+                        ),
+                    "computeFactors":
+                        list(factors),
+                }
+            )
+
+        except Exception as exc:
+            details["error"] = str(exc)
+
+        return routed_task_type, details
+
+    def _ensure_voice_output_instance(
+        self,
+    ) -> ChatterboxRuntime:
+        """
+        Construct the Chatterbox runtime without forcing a model load.
+
+        The assignment is protected because Wake/background prewarm and the
+        ordinary prepare() path can race on the first voice turn.
+        """
+        with self._lock:
+            voice = self.voice_output
+
+            if voice is None:
+                voice = ChatterboxRuntime()
+
+                if not voice.health_check():
+                    raise RuntimeError(
+                        "Qronos TTS runtime is not ready."
+                    )
+
+                self.voice_output = voice
+
+            return voice
+
+    def _prewarm_voice_output_async(
+        self,
+    ) -> None:
+        """
+        Hide Chatterbox cold-start behind command capture / STT.
+
+        This is best-effort and never delays listening. Chatterbox itself has
+        single-flight startup, so speak_to_file() safely joins an unfinished
+        prewarm instead of launching a duplicate server.
+        """
+        try:
+            voice = self._ensure_voice_output_instance()
+        except Exception as exc:
+            self._voice_output_prewarm_error = str(
+                exc
+            )
+            return
+
+        if bool(
+            getattr(
+                voice,
+                "is_loaded",
+                False,
+            )
+        ):
+            self._voice_output_prewarm_error = None
+            return
+
+        with self._lock:
+            current = (
+                self._voice_output_prewarm_thread
+            )
+
+            if (
+                current is not None
+                and current.is_alive()
+            ):
+                return
+
+            self._voice_output_prewarm_error = None
+
+            def worker() -> None:
+                try:
+                    voice.prewarm()
+                except Exception as exc:
+                    self._voice_output_prewarm_error = (
+                        str(exc)
+                    )
+
+            thread = threading.Thread(
+                target=worker,
+                name="qronos-tts-prewarm",
+                daemon=True,
+            )
+            self._voice_output_prewarm_thread = (
+                thread
+            )
+
+        thread.start()
+
+    def _yield_voice_output_before_brain(
+        self,
+        timeout_seconds: float = 8.0,
+    ) -> bool:
+        """
+        A model-backed Brain must not share the 8 GB card with hot TTS.
+
+        Chatterbox prewarm starts while the user is speaking so routes that do
+        not need a Brain (for example Computer or local arithmetic) can answer
+        quickly. Once routing proves that Fast/Heavy/Browser will load a Brain,
+        wait for any in-flight prewarm to settle and then release TTS before the
+        Brain is admitted. A timeout fails closed instead of risking VRAM
+        overcommit or an Ollama runner failure.
+        """
+        thread = self._voice_output_prewarm_thread
+
+        if (
+            thread is not None
+            and thread.is_alive()
+        ):
+            thread.join(
+                timeout=max(
+                    0.0,
+                    float(
+                        timeout_seconds
+                    ),
+                )
+            )
+
+        if (
+            thread is not None
+            and thread.is_alive()
+        ):
+            return False
+
+        return self._release_voice_output_runtime()
+
+    def _yield_voice_output_before_heavy(
+        self,
+        timeout_seconds: float = 8.0,
+    ) -> bool:
+        """Compatibility seam for the earlier Heavy-only handoff tests."""
+        return self._yield_voice_output_before_brain(
+            timeout_seconds=timeout_seconds,
+        )
 
     def _routing_shadow(
         self,
@@ -1499,6 +2171,1089 @@ class QronosRuntime:
         if self.orchestrator is None:
             self.orchestrator = Orchestrator()
 
+    def _ensure_file_runtime(self) -> None:
+        """Prepare only the trusted local file-action collaborators."""
+        if self.action_audit is None:
+            self.action_audit = ActionAuditLog()
+            set_default_audit_sink(
+                self.action_audit.record_verdict
+            )
+
+        if self.undo_journal is None:
+            self.undo_journal = UndoJournal()
+
+        if self.file_executor is None:
+            self.file_executor = FileExecutor(
+                audit=self.action_audit,
+                journal=self.undo_journal,
+            )
+
+        if self.file_resolver is None:
+            self.file_resolver = KnownFolderFileResolver()
+
+    def _ensure_computer_runtime(self) -> None:
+        """Prepare the trusted Windows computer-action collaborator."""
+        if self.action_audit is None:
+            self.action_audit = ActionAuditLog()
+            set_default_audit_sink(
+                self.action_audit.record_verdict
+            )
+
+        if self.undo_journal is None:
+            self.undo_journal = UndoJournal()
+
+        if self.computer_executor is None:
+            self.computer_executor = ComputerExecutor(
+                audit=self.action_audit,
+                journal=self.undo_journal,
+                dynamic_apps=True,
+            )
+
+    @staticmethod
+    def _computer_operation_label(
+        operation: ComputerOperation,
+    ) -> str:
+        labels = {
+            ComputerOperation.OPEN_APP: "باز کردن برنامه",
+            ComputerOperation.CLOSE_APP: "بستن برنامه",
+            ComputerOperation.FOCUS_WINDOW: "آوردن پنجره به جلو",
+            ComputerOperation.MINIMIZE_WINDOW: "مینیمایز کردن پنجره",
+            ComputerOperation.MAXIMIZE_WINDOW: "ماکسیمایز کردن پنجره",
+            ComputerOperation.OPEN_LOCATION: "باز کردن پوشه یا درایو",
+        }
+        return labels.get(
+            operation,
+            operation.value,
+        )
+
+    def _file_write_approval_lease_remaining(self) -> float:
+        return max(
+            0.0,
+            self._file_write_approval_lease_until
+            - float(self._file_approval_clock()),
+        )
+
+    def _file_write_approval_lease_active(self) -> bool:
+        return self._file_write_approval_lease_remaining() > 0.0
+
+    def _grant_file_write_approval_lease(self) -> None:
+        now = float(self._file_approval_clock())
+        self._file_write_approval_lease_until = (
+            now + FILE_WRITE_APPROVAL_LEASE_SECONDS
+        )
+        self._notify(
+            "file_action_approval_lease_started",
+            "ready",
+            json.dumps(
+                {
+                    "seconds": int(FILE_WRITE_APPROVAL_LEASE_SECONDS),
+                    "expiresInSeconds": int(FILE_WRITE_APPROVAL_LEASE_SECONDS),
+                    "scope": "reversible_file_writes",
+                    "resetsOnRestart": True,
+                    "clearsOnPause": True,
+                    "sliding": False,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def _clear_file_write_approval_lease(self, reason: str) -> None:
+        was_active = self._file_write_approval_lease_active()
+        self._file_write_approval_lease_until = 0.0
+        if was_active:
+            self._notify(
+                "file_action_approval_lease_cleared",
+                "ready",
+                json.dumps(
+                    {
+                        "reason": str(reason or "cleared"),
+                        "scope": "reversible_file_writes",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+
+    @staticmethod
+    def _file_operation_label(
+        operation: FileOperation,
+    ) -> str:
+        labels = {
+            FileOperation.COPY_FILE: "کپی فایل",
+            FileOperation.MOVE_FILE: "انتقال فایل",
+            FileOperation.RENAME_FILE: "تغییر نام فایل",
+            FileOperation.CREATE_FOLDER: "ساخت پوشه",
+            FileOperation.OPEN_FILE: "باز کردن فایل",
+        }
+        return labels.get(
+            operation,
+            operation.value,
+        )
+
+    def _finish_text_file_action(
+        self,
+        *,
+        request_id: str,
+        response: str,
+        started_at: float,
+    ) -> None:
+        self._record_conversation_message(
+            role="assistant",
+            text=response,
+            source="text",
+            request_id=request_id,
+        )
+        self._notify(
+            "text_response",
+            "ready",
+            _text_event_message(
+                request_id,
+                text=response,
+                route=TaskType.COMPUTER.value,
+                elapsedSeconds=round(
+                    time.perf_counter() - started_at,
+                    3,
+                ),
+            ),
+        )
+
+    def _fail_text_file_action(
+        self,
+        *,
+        request_id: str,
+        error: str,
+        started_at: float,
+    ) -> None:
+        self._notify(
+            "text_error",
+            "error",
+            _text_event_message(
+                request_id,
+                error=error,
+                route=TaskType.COMPUTER.value,
+                elapsedSeconds=round(
+                    time.perf_counter() - started_at,
+                    3,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _named_file_ambiguity_message(
+        names: tuple[str, ...],
+    ) -> str:
+        shown = "، ".join(names[:3])
+        if shown:
+            return (
+                "چند فایل با این بخش از اسم پیدا کردم: "
+                f"{shown}. چند کلمه بیشتر از اسم فایل بگو."
+            )
+        return (
+            "چند فایل شبیه به این اسم پیدا کردم. "
+            "چند کلمه بیشتر از اسم فایل بگو."
+        )
+
+    def _resolve_named_file_action(
+        self,
+        text: str,
+    ):
+        request = parse_named_file_request(text)
+        self._ensure_file_runtime()
+
+        if self.file_resolver is None:
+            raise RuntimeError(
+                "Qronos file resolver did not prepare correctly."
+            )
+
+        resolved = self.file_resolver.resolve(request)
+        action = FileAction(
+            FileOperation.OPEN_FILE,
+            source=str(resolved.path),
+        )
+        return request, resolved, action
+
+    def _begin_text_named_file_action(
+        self,
+        text: str,
+        request_id: str,
+        started_at: float,
+    ) -> bool:
+        """
+        Resolve a natural partial filename in Desktop/Documents/Downloads.
+
+        Text respects the existing OPEN_APPLICATION permission policy. With the
+        default policy it explains that the exact same request must be spoken;
+        it never silently treats typed text as voice confirmation.
+        """
+        try:
+            request, resolved, action = self._resolve_named_file_action(text)
+        except NamedFileParseError:
+            return False
+        except NamedFileAmbiguous as exc:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=self._named_file_ambiguity_message(exc.names),
+                started_at=started_at,
+            )
+            return True
+        except NamedFileSearchLimit:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "جست‌وجوی این محل خیلی گسترده شد. اسم فایل را کمی دقیق‌تر "
+                    "یا یک پوشه محدودتر بگو."
+                ),
+                started_at=started_at,
+            )
+            return True
+        except NamedFileNotFound:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "فایلی با این بخش از اسم در محلی که گفتی پیدا نکردم."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        if self.file_executor is None:
+            raise RuntimeError(
+                "Qronos file executor did not prepare correctly."
+            )
+
+        prepared = self.file_executor.prepare(action)
+        verdict = prepared.verdict
+
+        if verdict.refused:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "فایل پیدا شد، اما تنظیمات مجوز فعلی اجازه باز کردنش را نمی‌دهد."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        if verdict.allowed:
+            execution = self.file_executor.execute_prepared(
+                prepared,
+                reevaluate=False,
+            )
+            if execution.result.outcome is not ActionOutcome.SUCCEEDED:
+                self._fail_text_file_action(
+                    request_id=request_id,
+                    error=(
+                        execution.result.detail
+                        or "Open-file action failed."
+                    ),
+                    started_at=started_at,
+                )
+                return True
+
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=f"انجام شد. فایل {resolved.display_name} باز شد.",
+                started_at=started_at,
+            )
+            return True
+
+        if (
+            verdict.decision
+            is PermissionDecision.REQUIRE_VOICE_CONFIRMATION
+        ):
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    f"فایل {resolved.display_name} را پیدا کردم. "
+                    "طبق مجوز فعلی برای باز کردنش همین فرمان را با Voice بگو."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        self._finish_text_file_action(
+            request_id=request_id,
+            response=(
+                f"فایل {resolved.display_name} را پیدا کردم، اما باز کردنش "
+                "به نوع دیگری از تأیید نیاز دارد."
+            ),
+            started_at=started_at,
+        )
+        return True
+
+    def _execute_voice_named_file_action(
+        self,
+        transcript: str,
+        report: dict[str, Any],
+    ) -> str | None:
+        try:
+            request, resolved, action = self._resolve_named_file_action(
+                transcript
+            )
+        except NamedFileParseError:
+            return None
+        except NamedFileAmbiguous as exc:
+            report["voiceNamedFileAmbiguous"] = True
+            report["voiceComputerDeferred"] = False
+            return self._named_file_ambiguity_message(exc.names)
+        except NamedFileSearchLimit:
+            report["voiceNamedFileSearchLimit"] = True
+            report["voiceComputerDeferred"] = False
+            return (
+                "جست‌وجوی این محل خیلی گسترده شد. اسم فایل را کمی دقیق‌تر "
+                "یا یک پوشه محدودتر بگو."
+            )
+        except NamedFileNotFound:
+            report["voiceNamedFileNotFound"] = True
+            report["voiceComputerDeferred"] = False
+            return (
+                "فایلی با این بخش از اسم در محلی که گفتی پیدا نکردم."
+            )
+
+        if self.file_executor is None:
+            raise RuntimeError(
+                "Qronos file executor did not prepare correctly."
+            )
+
+        prepared = self.file_executor.prepare(action)
+        verdict = prepared.verdict
+
+        report["fileOperation"] = action.operation.value
+        report["namedFileFolder"] = resolved.folder_key
+        report["namedFileScore"] = int(resolved.score)
+        report["namedFileName"] = resolved.display_name
+
+        if verdict.refused:
+            report["voiceNamedFileRefused"] = True
+            report["voiceComputerDeferred"] = False
+            return (
+                "فایل پیدا شد، اما تنظیمات مجوز فعلی اجازه باز کردنش را نمی‌دهد."
+            )
+
+        approval = None
+        if verdict.needs_approval:
+            if (
+                verdict.decision
+                is PermissionDecision.REQUIRE_VOICE_CONFIRMATION
+            ):
+                approval = verdict.decision
+            else:
+                report["voiceNamedFileNeedsOtherApproval"] = (
+                    verdict.decision.value
+                )
+                report["voiceComputerDeferred"] = False
+                return (
+                    "فایل پیدا شد، اما باز کردنش به نوع دیگری از تأیید نیاز دارد."
+                )
+
+        execution = self.file_executor.execute_prepared(
+            prepared,
+            approval=approval,
+            reevaluate=False,
+        )
+        report["fileActionId"] = execution.request.action_id
+
+        if execution.result.outcome is not ActionOutcome.SUCCEEDED:
+            report["voiceNamedFileFailed"] = True
+            report["voiceNamedFileFailure"] = execution.result.detail
+            report["voiceComputerDeferred"] = False
+            return (
+                "فایل را پیدا کردم، اما Windows نتوانست آن را باز کند. "
+                "جزئیات در گزارش اجرای کرونوس ثبت شد."
+            )
+
+        report["voiceNamedFileExecuted"] = True
+        report["voiceComputerExecuted"] = True
+        report["voiceComputerDeferred"] = False
+        return f"انجام شد. فایل {resolved.display_name} باز شد."
+
+    def _resolve_named_location_action(
+        self,
+        text: str,
+    ):
+        request = parse_location_request(text)
+        self._ensure_file_runtime()
+        self._ensure_computer_runtime()
+        if self.file_resolver is None:
+            raise RuntimeError("Qronos file resolver did not prepare correctly.")
+        resolved = self.file_resolver.resolve_location(request)
+        action = ComputerAction(
+            ComputerOperation.OPEN_LOCATION,
+            location=str(resolved.path),
+        )
+        return request, resolved, action
+
+    def _begin_text_named_location_action(
+        self,
+        text: str,
+        request_id: str,
+        started_at: float,
+    ) -> bool:
+        try:
+            _, resolved, action = self._resolve_named_location_action(text)
+        except NamedLocationParseError:
+            return False
+        except NamedLocationNotFound:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response="پوشه یا درایوی که گفتی روی این سیستم در دسترس نیست.",
+                started_at=started_at,
+            )
+            return True
+
+        if self.computer_executor is None:
+            raise RuntimeError("Qronos computer executor did not prepare correctly.")
+        prepared = self.computer_executor.prepare(action)
+        verdict = prepared.verdict
+        if verdict.refused:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response="محل را پیدا کردم، اما تنظیمات مجوز اجازه باز کردنش را نمی‌دهد.",
+                started_at=started_at,
+            )
+            return True
+        if verdict.allowed:
+            execution = self.computer_executor.execute_prepared(prepared, reevaluate=False)
+            if execution.result.outcome is not ActionOutcome.SUCCEEDED:
+                self._fail_text_file_action(
+                    request_id=request_id,
+                    error=execution.result.detail or "Open-location action failed.",
+                    started_at=started_at,
+                )
+                return True
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=f"انجام شد. {resolved.display_name} باز شد.",
+                started_at=started_at,
+            )
+            return True
+        if verdict.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=f"{resolved.display_name} را پیدا کردم. طبق مجوز فعلی همین فرمان را با Voice بگو.",
+                started_at=started_at,
+            )
+            return True
+        self._finish_text_file_action(
+            request_id=request_id,
+            response=f"{resolved.display_name} را پیدا کردم، اما باز کردنش به نوع دیگری از تأیید نیاز دارد.",
+            started_at=started_at,
+        )
+        return True
+
+    def _execute_voice_named_location_action(
+        self,
+        transcript: str,
+        report: dict[str, Any],
+    ) -> str | None:
+        try:
+            _, resolved, action = self._resolve_named_location_action(transcript)
+        except NamedLocationParseError:
+            return None
+        except NamedLocationNotFound:
+            report["voiceNamedLocationNotFound"] = True
+            report["voiceComputerDeferred"] = False
+            return "پوشه یا درایوی که گفتی روی این سیستم در دسترس نیست."
+
+        if self.computer_executor is None:
+            raise RuntimeError("Qronos computer executor did not prepare correctly.")
+        prepared = self.computer_executor.prepare(action)
+        verdict = prepared.verdict
+        report["computerOperation"] = action.operation.value
+        report["namedLocation"] = str(resolved.path)
+        report["namedLocationKey"] = resolved.folder_key
+        if verdict.refused:
+            report["voiceNamedLocationRefused"] = True
+            report["voiceComputerDeferred"] = False
+            return "محل را پیدا کردم، اما تنظیمات مجوز اجازه باز کردنش را نمی‌دهد."
+        approval = None
+        if verdict.needs_approval:
+            if verdict.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION:
+                approval = verdict.decision
+            else:
+                report["voiceNamedLocationNeedsOtherApproval"] = verdict.decision.value
+                report["voiceComputerDeferred"] = False
+                return "محل را پیدا کردم، اما باز کردنش به نوع دیگری از تأیید نیاز دارد."
+        execution = self.computer_executor.execute_prepared(
+            prepared, approval=approval, reevaluate=False,
+        )
+        if execution.result.outcome is not ActionOutcome.SUCCEEDED:
+            report["voiceNamedLocationFailed"] = True
+            report["voiceNamedLocationFailure"] = execution.result.detail
+            report["voiceComputerDeferred"] = False
+            return "محل را پیدا کردم، اما Windows نتوانست آن را باز کند."
+        report["voiceNamedLocationExecuted"] = True
+        report["voiceComputerExecuted"] = True
+        report["voiceComputerDeferred"] = False
+        return f"انجام شد. {resolved.display_name} باز شد."
+
+    def _begin_text_computer_action(
+        self,
+        text: str,
+        request_id: str,
+        started_at: float,
+    ) -> bool:
+        """
+        Try the narrow Windows-control vocabulary before the File-Control path.
+
+        Returns True when this request was a recognized computer action, even
+        if policy refused it. False means the caller should try another
+        COMPUTER sub-parser such as exact-path File Control.
+        """
+        self._ensure_computer_runtime()
+
+        if self.computer_executor is None:
+            raise RuntimeError(
+                "Qronos computer executor did not prepare correctly."
+            )
+
+        try:
+            action = parse_computer_action(
+                text,
+                app_resolver=self.computer_executor.resolve_app_id,
+            )
+        except ComputerActionParseError:
+            return False
+
+        if self.computer_executor is None:
+            raise RuntimeError(
+                "Qronos computer executor did not prepare correctly."
+            )
+
+        prepared = self.computer_executor.prepare(action)
+        verdict = prepared.verdict
+
+        if verdict.refused:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "این عملیات طبق تنظیمات مجوز فعلی اجازه اجرا ندارد."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        if verdict.allowed:
+            execution = self.computer_executor.execute_prepared(
+                prepared,
+                reevaluate=False,
+            )
+            if execution.result.outcome is not ActionOutcome.SUCCEEDED:
+                self._fail_text_file_action(
+                    request_id=request_id,
+                    error=(
+                        execution.result.detail
+                        or "Computer action failed."
+                    ),
+                    started_at=started_at,
+                )
+                return True
+
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    f"انجام شد. {self._computer_operation_label(action.operation)} "
+                    "با موفقیت اجرا شد."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        if (
+            verdict.decision
+            is PermissionDecision.REQUIRE_VOICE_CONFIRMATION
+        ):
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "این عملیات طبق سیاست فعلی به تأیید صوتی نیاز دارد. "
+                    "از Voice همان فرمان را بگو."
+                ),
+                started_at=started_at,
+            )
+            self._notify(
+                "computer_action_voice_confirmation_required",
+                "ready",
+                json.dumps(
+                    {
+                        "requestId": request_id,
+                        "actionId": prepared.request.action_id,
+                        "operation": action.operation.value,
+                        "appId": action.app_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            return True
+
+        self._finish_text_file_action(
+            request_id=request_id,
+            response=(
+                "این عملیات به نوع دیگری از تأیید نیاز دارد و "
+                "Windows Control v1 آن را خودکار اجرا نمی‌کند."
+            ),
+            started_at=started_at,
+        )
+        return True
+
+    def _execute_voice_computer_action(
+        self,
+        transcript: str,
+        report: dict[str, Any],
+    ) -> str:
+        """
+        Execute one explicit, allowlisted Windows action from the active voice
+        command. The spoken command itself satisfies VOICE_CONFIRMATION only;
+        it never substitutes for UI_CONFIRMATION or TYPED_SECRET.
+        """
+        if is_computer_capability_query(transcript):
+            report["voiceComputerCapabilityQuery"] = True
+            report["voiceComputerDeferred"] = False
+            return _computer_capability_response()
+
+        self._ensure_computer_runtime()
+
+        if self.computer_executor is None:
+            raise RuntimeError(
+                "Qronos computer executor did not prepare correctly."
+            )
+
+        try:
+            action = parse_computer_action(
+                transcript,
+                app_resolver=self.computer_executor.resolve_app_id,
+            )
+        except ComputerActionParseError:
+            named_file_response = self._execute_voice_named_file_action(
+                transcript,
+                report,
+            )
+            if named_file_response is not None:
+                return named_file_response
+
+            named_location_response = self._execute_voice_named_location_action(
+                transcript,
+                report,
+            )
+            if named_location_response is not None:
+                return named_location_response
+
+            report["voiceComputerDeferred"] = True
+            report["voiceComputerReason"] = "unsupported_windows_control_v2_action"
+            return VOICE_COMPUTER_DEFERRED_RESPONSE
+
+        if self.computer_executor is None:
+            raise RuntimeError(
+                "Qronos computer executor did not prepare correctly."
+            )
+
+        prepared = self.computer_executor.prepare(action)
+        verdict = prepared.verdict
+
+        if verdict.refused:
+            report["voiceComputerRefused"] = True
+            report["computerOperation"] = action.operation.value
+            report["computerAppId"] = action.app_id
+            return (
+                "این عملیات طبق تنظیمات مجوز فعلی اجازه اجرا ندارد."
+            )
+
+        approval = None
+        if verdict.needs_approval:
+            if (
+                verdict.decision
+                is PermissionDecision.REQUIRE_VOICE_CONFIRMATION
+            ):
+                approval = verdict.decision
+            else:
+                report["voiceComputerNeedsOtherApproval"] = (
+                    verdict.decision.value
+                )
+                report["computerOperation"] = action.operation.value
+                report["computerAppId"] = action.app_id
+                return (
+                    "این عملیات به نوع دیگری از تأیید نیاز دارد و "
+                    "با فرمان صوتی فعلی اجرا نشد."
+                )
+
+        execution = self.computer_executor.execute_prepared(
+            prepared,
+            approval=approval,
+            reevaluate=False,
+        )
+
+        report["computerOperation"] = action.operation.value
+        report["computerAppId"] = action.app_id
+        report["computerActionId"] = execution.request.action_id
+
+        if execution.result.outcome is not ActionOutcome.SUCCEEDED:
+            report["voiceComputerFailed"] = True
+            report["voiceComputerFailure"] = (
+                execution.result.detail
+            )
+            return (
+                "باز کردن برنامه انجام نشد. "
+                "جزئیات در گزارش اجرای کرونوس ثبت شد."
+            )
+
+        report["voiceComputerExecuted"] = True
+        report["voiceComputerDeferred"] = False
+
+        app_names = {
+            "notepad": "نوت‌پد",
+            "calculator": "ماشین‌حساب",
+            "file_explorer": "فایل اکسپلورر",
+            "paint": "پینت",
+        }
+        app_name = app_names.get(
+            action.app_id,
+            action.app_id,
+        )
+        return f"انجام شد. {app_name} باز شد."
+
+    def _begin_text_file_action(
+        self,
+        text: str,
+        request_id: str,
+        started_at: float,
+    ) -> None:
+        if self.pending_file_actions:
+            raise RuntimeError(
+                "Another file action is already awaiting approval."
+            )
+
+        try:
+            action = parse_file_action(text)
+        except FileActionParseError as exc:
+            raise RuntimeError(
+                "برای کنترل فایل در Gate 1B مسیر دقیق را داخل کوتیشن بنویس. "
+                "عملیات پشتیبانی‌شده: Copy، Move، Rename و Create Folder. "
+                f"جزئیات: {exc}"
+            ) from exc
+
+        self._ensure_file_runtime()
+
+        if self.file_executor is None:
+            raise RuntimeError(
+                "Qronos file executor did not prepare correctly."
+            )
+
+        prepared = self.file_executor.prepare(action)
+        verdict = prepared.verdict
+
+        if verdict.refused:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "این عملیات طبق تنظیمات مجوز فعلی اجازه اجرا ندارد."
+                ),
+                started_at=started_at,
+            )
+            self._notify(
+                "file_action_refused",
+                "ready",
+                json.dumps(
+                    {
+                        "requestId": request_id,
+                        "actionId": prepared.request.action_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            return
+
+        if verdict.allowed:
+            execution = self.file_executor.execute_prepared(
+                prepared,
+                reevaluate=False,
+            )
+            if execution.result.outcome is not ActionOutcome.SUCCEEDED:
+                self._fail_text_file_action(
+                    request_id=request_id,
+                    error=(
+                        execution.result.detail
+                        or "File action failed."
+                    ),
+                    started_at=started_at,
+                )
+                return
+
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    f"انجام شد. {self._file_operation_label(action.operation)} "
+                    "با موفقیت اجرا شد."
+                ),
+                started_at=started_at,
+            )
+            self._notify(
+                "file_action_completed",
+                "ready",
+                json.dumps(
+                    {
+                        "requestId": request_id,
+                        "actionId": prepared.request.action_id,
+                        "operation": action.operation.value,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            return
+
+        if (
+            verdict.decision
+            is not PermissionDecision.REQUIRE_UI_CONFIRMATION
+        ):
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "این عملیات به نوع دیگری از تأیید نیاز دارد و "
+                    "Gate 1B متنی آن را خودکار اجرا نمی‌کند."
+                ),
+                started_at=started_at,
+            )
+            return
+
+        if self._file_write_approval_lease_active():
+            token = uuid.uuid4().hex
+            self.pending_file_actions[token] = PendingFileTextAction(
+                token=token,
+                prepared=prepared,
+                request_id=request_id,
+                started_at=started_at,
+            )
+            self._notify(
+                "file_action_approval_lease_used",
+                "ready",
+                json.dumps(
+                    {
+                        "requestId": request_id,
+                        "actionId": prepared.request.action_id,
+                        "remainingSeconds": int(
+                            self._file_write_approval_lease_remaining()
+                        ),
+                        "scope": "reversible_file_writes",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            self.resolve_file_action_decision(
+                token,
+                approved=True,
+                grant_lease=False,
+            )
+            return
+
+        token = uuid.uuid4().hex
+        pending = PendingFileTextAction(
+            token=token,
+            prepared=prepared,
+            request_id=request_id,
+            started_at=started_at,
+        )
+        self.pending_file_actions[token] = pending
+
+        action_payload = {
+            "actionToken": token,
+            "actionId": prepared.request.action_id,
+            "requestId": request_id,
+            "permission": verdict.decision.value,
+            "operation": action.operation.value,
+            "source": action.source,
+            "destination": action.destination,
+            "newName": action.new_name,
+        }
+
+        self._notify(
+            "file_action_approval_required",
+            "approval_required",
+            json.dumps(
+                action_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def resolve_file_action_decision(
+        self,
+        action_token: str,
+        *,
+        approved: bool,
+        grant_lease: bool = True,
+    ) -> None:
+        token = (action_token or "").strip()
+        if not token:
+            raise ValueError(
+                "File action decision needs an action token."
+            )
+
+        pending = self.pending_file_actions.pop(
+            token,
+            None,
+        )
+        if pending is None:
+            self._notify(
+                "runtime_warning",
+                "warning",
+                "Ignored an unknown or stale file-action approval token.",
+            )
+            return
+
+        if self.file_executor is None:
+            self._fail_text_file_action(
+                request_id=pending.request_id,
+                error="Qronos file executor is not available.",
+                started_at=pending.started_at,
+            )
+            return
+
+        if not approved:
+            self.file_executor.decline_prepared(
+                pending.prepared
+            )
+            self._notify(
+                "file_action_declined",
+                "ready",
+                json.dumps(
+                    {
+                        "actionToken": token,
+                        "requestId": pending.request_id,
+                        "actionId": pending.prepared.request.action_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            self._finish_text_file_action(
+                request_id=pending.request_id,
+                response="لغو شد؛ هیچ تغییری روی فایل‌ها انجام نشد.",
+                started_at=pending.started_at,
+            )
+            return
+
+        execution = self.file_executor.execute_prepared(
+            pending.prepared,
+            approval=PermissionDecision.REQUIRE_UI_CONFIRMATION,
+            reevaluate=True,
+        )
+
+        if (
+            grant_lease
+            and execution.result.outcome
+            not in {
+                ActionOutcome.REFUSED,
+                ActionOutcome.AWAITING_APPROVAL,
+            }
+        ):
+            self._grant_file_write_approval_lease()
+
+        if execution.result.outcome is ActionOutcome.SUCCEEDED:
+            self._notify(
+                "file_action_completed",
+                "ready",
+                json.dumps(
+                    {
+                        "actionToken": token,
+                        "requestId": pending.request_id,
+                        "actionId": execution.request.action_id,
+                        "operation": pending.prepared.action.operation.value,
+                        "undoActionId": (
+                            execution.undo_entry.action_id
+                            if execution.undo_entry is not None
+                            else ""
+                        ),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            self._finish_text_file_action(
+                request_id=pending.request_id,
+                response=(
+                    f"انجام شد. "
+                    f"{self._file_operation_label(pending.prepared.action.operation)} "
+                    "با موفقیت اجرا شد."
+                ),
+                started_at=pending.started_at,
+            )
+            return
+
+        if execution.result.outcome is ActionOutcome.REFUSED:
+            self._notify(
+                "file_action_refused",
+                "ready",
+                json.dumps(
+                    {
+                        "actionToken": token,
+                        "requestId": pending.request_id,
+                        "actionId": execution.request.action_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            self._finish_text_file_action(
+                request_id=pending.request_id,
+                response=(
+                    "مجوز این عملیات تغییر کرده یا اکنون اجازه اجرا نمی‌دهد؛ "
+                    "هیچ تغییری انجام نشد."
+                ),
+                started_at=pending.started_at,
+            )
+            return
+
+        if execution.result.outcome is ActionOutcome.AWAITING_APPROVAL:
+            self._notify(
+                "file_action_refused",
+                "ready",
+                json.dumps(
+                    {
+                        "actionToken": token,
+                        "requestId": pending.request_id,
+                        "actionId": execution.request.action_id,
+                        "reason": "approval_mechanism_changed",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            self._finish_text_file_action(
+                request_id=pending.request_id,
+                response=(
+                    "نوع مجوز این عملیات در زمان تأیید تغییر کرده است؛ "
+                    "برای امنیت، عملیات اجرا نشد."
+                ),
+                started_at=pending.started_at,
+            )
+            return
+
+        self._notify(
+            "file_action_failed",
+            "error",
+            json.dumps(
+                {
+                    "actionToken": token,
+                    "requestId": pending.request_id,
+                    "actionId": execution.request.action_id,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+        self._fail_text_file_action(
+            request_id=pending.request_id,
+            error=(
+                execution.result.detail
+                or "File action failed."
+            ),
+            started_at=pending.started_at,
+        )
+
     def run_text_turn(
         self,
         text: str,
@@ -1605,7 +3360,20 @@ class QronosRuntime:
             route = self.task_router.route(
                 cleaned_text
             )
-            selected_task_type = route.task_type
+            routed_task_type = route.task_type
+            text_routing_shadow = (
+                self._routing_shadow(
+                    cleaned_text
+                )
+            )
+            (
+                selected_task_type,
+                text_compute_promotion,
+            ) = self._select_production_task_type(
+                cleaned_text,
+                routed_task_type,
+                text_routing_shadow,
+            )
             route_name = (
                 selected_task_type.value
             )
@@ -1619,14 +3387,51 @@ class QronosRuntime:
                 ),
             )
 
+            if selected_task_type is TaskType.COMPUTER:
+                if is_computer_capability_query(cleaned_text):
+                    self._finish_text_file_action(
+                        request_id=cleaned_request_id,
+                        response=_computer_capability_response(),
+                        started_at=started,
+                    )
+                    return
+
+                if self._begin_text_computer_action(
+                    cleaned_text,
+                    cleaned_request_id,
+                    started,
+                ):
+                    return
+
+                if self._begin_text_named_file_action(
+                    cleaned_text,
+                    cleaned_request_id,
+                    started,
+                ):
+                    return
+
+                if self._begin_text_named_location_action(
+                    cleaned_text,
+                    cleaned_request_id,
+                    started,
+                ):
+                    return
+
+                self._begin_text_file_action(
+                    cleaned_text,
+                    cleaned_request_id,
+                    started,
+                )
+                return
+
             if selected_task_type not in (
                 TaskType.FAST,
                 TaskType.HEAVY,
             ):
                 raise RuntimeError(
-                    "Text Chat V1 currently supports Fast and Heavy "
-                    "responses only. Vision, browser, and computer "
-                    "actions remain behind their dedicated approval paths."
+                    "Text Chat currently supports Fast, Heavy, and the "
+                    "permission-gated exact-path File Control path. Vision "
+                    "and browser actions remain behind dedicated paths."
                 )
 
             arithmetic_answer = (
@@ -1969,16 +3774,7 @@ class QronosRuntime:
         )
 
         if self.voice_output is None:
-            voice_output = (
-                ChatterboxRuntime()
-            )
-
-            if not voice_output.health_check():
-                raise RuntimeError(
-                    "Qronos TTS runtime is not ready."
-                )
-
-            self.voice_output = voice_output
+            self._ensure_voice_output_instance()
 
         if self.task_router is None:
             self.task_router = TaskRouter()
@@ -2412,58 +4208,358 @@ class QronosRuntime:
         ):
             self._start_standalone_input_meter()
 
-    def _begin_voice_playback_wait(self) -> int:
-        """
-        Start tracking one complete desktop playback group.
+    def _write_voice_playback_telemetry(
+        self,
+        playback_id: int,
+        *,
+        archive: bool = False,
+    ) -> None:
+        """Persist desktop playback timing without affecting a voice turn."""
+        try:
+            with self._lock:
+                source = dict(
+                    self._voice_playback_metrics.get(
+                        playback_id,
+                        {},
+                    )
+                )
 
-        Every TTS chunk belonging to the same assistant response receives the
-        same playback id. The follow-up microphone may open only after the
-        desktop reports that this complete group has finished playing.
-        """
+            if not source:
+                return
+
+            def delta(
+                later: str,
+                earlier: str,
+            ) -> float | None:
+                try:
+                    return round(
+                        float(source[later])
+                        - float(source[earlier]),
+                        3,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return None
+
+            rendered: dict[str, Any] = {
+                key: value
+                for key, value in source.items()
+                if not key.endswith("Perf")
+            }
+
+            rendered.update(
+                {
+                    "responseReadyToFirstAudioReadySeconds": delta(
+                        "firstAudioReadyPerf",
+                        "responseReadyPerf",
+                    ),
+                    "firstAudioReadyToDesktopPlaybackStartSeconds": delta(
+                        "desktopPlaybackStartedPerf",
+                        "firstAudioReadyPerf",
+                    ),
+                    "responseReadyToDesktopPlaybackStartSeconds": delta(
+                        "desktopPlaybackStartedPerf",
+                        "responseReadyPerf",
+                    ),
+                    "desktopPlaybackDurationSeconds": delta(
+                        "desktopPlaybackCompletePerf",
+                        "desktopPlaybackStartedPerf",
+                    ),
+                }
+            )
+
+            VOICE_PLAYBACK_TELEMETRY_PATH.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            payload = json.dumps(
+                rendered,
+                ensure_ascii=False,
+                indent=2,
+            )
+            VOICE_PLAYBACK_TELEMETRY_PATH.write_text(
+                payload,
+                encoding="utf-8",
+            )
+
+            if archive:
+                archive_path = (
+                    VOICE_PLAYBACK_TELEMETRY_PATH.parent
+                    / (
+                        "voice_playback_"
+                        f"{playback_id}_"
+                        f"{time.time_ns()}.json"
+                    )
+                )
+                archive_path.write_text(
+                    payload,
+                    encoding="utf-8",
+                )
+        except Exception:
+            # Diagnostics must never affect voice playback.
+            pass
+
+    def _begin_voice_playback_wait(self) -> int:
+        """Start one response-level desktop playback timing group."""
+        now_perf = time.perf_counter()
+        now_epoch = time.time()
+
         with self._lock:
             self._voice_playback_id += 1
             playback_id = self._voice_playback_id
             self._pending_playback_id = playback_id
             self._voice_playback_complete.clear()
+            self._voice_playback_metrics[playback_id] = {
+                "playbackId": playback_id,
+                "status": "response_ready",
+                "responseReadyPerf": now_perf,
+                "responseReadyAtEpoch": round(now_epoch, 6),
+            }
 
+        self._write_voice_playback_telemetry(
+            playback_id
+        )
         return playback_id
+
+    def set_voice_playback_context(
+        self,
+        playback_id: int,
+        *,
+        trigger_source: str,
+        transcript: str,
+        response: str,
+    ) -> None:
+        with self._lock:
+            metrics = self._voice_playback_metrics.get(
+                playback_id
+            )
+            if metrics is None:
+                return
+            metrics.update(
+                {
+                    "triggerSource": trigger_source,
+                    "transcript": transcript,
+                    "response": response,
+                }
+            )
+
+        self._write_voice_playback_telemetry(
+            playback_id
+        )
+
+    def mark_voice_first_audio_ready(
+        self,
+        playback_id: int,
+    ) -> None:
+        now_perf = time.perf_counter()
+        now_epoch = time.time()
+
+        with self._lock:
+            metrics = self._voice_playback_metrics.get(
+                playback_id
+            )
+            if metrics is None:
+                return
+            if "firstAudioReadyPerf" in metrics:
+                return
+            metrics.update(
+                {
+                    "status": "audio_ready",
+                    "firstAudioReadyPerf": now_perf,
+                    "firstAudioReadyAtEpoch": round(
+                        now_epoch,
+                        6,
+                    ),
+                }
+            )
+
+        self._write_voice_playback_telemetry(
+            playback_id
+        )
+
+    def set_voice_playback_audio_metadata(
+        self,
+        playback_id: int,
+        *,
+        total_audio_seconds: float,
+        chunk_count: int,
+    ) -> None:
+        with self._lock:
+            metrics = self._voice_playback_metrics.get(
+                playback_id
+            )
+            if metrics is None:
+                return
+            metrics.update(
+                {
+                    "generatedAudioSeconds": round(
+                        float(total_audio_seconds),
+                        3,
+                    ),
+                    "chunkCount": int(chunk_count),
+                }
+            )
+
+        self._write_voice_playback_telemetry(
+            playback_id
+        )
+
+    def mark_voice_playback_started(
+        self,
+        playback_id: int,
+    ) -> bool:
+        """Record the first real Desktop media-engine playback start."""
+        now_perf = time.perf_counter()
+        now_epoch = time.time()
+
+        with self._lock:
+            if (
+                self._pending_playback_id is None
+                or playback_id != self._pending_playback_id
+            ):
+                return False
+
+            metrics = self._voice_playback_metrics.get(
+                playback_id
+            )
+            if metrics is None:
+                return False
+
+            if "desktopPlaybackStartedPerf" not in metrics:
+                metrics.update(
+                    {
+                        "status": "playing",
+                        "desktopPlaybackStartedPerf": now_perf,
+                        "desktopPlaybackStartedAtEpoch": round(
+                            now_epoch,
+                            6,
+                        ),
+                    }
+                )
+
+        self._write_voice_playback_telemetry(
+            playback_id
+        )
+        return True
+
+    def request_stop_response(
+        self,
+    ) -> dict[str, Any]:
+        """
+        Stop the current user-visible response without pausing Qronos.
+
+        Desktop audio is stopped independently at the media layer. This method
+        releases the backend playback wait immediately and asks any in-flight
+        voice turn to suppress remaining response/TTS phases. The active Brain
+        HTTP call is not force-killed; its result is discarded at the next
+        checkpoint instead.
+        """
+        now_perf = time.perf_counter()
+        now_epoch = time.time()
+
+        with self._lock:
+            busy = bool(self._busy)
+
+            if busy:
+                self._voice_response_stop_requested.set()
+
+            playback_id = self._pending_playback_id
+            playback_cancelled = playback_id is not None
+
+            if playback_id is not None:
+                metrics = self._voice_playback_metrics.get(
+                    playback_id
+                )
+                if metrics is not None:
+                    metrics.update(
+                        {
+                            "status": "cancelled",
+                            "desktopPlaybackCompletePerf": now_perf,
+                            "desktopPlaybackCompleteAtEpoch": round(
+                                now_epoch,
+                                6,
+                            ),
+                            "cancelledByUser": True,
+                        }
+                    )
+
+                # Clear the pending identity now so a stale later `ended`
+                # callback cannot complete a response the user already stopped.
+                self._pending_playback_id = None
+
+                # Wake any playback waiter immediately.
+                self._voice_playback_complete.set()
+
+        if playback_id is not None:
+            self._write_voice_playback_telemetry(
+                playback_id,
+                archive=True,
+            )
+
+        self._notify(
+            "voice_response_stopped",
+            "ready",
+            json.dumps(
+                {
+                    "busyTurnStopRequested": busy,
+                    "playbackCancelled": playback_cancelled,
+                    "playbackId": playback_id,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+
+        return {
+            "busyTurnStopRequested": busy,
+            "playbackCancelled": playback_cancelled,
+            "playbackId": playback_id,
+        }
+
 
     def mark_voice_playback_complete(
         self,
         playback_id: int,
     ) -> bool:
-        """
-        Accept one desktop playback-complete acknowledgement.
+        """Accept Desktop completion and persist final practical timing."""
+        now_perf = time.perf_counter()
+        now_epoch = time.time()
 
-        Stale acknowledgements are ignored so a late desktop event from an old
-        response can never unlock listening for a newer response.
-        """
         with self._lock:
             if (
-                self._pending_playback_id
-                is None
-                or playback_id
-                != self._pending_playback_id
+                self._pending_playback_id is None
+                or playback_id != self._pending_playback_id
             ):
                 return False
 
+            metrics = self._voice_playback_metrics.get(
+                playback_id
+            )
+            if metrics is not None:
+                metrics.update(
+                    {
+                        "status": "complete",
+                        "desktopPlaybackCompletePerf": now_perf,
+                        "desktopPlaybackCompleteAtEpoch": round(
+                            now_epoch,
+                            6,
+                        ),
+                    }
+                )
+
             self._voice_playback_complete.set()
-            return True
+
+        self._write_voice_playback_telemetry(
+            playback_id,
+            archive=True,
+        )
+        return True
 
     def _wait_for_voice_playback_complete(
         self,
     ) -> bool:
-        """
-        Wait until the desktop confirms that the complete response finished.
-
-        The normal path has no guessed playback duration. The five-minute
-        failsafe only prevents a permanently dead desktop from deadlocking the
-        wake thread. A failsafe expiry does not close the conversation.
-        """
+        """Wait for Desktop completion; timeout remains only a deadlock guard."""
         with self._lock:
-            playback_id = (
-                self._pending_playback_id
-            )
+            playback_id = self._pending_playback_id
 
         if playback_id is None:
             return True
@@ -2474,42 +4570,61 @@ class QronosRuntime:
         )
 
         while not self._wake_stop.is_set():
-            remaining = (
-                deadline
-                - time.monotonic()
-            )
-
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
 
             if self._voice_playback_complete.wait(
-                timeout=min(
-                    0.25,
-                    remaining,
-                )
+                timeout=min(0.25, remaining)
             ):
                 with self._lock:
-                    if (
-                        self._pending_playback_id
-                        == playback_id
-                    ):
+                    if self._pending_playback_id == playback_id:
                         self._pending_playback_id = None
-
                     self._voice_playback_complete.clear()
 
+                    metrics = self._voice_playback_metrics.get(
+                        playback_id
+                    )
+                    if (
+                        metrics is not None
+                        and metrics.get("status")
+                        != "cancelled"
+                    ):
+                        metrics["status"] = "acknowledged"
+
+                    # Keep a bounded amount of in-memory diagnostic state.
+                    if len(self._voice_playback_metrics) > 20:
+                        for old_id in sorted(
+                            self._voice_playback_metrics
+                        )[:-20]:
+                            self._voice_playback_metrics.pop(
+                                old_id,
+                                None,
+                            )
+
+                self._write_voice_playback_telemetry(
+                    playback_id
+                )
                 return True
 
         if self._wake_stop.is_set():
             return False
 
         with self._lock:
-            if (
-                self._pending_playback_id
-                == playback_id
-            ):
+            if self._pending_playback_id == playback_id:
                 self._pending_playback_id = None
-
             self._voice_playback_complete.clear()
+
+            metrics = self._voice_playback_metrics.get(
+                playback_id
+            )
+            if metrics is not None:
+                metrics["status"] = "ack_timeout"
+
+        self._write_voice_playback_telemetry(
+            playback_id,
+            archive=True,
+        )
 
         self._notify(
             "voice_playback_ack_timeout",
@@ -2729,7 +4844,22 @@ class QronosRuntime:
 
                 while self._should_continue_followup_session():
                     if playback_seconds > 0:
-                        self._wait_for_voice_playback_complete()
+                        playback_completed = (
+                            self._wait_for_voice_playback_complete()
+                        )
+
+                        if (
+                            playback_completed
+                            and not self._wake_stop.is_set()
+                        ):
+                            # WASAPI/device buffers can leave a tiny acoustic
+                            # tail after the Desktop process reports complete.
+                            # Keep the microphone closed through that tail so
+                            # follow-up capture cannot ingest Qronos's own last
+                            # syllable as the next user command.
+                            time.sleep(
+                                FOLLOWUP_PLAYBACK_GUARD_SECONDS
+                            )
 
                     if self._wake_stop.is_set():
                         break
@@ -2929,21 +5059,56 @@ class QronosRuntime:
         first_chunk_model_seconds = 0.0
         first_chunk_audio_seconds = 0.0
         spoken_chunks: list[str] = []
+        partial_tts_error: str | None = None
+        chunk_metrics: list[dict[str, Any]] = []
+        predicted_buffer_seconds = 0.0
+        predicted_underrun_seconds = 0.0
 
         for index, chunk in enumerate(
             chunks
         ):
+            if self._voice_response_stop_requested.is_set():
+                break
+
             spoken_chunk = normalise_spoken_text(
                 chunk
             )
+
+            try:
+                utterance = (
+                    self.voice_output.speak_to_file(
+                        spoken_chunk
+                    )
+                )
+            except Exception as exc:
+                # If an early chunk is already playing, a later TTS failure
+                # must not invalidate that healthy audio. Degrade to the
+                # successfully generated prefix, keep the playback identity
+                # alive, and let Desktop finish it normally.
+                if spoken_chunks:
+                    partial_tts_error = str(exc)
+                    self._notify(
+                        "runtime_warning",
+                        "warning",
+                        (
+                            "Voice continuation stopped after "
+                            f"{len(spoken_chunks)} generated chunk(s): {exc}"
+                        ),
+                    )
+                    break
+
+                # Nothing usable was generated, so this remains a genuine
+                # voice-turn failure and the established recovery path applies.
+                raise
+
+            # Chatterbox generation itself is synchronous. If Stop arrived
+            # during this one chunk, discard the generated file instead of
+            # emitting more speech to Desktop.
+            if self._voice_response_stop_requested.is_set():
+                break
+
             spoken_chunks.append(
                 spoken_chunk
-            )
-
-            utterance = (
-                self.voice_output.speak_to_file(
-                    spoken_chunk
-                )
             )
 
             if first_audio_ready_perf is None:
@@ -2961,12 +5126,95 @@ class QronosRuntime:
                     )
                 )
 
-            total_audio_seconds += float(
+                if playback_id is not None:
+                    self.mark_voice_first_audio_ready(
+                        playback_id
+                    )
+
+            audio_seconds = float(
                 utterance.audio_seconds
             )
-            total_model_seconds += float(
+            generation_seconds = float(
                 utterance.took_seconds
             )
+
+            predicted_gap_before_chunk = 0.0
+
+            if index == 0:
+                # Playback cannot consume anything before the first WAV exists.
+                predicted_buffer_seconds = audio_seconds
+            else:
+                # While Chatterbox generates chunk N, Desktop is consuming the
+                # already-buffered audio from earlier chunks. If generation
+                # takes longer than that buffer, the listener hears a gap.
+                predicted_gap_before_chunk = max(
+                    0.0,
+                    generation_seconds
+                    - predicted_buffer_seconds,
+                )
+                predicted_underrun_seconds += (
+                    predicted_gap_before_chunk
+                )
+                predicted_buffer_seconds = (
+                    max(
+                        0.0,
+                        predicted_buffer_seconds
+                        - generation_seconds,
+                    )
+                    + audio_seconds
+                )
+
+            try:
+                audio_quality = (
+                    _analyze_voice_wav_quality(
+                        utterance.audio_path
+                    )
+                )
+            except Exception as exc:
+                audio_quality = {
+                    "analysisError": str(
+                        exc
+                    )
+                }
+
+            chunk_metrics.append(
+                {
+                    "audioPath": str(
+                        utterance.audio_path
+                    ),
+                    "audioQuality":
+                        audio_quality,
+                    "chunkNumber": index + 1,
+                    "characterCount": len(
+                        spoken_chunk
+                    ),
+                    "audioSeconds": round(
+                        audio_seconds,
+                        3,
+                    ),
+                    "generationSeconds": round(
+                        generation_seconds,
+                        3,
+                    ),
+                    "rtf": round(
+                        float(
+                            utterance.real_time_factor
+                        ),
+                        3,
+                    ),
+                    "predictedGapBeforeChunkSeconds": round(
+                        predicted_gap_before_chunk,
+                        3,
+                    ),
+                    "predictedBufferedAudioAfterChunkSeconds": round(
+                        predicted_buffer_seconds,
+                        3,
+                    ),
+                }
+            )
+
+            total_audio_seconds += audio_seconds
+            total_model_seconds += generation_seconds
 
             def build_spectrum_sidecar(
                 audio_path=utterance.audio_path,
@@ -3029,10 +5277,45 @@ class QronosRuntime:
                 ),
             )
 
+        if playback_id is not None:
+            self.set_voice_playback_audio_metadata(
+                playback_id,
+                total_audio_seconds=total_audio_seconds,
+                chunk_count=len(spoken_chunks),
+            )
+
+            # Chunk playback is a streamed response. Desktop must not infer
+            # "whole response finished" merely because its queue is
+            # temporarily empty between chunks. This explicit finalization
+            # event closes the producer side only after TTS generation has
+            # genuinely finished (successfully, partially, or by Stop).
+            self._notify(
+                "voice_audio_stream_complete",
+                "ready",
+                json.dumps(
+                    {
+                        "playbackId": playback_id,
+                        "generatedChunkCount": len(
+                            spoken_chunks
+                        ),
+                        "plannedChunkCount": len(
+                            chunks
+                        ),
+                        "stoppedByUser":
+                            self._voice_response_stop_requested.is_set(),
+                        "partialTtsError":
+                            partial_tts_error,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+            )
+
         return {
             "chunks": chunks,
             "spokenChunks": spoken_chunks,
-            "chunkCount": len(chunks),
+            "chunkCount": len(spoken_chunks),
+            "plannedChunkCount": len(chunks),
             "totalAudioSeconds":
                 total_audio_seconds,
             "totalModelSeconds":
@@ -3043,6 +5326,15 @@ class QronosRuntime:
                 first_chunk_model_seconds,
             "firstChunkAudioSeconds":
                 first_chunk_audio_seconds,
+            "stoppedByUser":
+                self._voice_response_stop_requested.is_set(),
+            "partialTtsError":
+                partial_tts_error,
+            "chunkMetrics": chunk_metrics,
+            "predictedUnderrunSeconds": round(
+                predicted_underrun_seconds,
+                3,
+            ),
         }
 
 
@@ -3253,6 +5545,7 @@ class QronosRuntime:
             return 0.0
 
         self._set_busy(True)
+        self._voice_response_stop_requested.clear()
         playback_seconds = 0.0
         user_message_added = False
         assistant_message_added = False
@@ -3283,6 +5576,12 @@ class QronosRuntime:
         try:
             self.prepare_wake_capture()
             self._require_wake_capture_prepared()
+
+            # Chatterbox cold-start is ~2-3 seconds on this machine. Hide it
+            # behind the user's recording/STT time instead of paying it after
+            # the assistant text has already appeared.
+            self._prewarm_voice_output_async()
+            report["ttsPrewarmRequested"] = True
 
             self._notify(
                 "voice_listening",
@@ -3404,13 +5703,49 @@ class QronosRuntime:
 
             stt_started = time.perf_counter()
 
+            primary_stt_language = self.voice_language
             transcript = (
                 self.speech_runtime.transcribe_file(
                     recording.audio_path,
-                    language=self.voice_language,
+                    language=primary_stt_language,
                 )
                 .strip()
             )
+
+            primary_action_score = _voice_action_transcript_quality(transcript)
+            if (
+                _voice_transcript_looks_actionish(transcript)
+                and primary_action_score < 8
+            ):
+                retry_language = (
+                    "fa"
+                    if primary_stt_language != "fa"
+                    else "auto"
+                )
+                try:
+                    retry_transcript = (
+                        self.speech_runtime.transcribe_file(
+                            recording.audio_path,
+                            language=retry_language,
+                        )
+                        .strip()
+                    )
+                    retry_action_score = _voice_action_transcript_quality(
+                        retry_transcript
+                    )
+                    report["sttActionRetry"] = True
+                    report["sttActionRetryLanguage"] = retry_language
+                    report["sttPrimaryActionScore"] = primary_action_score
+                    report["sttRetryActionScore"] = retry_action_score
+                    report["sttPrimaryTranscript"] = transcript
+                    if retry_transcript and retry_action_score > primary_action_score:
+                        transcript = retry_transcript
+                        report["sttActionRetrySelected"] = True
+                    else:
+                        report["sttActionRetrySelected"] = False
+                except Exception as retry_exc:
+                    report["sttActionRetry"] = True
+                    report["sttActionRetryFailure"] = str(retry_exc)
 
             stt_finished = time.perf_counter()
 
@@ -3489,13 +5824,23 @@ class QronosRuntime:
             )
 
             routed_task_type = route.task_type
-            selected_task_type = routed_task_type
+            (
+                selected_task_type,
+                compute_promotion,
+            ) = self._select_production_task_type(
+                transcript,
+                routed_task_type,
+                routing_shadow,
+            )
 
             report["route"] = (
                 routed_task_type.value
             )
             report["selectedRoute"] = (
                 selected_task_type.value
+            )
+            report["computePromotion"] = (
+                compute_promotion
             )
 
             routing_shadow["legacyRoute"] = (
@@ -3504,13 +5849,21 @@ class QronosRuntime:
             routing_shadow["selectedRoute"] = (
                 selected_task_type.value
             )
+            routing_shadow[
+                "computePromotionApplied"
+            ] = bool(
+                compute_promotion.get(
+                    "applied",
+                    False,
+                )
+            )
 
             route_finished = time.perf_counter()
 
             self._notify(
                 "voice_routed",
                 "processing",
-                routed_task_type.value,
+                selected_task_type.value,
             )
 
             if selected_task_type is TaskType.VISION:
@@ -3528,17 +5881,90 @@ class QronosRuntime:
                 self._write_latency_report(report)
                 return 0.0
 
-            arithmetic_answer = (
-                solve_simple_arithmetic(
-                    transcript
+            voice_computer_response: str | None = None
+            voice_computer_deferred = False
+
+            if selected_task_type is TaskType.COMPUTER:
+                voice_computer_response = (
+                    self._execute_voice_computer_action(
+                        transcript,
+                        report,
+                    )
                 )
-                if selected_task_type is TaskType.FAST
-                else None
+                voice_computer_deferred = bool(
+                    report.get(
+                        "voiceComputerDeferred",
+                        False,
+                    )
+                )
+                arithmetic_answer = None
+            else:
+                arithmetic_answer = (
+                    solve_simple_arithmetic(
+                        transcript
+                    )
+                    if selected_task_type is TaskType.FAST
+                    else None
+                )
+
+            brain_route_needs_model = (
+                selected_task_type
+                in {
+                    TaskType.FAST,
+                    TaskType.HEAVY,
+                    TaskType.BROWSER,
+                }
+                and arithmetic_answer is None
             )
+
+            if brain_route_needs_model:
+                brain_tts_yield_started = (
+                    time.perf_counter()
+                )
+                brain_tts_yielded = (
+                    self._yield_voice_output_before_brain()
+                )
+                report[
+                    "ttsReleasedBeforeBrain"
+                ] = bool(
+                    brain_tts_yielded
+                )
+                report[
+                    "ttsBrainYieldSeconds"
+                ] = round(
+                    time.perf_counter()
+                    - brain_tts_yield_started,
+                    3,
+                )
+
+                # Preserve the established Heavy telemetry keys for existing
+                # diagnostics while the generic keys cover every Brain route.
+                if selected_task_type is TaskType.HEAVY:
+                    report[
+                        "ttsReleasedBeforeHeavyBrain"
+                    ] = bool(
+                        brain_tts_yielded
+                    )
+                    report[
+                        "ttsHeavyYieldSeconds"
+                    ] = report[
+                        "ttsBrainYieldSeconds"
+                    ]
+
+                if not brain_tts_yielded:
+                    raise RuntimeError(
+                        "Qronos could not safely yield TTS before "
+                        f"{selected_task_type.value} Brain execution."
+                    )
 
             brain_started = time.perf_counter()
 
-            if arithmetic_answer is not None:
+            if selected_task_type is TaskType.COMPUTER:
+                response = (
+                    voice_computer_response
+                    or VOICE_COMPUTER_DEFERRED_RESPONSE
+                )
+            elif arithmetic_answer is not None:
                 response = (
                     arithmetic_answer.spoken_text
                 )
@@ -3576,6 +6002,27 @@ class QronosRuntime:
                 response = result.output.strip()
 
             brain_finished = time.perf_counter()
+
+            if self._voice_response_stop_requested.is_set():
+                report["stoppedByUserBeforeTts"] = True
+                report["stoppedAtEpoch"] = round(
+                    time.time(),
+                    6,
+                )
+
+                self._release_brains_for_voice_phase()
+
+                self._notify(
+                    "voice_turn_stopped",
+                    "ready",
+                    "Current Qronos response was stopped by the user.",
+                )
+
+                self._write_latency_report(
+                    report
+                )
+
+                return 0.0
 
             if not response:
                 raise RuntimeError(
@@ -3616,8 +6063,28 @@ class QronosRuntime:
 
             tts_started = time.perf_counter()
 
+            report["ttsWasHotAtResponse"] = bool(
+                self.voice_output is not None
+                and getattr(
+                    self.voice_output,
+                    "is_loaded",
+                    False,
+                )
+            )
+            if self._voice_output_prewarm_error:
+                report["ttsPrewarmError"] = (
+                    self._voice_output_prewarm_error
+                )
+
             playback_id = (
                 self._begin_voice_playback_wait()
+            )
+
+            self.set_voice_playback_context(
+                playback_id,
+                trigger_source=trigger_source,
+                transcript=transcript,
+                response=response,
             )
 
             chunked = (
@@ -3630,6 +6097,18 @@ class QronosRuntime:
             all_audio_ready = (
                 time.perf_counter()
             )
+
+            if chunked.get("stoppedByUser"):
+                report["stoppedByUserDuringTts"] = True
+
+            partial_tts_error = chunked.get(
+                "partialTtsError"
+            )
+            if partial_tts_error:
+                report["partialTtsError"] = str(
+                    partial_tts_error
+                )
+                report["ttsPartialPlaybackPreserved"] = True
 
             tts_release_started = time.perf_counter()
             tts_released = (
@@ -3736,6 +6215,31 @@ class QronosRuntime:
                             "spokenChunks"
                         ]
                     ),
+                    "ttsChunkMetrics": list(
+                        chunked[
+                            "chunkMetrics"
+                        ]
+                    ),
+                    "predictedTtsUnderrunSeconds": round(
+                        float(
+                            chunked[
+                                "predictedUnderrunSeconds"
+                            ]
+                        ),
+                        3,
+                    ),
+                    "ttsContinuityChunkTargets": {
+                        "firstCharacters":
+                            TTS_FIRST_CHUNK_TARGET_CHARACTERS,
+                        "laterCharacters":
+                            TTS_LATER_CHUNK_TARGET_CHARACTERS,
+                        "minimumFirstCharacters":
+                            TTS_MIN_FIRST_CHUNK_CHARACTERS,
+                        "minimumCharacters":
+                            TTS_MIN_CHUNK_CHARACTERS,
+                        "maximumCharacters":
+                            TTS_MAX_CHUNK_CHARACTERS,
+                    },
                     "firstChunkAudioSeconds": round(
                         float(
                             chunked[
@@ -3929,6 +6433,7 @@ class QronosRuntime:
                     pass
 
             self._set_busy(False)
+            self._voice_response_stop_requested.clear()
 
         return playback_seconds
 
@@ -4320,6 +6825,8 @@ def handle_action(
 
     pause_safe_actions = {
         CONVERSATION_HISTORY_REQUEST_ACTION,
+        FILE_ACTION_DECISION_ACTION,
+        VOICE_PLAYBACK_STARTED_ACTION,
         VOICE_PLAYBACK_COMPLETE_ACTION,
         WAKE_LISTENER_STOP_ACTION,
         SETTINGS_RELOAD_ACTION,
@@ -4367,6 +6874,64 @@ def handle_action(
         )
         return
 
+    if action_id == STOP_RESPONSE_ACTION:
+        result = runtime.request_stop_response()
+
+        emit(
+            "voice_stop_acknowledged",
+            "ready",
+            json.dumps(
+                result,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+        return
+
+    if action_id == VOICE_PLAYBACK_STARTED_ACTION:
+        raw_playback_id = payload.get(
+            "playbackId",
+            0,
+        )
+
+        try:
+            playback_id = int(
+                raw_playback_id
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Playback start needs a valid playbackId."
+            ) from exc
+
+        if playback_id <= 0:
+            raise ValueError(
+                "Playback start needs a positive playbackId."
+            )
+
+        accepted = (
+            runtime.mark_voice_playback_started(
+                playback_id
+            )
+        )
+
+        if accepted:
+            emit(
+                "voice_playback_started_acknowledged",
+                "ready",
+                str(playback_id),
+            )
+        else:
+            emit(
+                "runtime_warning",
+                "warning",
+                (
+                    "Ignored stale voice playback start: "
+                    f"{playback_id}"
+                ),
+            )
+
+        return
+
     if action_id == VOICE_PLAYBACK_COMPLETE_ACTION:
         raw_playback_id = payload.get(
             "playbackId",
@@ -4409,6 +6974,34 @@ def handle_action(
                 ),
             )
 
+        return
+
+    if action_id == FILE_ACTION_DECISION_ACTION:
+        data = payload.get("data", {})
+        if not isinstance(data, dict):
+            raise ValueError(
+                "File action decision data must be an object."
+            )
+
+        action_token = str(
+            data.get("actionToken", "")
+        ).strip()
+        approved = data.get("approved", False)
+
+        if not isinstance(approved, bool):
+            raise ValueError(
+                "File action decision approved must be boolean."
+            )
+
+        worker = threading.Thread(
+            target=lambda: runtime.resolve_file_action_decision(
+                action_token,
+                approved=approved,
+            ),
+            name="qronos-file-action-decision",
+            daemon=True,
+        )
+        worker.start()
         return
 
     if action_id == PUSH_TO_TALK_ACTION:

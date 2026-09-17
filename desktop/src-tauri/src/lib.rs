@@ -759,6 +759,7 @@ pub fn run() {
             runtime::memory_command,
             runtime::settings_command,
             runtime::native_audio_output_play,
+            runtime::native_audio_output_stop,
             runtime::permissions_command,
             runtime::send_text_message,
             runtime::queue_list,

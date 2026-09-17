@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -13,6 +14,10 @@ from typing import BinaryIO
 
 from core.config import CONFIG
 from core.speech_runtime import SpeechRuntime
+from core.windows_sidecar_guard import (
+    SidecarAlreadyRunning,
+    WindowsSidecarGuard,
+)
 
 
 DEFAULT_WHISPER_SERVER_EXE = (
@@ -38,6 +43,7 @@ DEFAULT_STARTUP_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_BEST_OF = 5
 DEFAULT_BEAM_SIZE = 5
+WHISPER_SIDECAR_MUTEX = r"Local\Qronos.Whisper.Sidecar.v1"
 
 
 class WhisperServerRuntime(SpeechRuntime):
@@ -70,6 +76,7 @@ class WhisperServerRuntime(SpeechRuntime):
         best_of: int = DEFAULT_BEST_OF,
         beam_size: int = DEFAULT_BEAM_SIZE,
         log_dir: str | Path = CONFIG.paths.temp,
+        sidecar_guard_factory=None,
     ) -> None:
         if host != "127.0.0.1":
             raise ValueError(
@@ -132,7 +139,16 @@ class WhisperServerRuntime(SpeechRuntime):
             log_dir
         )
 
+        self._sidecar_guard_factory = (
+            sidecar_guard_factory
+            if sidecar_guard_factory is not None
+            else lambda: WindowsSidecarGuard.acquire(
+                WHISPER_SIDECAR_MUTEX
+            )
+        )
+
         self._process: subprocess.Popen[bytes] | None = None
+        self._sidecar_guard: WindowsSidecarGuard | None = None
         self._stdout_file: BinaryIO | None = None
         self._stderr_file: BinaryIO | None = None
 
@@ -244,20 +260,64 @@ class WhisperServerRuntime(SpeechRuntime):
                 "wb"
             )
 
+            guard: WindowsSidecarGuard | None = None
+            process = None
+
             try:
-                self._process = subprocess.Popen(
+                guard = self._sidecar_guard_factory()
+                process = subprocess.Popen(
                     self._build_command(),
                     stdout=self._stdout_file,
                     stderr=self._stderr_file,
                     stdin=subprocess.DEVNULL,
                 )
 
+                pid = int(
+                    getattr(process, "pid", 0)
+                    or 0
+                )
+                if pid <= 0:
+                    raise RuntimeError(
+                        "whisper-server.exe did not return a valid PID."
+                    )
+
+                guard.bind_process(pid)
+                self._process = process
+                self._sidecar_guard = guard
+
+            except SidecarAlreadyRunning as exc:
+                if guard is not None:
+                    guard.close()
+                self._close_logs()
+                raise RuntimeError(
+                    "Another Qronos process already owns the "
+                    "persistent Whisper sidecar."
+                ) from exc
+
             except OSError as exc:
+                if guard is not None:
+                    guard.close()
                 self._close_logs()
 
                 raise RuntimeError(
                     "Could not start whisper-server.exe."
                 ) from exc
+
+            except Exception:
+                if process is not None and process.poll() is None:
+                    try:
+                        process.kill()
+                        process.wait(timeout=3.0)
+                    except Exception:
+                        pass
+
+                if guard is not None:
+                    guard.close()
+
+                self._process = None
+                self._sidecar_guard = None
+                self._close_logs()
+                raise
 
             deadline = (
                 time.monotonic()
@@ -485,8 +545,10 @@ class WhisperServerRuntime(SpeechRuntime):
     def shutdown(self) -> None:
         with self._lifecycle_lock:
             process = self._process
+            guard = self._sidecar_guard
 
             self._process = None
+            self._sidecar_guard = None
 
             if process is not None:
                 if process.poll() is None:
@@ -509,6 +571,9 @@ class WhisperServerRuntime(SpeechRuntime):
 
                     except OSError:
                         pass
+
+            if guard is not None:
+                guard.close()
 
             self._close_logs()
 

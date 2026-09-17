@@ -55,8 +55,10 @@ const PLAYBACK_RATE: Record<
   fast: 1.25,
 };
 
-const ALLOWED_AUDIO_ROOT =
-  "E:\\Project Qronos Agent\\runtime\\chatterbox\\temp\\";
+// Qronos may be moved between drives. Keep the runtime-temp boundary strict
+// without pinning playback to one historical drive letter.
+const ALLOWED_AUDIO_ROOT_PATTERN =
+  /^[A-Za-z]:\\Project Qronos Agent\\runtime\\chatterbox\\temp\\/i;
 
 const SPECTRUM_BANDS = 32;
 const SPECTRUM_RETRY_MS = 80;
@@ -70,6 +72,16 @@ function normalizeWindowsPath(
     .replace(/\//g, "\\");
 }
 
+function asError(
+  value: unknown,
+): Error {
+  return value instanceof Error
+    ? value
+    : new Error(
+        String(value),
+      );
+}
+
 function assertAllowedWavePath(
   inputPath: string,
 ): string {
@@ -81,18 +93,23 @@ function assertAllowedWavePath(
   const lower =
     normalized.toLowerCase();
 
-  const root =
-    ALLOWED_AUDIO_ROOT.toLowerCase();
+  const rootMatch =
+    normalized.match(
+      ALLOWED_AUDIO_ROOT_PATTERN,
+    );
 
-  if (!lower.startsWith(root)) {
+  if (!rootMatch) {
     throw new Error(
       "Qronos refused audio outside its runtime temp directory.",
     );
   }
 
+  const root =
+    rootMatch[0];
+
   const relative =
     normalized.slice(
-      ALLOWED_AUDIO_ROOT.length,
+      root.length,
     );
 
   const parts =
@@ -332,10 +349,29 @@ export class QronosVoicePlayer {
   async playPath(
     inputPath: string,
   ): Promise<void> {
-    const path =
-      assertAllowedWavePath(
-        inputPath,
+    let path: string;
+
+    try {
+      path =
+        assertAllowedWavePath(
+          inputPath,
+        );
+    } catch (value) {
+      // Path validation happens before any HTMLAudio/native playback object
+      // exists. Surface it as a real player error so App.tsx can release the
+      // matching runtime playback wait instead of deadlocking Wake.
+      const error =
+        asError(value);
+
+      this.setState(
+        "error",
       );
+      this.onError?.(
+        error,
+      );
+
+      throw error;
+    }
 
     if (
       this.audio !== null ||
@@ -380,11 +416,7 @@ export class QronosVoicePlayer {
       await this.audio.play();
     } catch (value) {
       const error =
-        value instanceof Error
-          ? value
-          : new Error(
-              String(value),
-            );
+        asError(value);
 
       this.setState(
         "error",
@@ -399,12 +431,28 @@ export class QronosVoicePlayer {
   stop(): void {
     ++this.generation;
 
+    const hadNativePlayback =
+      this.nativePlaybackActive;
+
     this.queue = [];
     this.stopSpectrumLoop();
     this.emitSilentSpectrum();
     this.spectrum = null;
     this.nativePlaybackActive = false;
     this.nativePlaybackStartedAtMs = 0;
+
+    if (hadNativePlayback) {
+      void invoke(
+        "native_audio_output_stop",
+      ).catch(
+        (error) => {
+          console.error(
+            "[Qronos Voice Playback] native stop failed:",
+            error,
+          );
+        },
+      );
+    }
 
     const audio =
       this.audio;
@@ -467,9 +515,7 @@ export class QronosVoicePlayer {
         return;
       } catch (value) {
         const error =
-          value instanceof Error
-            ? value
-            : new Error(String(value));
+          asError(value);
 
         // A selected endpoint may disappear between enumeration and playback.
         // Fail open for this response instead of making Qronos silent.
@@ -704,11 +750,7 @@ export class QronosVoicePlayer {
       }
 
       const error =
-        value instanceof Error
-          ? value
-          : new Error(
-              String(value),
-            );
+        asError(value);
 
       this.stopSpectrumLoop();
       this.emitSilentSpectrum();

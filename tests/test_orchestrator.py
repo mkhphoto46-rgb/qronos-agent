@@ -36,7 +36,7 @@ class TestOrchestrator(unittest.TestCase):
             name="NVIDIA GeForce RTX 3070 Ti",
             temperature_c=50,
             gpu_utilization_percent=10,
-            vram_used_mb=2000,
+            vram_used_mb=1000,
             vram_total_mb=8192,
         )
 

@@ -9,6 +9,7 @@ from core.activity_guard import (
     ResourcePressure,
 )
 from core.brain_runtime import BrainRuntime
+from core.hard_floor import DEFAULT_HARD_FLOOR, required_vram_mb
 from core.model_registry import (
     ModelProfile,
     configured_model_names,
@@ -147,6 +148,46 @@ class ModelManager:
         )
 
     @staticmethod
+    def _new_model_has_vram_capacity(
+        gpu: GpuStatus | None,
+        model: ModelProfile,
+        already_resident: bool,
+    ) -> bool:
+        """
+        Check projected capacity before admitting a model that is not resident.
+
+        Percentage thresholds answer "is the card busy/full now?". They do
+        not answer "will this model fit after it loads?". On an 8 GB card a
+        57% current reading can still leave less free VRAM than Fast Brain
+        requires. Reuse of an already-resident target needs no second copy and
+        therefore bypasses this load-capacity test.
+        """
+        if already_resident or gpu is None:
+            return True
+
+        if (
+            gpu.vram_used_mb is None
+            or gpu.vram_total_mb in (None, 0)
+        ):
+            return True
+
+        free_vram_mb = max(
+            0,
+            int(gpu.vram_total_mb)
+            - int(gpu.vram_used_mb),
+        )
+        required_mb = (
+            required_vram_mb(
+                model.estimated_vram_gb
+            )
+            + int(
+                DEFAULT_HARD_FLOOR.vram_headroom_mb
+            )
+        )
+
+        return free_vram_mb >= required_mb
+
+    @staticmethod
     def _resident_pressure_is_only_self_load(
         resource_pressure: ResourcePressure,
         base_decision: ResourceDecision,
@@ -197,6 +238,17 @@ class ModelManager:
             system=system,
             gpu=capacity_gpu,
         )
+
+        if (
+            base_decision is not ResourceDecision.BLOCK
+            and not self._new_model_has_vram_capacity(
+                gpu=gpu,
+                model=model,
+                already_resident=already_resident,
+            )
+        ):
+            base_decision = ResourceDecision.BLOCK
+
         decision = base_decision
 
         if self._activity_blocks(
@@ -254,10 +306,12 @@ class ModelManager:
         if task_class is not TaskClass.HEAVY:
             return False
 
+        # ASSIST modes may use Heavy on demand when resource pressure is
+        # NORMAL. Orchestrator forces keep_alive=0 in user-active modes so
+        # the model yields VRAM immediately after answering. PERFORMANCE
+        # modes remain hard blocks because the user's active workload wins.
         return activity_mode in {
-            ActivityMode.GAMING_ASSIST,
             ActivityMode.GAMING_PERFORMANCE,
-            ActivityMode.CREATOR_ASSIST,
             ActivityMode.CREATOR_PERFORMANCE,
         }
 

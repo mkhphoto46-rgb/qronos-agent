@@ -8,10 +8,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from core.whisper_server_runtime import WhisperServerRuntime
+from core.windows_sidecar_guard import SidecarAlreadyRunning
 
 
 class FakeProcess:
-    def __init__(self) -> None:
+    def __init__(self, pid: int = 4242) -> None:
+        self.pid = pid
         self.returncode = None
         self.terminated = False
         self.killed = False
@@ -29,6 +31,18 @@ class FakeProcess:
 
     def wait(self, timeout=None):
         return self.returncode
+
+
+class FakeGuard:
+    def __init__(self) -> None:
+        self.bound_pids: list[int] = []
+        self.closed = False
+
+    def bind_process(self, pid: int) -> None:
+        self.bound_pids.append(pid)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeResponse:
@@ -55,13 +69,18 @@ def build_runtime(tmp_path: Path) -> WhisperServerRuntime:
     executable.write_bytes(b"server")
     model.write_bytes(b"model")
 
-    return WhisperServerRuntime(
+    guard = FakeGuard()
+
+    runtime = WhisperServerRuntime(
         executable_path=executable,
         model_path=model,
         log_dir=tmp_path,
         startup_timeout_seconds=0.5,
         request_timeout_seconds=0.5,
+        sidecar_guard_factory=lambda: guard,
     )
+    runtime._test_guard = guard
+    return runtime
 
 
 class TestWhisperServerRuntime(unittest.TestCase):
@@ -125,12 +144,61 @@ class TestWhisperServerRuntime(unittest.TestCase):
                 runtime.prepare()
 
                 self.assertEqual(popen.call_count, 1)
+                self.assertEqual(
+                    runtime._test_guard.bound_pids,
+                    [fake_process.pid],
+                )
 
                 runtime.prepare()
 
                 self.assertEqual(popen.call_count, 1)
 
                 runtime.shutdown()
+                self.assertTrue(
+                    runtime._test_guard.closed
+                )
+
+    def test_duplicate_owner_fails_before_popen(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            executable = tmp_path / "whisper-server.exe"
+            model = tmp_path / "model.bin"
+            executable.write_bytes(b"server")
+            model.write_bytes(b"model")
+
+            def duplicate_guard():
+                raise SidecarAlreadyRunning(
+                    "already owned"
+                )
+
+            runtime = WhisperServerRuntime(
+                executable_path=executable,
+                model_path=model,
+                log_dir=tmp_path,
+                startup_timeout_seconds=0.5,
+                request_timeout_seconds=0.5,
+                sidecar_guard_factory=duplicate_guard,
+            )
+
+            popen = MagicMock(
+                return_value=FakeProcess()
+            )
+
+            with patch.object(
+                runtime,
+                "_server_is_ready",
+                return_value=False,
+            ), patch(
+                "core.whisper_server_runtime.subprocess.Popen",
+                popen,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "already owns",
+                ):
+                    runtime.prepare()
+
+            popen.assert_not_called()
 
     def test_transcribe_file_decodes_utf8_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

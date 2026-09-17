@@ -52,6 +52,10 @@ from core.resource_ownership import (
     WorkloadState,
 )
 from core.voice_runtime import Utterance, VoiceRuntime
+from core.windows_sidecar_guard import (
+    SidecarAlreadyRunning,
+    WindowsSidecarGuard,
+)
 
 
 DEFAULT_ROOT = CONFIG.paths.root / "runtime" / "chatterbox"
@@ -110,6 +114,7 @@ NORMAL_TERMINATE_GRACE_SECONDS = 0.50
 EMERGENCY_KILL_WAIT_SECONDS = 1.0
 
 TTS_WORKLOAD_NAME = "chatterbox_tts"
+CHATTERBOX_SIDECAR_MUTEX = r"Local\Qronos.Chatterbox.Sidecar.v1"
 
 
 class VoiceUnavailable(RuntimeError):
@@ -157,6 +162,7 @@ class ChatterboxRuntime(VoiceRuntime):
         retry_seconds: float = DEFAULT_RETRY_SECONDS,
         admission_check: AdmissionCheck | None = None,
         resource_ledger: ResourceLedger | None = None,
+        sidecar_guard_factory: Callable[[], WindowsSidecarGuard] | None = None,
     ) -> None:
         if steps <= 0:
             raise ValueError("steps must be greater than zero")
@@ -192,7 +198,16 @@ class ChatterboxRuntime(VoiceRuntime):
             else self._default_admission_check
         )
 
+        self._sidecar_guard_factory = (
+            sidecar_guard_factory
+            if sidecar_guard_factory is not None
+            else lambda: WindowsSidecarGuard.acquire(
+                CHATTERBOX_SIDECAR_MUTEX
+            )
+        )
+
         self._process: subprocess.Popen | None = None
+        self._sidecar_guard: WindowsSidecarGuard | None = None
         self._active_port: int | None = None
         self._reservation_id: str | None = None
 
@@ -435,6 +450,10 @@ class ChatterboxRuntime(VoiceRuntime):
                     and self._process.poll() is not None
                 ):
                     self._fail_reservation_locked()
+                    stale_guard = self._sidecar_guard
+                    self._sidecar_guard = None
+                    if stale_guard is not None:
+                        stale_guard.close()
 
                 self._process = None
                 self._active_port = None
@@ -534,12 +553,55 @@ class ChatterboxRuntime(VoiceRuntime):
                 self._runtime_environment()
             )
 
+            guard: WindowsSidecarGuard | None = None
+            process: subprocess.Popen | None = None
+
             try:
+                guard = self._sidecar_guard_factory()
                 process = self._launch_process(
                     command=command,
                     environment=environment,
                 )
+
+                pid = int(
+                    getattr(process, "pid", 0)
+                    or 0
+                )
+                if pid <= 0:
+                    raise VoiceUnavailable(
+                        "CrispASR did not return a valid process identifier."
+                    )
+
+                guard.bind_process(pid)
+
+            except SidecarAlreadyRunning as exc:
+                with self._lock:
+                    self._state = (
+                        VoiceLifecycleState.FAILED
+                    )
+                    self._fail_reservation_locked()
+
+                if guard is not None:
+                    guard.close()
+
+                raise VoiceUnavailable(
+                    "Another Qronos process already owns the "
+                    "Chatterbox TTS sidecar."
+                ) from exc
+
             except Exception:
+                if process is not None and process.poll() is None:
+                    try:
+                        process.kill()
+                        process.wait(
+                            timeout=EMERGENCY_KILL_WAIT_SECONDS
+                        )
+                    except Exception:
+                        pass
+
+                if guard is not None:
+                    guard.close()
+
                 with self._lock:
                     self._state = (
                         VoiceLifecycleState.FAILED
@@ -549,6 +611,7 @@ class ChatterboxRuntime(VoiceRuntime):
 
             with self._lock:
                 self._process = process
+                self._sidecar_guard = guard
                 self._active_port = chosen_port
                 self._update_reservation_state_locked(
                     WorkloadState.STARTING
@@ -714,8 +777,10 @@ class ChatterboxRuntime(VoiceRuntime):
             self._cancel_idle_timer_locked()
 
             process = self._process
+            guard = self._sidecar_guard
 
             self._process = None
+            self._sidecar_guard = None
             self._active_port = None
             self._state = VoiceLifecycleState.RELEASING
 
@@ -757,6 +822,9 @@ class ChatterboxRuntime(VoiceRuntime):
                             pass
             finally:
                 pass
+
+        if guard is not None:
+            guard.close()
 
         with self._lock:
             if startup_failed:

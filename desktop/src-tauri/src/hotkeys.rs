@@ -165,11 +165,27 @@ fn save_settings(path: &PathBuf, settings: &HotkeySettings) -> Result<(), String
 }
 
 fn load_settings(path: &PathBuf) -> HotkeySettings {
-    fs::read(path)
+    let fallback = defaults();
+
+    let mut settings = fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<HotkeySettings>(&bytes).ok())
         .filter(|settings| settings.schema_version == 1)
-        .unwrap_or_else(defaults)
+        .unwrap_or_else(|| fallback.clone());
+
+    for default_binding in fallback.bindings {
+        if settings
+            .bindings
+            .iter()
+            .any(|item| item.action_id == default_binding.action_id)
+        {
+            continue;
+        }
+
+        settings.bindings.push(default_binding);
+    }
+
+    settings
 }
 
 fn normalized(value: &str) -> String {

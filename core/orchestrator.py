@@ -78,6 +78,22 @@ Response rules:
 FORCE_BRAIN_ENV = "QRONOS_FORCE_BRAIN"
 HEAVY_EFFORT_ENV = "QRONOS_HEAVY_EFFORT"
 
+# Brain request deadlines are role-aware and intentionally bounded.
+#
+# The old single 90-second runtime timeout was shorter than the measured
+# GPT-OSS 20B cold-load path on the 8 GB development GPU (~100 s total, with
+# ~98 s spent loading). That caused a valid Heavy request to be killed before
+# the model could answer. Warm Heavy requests are much faster, so they retain
+# tighter effort-specific ceilings; cold requests receive a separate load
+# allowance rather than turning the global runtime timeout into a large number.
+FAST_CHAT_TIMEOUT_SECONDS = 90.0
+HEAVY_COLD_LOAD_ALLOWANCE_SECONDS = 120.0
+HEAVY_WARM_TIMEOUT_SECONDS = {
+    "eco": 90.0,
+    "normal": 120.0,
+    "deep": 180.0,
+}
+
 
 def _keep_alive_enabled(value: str) -> bool:
     return value.strip().lower() not in {
@@ -372,6 +388,11 @@ class Orchestrator:
                 configured_keep_alive=generation.keep_alive,
                 activity_mode=live_state.mode,
             )
+            timeout_seconds = self._brain_timeout_seconds(
+                task_class=task_class,
+                generation_effort=generation_effort,
+                already_resident=selection.already_resident,
+            )
 
             reservation = self._reserve_brain_resources(
                 selection.model.name,
@@ -390,6 +411,7 @@ class Orchestrator:
                         selection.model.context_tokens
                     ),
                     keep_alive=keep_alive,
+                    timeout_seconds=timeout_seconds,
                 )
             finally:
                 # Model residency and resource ownership have the same lifetime.
@@ -755,6 +777,44 @@ class Orchestrator:
                         )
 
             self.telemetry.invalidate()
+
+
+    @staticmethod
+    def _brain_timeout_seconds(
+        task_class: TaskClass,
+        generation_effort: str,
+        already_resident: bool,
+    ) -> float:
+        """
+        Return the bounded request deadline for one Brain execution.
+
+        Fast keeps the existing conservative ceiling.
+
+        Heavy separates two costs that the Ollama HTTP request combines:
+        - model cold-load / placement;
+        - answer generation.
+
+        A resident Heavy model needs only the effort-specific generation
+        ceiling. A cold Heavy request gets an additional bounded load allowance.
+        This fixes cold activation without weakening the deadline for every
+        model and without coupling policy to a concrete Heavy model name.
+        """
+        if task_class is TaskClass.FAST:
+            return FAST_CHAT_TIMEOUT_SECONDS
+
+        effort = (generation_effort or "eco").strip().lower()
+        warm_timeout = HEAVY_WARM_TIMEOUT_SECONDS.get(
+            effort,
+            HEAVY_WARM_TIMEOUT_SECONDS["eco"],
+        )
+
+        if already_resident:
+            return warm_timeout
+
+        return (
+            warm_timeout
+            + HEAVY_COLD_LOAD_ALLOWANCE_SECONDS
+        )
 
 
     @staticmethod
