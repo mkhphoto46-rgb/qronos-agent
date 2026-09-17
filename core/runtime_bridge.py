@@ -95,7 +95,6 @@ from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
 from core.whisper_hybrid_runtime import WhisperHybridRuntime
 from core.whisper_cpp_vad_runtime import WhisperCppVADRuntime
-from core.web_worker import WebResearchWorker
 from security.gate import set_default_audit_sink
 from security.permissions import PermissionDecision
 from core.voice_trigger import VoiceTriggerService
@@ -371,6 +370,23 @@ def _computer_capability_response() -> str:
         "Minimize و Maximize پشتیبانی می‌شود. فرمان‌های Shell و Terminal همچنان "
         "خارج از Windows Control هستند."
     )
+
+
+def _computer_action_success_response(
+    operation: ComputerOperation,
+    display_name: str,
+) -> str:
+    """Render an operation-specific acknowledgement using a display name."""
+    verbs = {
+        ComputerOperation.OPEN_APP: "باز شد",
+        ComputerOperation.CLOSE_APP: "بسته شد",
+        ComputerOperation.FOCUS_WINDOW: "به جلو آورده شد",
+        ComputerOperation.MINIMIZE_WINDOW: "مینیمایز شد",
+        ComputerOperation.MAXIMIZE_WINDOW: "ماکسیمایز شد",
+        ComputerOperation.OPEN_LOCATION: "باز شد",
+        ComputerOperation.DRAW_BASIC_HOUSE: "یک خانه‌ی ساده در آن رسم شد",
+    }
+    return f"انجام شد. {display_name} {verbs[operation]}."
 
 
 def _normalise_conversation_control_text(
@@ -2220,6 +2236,7 @@ class QronosRuntime:
             ComputerOperation.MINIMIZE_WINDOW: "مینیمایز کردن پنجره",
             ComputerOperation.MAXIMIZE_WINDOW: "ماکسیمایز کردن پنجره",
             ComputerOperation.OPEN_LOCATION: "باز کردن پوشه یا درایو",
+            ComputerOperation.DRAW_BASIC_HOUSE: "کشیدن خانه‌ی ساده در Paint",
         }
         return labels.get(
             operation,
@@ -2901,17 +2918,13 @@ class QronosRuntime:
         report["voiceComputerExecuted"] = True
         report["voiceComputerDeferred"] = False
 
-        app_names = {
-            "notepad": "نوت‌پد",
-            "calculator": "ماشین‌حساب",
-            "file_explorer": "فایل اکسپلورر",
-            "paint": "پینت",
-        }
-        app_name = app_names.get(
-            action.app_id,
+        app_name = self.computer_executor.display_name_for_app_id(
             action.app_id,
         )
-        return f"انجام شد. {app_name} باز شد."
+        return _computer_action_success_response(
+            action.operation,
+            app_name,
+        )
 
     def _begin_text_file_action(
         self,
@@ -3429,7 +3442,7 @@ class QronosRuntime:
                 TaskType.HEAVY,
             ):
                 raise RuntimeError(
-                    "Text Chat currently supports Fast, Heavy, and the "
+                    "Text Chat currently supports Fast and Heavy, plus the "
                     "permission-gated exact-path File Control path. Vision "
                     "and browser actions remain behind dedicated paths."
                 )
@@ -3796,13 +3809,8 @@ class QronosRuntime:
 
         if self.orchestrator is None:
             orchestrator = Orchestrator()
-            orchestrator.workers.register(
-                WebResearchWorker(
-                    answer_fn=(
-                        orchestrator.answer_web_prompt
-                    ),
-                )
-            )
+            # Public web access requires the browser adapter. Legacy direct
+            # HTTP research is intentionally unavailable in production.
             orchestrator.workers.register(
                 build_vision_worker(
                     orchestrator.runtime
@@ -5707,7 +5715,7 @@ class QronosRuntime:
             transcript = (
                 self.speech_runtime.transcribe_file(
                     recording.audio_path,
-                    language=primary_stt_language,
+                    language=self.voice_language,
                 )
                 .strip()
             )

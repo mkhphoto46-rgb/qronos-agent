@@ -989,7 +989,7 @@ class TestRoutingIsReported(unittest.TestCase):
 
         self.assertEqual(normalise_qronos_invocation(transcript), transcript)
 
-    def test_prepare_registers_the_production_web_worker(self) -> None:
+    def test_prepare_does_not_register_direct_web_worker(self) -> None:
         runtime = QronosRuntime()
 
         with patch("core.runtime_bridge.AudioInput"), patch(
@@ -1007,7 +1007,7 @@ class TestRoutingIsReported(unittest.TestCase):
             runtime.prepare()
 
         assert runtime.orchestrator is not None
-        self.assertIn(TaskType.BROWSER, runtime.orchestrator.workers.registered())
+        self.assertNotIn(TaskType.BROWSER, runtime.orchestrator.workers.registered())
 
 
 

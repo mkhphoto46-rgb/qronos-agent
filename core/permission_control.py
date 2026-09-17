@@ -80,7 +80,7 @@ USER_PERMISSION_DEFINITIONS: tuple[dict[str, object], ...] = (
         "id": "automation",
         "title": "Automation",
         "defaultPolicy": "CUSTOM",
-        "categories": ("code_analysis",),
+        "categories": ("code_analysis", "gui_automation"),
     },
     {
         "id": "system",

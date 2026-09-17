@@ -66,6 +66,10 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     "core.ollama_controller": (
         "Starts and stops the local model server."
     ),
+    "core.file_resolver": (
+        "Reads Windows User Shell Folders from the Registry to resolve redirected "
+        "Desktop, Documents, and Downloads paths; it never writes Registry values."
+    ),
     "core.whisper_cpp_runtime": (
         "Runs the whisper binary to transcribe an audio file."
     ),

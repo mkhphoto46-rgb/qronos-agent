@@ -82,6 +82,11 @@ class TaskRouter:
         "کامپیوتر",
         "رایانه",
         "نصب کن",
+        "در پینت",
+        "توی پینت",
+        "داخل پینت",
+        "in paint",
+        "draw in paint",
     )
 
     BROWSER_KEYWORDS = _markers(

@@ -78,7 +78,7 @@ _FOLDER_WORDS = (
 
 _EXPLORER_CONTEXT_ALIASES = (
     "file explorer", "windows explorer", "explorer",
-    "فایل اکسپلورر", "فایل‌اکسپلورر", "اکسپلورر",
+    "فایل اکسپلورر", "فایل‌اکسپلورر", "ویندوز اکسپلورر", "اکسپلورر",
 )
 
 _STRONG_FILE_MARKERS = (
@@ -100,6 +100,10 @@ _KNOWN_FOLDER_ALIASES: dict[str, tuple[str, ...]] = {
 # H is the user's current target and is deliberately supported in both common
 # Persian pronunciations. Latin A-Z works generically via "Drive X".
 _PERSIAN_DRIVE_LETTERS: dict[str, tuple[str, ...]] = {
+    "C": ("سی",),
+    "D": ("دی",),
+    "E": ("ای", "ئی"),
+    "F": ("اف", "اِف"),
     "H": ("اچ", "ایچ", "اچ", "هِچ"),
 }
 
@@ -180,6 +184,10 @@ def _normalise_text(value: str) -> str:
     text = _strip_marks(text)
     text = text.replace("\u200c", " ")
     text = text.replace("ي", "ی").replace("ك", "ک")
+    # Mixed Persian/Urdu STT occasionally emits Urdu dal in otherwise
+    # Persian folder names (for example ``دانلوڈز``).  Canonicalise only the
+    # character variants that are equivalent for our command vocabulary.
+    text = text.replace("ڈ", "د").replace("ۀ", "ه")
     text = text.translate(_PERSIAN_DIGITS)
     text = text.replace("…", " ")
     text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
@@ -219,6 +227,17 @@ def _strip_explorer_context(value: str) -> tuple[str, bool]:
             found = True
             n = re.sub(pattern, " ", n, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", n).strip(), found
+
+
+def _strip_leading_invocation(value: str) -> str:
+    """Remove only a leading wake-name, never Qronos inside a target name."""
+    return re.sub(
+        r"^(?:کرونوس|qronos)\s+",
+        "",
+        _normalise_text(value),
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
 def _raw_quoted_values(text: str) -> tuple[str, ...]:
@@ -274,13 +293,13 @@ def _extract_drive_hint(normalised: str) -> str | None:
     if match:
         return f"drive:{match.group(1).upper()}"
 
-    match = re.search(r"\bدرایو\s+([a-z])\b", normalised, flags=re.IGNORECASE)
+    match = re.search(r"\bدرایوه?\s+([a-z])\b", normalised, flags=re.IGNORECASE)
     if match:
         return f"drive:{match.group(1).upper()}"
 
     for letter, aliases in _PERSIAN_DRIVE_LETTERS.items():
         for alias in aliases:
-            if re.search(rf"\bدرایو\s+{re.escape(_normalise_text(alias))}\b", normalised):
+            if re.search(rf"\bدرایوه?\s+{re.escape(_normalise_text(alias))}\b", normalised):
                 return f"drive:{letter}"
     return None
 
@@ -339,13 +358,13 @@ def _remove_location_words(value: str) -> str:
 
     # Remove a preposition only together with a drive phrase.
     n = re.sub(
-        r"\b(?:روی|تو|توی|داخل|در|به)\s+(?:drive\s*[a-z]|درایو\s+(?:[a-z]|اچ|ایچ|هِچ))\b",
+        r"\b(?:روی|تو|توی|داخل|در|به)\s+(?:drive\s*[a-z]|درایوه?\s+(?:[a-z]|سی|دی|ای|ئی|اف|اِف|اچ|ایچ|هِچ))\b",
         " ",
         n,
         flags=re.IGNORECASE,
     )
     n = re.sub(r"\bdrive\s*[a-z]\b", " ", n, flags=re.IGNORECASE)
-    n = re.sub(r"\bدرایو\s+(?:[a-z]|اچ|ایچ|هِچ)\b", " ", n, flags=re.IGNORECASE)
+    n = re.sub(r"\bدرایوه?\s+(?:[a-z]|سی|دی|ای|ئی|اف|اِف|اچ|ایچ|هِچ)\b", " ", n, flags=re.IGNORECASE)
 
     # Remove a preposition only together with a known-folder alias.  The bare
     # word ``در`` must remain available to be part of the filename itself.
@@ -372,7 +391,7 @@ def _tail_after_location(normalised: str, folder_hint: str | None) -> str:
     if folder_hint.startswith("drive:"):
         for pattern in (
             r"\bdrive\s*[a-z]\b",
-            r"\bدرایو\s+(?:[a-z]|اچ|ایچ|اچ|هِچ)\b",
+            r"\bدرایوه?\s+(?:[a-z]|سی|دی|ای|ئی|اف|اِف|اچ|ایچ|هِچ)\b",
         ):
             spans.extend((m.start(), m.end()) for m in re.finditer(pattern, normalised, flags=re.IGNORECASE))
     else:
@@ -441,6 +460,7 @@ def parse_named_file_request(text: str) -> NamedFileRequest:
         raise NamedFileParseError("No explicit open-file intent was found.")
 
     semantic, had_explorer_context = _strip_explorer_context(normalised)
+    semantic = _strip_leading_invocation(semantic)
     folder_hint = _extract_folder_hint(semantic)
     has_file_marker = any(marker in semantic for marker in _FILE_MARKERS)
     has_folder_marker = any(marker in semantic for marker in _FOLDER_WORDS)
@@ -513,6 +533,7 @@ def parse_location_request(text: str) -> NamedLocationRequest:
         raise NamedLocationParseError("No folder/location navigation intent was found.")
 
     semantic, had_explorer_context = _strip_explorer_context(normalised)
+    semantic = _strip_leading_invocation(semantic)
 
     try:
         folder_hint = _extract_folder_hint(semantic)
@@ -607,15 +628,32 @@ class KnownFolderFileResolver:
         home = Path.home()
         env = os.environ
 
-        def candidates(name: str) -> tuple[Path, ...]:
+        def registered_path(value_name: str) -> Path | None:
+            """Read a redirected Windows known-folder path without writing Registry."""
+            if os.name != "nt":
+                return None
+            try:
+                import winreg
+
+                key_path = (
+                    r"Software\Microsoft\Windows\CurrentVersion"
+                    r"\Explorer\User Shell Folders"
+                )
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                    value, _ = winreg.QueryValueEx(key, value_name)
+            except (ImportError, OSError):
+                return None
+            expanded = os.path.expandvars(str(value or "").strip())
+            return Path(expanded) if expanded else None
+
+        def candidates(name: str, registry_name: str) -> tuple[Path, ...]:
             raw: list[Path] = [home / name]
+            redirected = registered_path(registry_name)
+            if redirected is not None:
+                raw.insert(0, redirected)
             userprofile = env.get("USERPROFILE")
             if userprofile:
                 raw.append(Path(userprofile) / name)
-            for key in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-                value = env.get(key)
-                if value:
-                    raw.append(Path(value) / name)
             unique: list[Path] = []
             seen: set[str] = set()
             for item in raw:
@@ -627,9 +665,12 @@ class KnownFolderFileResolver:
             return tuple(unique)
 
         return {
-            "desktop": candidates("Desktop"),
-            "documents": candidates("Documents"),
-            "downloads": candidates("Downloads"),
+            "desktop": candidates("Desktop", "Desktop"),
+            "documents": candidates("Documents", "Personal"),
+            "downloads": candidates(
+                "Downloads",
+                "{374DE290-123F-4565-9164-39C4925E467B}",
+            ),
         }
 
     @staticmethod

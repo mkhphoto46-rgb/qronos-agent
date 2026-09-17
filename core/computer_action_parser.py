@@ -21,12 +21,20 @@ _ENGLISH_CLOSE = re.compile(r"(?<!\w)(close|quit|exit)(?!\w)", re.IGNORECASE)
 _ENGLISH_MINIMIZE = re.compile(r"(?<!\w)(minimize|minimise)(?!\w)", re.IGNORECASE)
 _ENGLISH_MAXIMIZE = re.compile(r"(?<!\w)(maximize|maximise)(?!\w)", re.IGNORECASE)
 _ENGLISH_FOCUS = re.compile(r"(?<!\w)(focus|foreground)(?!\w)", re.IGNORECASE)
+_ENGLISH_DRAW_HOUSE = re.compile(
+    r"(?<!\w)(?:draw|sketch)\s+(?:a\s+)?(?:basic\s+|simple\s+)?house(?!\w)",
+    re.IGNORECASE,
+)
 
 _PERSIAN_OPEN_PHRASES = ("باز کن", "بازش کن", "اجرا کن", "راه بنداز", "راه بینداز", "راه اندازی کن")
 _PERSIAN_CLOSE_PHRASES = ("ببند", "ببندش", "بندازش", "خارج شو از")
 _PERSIAN_MINIMIZE_PHRASES = ("مینیمایز کن", "مینیمایزش کن", "کوچیکش کن", "کوچک کن")
 _PERSIAN_MAXIMIZE_PHRASES = ("ماکسیمایز کن", "ماکسیمایزش کن", "بزرگش کن")
 _PERSIAN_FOCUS_PHRASES = ("فوکوس کن", "بیار جلو", "بیارش جلو", "برو روی")
+_PERSIAN_DRAW_HOUSE_PHRASES = (
+    "خونه بکش", "خانه بکش", "یه خونه بکش", "یک خانه بکش",
+    "خونه ساده بکش", "خانه ساده بکش", "خونه رسم کن", "خانه رسم کن",
+)
 
 _FORBIDDEN_MARKERS = ("&&", "||", ";", ">", "<", "`", "$(", "\\", "/", ":", ".exe")
 
@@ -39,6 +47,7 @@ _LOCATION_CUES = (
 def _normalise(text: str) -> str:
     value = str(text or "").replace("\u200c", " ")
     value = value.replace("ي", "ی").replace("ك", "ک")
+    value = value.replace("ڈ", "د")
     return re.sub(r"\s+", " ", value).strip().lower()
 
 
@@ -48,6 +57,11 @@ def _contains_alias(text: str, alias: str) -> bool:
 
 
 def _operation(text: str) -> ComputerOperation | None:
+    if _ENGLISH_DRAW_HOUSE.search(text) or (
+        ("خونه" in text or "خانه" in text)
+        and ("بکش" in text or "رسم کن" in text)
+    ):
+        return ComputerOperation.DRAW_BASIC_HOUSE
     checks = (
         (ComputerOperation.CLOSE_APP, _ENGLISH_CLOSE, _PERSIAN_CLOSE_PHRASES),
         (ComputerOperation.MINIMIZE_WINDOW, _ENGLISH_MINIMIZE, _PERSIAN_MINIMIZE_PHRASES),
@@ -67,12 +81,13 @@ def _has_contextual_file_or_location_target(text: str) -> bool:
 
 def _strip_operation(text: str) -> str:
     value = text
-    for regex in (_ENGLISH_OPEN, _ENGLISH_CLOSE, _ENGLISH_MINIMIZE, _ENGLISH_MAXIMIZE, _ENGLISH_FOCUS):
+    for regex in (_ENGLISH_OPEN, _ENGLISH_CLOSE, _ENGLISH_MINIMIZE, _ENGLISH_MAXIMIZE, _ENGLISH_FOCUS, _ENGLISH_DRAW_HOUSE):
         value = regex.sub(" ", value)
     for phrase in (*_PERSIAN_OPEN_PHRASES, *_PERSIAN_CLOSE_PHRASES, *_PERSIAN_MINIMIZE_PHRASES, *_PERSIAN_MAXIMIZE_PHRASES, *_PERSIAN_FOCUS_PHRASES):
         value = value.replace(phrase, " ")
     value = re.sub(r"(?<!\w)(?:رو|را|برام|لطفا|لطفاً|please|the|app|application)(?!\w)", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"(?<!\w)(?:برنامه|نرم افزار|نرم‌افزار)(?!\w)", " ", value)
+    value = re.sub(r"(?<!\w)(?:یه|یک|ساده|خونه|خانه|بکش|رسم|کن)(?!\w)", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -100,6 +115,13 @@ def parse_computer_action(text: str, *, app_resolver: AppResolver | None = None)
         raise ComputerActionParseError("No supported Windows-control verb was found.")
 
     app_id = _static_app_id(cleaned)
+
+    if operation is ComputerOperation.DRAW_BASIC_HOUSE:
+        if app_id != "paint":
+            raise ComputerActionParseError(
+                "Drawing the basic house template is restricted to Paint."
+            )
+        return ComputerAction(operation=operation, app_id="paint")
 
     # Preserve the four reviewed built-ins as direct application targets.  In
     # particular, Persian "نوت پد" contains the ordinary file cue "نوت" and

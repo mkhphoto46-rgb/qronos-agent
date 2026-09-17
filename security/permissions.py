@@ -45,6 +45,7 @@ class ActionCategory(Enum):
     SYSTEM_CONFIGURATION = "system_configuration"
     REMOTE_CONTROL = "remote_control"
     DEVICE_CONTROL = "device_control"
+    GUI_AUTOMATION = "gui_automation"
     CODE_GENERATION = "code_generation"
     CODE_ANALYSIS = "code_analysis"
     CODE_MODIFICATION = "code_modification"
@@ -200,6 +201,12 @@ ACTION_POLICIES = {
         PermissionLevel.TYPED_SECRET,
         False,
         "Control a printer, 3D printer, or third-party device.",
+    ),
+    ActionCategory.GUI_AUTOMATION: _policy(
+        ActionCategory.GUI_AUTOMATION,
+        PermissionLevel.VOICE_CONFIRMATION,
+        True,
+        "Run one bounded, typed mouse/keyboard automation in a verified application window.",
     ),
     ActionCategory.CODE_GENERATION: _policy(
         ActionCategory.CODE_GENERATION,

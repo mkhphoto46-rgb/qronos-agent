@@ -78,3 +78,27 @@ For consequential proposals, use this sequence when applicable:
 - After every push, explain how to confirm on GitHub that the expected files and commit arrived and that no sensitive file was published.
 - Treat uploading source code to GitHub and deploying a runnable application as separate workflows unless the selected hosting platform explicitly connects them.
 - Do not publish, push, create a remote repository, or change repository visibility without the user's explicit authorization for that external action.
+
+## Offline-first and browser-only internet rule
+
+- Qronos production operation must remain offline-first. AI inference, STT, TTS,
+  Vision, routing, planning, memory, file control, computer control, and app
+  adapters must run locally.
+- Do not add Cloud APIs, Online APIs, remote model endpoints, hosted inference,
+  telemetry upload, or direct Core HTTP/network access.
+- The only permitted user-facing route to public internet content is visible,
+  permission-gated, audited browser control using the browser workflow supplied
+  by the project. Qronos must not silently bypass the browser through requests,
+  urllib, curl, PowerShell web requests, sockets, or third-party SDKs.
+- Local IPC and loopback communication with Qronos-owned local sidecars are
+  allowed when bounded to localhost and covered by lifecycle/security tests.
+- Local Windows facilities such as the Print Spooler and local/LAN device
+  drivers may be used without a cloud service. Do not add vendor cloud APIs.
+- Add and preserve automated tests that fail if a production module introduces
+  an undeclared direct-network path.
+- Explicit exception: the paired mobile application must support remote access
+  beyond the LAN. A dedicated authenticated, encrypted Device Link transport is
+  permitted over the internet; it carries commands/results while all inference
+  and execution remain on the PC. It must preserve pairing, revocation,
+  capability limits and audit. This exception does not permit cloud inference
+  or direct web-search APIs. Relay deployment is a separate infrastructure step.

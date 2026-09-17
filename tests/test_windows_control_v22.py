@@ -5,14 +5,20 @@ from pathlib import Path
 import unittest
 
 from core.computer_executor import (
+    ComputerAction,
     ComputerExecutor,
     ComputerOperation,
+)
+from core.computer_action_parser import (
+    ComputerActionParseError,
+    parse_computer_action,
 )
 from core.file_resolver import (
     KnownFolderFileResolver,
     parse_location_request,
 )
 from core.runtime_bridge import _computer_action_success_response
+from security.permissions import ActionCategory
 
 
 class LocationSpeechRobustnessV22Tests(unittest.TestCase):
@@ -112,6 +118,53 @@ class ActionAcknowledgementV22Tests(unittest.TestCase):
         self.assertEqual(
             executor.display_name_for_app_id("paint"),
             "Paint",
+        )
+
+
+class BoundedPaintAutomationTests(unittest.TestCase):
+    def test_persian_house_command_is_a_typed_paint_action(self) -> None:
+        action = parse_computer_action("توی پینت یه خونه ساده بکش")
+        self.assertIs(action.operation, ComputerOperation.DRAW_BASIC_HOUSE)
+        self.assertEqual(action.app_id, "paint")
+        self.assertIs(action.category, ActionCategory.GUI_AUTOMATION)
+
+    def test_english_house_command_is_a_typed_paint_action(self) -> None:
+        action = parse_computer_action("draw a simple house in Paint")
+        self.assertIs(action.operation, ComputerOperation.DRAW_BASIC_HOUSE)
+        self.assertEqual(action.app_id, "paint")
+
+    def test_house_template_without_paint_fails_closed(self) -> None:
+        with self.assertRaises(ComputerActionParseError):
+            parse_computer_action("یه خونه ساده بکش")
+
+    def test_executor_restricts_house_template_to_paint(self) -> None:
+        with self.assertRaisesRegex(Exception, "restricted to Paint"):
+            ComputerAction(
+                ComputerOperation.DRAW_BASIC_HOUSE,
+                app_id="notepad",
+            )
+
+    def test_injected_gui_executor_receives_only_typed_template(self) -> None:
+        seen: list[tuple[str, ComputerOperation]] = []
+
+        def gui_action(spec, operation):
+            seen.append((spec.app_id, operation))
+            return "drawn"
+
+        executor = ComputerExecutor(
+            gui_action=gui_action,
+            verification_delay_seconds=0,
+        )
+        detail = executor._perform(
+            ComputerAction(
+                ComputerOperation.DRAW_BASIC_HOUSE,
+                app_id="paint",
+            )
+        )
+        self.assertEqual(detail, "drawn")
+        self.assertEqual(
+            seen,
+            [("paint", ComputerOperation.DRAW_BASIC_HOUSE)],
         )
 
 

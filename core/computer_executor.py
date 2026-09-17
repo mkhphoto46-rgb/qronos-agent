@@ -33,6 +33,7 @@ class ComputerOperation(Enum):
     MINIMIZE_WINDOW = "minimize_window"
     MAXIMIZE_WINDOW = "maximize_window"
     OPEN_LOCATION = "open_location"
+    DRAW_BASIC_HOUSE = "draw_basic_house"
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,7 @@ KNOWN_APPS: dict[str, AppSpec] = {
         app_id="paint",
         executable="mspaint.exe",
         display_name="Paint",
-        aliases=("microsoft paint", "mspaint", "paint", "پینت", "نقاشی"),
+        aliases=("microsoft paint", "mspaint", "paint", "پینت", "پاینت", "نقاشی"),
         process_names=("mspaint.exe",),
     ),
 }
@@ -82,7 +83,7 @@ _BLOCKED_EXECUTABLES = {
 }
 
 _COMMON_APP_ALIASES: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...] = (
-    (("telegram",), ("تلگرام", "telegram desktop"), ("telegram.exe",)),
+    (("telegram",), ("تلگرام",), ("telegram.exe",)),
     (("discord",), ("دیسکورد",), ("discord.exe",)),
     (("premiere",), ("پریمیر", "پریمیر پرو", "premiere pro"), ("adobe premiere pro.exe",)),
     (("photoshop",), ("فتوشاپ",), ("photoshop.exe",)),
@@ -359,12 +360,18 @@ class ComputerAction:
             ComputerOperation.FOCUS_WINDOW,
             ComputerOperation.MINIMIZE_WINDOW,
             ComputerOperation.MAXIMIZE_WINDOW,
+            ComputerOperation.DRAW_BASIC_HOUSE,
         }:
             app_id = self.app_id.strip()
             if not app_id:
                 raise InvalidAction(f"{self.operation.value} requires an app_id.")
             if app_id not in KNOWN_APPS and not app_id.startswith("discovered:"):
                 raise InvalidAction(f"Unknown or unapproved application: {self.app_id!r}.")
+            if (
+                self.operation is ComputerOperation.DRAW_BASIC_HOUSE
+                and app_id != "paint"
+            ):
+                raise InvalidAction("DRAW_BASIC_HOUSE is restricted to Paint.")
             if self.location.strip():
                 raise InvalidAction(f"{self.operation.value} does not accept a location argument.")
             return
@@ -372,6 +379,8 @@ class ComputerAction:
 
     @property
     def category(self) -> ActionCategory:
+        if self.operation is ComputerOperation.DRAW_BASIC_HOUSE:
+            return ActionCategory.GUI_AUTOMATION
         return ActionCategory.OPEN_APPLICATION
 
     def to_request(self) -> ActionRequest:
@@ -390,6 +399,9 @@ class ComputerAction:
             ComputerOperation.FOCUS_WINDOW: f"Focus application window {spec.display_name}.",
             ComputerOperation.MINIMIZE_WINDOW: f"Minimize application window {spec.display_name}.",
             ComputerOperation.MAXIMIZE_WINDOW: f"Maximize application window {spec.display_name}.",
+            ComputerOperation.DRAW_BASIC_HOUSE: (
+                f"Draw one bounded basic house template in {spec.display_name}."
+            ),
         }
         return ActionRequest(
             category=self.category,
@@ -423,6 +435,7 @@ EvaluateFn = Callable[..., Verdict]
 LaunchFn = Callable[[tuple[str, ...]], ProcessLike]
 LocationOpenFn = Callable[[str], None]
 WindowActionFn = Callable[[AppSpec, ComputerOperation], str]
+GuiActionFn = Callable[[AppSpec, ComputerOperation], str]
 SleepFn = Callable[[float], None]
 
 
@@ -438,6 +451,7 @@ class ComputerExecutor:
         launcher: LaunchFn | None = None,
         location_opener: LocationOpenFn | None = None,
         window_action: WindowActionFn | None = None,
+        gui_action: GuiActionFn | None = None,
         sleep_fn: SleepFn = time.sleep,
         verification_delay_seconds: float = 0.20,
         dynamic_apps: bool = False,
@@ -448,12 +462,17 @@ class ComputerExecutor:
         self._launcher = launcher if launcher is not None else _default_launcher
         self._location_opener = location_opener if location_opener is not None else _default_open_location
         self._window_action = window_action if window_action is not None else _default_window_action
+        self._gui_action = gui_action if gui_action is not None else _default_gui_action
         self._sleep = sleep_fn
         self._verification_delay_seconds = max(0.0, float(verification_delay_seconds))
         self.dynamic_apps = bool(dynamic_apps)
 
     def resolve_app_id(self, query: str) -> str:
         return resolve_application_id(query, dynamic=self.dynamic_apps)
+
+    def display_name_for_app_id(self, app_id: str) -> str:
+        """Return a human-readable name without exposing a discovered app id."""
+        return get_app_spec(app_id).display_name
 
     def prepare(self, action: ComputerAction) -> PreparedComputerAction:
         request = action.to_request()
@@ -579,6 +598,11 @@ class ComputerExecutor:
             ComputerOperation.MAXIMIZE_WINDOW,
         }:
             return self._window_action(spec, action.operation)
+
+        if action.operation is ComputerOperation.DRAW_BASIC_HOUSE:
+            if spec.app_id != "paint":
+                raise InvalidAction("DRAW_BASIC_HOUSE is restricted to Microsoft Paint.")
+            return self._gui_action(spec, action.operation)
 
         raise InvalidAction(f"Unsupported computer operation: {action.operation!r}.")
 
@@ -769,3 +793,13 @@ def _default_window_action(spec: AppSpec, operation: ComputerOperation) -> str:
         user32.ShowWindow(target.hwnd, SW_MAXIMIZE)
         return f"Maximized {spec.display_name}."
     raise InvalidAction(f"Unsupported window operation: {operation!r}.")
+
+
+def _default_gui_action(spec: AppSpec, operation: ComputerOperation) -> str:
+    """Run reviewed, coordinate-free templates in one verified app window."""
+    # Client-relative coordinates do not identify the actual Paint canvas or
+    # selected tool. Keep native input disabled until grounding, cancellation
+    # and postcondition verification are implemented and tested together.
+    raise RuntimeError(
+        "Paint drawing requires verified canvas/tool grounding; native input is not enabled yet."
+    )
