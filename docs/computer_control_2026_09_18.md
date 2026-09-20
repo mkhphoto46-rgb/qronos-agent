@@ -1,6 +1,6 @@
 # Computer-control verification — 2026-09-18
 
-Active checkout: `H:\Project Qronos Agent`.
+Active checkout: `<QronosProjectRoot>`.
 
 ## Implemented in this pass
 
@@ -20,9 +20,9 @@ Active checkout: `H:\Project Qronos Agent`.
 
 ## Example commands
 
-- `پوشه "H:\Project Qronos Agent" را باز کن`
-- `فایل "H:\Project Qronos Agent\README.md" را باز کن`
-- `فایل "README" داخل پوشه "H:\Project Qronos Agent" را باز کن`
+- `پوشه "<QronosProjectRoot>" را باز کن`
+- `فایل "<QronosProjectRoot>\README.md" را باز کن`
+- `فایل "README" داخل پوشه "<QronosProjectRoot>" را باز کن`
 - `فوتوشاپ را باز کن`
 
 The examples use existing permission/execution gates. Opening an executable as
