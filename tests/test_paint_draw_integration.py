@@ -11,12 +11,10 @@ from core.paint_draw_integration import (
     PaintDrawAction,
     PaintDrawExecutor,
     PaintReferenceUnavailable,
-    _safe_inner_square,
 )
 from core.paint_draw_parser import PaintDrawParseError, parse_paint_draw_action
 from core.runtime_bridge import QronosRuntime
 from core.task_router import TaskRouter, TaskType
-from core.window_binding import WindowRect
 from security.gate import Verdict
 from security.permissions import PermissionDecision
 
@@ -154,12 +152,3 @@ def test_environment_reference_provider_is_explicit_and_local(tmp_path, monkeypa
     image.write_bytes(b"not-decoded-here")
     monkeypatch.setenv("QRONOS_PAINT_REFERENCE_PATH", str(image))
     assert provider.reference_for("cat") == image.resolve()
-
-
-def test_safe_canvas_is_square_and_inside_client():
-    client = WindowRect(239, 84, 1759, 909)
-    safe = _safe_inner_square(client)
-    assert safe.width == safe.height
-    assert safe.width >= 300
-    assert client.left <= safe.left < safe.right <= client.right
-    assert client.top <= safe.top < safe.bottom <= client.bottom

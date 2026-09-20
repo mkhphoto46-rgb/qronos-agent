@@ -148,6 +148,7 @@ class PaintStateNormalizer:
         inputs: InputCapabilities | None = None,
         sleep_fn: SleepFn = time.sleep,
         settle_seconds: float = 0.12,
+        close_grounder: bool = True,
     ) -> None:
         self._binder = binder
         self._capture = capture
@@ -155,6 +156,7 @@ class PaintStateNormalizer:
         self._inputs = inputs if inputs is not None else InputCapabilities.for_binder(binder)
         self._sleep = sleep_fn
         self._settle_seconds = float(settle_seconds)
+        self._close_grounder = bool(close_grounder)
         if self._settle_seconds < 0.0:
             raise ValueError("settle_seconds cannot be negative.")
 
@@ -236,9 +238,10 @@ class PaintStateNormalizer:
                 minimum_size_selected_confidence=selected_minimum_size.confidence,
             )
         finally:
-            close = getattr(self._grounder, "close", None)
-            if callable(close):
-                close()
+            if self._close_grounder:
+                close = getattr(self._grounder, "close", None)
+                if callable(close):
+                    close()
 
     def _locate_and_click(
         self,

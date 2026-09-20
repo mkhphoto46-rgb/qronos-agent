@@ -12,7 +12,8 @@ from core.computer_executor import ComputerAction, ComputerExecutor, ComputerOpe
 from core.input_capabilities import InputCapabilities
 from core.input_safety import BoundInputAuthorization
 from core.model_manager import ModelManager
-from core.paint_adapter import PaintAdapter, PaintCanvasRegion
+from core.paint_adapter import PaintAdapter
+from core.paint_canvas_grounding import ground_paint_canvas
 from core.paint_state import PaintStateGrounder, PaintStateNormalizer
 from core.paint_verification import PaintPostDrawVerification, PaintPostDrawVerifier
 from core.reference_sketch_pipeline import ReferenceSketchPipeline
@@ -20,7 +21,7 @@ from core.screen_capture import ScreenCapture
 from core.sketch_critic import SketchVisualCritic
 from core.undo_journal import UndoJournal
 from core.vision_image import PreparedImage
-from core.window_binding import WindowBindingStale, WindowRect
+from core.window_binding import WindowBindingStale
 from security.gate import ActionGrant, Verdict, evaluate, issue_grant
 from security.permissions import ActionCategory, PermissionDecision
 
@@ -413,31 +414,39 @@ class PaintDrawExecutor:
         # *before* the before-capture and before any canvas side effect. Every
         # toolbar coordinate is vision-grounded to this exact HWND/layout.
         capture = self._screen_capture_factory()
-        PaintStateNormalizer(
-            self.computer_executor.window_binder,
-            capture,
-            PaintStateGrounder(manager.runtime),
-            inputs=inputs,
-            sleep_fn=self._sleep,
-        ).normalize(
-            binding,
-            authorization=input_authorization,
-            screen_approved=True,
-        )
+        ui_grounder = PaintStateGrounder(manager.runtime)
+        try:
+            PaintStateNormalizer(
+                self.computer_executor.window_binder,
+                capture,
+                ui_grounder,
+                inputs=inputs,
+                sleep_fn=self._sleep,
+                close_grounder=False,
+            ).normalize(
+                binding,
+                authorization=input_authorization,
+                screen_approved=True,
+            )
 
-        # A toolbar interaction must not silently change the window geometry.
+            # A toolbar interaction must not silently change the window geometry.
         # Refresh the exact-PID binding after normalization so the canvas
         # capability and before/after captures are issued from settled state.
-        binding = self.computer_executor.bind_app_window(
-            "paint",
-            require_foreground=True,
-            expected_pid=binding.snapshot.pid,
-        )
-        input_authorization = BoundInputAuthorization.bind(gui_grant, binding)
-        canvas = PaintCanvasRegion.verified(
-            binding,
-            _safe_inner_square(binding.snapshot.client_rect),
-        )
+            binding = self.computer_executor.bind_app_window(
+                "paint",
+                require_foreground=True,
+                expected_pid=binding.snapshot.pid,
+            )
+            input_authorization = BoundInputAuthorization.bind(gui_grant, binding)
+            canvas = ground_paint_canvas(
+                binding,
+                self.computer_executor.window_binder,
+                capture,
+                ui_grounder,
+                screen_approved=True,
+            )
+        finally:
+            ui_grounder.close()
 
         before = capture.capture_bound(
             binding,
@@ -503,39 +512,3 @@ def _validated_prompt(value: str) -> str:
     if any(ord(char) < 32 and char not in "\t\n\r" for char in prompt):
         raise ValueError("Paint drawing prompt contains control characters.")
     return prompt
-
-
-def _safe_inner_square(client: WindowRect) -> WindowRect:
-    """Conservative, layout-relative Paint region used until UIA canvas lookup."""
-    if not client.usable:
-        raise PaintDrawError("Paint client rectangle is not usable.")
-
-    left_inset = max(80, round(client.width * 0.165))
-    right_inset = left_inset
-    top_inset = max(120, round(client.height * 0.30))
-    bottom_inset = max(90, round(client.height * 0.18))
-
-    base = WindowRect(
-        left=client.left + left_inset,
-        top=client.top + top_inset,
-        right=client.right - right_inset,
-        bottom=client.bottom - bottom_inset,
-    )
-    if base.width < 300 or base.height < 200:
-        raise PaintDrawError(
-            "Paint client area is too small for the conservative drawing region."
-        )
-
-    side = min(base.width, base.height)
-    center_x = (base.left + base.right) // 2
-    center_y = (base.top + base.bottom) // 2
-    half = side // 2
-    square = WindowRect(
-        left=center_x - half,
-        top=center_y - half,
-        right=center_x - half + side,
-        bottom=center_y - half + side,
-    )
-    if not square.usable:
-        raise PaintDrawError("Paint safe drawing region is not usable.")
-    return square
