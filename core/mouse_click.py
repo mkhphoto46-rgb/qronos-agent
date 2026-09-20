@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.input_safety import BoundInputPoint
+from core.input_safety import BoundInputAuthorization, BoundInputPoint
 from core.mouse_button import MouseButton, MouseButtonController
 from core.mouse_hover import MouseHoverController
 from core.window_binding import WindowBinder, WindowBinding, WindowRect
@@ -37,7 +37,7 @@ class MouseClickController:
         x: int,
         y: int,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         button: MouseButton = MouseButton.LEFT,
         allowed_rect: WindowRect | None = None,
     ) -> MouseClickResult:
@@ -47,7 +47,7 @@ class MouseClickController:
                 binding,
                 x,
                 y,
-                approved=approved,
+                authorization=authorization,
                 button=button,
                 allowed_rect=allowed_rect,
             )
@@ -58,7 +58,7 @@ class MouseClickController:
                 binding,
                 x,
                 y,
-                approved=approved,
+                authorization=authorization,
                 button=button,
                 allowed_rect=allowed_rect,
             )

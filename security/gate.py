@@ -31,6 +31,8 @@ Three rules:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import time
 from typing import Callable
 
 from core.actions import ActionOutcome, ActionRequest, ActionResult
@@ -154,6 +156,82 @@ class Verdict:
             outcome=self.outcome,
             detail=self.reason,
         )
+
+
+class ActionGrantUnavailable(PermissionError):
+    """A short-lived action grant could not be issued from the gate verdict."""
+
+
+_GRANT_ISSUER = object()
+
+
+@dataclass(frozen=True, init=False)
+class ActionGrant:
+    """Short-lived proof that one exact ActionRequest passed the permission gate."""
+
+    action_id: str
+    category: ActionCategory
+    target: str
+    issued_at: float
+    expires_at: float
+
+    def __init__(
+        self,
+        *,
+        action_id: str,
+        category: ActionCategory,
+        target: str,
+        issued_at: float,
+        expires_at: float,
+        _issuer: object,
+    ) -> None:
+        if _issuer is not _GRANT_ISSUER:
+            raise TypeError("ActionGrant objects may only be issued by security.gate.")
+        object.__setattr__(self, "action_id", action_id)
+        object.__setattr__(self, "category", category)
+        object.__setattr__(self, "target", target)
+        object.__setattr__(self, "issued_at", float(issued_at))
+        object.__setattr__(self, "expires_at", float(expires_at))
+
+    def active(self) -> bool:
+        return time.monotonic() < self.expires_at
+
+
+def issue_grant(
+    request: ActionRequest,
+    verdict: Verdict,
+    *,
+    approval: PermissionDecision | None = None,
+    ttl_seconds: float = 180.0,
+) -> ActionGrant:
+    """Issue one short-lived grant for the exact request represented by verdict."""
+    if verdict.request != request:
+        raise ActionGrantUnavailable("Verdict does not belong to this action request.")
+
+    ttl = float(ttl_seconds)
+    if not math.isfinite(ttl) or ttl <= 0.0:
+        raise ValueError("ttl_seconds must be a finite positive number.")
+
+    if verdict.refused:
+        raise ActionGrantUnavailable(verdict.reason)
+
+    if verdict.needs_approval:
+        if approval is not verdict.decision:
+            raise ActionGrantUnavailable(
+                f"Action requires {verdict.decision.value}; matching approval was not supplied."
+            )
+    elif not verdict.allowed:
+        raise ActionGrantUnavailable("Gate verdict is not executable.")
+
+    now = time.monotonic()
+    return ActionGrant(
+        action_id=request.action_id,
+        category=request.category,
+        target=request.target,
+        issued_at=now,
+        expires_at=now + ttl,
+        _issuer=_GRANT_ISSUER,
+    )
 
 
 def evaluate(

@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.actions import ActionRequest
+from core.input_safety import BoundInputAuthorization
 from core.paint_adapter import PaintAdapter, PaintAdapterError, PaintCanvasRegion
+from security.gate import evaluate, issue_grant
+from security.permissions import ActionCategory
 from core.sketch_approval import VisualApprovedSketch
 from core.sketch_preview import SketchPreviewRenderer
 from core.shape_planner import ShapePlanner
@@ -38,6 +42,21 @@ def _binding(
         identity_token="identity",
         layout_token="layout",
     )
+
+
+def _authorization(binding: WindowBinding) -> BoundInputAuthorization:
+    request = ActionRequest(
+        category=ActionCategory.GUI_AUTOMATION,
+        target=f"app:{binding.app_id}",
+        summary="test Paint input",
+    )
+    verdict = evaluate(request)
+    grant = issue_grant(
+        request,
+        verdict,
+        approval=verdict.decision if verdict.needs_approval else None,
+    )
+    return BoundInputAuthorization.bind(grant, binding)
 
 
 class FakeBinder:
@@ -116,7 +135,7 @@ def test_adapter_executes_generic_plan_only_inside_supplied_canvas():
         binding,
         plan,
         canvas,
-        approved=True,
+        authorization=_authorization(binding),
         step_delay_seconds=0.0,
     )
 
@@ -145,7 +164,7 @@ def test_adapter_refuses_stale_canvas_capability_before_side_effect():
     )
 
     with pytest.raises(PaintAdapterError):
-        adapter.execute(binding, ShapePlanner.line(), stale, approved=True)
+        adapter.execute(binding, ShapePlanner.line(), stale, authorization=_authorization(binding))
 
     assert stroke.calls == []
 
@@ -171,7 +190,7 @@ def test_adapter_production_path_accepts_only_visual_approval_capability():
         binding,
         approved,
         canvas,
-        approved=True,
+        authorization=_authorization(binding),
         step_delay_seconds=0.0,
     )
 
@@ -183,7 +202,7 @@ def test_adapter_production_path_accepts_only_visual_approval_capability():
             binding,
             plan,  # type: ignore[arg-type]
             canvas,
-            approved=True,
+            authorization=_authorization(binding),
         )
 
     tampered = VisualApprovedSketch(
@@ -202,7 +221,7 @@ def test_adapter_production_path_accepts_only_visual_approval_capability():
             binding,
             tampered,
             canvas,
-            approved=True,
+            authorization=_authorization(binding),
         )
 
 
@@ -212,7 +231,7 @@ def test_adapter_uses_fidelity_projection_and_pointer_delivery_defaults():
     canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650))
     plan = ShapePlanner.line((0.0, 0.0), (1.0, 1.0))
 
-    adapter.execute(binding, plan, canvas, approved=True)
+    adapter.execute(binding, plan, canvas, authorization=_authorization(binding))
 
     _, points, kwargs = stroke.calls[0]
     # 600x400 canvas contains a centered 400x400 projection.

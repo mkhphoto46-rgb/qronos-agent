@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from core.input_capabilities import InputCapabilities
+from core.input_safety import BoundInputAuthorization
 from core.pointer_stroke import PointerStrokeResult
 from core.shape_planner import ShapePlan
 from core.sketch_approval import VisualApprovedSketch
@@ -86,7 +87,7 @@ class PaintAdapter:
         approved_sketch: VisualApprovedSketch,
         canvas: PaintCanvasRegion,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         step_delay_seconds: float = 0.006,
         inset_pixels: int = 0,
         max_step_pixels: float = 8.0,
@@ -112,7 +113,7 @@ class PaintAdapter:
             binding,
             approved_sketch.plan,
             canvas,
-            approved=approved,
+            authorization=authorization,
             step_delay_seconds=step_delay_seconds,
             inset_pixels=inset_pixels,
             max_step_pixels=max_step_pixels,
@@ -126,7 +127,7 @@ class PaintAdapter:
         plan: ShapePlan,
         canvas: PaintCanvasRegion,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         step_delay_seconds: float = 0.006,
         inset_pixels: int = 0,
         max_step_pixels: float = 8.0,
@@ -162,7 +163,7 @@ class PaintAdapter:
             result = self._inputs.stroke.stroke(
                 binding,
                 points,
-                approved=approved,
+                authorization=authorization,
                 allowed_rect=canvas.rect,
                 step_delay_seconds=step_delay_seconds,
                 max_step_pixels=max_step_pixels,

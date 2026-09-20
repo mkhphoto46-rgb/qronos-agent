@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-from core.input_safety import BoundInputGuard, BoundInputPoint
+from core.input_safety import BoundInputAuthorization, BoundInputGuard, BoundInputPoint
 from core.mouse_hover import MouseHoverController
 from core.window_binding import WindowBinder, WindowBinding, WindowRect
 from core.windows_input_native import send_mouse_button
@@ -52,7 +52,7 @@ class MouseButtonController:
         x: int,
         y: int,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         button: MouseButton = MouseButton.LEFT,
         allowed_rect: WindowRect | None = None,
     ) -> MouseButtonResult:
@@ -60,7 +60,7 @@ class MouseButtonController:
             binding,
             x,
             y,
-            approved=approved,
+            authorization=authorization,
             button=button,
             down=True,
             allowed_rect=allowed_rect,
@@ -72,7 +72,7 @@ class MouseButtonController:
         x: int,
         y: int,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         button: MouseButton = MouseButton.LEFT,
         allowed_rect: WindowRect | None = None,
     ) -> MouseButtonResult:
@@ -80,7 +80,7 @@ class MouseButtonController:
             binding,
             x,
             y,
-            approved=approved,
+            authorization=authorization,
             button=button,
             down=False,
             allowed_rect=allowed_rect,
@@ -103,7 +103,7 @@ class MouseButtonController:
         x: int,
         y: int,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         button: MouseButton,
         down: bool,
         allowed_rect: WindowRect | None,
@@ -114,12 +114,12 @@ class MouseButtonController:
             binding,
             x,
             y,
-            approved=approved,
+            authorization=authorization,
             allowed_rect=allowed_rect,
         )
-        self._guard.revalidate(binding, approved=approved)
+        self._guard.revalidate(binding, authorization=authorization)
         self._button(button.value, down)
-        self._guard.revalidate(binding, approved=approved)
+        self._guard.revalidate(binding, authorization=authorization)
         return MouseButtonResult(
             point=hover_result.point,
             button=button,

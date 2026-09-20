@@ -6,6 +6,7 @@ from typing import Callable, Protocol
 
 from core.brain_runtime import BrainMessage, BrainMessageRole, BrainRuntime
 from core.input_capabilities import InputCapabilities
+from core.input_safety import BoundInputAuthorization
 from core.model_registry import get_model
 from core.screen_capture import Capture, ScreenCapture
 from core.vision_grounding import (
@@ -161,7 +162,8 @@ class PaintStateNormalizer:
         self,
         binding: WindowBinding,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
+        screen_approved: bool,
     ) -> PaintStateNormalization:
         if binding.app_id != "paint" or binding.snapshot.process_name != "mspaint.exe":
             raise PaintStateError("PaintStateNormalizer refuses a non-Paint binding.")
@@ -171,8 +173,12 @@ class PaintStateNormalizer:
             raise PaintStateError("Paint client rectangle is not usable.")
 
         try:
-            pencil = self._locate_and_click(binding, self.PENCIL_TARGET, client, approved)
-            black = self._locate_and_click(binding, self.BLACK_TARGET, client, approved)
+            pencil = self._locate_and_click(
+                binding, self.PENCIL_TARGET, client, authorization, screen_approved
+            )
+            black = self._locate_and_click(
+                binding, self.BLACK_TARGET, client, authorization, screen_approved
+            )
 
             # Current Windows 11 Paint exposes Pencil width as a size slider on
             # the left side of the canvas, not as a stable top-toolbar Size
@@ -183,7 +189,8 @@ class PaintStateNormalizer:
                 binding,
                 self.MINIMUM_SIZE_TARGET,
                 _left_size_control_region(client),
-                approved,
+                authorization,
+                screen_approved,
             )
 
             # Selection verification is observational. It happens before the canvas
@@ -193,7 +200,7 @@ class PaintStateNormalizer:
                 binding,
                 "Verify the selected Paint Pencil tool and primary black colour "
                 "before any canvas drawing occurs.",
-                approved,
+                screen_approved,
             )
             selected_pencil = self._locate(
                 self.SELECTED_PENCIL_TARGET,
@@ -238,12 +245,13 @@ class PaintStateNormalizer:
         binding: WindowBinding,
         target: str,
         allowed_rect: WindowRect,
-        approved: bool,
+        authorization: BoundInputAuthorization,
+        screen_approved: bool,
     ) -> GroundedTarget:
         frame = self._capture_frame(
             binding,
             f"Locate one Paint toolbar control before drawing: {target}",
-            approved,
+            screen_approved,
         )
         grounded = self._locate(target, frame, step=target)
         try:
@@ -267,7 +275,7 @@ class PaintStateNormalizer:
             binding,
             x,
             y,
-            approved=approved,
+            authorization=authorization,
             allowed_rect=allowed_rect,
         )
         if self._settle_seconds:
@@ -278,12 +286,12 @@ class PaintStateNormalizer:
         self,
         binding: WindowBinding,
         reason: str,
-        approved: bool,
+        screen_approved: bool,
     ) -> Capture:
         return self._capture.capture_bound(
             binding,
             self._binder,
-            approved=approved,
+            approved=screen_approved,
             require_foreground=True,
             reason=reason,
         )

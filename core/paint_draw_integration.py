@@ -10,6 +10,7 @@ from core.action_audit import ActionAuditLog, AuditEvent
 from core.actions import ActionOutcome, ActionRequest, ActionResult
 from core.computer_executor import ComputerAction, ComputerExecutor, ComputerOperation
 from core.input_capabilities import InputCapabilities
+from core.input_safety import BoundInputAuthorization
 from core.model_manager import ModelManager
 from core.paint_adapter import PaintAdapter, PaintCanvasRegion
 from core.paint_state import PaintStateGrounder, PaintStateNormalizer
@@ -20,7 +21,7 @@ from core.sketch_critic import SketchVisualCritic
 from core.undo_journal import UndoJournal
 from core.vision_image import PreparedImage
 from core.window_binding import WindowBindingStale, WindowRect
-from security.gate import Verdict, evaluate
+from security.gate import ActionGrant, Verdict, evaluate, issue_grant
 from security.permissions import ActionCategory, PermissionDecision
 
 
@@ -236,7 +237,7 @@ class PaintDrawExecutor:
             return PaintDrawExecution(prepared.gui_request, blocked)
 
         blocked = self._blocked_result(
-            prepared.gui_request,
+            prepared.screen_request,
             screen_verdict,
             screen_approval,
             label="Paint screen verification",
@@ -251,9 +252,16 @@ class PaintDrawExecutor:
             screen_approval,
         )
 
+        gui_grant = issue_grant(
+            prepared.gui_request,
+            gui_verdict,
+            approval=gui_approval,
+            ttl_seconds=180.0,
+        )
+
         run: PaintDrawRun | None = None
         try:
-            run = self._perform(prepared.action)
+            run = self._perform(prepared.action, gui_grant)
             detail = (
                 "Paint drawing completed and post-draw verification passed: "
                 + run.verification.summary()
@@ -345,7 +353,7 @@ class PaintDrawExecutor:
                 decision=verdict.decision,
             )
 
-    def _perform(self, action: PaintDrawAction) -> PaintDrawRun:
+    def _perform(self, action: PaintDrawAction, gui_grant: ActionGrant) -> PaintDrawRun:
         reference = self.reference_provider.reference_for(action.prompt)
 
         manager = self._model_manager_factory()
@@ -378,12 +386,13 @@ class PaintDrawExecutor:
         prime_x = (fresh.client_rect.left + fresh.client_rect.right) // 2
         prime_y = (fresh.client_rect.top + fresh.client_rect.bottom) // 2
         inputs = InputCapabilities.for_binder(self.computer_executor.window_binder)
+        input_authorization = BoundInputAuthorization.bind(gui_grant, binding)
         try:
             inputs.hover.hover(
                 binding,
                 prime_x,
                 prime_y,
-                approved=True,
+                authorization=input_authorization,
             )
         except WindowBindingStale:
             # Moving into Paint can make its chrome settle. Coordinates are not
@@ -396,6 +405,7 @@ class PaintDrawExecutor:
             require_foreground=True,
             expected_pid=binding.snapshot.pid,
         )
+        input_authorization = BoundInputAuthorization.bind(gui_grant, binding)
 
         # Paint persists its last drawing tool, colour, and width across runs.
         # Pointer geometry can therefore be perfect while a stale Brush/Marker
@@ -411,7 +421,8 @@ class PaintDrawExecutor:
             sleep_fn=self._sleep,
         ).normalize(
             binding,
-            approved=True,
+            authorization=input_authorization,
+            screen_approved=True,
         )
 
         # A toolbar interaction must not silently change the window geometry.
@@ -422,6 +433,7 @@ class PaintDrawExecutor:
             require_foreground=True,
             expected_pid=binding.snapshot.pid,
         )
+        input_authorization = BoundInputAuthorization.bind(gui_grant, binding)
         canvas = PaintCanvasRegion.verified(
             binding,
             _safe_inner_square(binding.snapshot.client_rect),
@@ -442,7 +454,7 @@ class PaintDrawExecutor:
             binding,
             approved_sketch,
             canvas,
-            approved=True,
+            authorization=input_authorization.restrict(canvas.rect),
             step_delay_seconds=0.006,
             inset_pixels=12,
         )

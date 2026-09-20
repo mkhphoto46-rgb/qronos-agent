@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import pytest
 
+from core.actions import ActionRequest
 from core.input_capabilities import InputCapabilities
-from core.input_safety import InputOutOfBounds, InputPermissionRequired
+from core.input_safety import (
+    BoundInputAuthorization,
+    InputAuthorizationMismatch,
+    InputOutOfBounds,
+    InputPermissionRequired,
+)
+from security.gate import evaluate, issue_grant
+from security.permissions import ActionCategory
 from core.keyboard_control import KeyboardController
 from core.mouse_button import MouseButton, MouseButtonController
 from core.mouse_click import MouseClickController
@@ -45,6 +53,26 @@ def _binding() -> WindowBinding:
     )
 
 
+def _authorization(
+    binding: WindowBinding | None = None,
+    *,
+    allowed_rect: WindowRect | None = None,
+) -> BoundInputAuthorization:
+    binding = binding or _binding()
+    request = ActionRequest(
+        category=ActionCategory.GUI_AUTOMATION,
+        target=f"app:{binding.app_id}",
+        summary="test bounded GUI input",
+    )
+    verdict = evaluate(request)
+    grant = issue_grant(
+        request,
+        verdict,
+        approval=verdict.decision if verdict.needs_approval else None,
+    )
+    return BoundInputAuthorization.bind(grant, binding, allowed_rect=allowed_rect)
+
+
 class _Binder:
     def __init__(self, snapshot=None, error=None):
         self.snapshot = snapshot or _snapshot()
@@ -63,7 +91,7 @@ def test_hover_is_a_separate_capability_and_only_moves():
     moves = []
     hover = MouseHoverController(binder, move_fn=lambda x, y: moves.append((x, y)))
 
-    result = hover.hover(_binding(), 250, 220, approved=True)
+    result = hover.hover(_binding(), 250, 220, authorization=_authorization(_binding()))
 
     assert moves == [(250, 220)]
     assert result.point.x == 250
@@ -81,9 +109,9 @@ def test_mouse_button_state_is_separate_for_drawing_and_dragging():
         button_fn=lambda button, down: buttons.append((button, down)),
     )
 
-    control.down_at(_binding(), 200, 200, approved=True)
-    hover.hover(_binding(), 250, 250, approved=True)
-    control.up_at(_binding(), 300, 300, approved=True)
+    control.down_at(_binding(), 200, 200, authorization=_authorization(_binding()))
+    hover.hover(_binding(), 250, 250, authorization=_authorization(_binding()))
+    control.up_at(_binding(), 300, 300, authorization=_authorization(_binding()))
 
     assert moves == [(200, 200), (250, 250), (300, 300)]
     assert buttons == [("left", True), ("left", False)]
@@ -101,7 +129,7 @@ def test_click_is_composition_not_a_second_native_mouse_implementation():
     )
     click = MouseClickController(binder, hover=hover, buttons=button_control)
 
-    result = click.click_at(_binding(), 300, 240, approved=True)
+    result = click.click_at(_binding(), 300, 240, authorization=_authorization(_binding()))
 
     # down_at and up_at each re-ground/revalidate the point by design.
     assert moves == [(300, 240), (300, 240)]
@@ -119,8 +147,8 @@ def test_keyboard_is_independent_from_pointer_capabilities():
         key_fn=lambda key, down: keys.append((key, down)),
     )
 
-    keyboard.type_text(_binding(), "سلام", approved=True)
-    keyboard.press(_binding(), "enter", approved=True)
+    keyboard.type_text(_binding(), "سلام", authorization=_authorization(_binding()))
+    keyboard.press(_binding(), "enter", authorization=_authorization(_binding()))
 
     assert text == ["سلام"]
     assert keys == [("enter", True), ("enter", False)]
@@ -133,9 +161,9 @@ def test_every_capability_requires_explicit_approval():
     keyboard = KeyboardController(binder, text_fn=lambda _text: None)
 
     with pytest.raises(InputPermissionRequired):
-        hover.hover(binding, 200, 200, approved=False)
+        hover.hover(binding, 200, 200, authorization=None)
     with pytest.raises(InputPermissionRequired):
-        keyboard.type_text(binding, "x", approved=False)
+        keyboard.type_text(binding, "x", authorization=None)
 
 
 def test_pointer_is_rejected_outside_verified_client_rect():
@@ -144,7 +172,7 @@ def test_pointer_is_rejected_outside_verified_client_rect():
     hover = MouseHoverController(binder, move_fn=lambda x, y: called.append((x, y)))
 
     with pytest.raises(InputOutOfBounds):
-        hover.hover(_binding(), 99, 200, approved=True)
+        hover.hover(_binding(), 99, 200, authorization=_authorization(_binding()))
 
     assert called == []
 
@@ -155,9 +183,9 @@ def test_adapter_can_narrow_pointer_to_its_own_allowed_region():
     hover = MouseHoverController(binder, move_fn=lambda x, y: called.append((x, y)))
     canvas = WindowRect(150, 150, 450, 350)
 
-    hover.hover(_binding(), 200, 200, approved=True, allowed_rect=canvas)
+    hover.hover(_binding(), 200, 200, authorization=_authorization(_binding()), allowed_rect=canvas)
     with pytest.raises(InputOutOfBounds):
-        hover.hover(_binding(), 120, 120, approved=True, allowed_rect=canvas)
+        hover.hover(_binding(), 120, 120, authorization=_authorization(_binding()), allowed_rect=canvas)
 
     assert called == [(200, 200)]
 
@@ -168,7 +196,7 @@ def test_stale_window_prevents_all_input():
     hover = MouseHoverController(binder, move_fn=lambda x, y: hover_calls.append((x, y)))
 
     with pytest.raises(WindowBindingStale):
-        hover.hover(_binding(), 200, 200, approved=True)
+        hover.hover(_binding(), 200, 200, authorization=_authorization(_binding()))
 
     assert hover_calls == []
 
@@ -234,7 +262,7 @@ def test_click_emergency_releases_if_window_goes_stale_after_down():
     click = MouseClickController(binder, hover=hover, buttons=button_control)
 
     with pytest.raises(WindowBindingStale):
-        click.click_at(_binding(), 220, 220, approved=True)
+        click.click_at(_binding(), 220, 220, authorization=_authorization(_binding()))
 
     assert buttons == [("left", True), ("left", False)]
 
@@ -256,7 +284,7 @@ def test_pointer_stroke_is_generic_and_composes_separate_primitives():
     result = stroke.stroke(
         _binding(),
         [(180, 180), (200, 200), (240, 220), (280, 240)],
-        approved=True,
+        authorization=_authorization(_binding()),
     )
 
     # down_at moves to the first point; intermediate movement is independent;
@@ -301,7 +329,7 @@ def test_pointer_stroke_emergency_releases_if_midstroke_revalidation_fails():
         stroke.stroke(
             _binding(),
             [(180, 180), (220, 220), (260, 260)],
-            approved=True,
+            authorization=_authorization(_binding()),
         )
 
     assert buttons == [("left", True), ("left", False)]
@@ -333,7 +361,7 @@ def test_pointer_stroke_can_resample_sparse_segments_and_settle(monkeypatch):
     result = stroke.stroke(
         _binding(),
         [(180, 180), (220, 180)],
-        approved=True,
+        authorization=_authorization(_binding()),
         max_step_pixels=10,
         press_settle_seconds=0.012,
         release_settle_seconds=0.015,
@@ -363,11 +391,11 @@ def test_pointer_stroke_rejects_invalid_fidelity_parameters():
 
     stroke = PointerStrokeController(_Binder())
     with pytest.raises(ValueError, match="max_step_pixels"):
-        stroke.stroke(_binding(), [(180, 180), (200, 200)], approved=True, max_step_pixels=0)
+        stroke.stroke(_binding(), [(180, 180), (200, 200)], authorization=_authorization(_binding()), max_step_pixels=0)
     with pytest.raises(ValueError, match="settle"):
         stroke.stroke(
             _binding(),
             [(180, 180), (200, 200)],
-            approved=True,
+            authorization=_authorization(_binding()),
             press_settle_seconds=-0.01,
         )

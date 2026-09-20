@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from core.input_safety import BoundInputGuard, BoundInputPoint
+from core.input_safety import BoundInputAuthorization, BoundInputGuard, BoundInputPoint
 from core.window_binding import WindowBinder, WindowBinding, WindowRect
 from core.windows_input_native import send_mouse_move_absolute
 
@@ -39,18 +39,18 @@ class MouseHoverController:
         x: int,
         y: int,
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         allowed_rect: WindowRect | None = None,
     ) -> MouseHoverResult:
         _snapshot, point = self._guard.point(
             binding,
             x,
             y,
-            approved=approved,
+            authorization=authorization,
             allowed_rect=allowed_rect,
         )
         self._move(point.x, point.y)
         # Input is only considered successful if the target stayed identical,
         # foreground, and layout-stable throughout the primitive.
-        self._guard.revalidate(binding, approved=approved)
+        self._guard.revalidate(binding, authorization=authorization)
         return MouseHoverResult(point=point)

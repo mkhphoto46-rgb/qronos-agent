@@ -5,7 +5,7 @@ import math
 import time
 from typing import Iterable
 
-from core.input_safety import BoundInputPoint
+from core.input_safety import BoundInputAuthorization, BoundInputPoint
 from core.mouse_button import MouseButton, MouseButtonController
 from core.mouse_hover import MouseHoverController
 from core.window_binding import WindowBinder, WindowBinding, WindowRect
@@ -46,7 +46,7 @@ class PointerStrokeController:
         binding: WindowBinding,
         points: Iterable[tuple[int, int]],
         *,
-        approved: bool,
+        authorization: BoundInputAuthorization,
         button: MouseButton = MouseButton.LEFT,
         allowed_rect: WindowRect | None = None,
         step_delay_seconds: float = 0.0,
@@ -76,7 +76,7 @@ class PointerStrokeController:
                 binding,
                 last_x,
                 last_y,
-                approved=approved,
+                authorization=authorization,
                 button=button,
                 allowed_rect=allowed_rect,
             )
@@ -90,7 +90,7 @@ class PointerStrokeController:
                     binding,
                     x,
                     y,
-                    approved=approved,
+                    authorization=authorization,
                     allowed_rect=allowed_rect,
                 )
                 collected.append(moved.point)
@@ -105,7 +105,7 @@ class PointerStrokeController:
                 binding,
                 last_x,
                 last_y,
-                approved=approved,
+                authorization=authorization,
                 button=button,
                 allowed_rect=allowed_rect,
             )

@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.actions import ActionRequest
+from core.input_safety import BoundInputAuthorization
 from core.paint_state import PaintStateError, PaintStateNormalizer
+from security.gate import evaluate, issue_grant
+from security.permissions import ActionCategory
 from core.screen_capture import Capture, DisplayGeometry
 from core.vision_grounding import GroundedPoint, GroundedTarget, ImageBox
 from core.vision_image import PreparedImage
@@ -33,6 +37,21 @@ def _binding(*, app_id="paint", process_path=r"C:\Program Files\WindowsApps\Micr
         identity_token="identity",
         layout_token="layout",
     )
+
+
+def _authorization(binding: WindowBinding) -> BoundInputAuthorization:
+    request = ActionRequest(
+        category=ActionCategory.GUI_AUTOMATION,
+        target=f"app:{binding.app_id}",
+        summary="test Paint toolbar input",
+    )
+    verdict = evaluate(request)
+    grant = issue_grant(
+        request,
+        verdict,
+        approval=verdict.decision if verdict.needs_approval else None,
+    )
+    return BoundInputAuthorization.bind(grant, binding)
 
 
 class FakeBinder:
@@ -135,7 +154,11 @@ def test_normalizer_selects_pencil_black_and_minimum_size_before_verification():
         [(150, 150), (250, 150), (200, 300), (150, 150), (250, 150), (200, 300)],
     )
 
-    result = normalizer.normalize(binding, approved=True)
+    result = normalizer.normalize(
+            binding,
+            authorization=_authorization(binding),
+            screen_approved=True,
+        )
 
     assert len(click.calls) == 3
     assert [call[1:3] for call in click.calls] == [
@@ -143,7 +166,7 @@ def test_normalizer_selects_pencil_black_and_minimum_size_before_verification():
         (250, 150),
         (200, 300),
     ]
-    assert all(call[3]["approved"] is True for call in click.calls)
+    assert all(isinstance(call[3]["authorization"], BoundInputAuthorization) for call in click.calls)
     assert click.calls[0][3]["allowed_rect"] == binding.snapshot.client_rect
     assert click.calls[1][3]["allowed_rect"] == binding.snapshot.client_rect
     size_rect = click.calls[2][3]["allowed_rect"]
@@ -163,7 +186,11 @@ def test_normalizer_refuses_non_paint_without_any_click():
     normalizer, _, capture, grounder, click = _normalizer(binding, [])
 
     with pytest.raises(PaintStateError, match="non-Paint"):
-        normalizer.normalize(binding, approved=True)
+        normalizer.normalize(
+            binding,
+            authorization=_authorization(binding),
+            screen_approved=True,
+        )
 
     assert click.calls == []
     assert capture.calls == []
@@ -178,7 +205,11 @@ def test_normalizer_fails_closed_when_grounded_ui_point_is_outside_client():
     )
 
     with pytest.raises(PaintStateError, match="outside its verified safe control region"):
-        normalizer.normalize(binding, approved=True)
+        normalizer.normalize(
+            binding,
+            authorization=_authorization(binding),
+            screen_approved=True,
+        )
 
     assert click.calls == []
 
@@ -234,6 +265,10 @@ def test_normalizer_rejects_size_target_outside_left_control_region():
     )
 
     with pytest.raises(PaintStateError, match="safe control region"):
-        normalizer.normalize(binding, approved=True)
+        normalizer.normalize(
+            binding,
+            authorization=_authorization(binding),
+            screen_approved=True,
+        )
 
     assert len(click.calls) == 2
