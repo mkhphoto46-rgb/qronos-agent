@@ -52,6 +52,17 @@ from core.computer_executor import (
     ComputerAction,
     ComputerExecutor,
     ComputerOperation,
+    resolve_application_id,
+)
+from core.paint_draw_integration import (
+    EnvironmentPaintReferenceProvider,
+    PaintDrawExecutor,
+    PaintReferenceProvider,
+    PreparedPaintDrawAction,
+)
+from core.paint_draw_parser import (
+    PaintDrawParseError,
+    parse_paint_draw_action,
 )
 from core.audio_input import AudioConfig, AudioInput, resolve_input_device
 from core.chatterbox_runtime import ChatterboxRuntime
@@ -125,7 +136,11 @@ class PendingFileTextAction:
     started_at: float
 
 
-
+@dataclass(frozen=True)
+class PendingPaintDrawAction:
+    prepared: PreparedPaintDrawAction
+    gui_approval: PermissionDecision | None
+    transcript: str
 
 
 
@@ -310,6 +325,7 @@ def _voice_action_transcript_quality(text: str) -> int:
     if any(marker in n for marker in (
         "باز کن", "بازش کن", "برو ", "ببند", "بیار جلو", "مینیمایز", "ماکسیمایز",
         "open ", "launch ", "close ", "focus ", "minimize ", "maximize ", "go to",
+        "بکش", "رسم کن", "نقاشی کن", "draw ", "sketch ",
     )):
         score += 6
     if any(marker in n for marker in (
@@ -323,7 +339,7 @@ def _voice_action_transcript_quality(text: str) -> int:
     )):
         score += 3
     if any(marker in n for marker in (
-        "notepad", "نوت پد", "calculator", "paint", "explorer", "telegram", "تلگرام", "premiere", "پریمیر",
+        "notepad", "نوت پد", "calculator", "paint", "پینت", "پاینت", "explorer", "telegram", "تلگرام", "premiere", "پریمیر",
     )):
         score += 3
     if is_computer_capability_query(text):
@@ -337,7 +353,7 @@ def _voice_transcript_looks_actionish(text: str) -> bool:
         "دسکتاپ", "دسکتاب", "desktop", "دانلود", "download",
         "documents", "اسناد", "درایو", "drive", "فایل", "file",
         "document", "داکیومنت", "دایکیومنت", "folder", "فولدر",
-        "notepad", "نوت پد", "calculator", "paint", "explorer", "telegram", "تلگرام", "premiere", "پریمیر",
+        "notepad", "نوت پد", "calculator", "paint", "پینت", "پاینت", "explorer", "telegram", "تلگرام", "premiere", "پریمیر",
     ))
 
 
@@ -351,15 +367,36 @@ def _windows_control_route_promotion(text: str) -> bool:
         "مینیمایز", "ماکسیمایز", "فوکوس",
         "open ", "launch ", "start ", "run ", "go to", "close ",
         "focus ", "minimize ", "minimise ", "maximize ", "maximise ",
+        "بکش", "رسم کن", "نقاشی کن", "draw ", "sketch ",
     ))
     has_target = any(marker in n for marker in (
         "دسکتاپ", "دسکتاب", "desktop", "دانلود", "downloads", "download",
         "documents", "اسناد", "درایو", "drive", "فایل", "file", "folder",
-        "فولدر", "پوشه", "notepad", "نوت پد", "calculator", "paint",
+        "فولدر", "پوشه", "notepad", "نوت پد", "calculator", "paint", "پینت", "پاینت",
         "explorer", "telegram", "تلگرام", "premiere", "پریمیر", "برنامه",
         "نرم افزار", "نرم‌افزار", "app", "application",
     ))
-    return bool(has_action and has_target)
+    if not has_action:
+        return False
+    if has_target:
+        return True
+
+    # Installed applications are dynamic and cannot all be hard-coded into
+    # TaskRouter.  Before allowing an explicit open/close/focus command to fall
+    # through to conversational FAST, verify that its target resolves in the
+    # local Windows catalog.  Parsing also strips polite Persian fillers and
+    # keeps file/folder ownership out of this branch.
+    try:
+        parse_computer_action(
+            text,
+            app_resolver=lambda query: resolve_application_id(
+                query,
+                dynamic=True,
+            ),
+        )
+    except ComputerActionParseError:
+        return False
+    return True
 
 
 def _computer_capability_response() -> str:
@@ -936,6 +973,7 @@ class QronosRuntime:
         scheduler: QueueScheduler | None = None,
         notify: Callable[[str, str, str], None] | None = None,
         settings: SettingsService | None = None,
+        paint_reference_provider: PaintReferenceProvider | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._busy = False
@@ -1019,6 +1057,13 @@ class QronosRuntime:
         self.file_executor: FileExecutor | None = None
         self.file_resolver: KnownFolderFileResolver | None = None
         self.computer_executor: ComputerExecutor | None = None
+        self.paint_reference_provider: PaintReferenceProvider = (
+            paint_reference_provider
+            if paint_reference_provider is not None
+            else EnvironmentPaintReferenceProvider()
+        )
+        self.paint_draw_executor: PaintDrawExecutor | None = None
+        self.pending_paint_draw: PendingPaintDrawAction | None = None
         self.pending_file_actions: dict[str, PendingFileTextAction] = {}
         # One explicit UI approval grants a short, process-local lease for
         # ordinary reversible file-write actions. The window is fixed: auto-
@@ -1512,6 +1557,7 @@ class QronosRuntime:
 
         if paused:
             self._clear_file_write_approval_lease("runtime_paused")
+            self.pending_paint_draw = None
             # Stop accepting new voice input immediately and release idle voice
             # resources. An already-running non-cancellable model call is not
             # force-killed; downstream checkpoints suppress later phases.
@@ -2205,7 +2251,7 @@ class QronosRuntime:
             )
 
         if self.file_resolver is None:
-            self.file_resolver = KnownFolderFileResolver()
+            self.file_resolver = KnownFolderFileResolver(use_index=True)
 
     def _ensure_computer_runtime(self) -> None:
         """Prepare the trusted Windows computer-action collaborator."""
@@ -2223,6 +2269,14 @@ class QronosRuntime:
                 audit=self.action_audit,
                 journal=self.undo_journal,
                 dynamic_apps=True,
+            )
+
+        if self.paint_draw_executor is None:
+            self.paint_draw_executor = PaintDrawExecutor(
+                self.computer_executor,
+                reference_provider=self.paint_reference_provider,
+                audit=self.action_audit,
+                journal=self.undo_journal,
             )
 
     @staticmethod
@@ -2705,6 +2759,172 @@ class QronosRuntime:
         report["voiceComputerDeferred"] = False
         return f"انجام شد. {resolved.display_name} باز شد."
 
+    def _begin_text_paint_draw_action(
+        self,
+        text: str,
+        request_id: str,
+        started_at: float,
+    ) -> bool:
+        """Recognize Paint drawing before the narrower Windows verb parser."""
+        try:
+            action = parse_paint_draw_action(text)
+        except PaintDrawParseError:
+            return False
+
+        self._ensure_computer_runtime()
+        if self.paint_draw_executor is None:
+            raise RuntimeError("Qronos Paint draw executor did not prepare correctly.")
+
+        prepared = self.paint_draw_executor.prepare(action)
+        gui = prepared.gui_verdict
+        screen = prepared.screen_verdict
+
+        if gui.refused or screen.refused:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response="این عملیات طبق تنظیمات مجوز فعلی اجازه اجرا ندارد.",
+                started_at=started_at,
+            )
+            return True
+
+        if gui.allowed and screen.allowed:
+            execution = self.paint_draw_executor.execute_prepared(
+                prepared,
+                reevaluate=True,
+            )
+            if execution.result.outcome is ActionOutcome.SUCCEEDED:
+                self._finish_text_file_action(
+                    request_id=request_id,
+                    response=(
+                        "انجام شد. نقاشی در Paint اجرا و نتیجهٔ واقعی آن "
+                        "تأیید شد."
+                    ),
+                    started_at=started_at,
+                )
+            else:
+                self._fail_text_file_action(
+                    request_id=request_id,
+                    error=execution.result.detail or "Paint drawing failed.",
+                    started_at=started_at,
+                )
+            return True
+
+        if (
+            gui.needs_approval
+            and gui.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION
+        ):
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "کشیدن در Paint طبق مجوز فعلی به تأیید صوتی نیاز دارد. "
+                    "همین فرمان را با Voice بگو؛ برای مشاهدهٔ محدود پنجرهٔ Paint "
+                    "و تأیید نتیجه نیز تأیید روی صفحه خواسته می‌شود."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        self._finish_text_file_action(
+            request_id=request_id,
+            response=(
+                "این عملیات به تأییدی نیاز دارد که مسیر Text فعلی آن را "
+                "خودکار انجام نمی‌دهد."
+            ),
+            started_at=started_at,
+        )
+        return True
+
+    def _prepare_voice_paint_draw_action(
+        self,
+        transcript: str,
+        report: dict[str, Any],
+    ) -> str | None:
+        """
+        Prepare a natural Paint drawing command.
+
+        ``None`` means the transcript was not a Paint draw request and the
+        normal Computer parser should continue. An empty string means the
+        request is waiting for the existing screen-approval UI and the current
+        voice turn must return before TTS/model work starts.
+        """
+        try:
+            action = parse_paint_draw_action(transcript)
+        except PaintDrawParseError:
+            return None
+
+        self._ensure_computer_runtime()
+        if self.paint_draw_executor is None:
+            raise RuntimeError("Qronos Paint draw executor did not prepare correctly.")
+
+        prepared = self.paint_draw_executor.prepare(action)
+        gui = prepared.gui_verdict
+        screen = prepared.screen_verdict
+
+        report["computerOperation"] = "draw_in_paint"
+        report["computerAppId"] = "paint"
+        report["paintDrawPrepared"] = True
+
+        if gui.refused or screen.refused:
+            report["voiceComputerRefused"] = True
+            report["voiceComputerDeferred"] = False
+            return "این عملیات طبق تنظیمات مجوز فعلی اجازه اجرا ندارد."
+
+        gui_approval: PermissionDecision | None = None
+        if gui.needs_approval:
+            if gui.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION:
+                gui_approval = gui.decision
+            else:
+                report["voiceComputerNeedsOtherApproval"] = gui.decision.value
+                report["voiceComputerDeferred"] = False
+                return "کنترل Paint به نوع دیگری از تأیید نیاز دارد و اجرا نشد."
+
+        screen_approval: PermissionDecision | None = None
+        if screen.needs_approval:
+            if screen.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION:
+                screen_approval = screen.decision
+            elif screen.decision is PermissionDecision.REQUIRE_UI_CONFIRMATION:
+                if self.pending_paint_draw is not None:
+                    report["voiceComputerDeferred"] = False
+                    return "یک نقاشی دیگر هنوز منتظر تأیید صفحه است."
+                self.pending_paint_draw = PendingPaintDrawAction(
+                    prepared=prepared,
+                    gui_approval=gui_approval,
+                    transcript=transcript,
+                )
+                report["paintDrawScreenApprovalPending"] = True
+                report["voiceComputerDeferred"] = False
+                return ""
+            else:
+                report["voiceComputerNeedsOtherApproval"] = screen.decision.value
+                report["voiceComputerDeferred"] = False
+                return "مشاهدهٔ تأییدی Paint به نوع دیگری از تأیید نیاز دارد."
+
+        execution = self.paint_draw_executor.execute_prepared(
+            prepared,
+            gui_approval=gui_approval,
+            screen_approval=screen_approval,
+            reevaluate=True,
+        )
+        report["computerActionId"] = execution.request.action_id
+        if execution.result.outcome is ActionOutcome.SUCCEEDED:
+            report["voiceComputerExecuted"] = True
+            report["voiceComputerDeferred"] = False
+            if execution.run is not None:
+                report["paintDrawStrokes"] = execution.run.stroke_count
+                report["paintDrawFidelityF1"] = round(
+                    execution.run.verification.f1_score,
+                    4,
+                )
+            return "انجام شد. نقاشی در Paint اجرا و نتیجهٔ واقعی آن تأیید شد."
+
+        if execution.result.outcome is ActionOutcome.AWAITING_APPROVAL:
+            report["voiceComputerNeedsOtherApproval"] = True
+        else:
+            report["voiceComputerFailed"] = True
+            report["voiceComputerFailure"] = execution.result.detail
+        report["voiceComputerDeferred"] = False
+        return "نقاشی در Paint کامل یا تأیید نشد؛ هیچ retry خودکاری انجام نشد."
+
     def _begin_text_computer_action(
         self,
         text: str,
@@ -2718,6 +2938,13 @@ class QronosRuntime:
         if policy refused it. False means the caller should try another
         COMPUTER sub-parser such as exact-path File Control.
         """
+        if self._begin_text_paint_draw_action(
+            text,
+            request_id,
+            started_at,
+        ):
+            return True
+
         self._ensure_computer_runtime()
 
         if self.computer_executor is None:
@@ -2829,6 +3056,13 @@ class QronosRuntime:
             report["voiceComputerCapabilityQuery"] = True
             report["voiceComputerDeferred"] = False
             return _computer_capability_response()
+
+        paint_draw_response = self._prepare_voice_paint_draw_action(
+            transcript,
+            report,
+        )
+        if paint_draw_response is not None:
+            return paint_draw_response
 
         self._ensure_computer_runtime()
 
@@ -5905,6 +6139,19 @@ class QronosRuntime:
                         False,
                     )
                 )
+                if report.get(
+                    "paintDrawScreenApprovalPending",
+                    False,
+                ):
+                    self.conversation_session.begin_listening()
+                    self._notify(
+                        "voice_needs_screen",
+                        "ready",
+                        transcript,
+                    )
+                    report["visionApprovalPending"] = True
+                    self._write_latency_report(report)
+                    return 0.0
                 arithmetic_answer = None
             else:
                 arithmetic_answer = (
@@ -6474,6 +6721,112 @@ class QronosRuntime:
                 self._start_standalone_input_meter()
 
 
+    def _resolve_pending_paint_draw_screen_decision(
+        self,
+        *,
+        approved: bool,
+    ) -> bool:
+        pending = self.pending_paint_draw
+        if pending is None:
+            return False
+        self.pending_paint_draw = None
+
+        self._ensure_computer_runtime()
+        if self.paint_draw_executor is None:
+            raise RuntimeError("Qronos Paint draw executor is not available.")
+
+        if not approved:
+            self.paint_draw_executor.decline_screen(pending.prepared)
+            self._notify(
+                "voice_screen_declined",
+                "ready",
+                "نقاشی لغو شد؛ Qronos پنجرهٔ Paint را مشاهده یا تغییر نداد.",
+            )
+            return True
+
+        execution = self.paint_draw_executor.execute_prepared(
+            pending.prepared,
+            gui_approval=pending.gui_approval,
+            screen_approval=PermissionDecision.REQUIRE_UI_CONFIRMATION,
+            reevaluate=True,
+        )
+
+        if execution.result.outcome is ActionOutcome.SUCCEEDED:
+            response = "انجام شد. نقاشی در Paint اجرا و نتیجهٔ واقعی آن تأیید شد."
+            payload: dict[str, Any] = {
+                "actionId": execution.request.action_id,
+                "verified": True,
+            }
+            if execution.run is not None:
+                payload.update(
+                    {
+                        "strokes": execution.run.stroke_count,
+                        "points": execution.run.point_count,
+                        "pid": execution.run.pid,
+                        "hwnd": execution.run.hwnd,
+                        "expectedCoverage": round(
+                            execution.run.verification.expected_coverage,
+                            4,
+                        ),
+                        "observedPrecision": round(
+                            execution.run.verification.observed_precision,
+                            4,
+                        ),
+                        "fidelityF1": round(
+                            execution.run.verification.f1_score,
+                            4,
+                        ),
+                        "semanticConfidence": round(
+                            execution.run.verification.semantic_critique.confidence,
+                            4,
+                        ),
+                    }
+                )
+            self._notify(
+                "paint_draw_completed",
+                "ready",
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        elif execution.result.outcome is ActionOutcome.AWAITING_APPROVAL:
+            response = (
+                "مجوزها هنگام اجرا تغییر کردند و نقاشی انجام نشد. "
+                "دوباره فرمان را بگو."
+            )
+        elif execution.result.outcome is ActionOutcome.REFUSED:
+            response = "مجوز فعلی اجازهٔ این نقاشی را نمی‌دهد."
+        else:
+            response = (
+                "نقاشی کامل یا تأیید نشد؛ برای جلوگیری از خطوط دوبل "
+                "Qronos روی همان canvas دوباره تلاش نکرد."
+            )
+            self._notify(
+                "paint_draw_failed",
+                "error",
+                execution.result.detail,
+            )
+
+        if self.conversation_session is not None:
+            if self.conversation_session.is_active:
+                self.conversation_session.begin_responding()
+                self.conversation_session.add_assistant_message(response)
+                self.conversation_session.begin_listening()
+
+        self._notify(
+            "voice_response",
+            "ready",
+            response,
+        )
+        self._notify(
+            "voice_turn_complete",
+            "ready",
+            "Paint drawing turn completed.",
+        )
+        return True
+
     def look_at_screen(
         self,
         approved: bool = False,
@@ -6492,10 +6845,16 @@ class QronosRuntime:
             return
 
         self._set_busy(True)
-        asked = (question or self.pending_look or "").strip()
-        self.pending_look = None
 
         try:
+            if self._resolve_pending_paint_draw_screen_decision(
+                approved=approved,
+            ):
+                return
+
+            asked = (question or self.pending_look or "").strip()
+            self.pending_look = None
+
             if not asked:
                 raise RuntimeError(
                     "Qronos was asked to look at the screen without being "

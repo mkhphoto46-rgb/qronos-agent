@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
+import os
+import shutil
+import subprocess
+import threading
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
 import requests
 
 from core import vision_image
@@ -20,6 +28,13 @@ OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 # an explicit role-aware deadline. Orchestrator supplies longer bounded
 # deadlines for Heavy Brain cold-load and deeper-reasoning requests.
 CHAT_TIMEOUT_SECONDS = 90
+OLLAMA_AUTO_START_ENV = "QRONOS_OLLAMA_AUTO_START"
+OLLAMA_EXECUTABLE_ENV = "QRONOS_OLLAMA_EXECUTABLE"
+OLLAMA_START_TIMEOUT_SECONDS = 12.0
+OLLAMA_START_POLL_SECONDS = 0.25
+
+_BOOTSTRAP_LOCK = threading.Lock()
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 # Temporary compatibility alias.
@@ -80,23 +95,121 @@ class OllamaController(BrainRuntime):
     ) -> None:
         self.base_url = base_url.rstrip("/")
 
-    def health_check(self) -> bool:
-        """
-        Return True when the local Ollama API is reachable.
-        """
-
+    def _probe(self, timeout_seconds: float = 3.0) -> bool:
         try:
             response = requests.get(
                 f"{self.base_url}/api/version",
-                timeout=3,
+                timeout=max(0.1, float(timeout_seconds)),
             )
-
             response.raise_for_status()
-
             return True
-
         except requests.RequestException:
             return False
+
+    def health_check(self) -> bool:
+        """Return True when the configured Ollama API is reachable."""
+        return self._probe(3.0)
+
+    def ensure_ready(
+        self,
+        *,
+        auto_start: bool = True,
+        timeout_seconds: float = OLLAMA_START_TIMEOUT_SECONDS,
+    ) -> bool:
+        """
+        Ensure the local Ollama service is reachable, starting it if needed.
+
+        Qronos never shells out and never starts a server for a non-local URL.
+        Startup is process-serialized so simultaneous first-use requests do not
+        race several ``ollama serve`` children after a Windows reboot.
+        """
+        if self._probe(0.5):
+            return True
+        if not auto_start or not self._auto_start_enabled():
+            return False
+        if not self._is_local_base_url():
+            return False
+
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        with _BOOTSTRAP_LOCK:
+            if self._probe(0.5):
+                return True
+
+            executable = self._resolve_local_executable()
+            if executable is None:
+                return False
+
+            try:
+                self._start_local_server(executable)
+            except OSError:
+                return False
+
+            while time.monotonic() < deadline:
+                if self._probe(0.5):
+                    return True
+                time.sleep(OLLAMA_START_POLL_SECONDS)
+
+        return self._probe(0.5)
+
+    @staticmethod
+    def _auto_start_enabled() -> bool:
+        raw = os.environ.get(OLLAMA_AUTO_START_ENV, "1").strip().lower()
+        return raw not in _FALSE_ENV_VALUES
+
+    def _is_local_base_url(self) -> bool:
+        host = (urlparse(self.base_url).hostname or "").lower()
+        return host in {"127.0.0.1", "localhost", "::1"}
+
+    @staticmethod
+    def _resolve_local_executable() -> str | None:
+        configured = os.environ.get(OLLAMA_EXECUTABLE_ENV, "").strip()
+        if configured:
+            candidate = Path(configured).expanduser()
+            if candidate.is_file():
+                return str(candidate.resolve())
+            return None
+
+        discovered = shutil.which("ollama")
+        if discovered:
+            return str(Path(discovered).resolve())
+
+        if os.name == "nt":
+            roots = (
+                os.environ.get("LOCALAPPDATA", ""),
+                os.environ.get("PROGRAMFILES", ""),
+            )
+            for root in roots:
+                if not root:
+                    continue
+                candidate = Path(root) / "Programs" / "Ollama" / "ollama.exe"
+                if candidate.is_file():
+                    return str(candidate.resolve())
+                candidate = Path(root) / "Ollama" / "ollama.exe"
+                if candidate.is_file():
+                    return str(candidate.resolve())
+
+        return None
+
+    @staticmethod
+    def _start_local_server(executable: str) -> None:
+        kwargs: dict[str, object] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        else:
+            kwargs["start_new_session"] = True
+
+        subprocess.Popen(
+            [executable, "serve"],
+            **kwargs,
+        )
 
     def list_running_models(
         self,

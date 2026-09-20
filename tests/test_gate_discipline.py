@@ -47,10 +47,23 @@ GATE_MODULE = "security.gate"
 # not writing — or is an executor nobody declared.
 DANGEROUS_IMPORTS = frozenset({"subprocess", "shutil", "winreg", "ctypes"})
 
+# Native backends may only be imported by the reviewed permission/foreground
+# guarded callers below. They are not general exceptions available to workers.
+NATIVE_BACKENDS = {
+    "core.windows_app_activation": frozenset({"core.computer_executor"}),
+    "core.windows_input_native": frozenset({
+        "core.keyboard_control", "core.mouse_button", "core.mouse_hover",
+    }),
+}
+
 # Modules that legitimately touch these without being action executors, with
 # the reason. Anything not listed has to be justified by adding it here, which
 # is the point: the list is short and someone has to look at it.
 KNOWN_SYSTEM_MODULES: dict[str, str] = {
+    "core.window_binding": (
+        "Reads HWND/process identity, foreground state and window geometry; "
+        "does not send input, activate applications or change windows."
+    ),
     "core.artifact_registry": (
         "Its shutil/subprocess/ctypes use serves direct user-controlled Library "
         "operations reached through the Tauri library_command control plane, "
@@ -173,7 +186,7 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
         for path in product_modules():
             name = module_name(path)
 
-            if name in KNOWN_SYSTEM_MODULES or name in EXECUTOR_MODULES:
+            if name in KNOWN_SYSTEM_MODULES or name in EXECUTOR_MODULES or name in NATIVE_BACKENDS:
                 continue
 
             if imported_names(path) & DANGEROUS_IMPORTS:
@@ -187,6 +200,16 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
             "EXECUTOR_MODULES so they must reach the permission gate, or to "
             "KNOWN_SYSTEM_MODULES with the reason.",
         )
+
+    def test_native_backends_have_only_reviewed_callers(self) -> None:
+        for path in product_modules():
+            name = module_name(path)
+            imports = imported_names(path)
+            for backend, callers in NATIVE_BACKENDS.items():
+                if backend in imports:
+                    self.assertIn(name, callers, f"{name} bypasses the reviewed {backend} callers")
+                    guard = "security.gate" if name == "core.computer_executor" else "core.input_safety"
+                    self.assertIn(guard, imports, f"{name} lost its action guard")
 
     def test_the_exception_list_has_no_stale_entries(self) -> None:
         # An exception that no longer applies is an exception nobody will

@@ -62,6 +62,23 @@ class ModelManager:
         # Temporary compatibility alias for existing code/tests.
         self.ollama = self.runtime
 
+    def ensure_runtime_ready(
+        self,
+        *,
+        auto_start: bool = True,
+        timeout_seconds: float = 12.0,
+    ) -> bool:
+        """Ensure the configured local brain runtime is available."""
+        ensure_ready = getattr(self.runtime, "ensure_ready", None)
+        if callable(ensure_ready):
+            return bool(
+                ensure_ready(
+                    auto_start=auto_start,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+        return bool(self.runtime.health_check())
+
     def _running_names(self) -> set[str]:
         try:
             return {

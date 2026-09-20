@@ -52,6 +52,23 @@ def _markers(*values: str) -> tuple[str, ...]:
 class TaskRouter:
     """Route a user request to the first appropriate Qronos task type."""
 
+    PAINT_NAMES = _markers(
+        "paint",
+        "microsoft paint",
+        "mspaint",
+        "پینت",
+        "پاینت",
+    )
+
+    DRAW_MARKERS = _markers(
+        "draw",
+        "sketch",
+        "بکش",
+        "بکشید",
+        "رسم کن",
+        "نقاشی کن",
+    )
+
     COMPUTER_KEYWORDS = _markers(
         "open",
         "close",
@@ -318,6 +335,12 @@ class TaskRouter:
                 ),
             )
 
+        if self._looks_like_paint_draw(text):
+            return RouteDecision(
+                task_type=TaskType.COMPUTER,
+                reason="The request explicitly asks to draw in Microsoft Paint.",
+            )
+
         if self._contains_any(text, self.COMPUTER_KEYWORDS):
             return RouteDecision(
                 task_type=TaskType.COMPUTER,
@@ -340,6 +363,11 @@ class TaskRouter:
             task_type=TaskType.FAST,
             reason="The request appears suitable for fast handling.",
         )
+
+    def _looks_like_paint_draw(self, text: str) -> bool:
+        return self._contains_any(
+            text, self.PAINT_NAMES
+        ) and self._contains_any(text, self.DRAW_MARKERS)
 
     def _looks_like_vision(self, text: str) -> bool:
         return self._contains_any(

@@ -5,7 +5,11 @@ from difflib import SequenceMatcher
 import os
 from pathlib import Path
 import re
+import time
 import unicodedata
+import sqlite3
+
+from core.local_file_index import LocalFileIndex
 
 
 class NamedFileParseError(ValueError):
@@ -42,6 +46,8 @@ class NamedFileRequest:
     folder_hint: str | None = None
     note_like: bool = False
     suffix_hint: str | None = None
+    exact_path: str | None = None
+    directory_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,7 @@ class ResolvedNamedFile:
 class NamedLocationRequest:
     folder_hint: str | None
     name_hint: str | None = None
+    exact_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -484,6 +491,22 @@ def parse_named_file_request(text: str) -> NamedFileRequest:
         )
 
     quoted = _raw_quoted_values(raw)
+    path_values = [value for value in quoted if _looks_like_path(value)]
+    if path_values:
+        if len(path_values) != 1 or len(quoted) > 2:
+            raise NamedFileParseError("Name exactly one file or one folder and one filename.")
+        path = Path(path_values[0])
+        if not path.is_absolute() or str(path).startswith(("\\\\", "//")):
+            raise NamedFileParseError("An absolute local path is required.")
+        names = [value for value in quoted if value not in path_values]
+        if names:
+            return NamedFileRequest(
+                name_hint=_canonical_name(names[0]),
+                directory_path=str(path),
+            )
+        if has_folder_marker and not has_strong_file_marker:
+            raise NamedFileParseError("This is a directory request.")
+        return NamedFileRequest(name_hint=path.stem, exact_path=str(path))
     if quoted:
         candidate = quoted[0]
         if _looks_like_path(candidate):
@@ -525,6 +548,14 @@ def parse_named_file_request(text: str) -> NamedFileRequest:
 def parse_location_request(text: str) -> NamedLocationRequest:
     raw = str(text or "").strip()
     normalised = _normalise_text(raw)
+    quoted_paths = [value for value in _raw_quoted_values(raw) if _looks_like_path(value)]
+    if quoted_paths and _has_open_intent(normalised):
+        if len(quoted_paths) != 1 or len(_raw_quoted_values(raw)) != 1:
+            raise NamedLocationParseError("Name exactly one folder path.")
+        path = Path(quoted_paths[0])
+        if not path.is_absolute() or str(path).startswith(("\\\\", "//")):
+            raise NamedLocationParseError("An absolute local path is required.")
+        return NamedLocationRequest(folder_hint=None, exact_path=str(path))
     if not normalised:
         raise NamedLocationParseError("Location request is empty.")
     if is_computer_capability_query(raw):
@@ -618,10 +649,32 @@ class KnownFolderFileResolver:
         *,
         max_entries: int = 100_000,
         max_depth: int = 8,
+        max_search_seconds: float = 2.0,
+        use_index: bool = False,
+        index: LocalFileIndex | None = None,
     ) -> None:
         self._roots = roots if roots is not None else self._default_roots()
         self.max_entries = max(1, int(max_entries))
         self.max_depth = max(0, int(max_depth))
+        self.max_search_seconds = max(0.01, float(max_search_seconds))
+        self._index = index
+        if use_index and self._index is None:
+            base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share")
+            try:
+                self._index = LocalFileIndex(base / "Qronos" / "filename_index.sqlite3", _canonical_name)
+            except (OSError, sqlite3.Error):
+                self._index = None
+
+    @staticmethod
+    def _entries(directory: Path):
+        # Stream entries: sorting/materializing a giant directory before the
+        # first budget check defeated both latency and entry limits.
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    yield Path(entry.path)
+        except OSError:
+            return
 
     @staticmethod
     def _default_roots() -> dict[str, tuple[Path, ...]]:
@@ -798,23 +851,40 @@ class KnownFolderFileResolver:
         folder_key: str,
         root: Path,
         request: NamedFileRequest,
+        *,
+        deadline: float | None = None,
     ) -> tuple[list[ResolvedNamedFile], bool]:
-        recursive = folder_key.startswith("drive:") or True
+        if self._index is not None:
+            cached = self._index.lookup(root, request.name_hint, directory=False)
+            if cached:
+                hits = []
+                for path in cached:
+                    if not self._safe_file(path):
+                        continue
+                    score = self._score(request.name_hint, path.stem, note_like=request.note_like,
+                                        suffix=path.suffix, suffix_hint=request.suffix_hint)
+                    if score > 0:
+                        hits.append(ResolvedNamedFile(path, score, folder_key, path.name))
+                if hits:
+                    return hits, False
+        deadline = deadline if deadline is not None else time.monotonic() + self.max_search_seconds
         stack: list[tuple[Path, int]] = [(root, 0)]
         matches: list[ResolvedNamedFile] = []
         visited_entries = 0
         truncated = False
 
         while stack:
+            if time.monotonic() >= deadline:
+                return matches, True
             directory, depth = stack.pop()
             try:
-                entries = sorted(directory.iterdir(), key=lambda p: p.name.casefold())
+                entries = self._entries(directory)
             except (OSError, PermissionError):
                 continue
 
             for entry in entries:
                 visited_entries += 1
-                if visited_entries > self.max_entries:
+                if visited_entries > self.max_entries or time.monotonic() >= deadline:
                     truncated = True
                     stack.clear()
                     break
@@ -825,7 +895,7 @@ class KnownFolderFileResolver:
                     is_dir = False
 
                 if is_dir:
-                    if recursive and depth < self.max_depth and not self._unsafe_directory(entry):
+                    if depth < self.max_depth and not self._unsafe_directory(entry):
                         stack.append((entry, depth + 1))
                     continue
 
@@ -851,15 +921,27 @@ class KnownFolderFileResolver:
         return matches, truncated
 
     def resolve(self, request: NamedFileRequest) -> ResolvedNamedFile:
-        roots = self._roots_for(request.folder_hint)
+        if request.exact_path:
+            path = Path(request.exact_path)
+            if not path.is_absolute() or not self._safe_file(path):
+                raise NamedFileNotFound("The exact file is unavailable or is not an openable document.")
+            return ResolvedNamedFile(path, 1000, "exact", path.name)
+        if request.directory_path:
+            root = Path(request.directory_path)
+            if not root.is_absolute() or not root.is_dir() or self._unsafe_directory(root):
+                raise NamedFileNotFound("The requested folder is unavailable.")
+            roots = (("explicit", root),)
+        else:
+            roots = self._roots_for(request.folder_hint)
         if not roots:
             where = request.folder_hint or "known folders"
             raise NamedFileNotFound(f"No available {where} location could be searched.")
 
         matches: list[ResolvedNamedFile] = []
         truncated_any = False
+        deadline = time.monotonic() + self.max_search_seconds
         for folder_key, root in roots:
-            found, truncated = self._scan_root(folder_key, root, request)
+            found, truncated = self._scan_root(folder_key, root, request, deadline=deadline)
             matches.extend(found)
             truncated_any = truncated_any or truncated
 
@@ -887,10 +969,9 @@ class KnownFolderFileResolver:
                         names.append(label)
                 raise NamedFileAmbiguous(tuple(names))
 
-        # If a broad recursive scan was truncated, opening a fuzzy/partial hit is
-        # unsafe because a better unseen match may exist. Exact/canonical matches
-        # are allowed; everything else asks for a narrower folder or more name.
-        if truncated_any and best.score < 1000:
+        # A second exact name can exist beyond the search budget as well.
+        # Never claim uniqueness from an incomplete recursive scan.
+        if truncated_any:
             raise NamedFileSearchLimit(
                 "A partial match was found but the search scope was truncated."
             )
@@ -902,26 +983,34 @@ class KnownFolderFileResolver:
         folder_key: str,
         root: Path,
         name_hint: str,
+        *,
+        deadline: float | None = None,
     ) -> tuple[list[tuple[int, Path]], bool]:
+        if self._index is not None:
+            cached = self._index.lookup(root, name_hint, directory=True)
+            if cached:
+                hits = [(1000, path) for path in cached if path.is_dir() and not self._unsafe_directory(path)]
+                if hits:
+                    return hits, False
+        deadline = deadline if deadline is not None else time.monotonic() + self.max_search_seconds
         stack: list[tuple[Path, int]] = [(root, 0)]
         matches: list[tuple[int, Path]] = []
         visited_entries = 0
         truncated = False
 
         while stack:
+            if time.monotonic() >= deadline:
+                return matches, True
             directory, depth = stack.pop()
 
             try:
-                entries = sorted(
-                    directory.iterdir(),
-                    key=lambda p: p.name.casefold(),
-                )
+                entries = self._entries(directory)
             except (OSError, PermissionError):
                 continue
 
             for entry in entries:
                 visited_entries += 1
-                if visited_entries > self.max_entries:
+                if visited_entries > self.max_entries or time.monotonic() >= deadline:
                     truncated = True
                     stack.clear()
                     break
@@ -950,6 +1039,11 @@ class KnownFolderFileResolver:
         return matches, truncated
 
     def resolve_location(self, request: NamedLocationRequest) -> ResolvedLocation:
+        if request.exact_path:
+            path = Path(request.exact_path)
+            if not path.is_absolute() or not path.is_dir() or self._unsafe_directory(path):
+                raise NamedLocationNotFound("The exact directory is unavailable.")
+            return ResolvedLocation(path, "exact", path.name or str(path))
         roots = self._roots_for(request.folder_hint)
         if not roots:
             where = request.folder_hint or "known folders"
@@ -969,14 +1063,29 @@ class KnownFolderFileResolver:
                 display_name=display,
             )
 
+        # An exact immediate child of an explicitly named drive/folder takes
+        # precedence over similarly named descendants. No recursive scan is
+        # needed for the ordinary "folder X on drive H" case.
+        if request.folder_hint and Path(request.name_hint).name == request.name_hint:
+            direct: list[tuple[str, Path]] = []
+            for folder_key, root in roots:
+                candidate = root / request.name_hint
+                if candidate.is_dir() and not self._unsafe_directory(candidate):
+                    direct.append((folder_key, candidate))
+            if len(direct) == 1:
+                folder_key, candidate = direct[0]
+                return ResolvedLocation(candidate, folder_key, candidate.name)
+
         matches: list[tuple[int, str, Path]] = []
         truncated_any = False
+        deadline = time.monotonic() + self.max_search_seconds
 
         for folder_key, root in roots:
             found, truncated = self._scan_directories(
                 folder_key,
                 root,
                 request.name_hint,
+                deadline=deadline,
             )
             matches.extend(
                 (score, folder_key, path)
@@ -1013,7 +1122,7 @@ class KnownFolderFileResolver:
                     "a more specific folder name is required."
                 )
 
-        if truncated_any and best_score < 1000:
+        if truncated_any:
             raise NamedLocationNotFound(
                 "Folder search was truncated before a unique exact match was proven."
             )

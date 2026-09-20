@@ -61,6 +61,7 @@ unchanged.
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import sys
 from dataclasses import dataclass
 from typing import Callable
@@ -69,6 +70,12 @@ from dataclasses import replace
 
 from core.actions import ActionRequest
 from core.vision_image import PreparedImage, prepare_bytes
+from core.window_binding import (
+    WindowBinder,
+    WindowBinding,
+    WindowBindingStale,
+    WindowRect,
+)
 from security.gate import AuditSink, evaluate
 from security.permissions import ActionCategory
 
@@ -80,6 +87,15 @@ DESKTOPHORZRES = 118
 DESKTOPVERTRES = 117
 HORZRES = 8
 VERTRES = 10
+
+#: ``GetSystemMetrics`` indices for the bounding rectangle of the entire
+#: multi-monitor desktop. Unlike HORZRES/VERTRES, these include secondary
+#: monitors and can have a negative origin when a monitor sits left/above the
+#: primary display.
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 
 #: ``BitBlt``: copy the source rectangle as it is.
 SRCCOPY = 0x00CC0020
@@ -152,6 +168,22 @@ class Capture:
     #: rectangle will describe a black rectangle at some length rather than
     #: saying anything useful.
     blank: bool = False
+
+    #: Non-empty only for a capture tied to a verified WindowBinding.
+    #: Vision-grounded coordinates must carry both tokens and expire when the
+    #: layout token changes.
+    binding_token: str = ""
+    layout_token: str = ""
+
+    #: Size of the full-resolution bitmap before vision_image resized it.
+    #: Grounding uses this to map model-image pixels back to captured pixels.
+    source_width: int = 0
+    source_height: int = 0
+
+    #: Exact screen rectangle represented by the captured bitmap. Present only
+    #: for a capture made through capture_bound(), where the window identity and
+    #: layout were verified both before and after the pixels were copied.
+    frame_rect: WindowRect | None = None
 
     def describe(self) -> str:
         what = "the screen" if self.window is None else "one window"
@@ -330,6 +362,89 @@ class ScreenCapture:
 
         return self._take(window)
 
+    def capture_bound(
+        self,
+        binding: WindowBinding,
+        binder: WindowBinder,
+        *,
+        approved: bool = False,
+        reason: str = "Look at the verified application window.",
+        require_foreground: bool = True,
+    ) -> Capture:
+        """
+        Capture one already-bound window and reject stale/focus/layout races.
+
+        The binding is checked immediately before the permission-gated capture
+        and again before pixels are returned to a model. If identity/focus/DPI
+        or geometry changed, the frame is discarded and must be grounded again.
+        """
+        try:
+            binder.revalidate(
+                binding,
+                require_foreground=require_foreground,
+                require_same_layout=True,
+            )
+        except WindowBindingStale as exc:
+            raise CaptureUnavailable(
+                f"Verified window binding is stale: {exc}"
+            ) from exc
+
+        capture = self.capture(
+            approved=approved,
+            window=binding.hwnd,
+            reason=reason,
+        )
+
+        try:
+            binder.revalidate(
+                binding,
+                require_foreground=require_foreground,
+                require_same_layout=True,
+            )
+        except WindowBindingStale as exc:
+            raise CaptureUnavailable(
+                f"Verified window changed during capture; frame discarded: {exc}"
+            ) from exc
+
+        if self._grab is _grab_with_gdi:
+            desktop_left, desktop_top, desktop_width, desktop_height = (
+                _virtual_screen_region()
+            )
+            expected_rect = _clipped_rect(
+                binding.snapshot.window_rect,
+                desktop_width,
+                desktop_height,
+                screen_left=desktop_left,
+                screen_top=desktop_top,
+            )
+        else:
+            expected_rect = _clipped_rect(
+                binding.snapshot.window_rect,
+                capture.geometry.logical_width,
+                capture.geometry.logical_height,
+            )
+        if self._grab is _grab_with_gdi and (
+            expected_rect.width != capture.source_width
+            or expected_rect.height != capture.source_height
+        ):
+            raise CaptureUnavailable(
+                "Verified window geometry did not match the captured frame; "
+                "frame discarded."
+            )
+        frame_rect = WindowRect(
+            expected_rect.left,
+            expected_rect.top,
+            expected_rect.left + capture.source_width,
+            expected_rect.top + capture.source_height,
+        )
+
+        return replace(
+            capture,
+            binding_token=binding.identity_token,
+            layout_token=binding.layout_token,
+            frame_rect=frame_rect,
+        )
+
     def capture_under(
         self,
         session,
@@ -397,6 +512,8 @@ class ScreenCapture:
             geometry=shape,
             window=window,
             blank=blank,
+            source_width=width,
+            source_height=height,
         )
 
 
@@ -475,16 +592,24 @@ def _grab_with_gdi(window: int | None) -> tuple[bytes, int, int]:
     bitmap = None
 
     try:
-        screen_width = gdi32.GetDeviceCaps(source_dc, HORZRES)
-        screen_height = gdi32.GetDeviceCaps(source_dc, VERTRES)
-
         if window:
+            desktop_left, desktop_top, desktop_width, desktop_height = (
+                _virtual_screen_region()
+            )
             left, top, width, height = _window_region(
-                window, screen_width, screen_height
+                window,
+                desktop_width,
+                desktop_height,
+                screen_left=desktop_left,
+                screen_top=desktop_top,
             )
         else:
+            # Preserve the existing whole-screen meaning: one capture of the
+            # primary display. Bound-window capture is the path that needs the
+            # virtual desktop because the verified app may live on any monitor.
             left, top = 0, 0
-            width, height = screen_width, screen_height
+            width = gdi32.GetDeviceCaps(source_dc, HORZRES)
+            height = gdi32.GetDeviceCaps(source_dc, VERTRES)
 
         if width <= 0 or height <= 0:
             return b"", 0, 0
@@ -549,18 +674,56 @@ def _grab_with_gdi(window: int | None) -> tuple[bytes, int, int]:
         user32.ReleaseDC(None, source_dc)
 
 
+def _virtual_screen_region() -> tuple[int, int, int, int]:
+    """Bounding rectangle of all attached monitors in desktop coordinates."""
+    if not available():
+        raise CaptureUnavailable(
+            "Qronos can only inspect the virtual desktop on Windows."
+        )
+
+    user32 = ctypes.windll.user32
+    left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+    top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+    width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+    height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+
+    if width <= 0 or height <= 0:
+        raise CaptureUnavailable(
+            "Windows reported an invalid virtual desktop rectangle."
+        )
+
+    return left, top, width, height
+
+
+def _clipped_rect(
+    rect: WindowRect,
+    screen_width: int,
+    screen_height: int,
+    *,
+    screen_left: int = 0,
+    screen_top: int = 0,
+) -> WindowRect:
+    """Visible part of a window in the supplied desktop coordinate space."""
+    screen_right = int(screen_left) + int(screen_width)
+    screen_bottom = int(screen_top) + int(screen_height)
+
+    return WindowRect(
+        left=max(screen_left, min(screen_right, rect.left)),
+        top=max(screen_top, min(screen_bottom, rect.top)),
+        right=max(screen_left, min(screen_right, rect.right)),
+        bottom=max(screen_top, min(screen_bottom, rect.bottom)),
+    )
+
+
 def _window_region(
     window: int,
     screen_width: int,
     screen_height: int,
+    *,
+    screen_left: int = 0,
+    screen_top: int = 0,
 ) -> tuple[int, int, int, int]:
-    """
-    Where on the screen that window is, clipped to the screen.
-
-    Clipped because a window can be dragged half off the edge, and copying
-    from outside the screen's own bitmap gives whatever happens to be there —
-    usually black, sometimes the last thing that was.
-    """
+    """Where a window intersects the desktop, including secondary monitors."""
     user32 = ctypes.windll.user32
     rect = _RECT()
 
@@ -573,21 +736,22 @@ def _window_region(
         # A minimised window has a rectangle, off-screen, and no pixels.
         return 0, 0, 0, 0
 
-    left = max(0, rect.left)
-    top = max(0, rect.top)
-    right = min(screen_width, rect.right)
-    bottom = min(screen_height, rect.bottom)
+    clipped = _clipped_rect(
+        WindowRect(rect.left, rect.top, rect.right, rect.bottom),
+        screen_width,
+        screen_height,
+        screen_left=screen_left,
+        screen_top=screen_top,
+    )
 
-    return left, top, max(0, right - left), max(0, bottom - top)
+    return clipped.left, clipped.top, clipped.width, clipped.height
 
 
-class _RECT(ctypes.Structure):
-    _fields_ = [
-        ("left", ctypes.c_long),
-        ("top", ctypes.c_long),
-        ("right", ctypes.c_long),
-        ("bottom", ctypes.c_long),
-    ]
+# Use ctypes' canonical Win32 RECT type. ``ctypes.windll`` caches function
+# objects process-wide, so another module may already have declared
+# GetWindowRect.argtypes with this exact type. A second, structurally identical
+# Structure subclass is not pointer-compatible from ctypes' perspective.
+_RECT = wintypes.RECT
 
 
 class _BITMAPINFOHEADER(ctypes.Structure):

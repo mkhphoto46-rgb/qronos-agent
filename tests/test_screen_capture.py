@@ -499,6 +499,49 @@ class TestTheTextHint(unittest.TestCase):
         self.assertEqual(called, [])
 
 
+class TestVirtualDesktopClipping(unittest.TestCase):
+    def test_window_on_secondary_monitor_is_not_clipped_to_primary_screen(self) -> None:
+        from core.window_binding import WindowRect
+
+        rect = WindowRect(2304, 90, 3840, 954)
+        clipped = screen_capture._clipped_rect(
+            rect,
+            3840,
+            1080,
+            screen_left=0,
+            screen_top=0,
+        )
+
+        self.assertEqual(clipped, rect)
+        self.assertEqual((clipped.width, clipped.height), (1536, 864))
+
+    def test_negative_virtual_desktop_origin_is_preserved(self) -> None:
+        from core.window_binding import WindowRect
+
+        rect = WindowRect(-1700, 100, -100, 900)
+        clipped = screen_capture._clipped_rect(
+            rect,
+            3840,
+            1080,
+            screen_left=-1920,
+            screen_top=0,
+        )
+
+        self.assertEqual(clipped, rect)
+        self.assertEqual((clipped.width, clipped.height), (1600, 800))
+
+    def test_window_outside_virtual_desktop_becomes_zero_area(self) -> None:
+        from core.window_binding import WindowRect
+
+        clipped = screen_capture._clipped_rect(
+            WindowRect(5000, 100, 5200, 300),
+            3840,
+            1080,
+        )
+
+        self.assertEqual((clipped.width, clipped.height), (0, 200))
+
+
 @unittest.skipUnless(sys.platform == "win32", "GDI is a Windows thing.")
 class TestTheRealScreen(unittest.TestCase):
     """
@@ -524,10 +567,15 @@ class TestTheRealScreen(unittest.TestCase):
             handle = foreground_window()
 
             if handle is not None:
+                desktop_left, desktop_top, desktop_width, desktop_height = (
+                    screen_capture._virtual_screen_region()
+                )
                 left, top, width, height = screen_capture._window_region(
                     handle,
-                    shape.logical_width,
-                    shape.logical_height,
+                    desktop_width,
+                    desktop_height,
+                    screen_left=desktop_left,
+                    screen_top=desktop_top,
                 )
 
                 last_seen = (handle, left, top, width, height)
@@ -612,14 +660,22 @@ class TestTheRealScreen(unittest.TestCase):
     def test_a_window_capture_is_smaller_than_the_whole_screen(self) -> None:
         """Otherwise the handle is being ignored and the screen returned."""
         window = self._stable_foreground_window()
-        shape = screen_capture.geometry()
+        desktop_left, desktop_top, desktop_width, desktop_height = (
+            screen_capture._virtual_screen_region()
+        )
         left, top, width, height = screen_capture._window_region(
-            window, shape.logical_width, shape.logical_height
+            window,
+            desktop_width,
+            desktop_height,
+            screen_left=desktop_left,
+            screen_top=desktop_top,
         )
 
         self.assertGreater(width, 0)
-        self.assertLessEqual(left + width, shape.logical_width)
-        self.assertLessEqual(top + height, shape.logical_height)
+        self.assertGreaterEqual(left, desktop_left)
+        self.assertGreaterEqual(top, desktop_top)
+        self.assertLessEqual(left + width, desktop_left + desktop_width)
+        self.assertLessEqual(top + height, desktop_top + desktop_height)
 
     def test_capturing_repeatedly_does_not_leak_handles(self) -> None:
         """
@@ -649,5 +705,144 @@ class TestTheRealScreen(unittest.TestCase):
         self.assertLessEqual(handles() - before, 5)
 
 
+
+class TestBoundWindowCapture(unittest.TestCase):
+    def _snapshot(self, *, foreground: bool = True):
+        from core.window_binding import WindowRect, WindowSnapshot
+
+        return WindowSnapshot(
+            hwnd=12345,
+            pid=777,
+            thread_id=888,
+            title="Untitled - Paint",
+            process_path=r"C:\Windows\System32\mspaint.exe",
+            process_start_time_100ns=123456,
+            window_rect=WindowRect(10, 10, 810, 610),
+            client_rect=WindowRect(20, 50, 800, 600),
+            dpi=96,
+            visible=True,
+            minimized=False,
+            foreground=foreground,
+        )
+
+    def _binding(self, current):
+        from core.window_binding import WindowBinder, WindowTarget
+
+        binder = WindowBinder(
+            enumerate_fn=lambda: (current["value"],),
+            snapshot_fn=lambda hwnd: current["value"],
+        )
+        binding = binder.bind(
+            WindowTarget(
+                app_id="paint",
+                display_name="Paint",
+                executable="mspaint.exe",
+                process_names=("mspaint.exe",),
+            ),
+            require_foreground=True,
+        )
+        return binder, binding
+
+    def test_bound_capture_carries_identity_and_layout_tokens(self) -> None:
+        current = {"value": self._snapshot()}
+        binder, binding = self._binding(current)
+        asked = []
+        capture = ScreenCapture(
+            grab=lambda window: (
+                asked.append(window) or busy_pixels(64, 48),
+                64,
+                48,
+            ),
+            geometry_fn=fake_geometry(64, 48),
+        ).capture_bound(
+            binding,
+            binder,
+            approved=True,
+        )
+
+        self.assertEqual(asked, [binding.hwnd])
+        self.assertEqual(capture.binding_token, binding.identity_token)
+        self.assertEqual(capture.layout_token, binding.layout_token)
+        self.assertEqual((capture.source_width, capture.source_height), (64, 48))
+        self.assertEqual(capture.frame_rect.left, binding.snapshot.window_rect.left)
+        self.assertEqual(capture.frame_rect.top, binding.snapshot.window_rect.top)
+
+    def test_stale_binding_refuses_before_pixels_are_grabbed(self) -> None:
+        from dataclasses import replace
+
+        current = {"value": self._snapshot()}
+        binder, binding = self._binding(current)
+        current["value"] = replace(
+            current["value"],
+            process_start_time_100ns=999999,
+        )
+        asked = []
+        capture = ScreenCapture(
+            grab=lambda window: (
+                asked.append(window) or busy_pixels(64, 48),
+                64,
+                48,
+            ),
+            geometry_fn=fake_geometry(64, 48),
+        )
+
+        with self.assertRaises(CaptureUnavailable):
+            capture.capture_bound(binding, binder, approved=True)
+
+        self.assertEqual(asked, [])
+
+    def test_focus_loss_after_capture_discards_frame(self) -> None:
+        from dataclasses import replace
+        from core.window_binding import WindowBinder, WindowTarget
+
+        initial = self._snapshot()
+        background = replace(initial, foreground=False)
+        calls = {"count": 0}
+
+        def current(hwnd):
+            calls["count"] += 1
+            return initial if calls["count"] < 3 else background
+
+        binder = WindowBinder(
+            enumerate_fn=lambda: (initial,),
+            snapshot_fn=current,
+        )
+        binding = binder.bind(
+            WindowTarget(
+                app_id="paint",
+                display_name="Paint",
+                executable="mspaint.exe",
+                process_names=("mspaint.exe",),
+            ),
+            require_foreground=True,
+        )
+        asked = []
+        capture = ScreenCapture(
+            grab=lambda window: (
+                asked.append(window) or busy_pixels(64, 48),
+                64,
+                48,
+            ),
+            geometry_fn=fake_geometry(64, 48),
+        )
+
+        with self.assertRaisesRegex(CaptureUnavailable, "frame discarded"):
+            capture.capture_bound(binding, binder, approved=True)
+
+        self.assertEqual(asked, [binding.hwnd])
+
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_win32_geometry_types_are_shared_across_native_modules():
+    # Regression for the live ctypes GetWindowRect pointer-type collision.
+    from ctypes import wintypes
+
+    import core.screen_capture as screen_capture_module
+    import core.window_binding as window_binding_module
+
+    assert screen_capture_module._RECT is wintypes.RECT
+    assert window_binding_module._RECT is wintypes.RECT
+    assert window_binding_module._POINT is wintypes.POINT
+    assert screen_capture_module._RECT is window_binding_module._RECT

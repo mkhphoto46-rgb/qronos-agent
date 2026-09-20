@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from core.action_audit import ActionAuditLog
 from core.actions import ActionOutcome, InvalidAction
@@ -10,6 +11,7 @@ from core.computer_executor import (
     ComputerOperation,
 )
 from core.undo_journal import UndoJournal
+from core.window_binding import WindowBindingUnavailable
 from security.gate import Verdict
 from security.permissions import (
     ActionCategory,
@@ -188,6 +190,103 @@ class ComputerExecutorTests(unittest.TestCase):
         )
         self.assertEqual(calls, [("notepad.exe",)])
 
+
+    def test_packaged_app_uses_aumid_activation_and_binds_exact_returned_pid(self) -> None:
+        executable_calls = []
+        packaged_calls = []
+        bind_calls = []
+        binding = SimpleNamespace(hwnd=9876)
+
+        class FakeBinder:
+            def bind(
+                self,
+                target,
+                *,
+                require_foreground=False,
+                expected_pid=None,
+            ):
+                bind_calls.append((target.app_id, require_foreground, expected_pid))
+                return binding
+
+            def revalidate(self, binding, **kwargs):
+                return "snapshot"
+
+        executor = ComputerExecutor(
+            audit=ActionAuditLog(path=None),
+            journal=UndoJournal(path=None),
+            evaluate_fn=evaluator_for(PermissionDecision.ALLOW),
+            launcher=lambda command: executable_calls.append(command),
+            packaged_launcher=lambda aumid: packaged_calls.append(aumid) or 4321,
+            window_binder=FakeBinder(),
+            verification_delay_seconds=0,
+        )
+
+        result = executor.execute(
+            ComputerAction(ComputerOperation.OPEN_APP, app_id="paint")
+        )
+
+        self.assertIs(result.result.outcome, ActionOutcome.SUCCEEDED)
+        self.assertEqual(executable_calls, [])
+        self.assertEqual(
+            packaged_calls,
+            ["Microsoft.Paint_8wekyb3d8bbwe!App"],
+        )
+        self.assertEqual(bind_calls, [("paint", False, 4321)])
+        self.assertIs(result.window_binding, binding)
+        self.assertIn("pid=4321", result.result.detail)
+        self.assertIn("hwnd=9876", result.result.detail)
+        self.assertIn("exact-pid window binding succeeded", result.result.detail)
+
+    def test_packaged_app_launch_fails_when_exact_returned_pid_has_no_window(self) -> None:
+        class FakeBinder:
+            def bind(
+                self,
+                target,
+                *,
+                require_foreground=False,
+                expected_pid=None,
+            ):
+                raise WindowBindingUnavailable("not ready")
+
+            def revalidate(self, binding, **kwargs):
+                return "snapshot"
+
+        executor = ComputerExecutor(
+            audit=ActionAuditLog(path=None),
+            journal=UndoJournal(path=None),
+            evaluate_fn=evaluator_for(PermissionDecision.ALLOW),
+            packaged_launcher=lambda aumid: 4321,
+            window_binder=FakeBinder(),
+            launch_binding_attempts=1,
+            launch_binding_poll_seconds=0,
+            verification_delay_seconds=0,
+        )
+
+        result = executor.execute(
+            ComputerAction(ComputerOperation.OPEN_APP, app_id="paint")
+        )
+
+        self.assertIs(result.result.outcome, ActionOutcome.FAILED)
+        self.assertIsNone(result.window_binding)
+        self.assertIn("exact process", result.result.detail)
+        self.assertIn("pid=4321", result.result.detail)
+
+    def test_packaged_app_activation_requires_a_valid_pid(self) -> None:
+        executor = ComputerExecutor(
+            audit=ActionAuditLog(path=None),
+            journal=UndoJournal(path=None),
+            evaluate_fn=evaluator_for(PermissionDecision.ALLOW),
+            packaged_launcher=lambda aumid: 0,
+            verification_delay_seconds=0,
+        )
+
+        result = executor.execute(
+            ComputerAction(ComputerOperation.OPEN_APP, app_id="paint")
+        )
+
+        self.assertIs(result.result.outcome, ActionOutcome.FAILED)
+        self.assertIn("valid process identifier", result.result.detail)
+
     def test_nonzero_immediate_exit_is_failed(self) -> None:
         executor = self.executor(
             PermissionDecision.ALLOW,
@@ -222,6 +321,68 @@ class ComputerExecutorTests(unittest.TestCase):
             result.result.detail,
         )
 
+
+    def test_window_binding_uses_exact_app_identity(self) -> None:
+        seen = []
+
+        class FakeBinder:
+            def bind(self, target, *, require_foreground=False):
+                seen.append((target, require_foreground))
+                return "binding"
+
+            def revalidate(self, binding, **kwargs):
+                return "snapshot"
+
+        executor = ComputerExecutor(
+            window_binder=FakeBinder(),
+            verification_delay_seconds=0,
+        )
+
+        result = executor.bind_app_window(
+            "paint",
+            require_foreground=True,
+        )
+
+        self.assertEqual(result, "binding")
+        target, foreground = seen[0]
+        self.assertEqual(target.app_id, "paint")
+        self.assertEqual(target.executable, "mspaint.exe")
+        self.assertIn("mspaint.exe", target.process_names)
+        self.assertTrue(foreground)
+
+    def test_window_revalidation_delegates_to_same_binder(self) -> None:
+        calls = []
+
+        class FakeBinder:
+            def bind(self, target, *, require_foreground=False):
+                return "binding"
+
+            def revalidate(self, binding, **kwargs):
+                calls.append((binding, kwargs))
+                return "snapshot"
+
+        executor = ComputerExecutor(
+            window_binder=FakeBinder(),
+            verification_delay_seconds=0,
+        )
+
+        result = executor.revalidate_window_binding(
+            "binding",
+            require_foreground=False,
+            require_same_layout=True,
+        )
+
+        self.assertEqual(result, "snapshot")
+        self.assertEqual(
+            calls,
+            [(
+                "binding",
+                {
+                    "require_foreground": False,
+                    "require_same_layout": True,
+                },
+            )],
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,15 @@ from core.model_registry import get_model
 from core.persian_text import contains_marker, normalise
 from core.task_plan import PlanStep
 from core.task_router import TaskType
+from core.screen_capture import Capture
+from core.vision_grounding import (
+    DEFAULT_MIN_CONFIDENCE,
+    GROUNDING_RESPONSE_SCHEMA,
+    GroundedTarget,
+    ground_structured_response,
+    grounding_prompt,
+    validate_grounding_capture,
+)
 from core.vision_image import ImageUnusable, cost
 from core.workers import TaskWorker, WorkerOutput
 
@@ -166,6 +175,87 @@ def with_hints(question: str, images: Sequence[object]) -> str:
         f"{question}"
     )
 
+
+
+def brain_ground_fn(
+    runtime: BrainRuntime,
+    model_name: str | None = None,
+    num_ctx: int | None = None,
+) -> Callable[[str, Capture], str]:
+    """A structured UI-target locator backed by the vision model.
+
+    This path is intentionally separate from free-form description. The model
+    is asked for schema-constrained JSON, but the returned text is still treated
+    as untrusted and is validated by :func:`ground_structured_response`.
+    """
+    profile = get_model("vision")
+    name = model_name or profile.name
+    context = num_ctx if num_ctx is not None else profile.context_tokens
+
+    def locate(target: str, capture: Capture) -> str:
+        asked = grounding_prompt(
+            target,
+            image_width=int(capture.image.width),
+            image_height=int(capture.image.height),
+        )
+
+        try:
+            return runtime.chat(
+                model_name=name,
+                messages=[
+                    BrainMessage(
+                        role=BrainMessageRole.USER,
+                        content=asked,
+                        images=(capture.image,),
+                    )
+                ],
+                think=False,
+                num_predict=384,
+                num_ctx=context,
+                keep_alive="0",
+                response_format=GROUNDING_RESPONSE_SCHEMA,
+            )
+        finally:
+            runtime.stop_model(name)
+
+    return locate
+
+
+class VisionGrounder:
+    """Locate one UI target without performing any mouse or keyboard input."""
+
+    def __init__(
+        self,
+        locate_fn: Callable[[str, Capture], str] | None = None,
+        *,
+        min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    ) -> None:
+        self.locate_fn = locate_fn
+        self.min_confidence = float(min_confidence)
+
+    def health_check(self) -> bool:
+        return self.locate_fn is not None
+
+    def locate(self, target: str, capture: Capture) -> GroundedTarget:
+        if self.locate_fn is None:
+            raise RuntimeError(NO_MODEL_MESSAGE)
+
+        # Do not spend a model call on a frame that could never produce safe
+        # coordinates. Provenance is checked before inference and again when
+        # the response is converted to a target.
+        validate_grounding_capture(capture)
+        raw = self.locate_fn(target, capture)
+
+        return ground_structured_response(
+            capture,
+            raw,
+            min_confidence=self.min_confidence,
+        )
+
+
+def build_vision_grounder(runtime: BrainRuntime) -> VisionGrounder:
+    """Production structured grounder on the same runtime as VisionWorker."""
+    return VisionGrounder(locate_fn=brain_ground_fn(runtime))
 
 def brain_describe_fn(
     runtime: BrainRuntime,
