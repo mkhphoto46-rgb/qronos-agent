@@ -49,7 +49,7 @@ def isolate_qronos_conversation_and_settings_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Keep test turns out of the real user's conversation history and settings.
+    Keep test turns out of the real user's history, settings and queue.
 
     ``QronosRuntime()`` opens the canonical conversation history and settings
     at their default locations under the user's profile. Any test that runs a
@@ -66,6 +66,28 @@ def isolate_qronos_conversation_and_settings_state(
     monkeypatch.setenv(
         "QRONOS_SETTINGS_PATH",
         str(tmp_path / "settings.json"),
+    )
+
+    # The Smart Queue's durable record lives under the user's profile too.
+    monkeypatch.setenv(
+        "QRONOS_QUEUE_STATE_PATH",
+        str(tmp_path / "queue_state.json"),
+    )
+
+    # Anything that resolves storage locations — the artifact registry and
+    # user memory do so even when handed explicit paths — would otherwise
+    # read the user's own locator file and create every folder it names.
+    import core.storage_locations as storage_locations
+
+    monkeypatch.setattr(
+        storage_locations,
+        "_local_app_data",
+        lambda: tmp_path / "LocalAppData",
+    )
+    monkeypatch.setattr(
+        storage_locations,
+        "_documents",
+        lambda: tmp_path / "Documents",
     )
 
 

@@ -121,10 +121,15 @@ class JsonStore:
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
 
         try:
-            temporary.write_text(
-                json.dumps(document, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            # Flushed to the disk before the rename, so a power cut cannot
+            # leave the rename recorded and the contents not.
+            with open(temporary, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(document, ensure_ascii=False, indent=2)
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+
             os.replace(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)

@@ -299,6 +299,30 @@ class ConversationHistory:
             for row in rows
         )
 
+    def has_assistant_reply(
+        self,
+        request_id: str,
+    ) -> bool:
+        """Whether an answer to this request was already recorded."""
+        cleaned = request_id.strip()
+
+        if not cleaned:
+            return False
+
+        with self._lock:
+            with self._connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT 1
+                    FROM conversation_messages
+                    WHERE request_id = ? AND role = 'assistant'
+                    LIMIT 1
+                    """,
+                    (cleaned,),
+                ).fetchone()
+
+        return row is not None
+
     def brain_context(
         self,
         *,

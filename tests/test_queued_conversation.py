@@ -93,9 +93,11 @@ class FakeBrain:
         self.gate = gate
         self.entered = threading.Event()
         self.calls: list[tuple[str, str, tuple]] = []
+        self.priorities: list[object] = []
         self.released = 0
 
-    def execute_plan(self, plan, conversation_messages=None):
+    def execute_plan(self, plan, conversation_messages=None, priority=None):
+        self.priorities.append(priority)
         step = plan.steps[0]
         self.calls.append(
             (
@@ -204,6 +206,9 @@ class Harness:
             foreground_busy=lambda: self.runtime.is_busy,
         )
         self.runtime._scheduler = self.scheduler
+        # As ensure_scheduler does: open the durable record and put back
+        # whatever an earlier run left in it.
+        self.runtime._recover_queue(self.scheduler)
 
     # ------------------------------------------------------------ actions
 
@@ -861,7 +866,7 @@ def test_a_summary_only_submission_is_real_work_too(harness: Harness) -> None:
 # ------------------------------------------------------------- shutdown
 
 
-def test_closing_reports_unanswered_requests_as_interrupted(
+def test_closing_keeps_saved_waiting_requests_for_the_next_start(
     harness: Harness,
 ) -> None:
     harness.machine.level = LoadLevel.BUSY
@@ -870,9 +875,35 @@ def test_closing_reports_unanswered_requests_as_interrupted(
 
     harness.runtime.close()
 
-    interrupted = harness.updates("req-closing")[-1]
+    # Saved, so it comes back on the next start; nothing is said to the
+    # conversation as if it were lost.
+    assert harness.phases("req-closing") == ["queued"]
+    assert not work.cancelled
+    record = harness.runtime._queue_journal.get(task_id)
+    assert record.state.value == "queued"
+
+
+def test_closing_without_durable_storage_says_the_request_is_lost(
+    harness: Harness,
+    monkeypatch,
+) -> None:
+    from core.queue_journal import StorageProblem, StorageStatus
+
+    harness.machine.level = LoadLevel.BUSY
+    task_id = harness.submit("list or tuple?", "req-lost")
+    work = harness.scheduler.work_for(task_id)
+    monkeypatch.setattr(
+        harness.runtime._queue_journal,
+        "status",
+        lambda: StorageStatus(False, StorageProblem.UNWRITABLE, "disk full"),
+    )
+
+    harness.runtime.close()
+
+    interrupted = harness.updates("req-lost")[-1]
     assert interrupted["phase"] == "interrupted"
-    assert "not run again automatically" in interrupted["detail"]
+    assert interrupted["resumable"] is False
+    assert "will not come back" in interrupted["detail"]
     # Any model call still under way can no longer attach its answer.
     assert work.cancelled
 
