@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from core.artifact_registry import Artifact, ArtifactRegistry
+from core.artifact_registry import (
+    Artifact,
+    ArtifactRegistry,
+    is_link_or_reparse_point,
+    same_path,
+)
 
 
 ArtifactOrigin = Literal[
@@ -54,8 +59,18 @@ class ArtifactProducerRegistry:
     ) -> Artifact:
         if origin not in _ALLOWED_ORIGINS:
             raise ValueError(f"Unsupported Qronos artifact origin: {origin}")
+        # Registration is what later lets the Library move or recycle a file,
+        # so it is limited to files inside the Qronos artifact root. Without
+        # this, any caller could adopt an arbitrary user file into the Library.
+        candidate = Path(path).expanduser()
+        if is_link_or_reparse_point(candidate):
+            raise PermissionError("Links and reparse points cannot be registered as artifacts.")
+        resolved = candidate.resolve(strict=True)
+        root = Path(self.registry.artifact_root).resolve(strict=True)
+        if not resolved.is_relative_to(root) or same_path(resolved, root):
+            raise PermissionError("Only files inside the Qronos artifact root can be registered.")
         return self.registry.register_file(
-            path,
+            resolved,
             origin=origin,
             source_conversation_id=provenance.conversation_id,
             source_message_id=provenance.message_id,

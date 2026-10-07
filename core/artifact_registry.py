@@ -2,15 +2,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import ctypes
-from ctypes import wintypes
 import hashlib
 import json
 import mimetypes
 import os
 from pathlib import Path
-import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 import uuid
@@ -19,6 +17,18 @@ import webbrowser
 from core.storage_locations import load_storage_locations
 
 HASH_INLINE_MAX_BYTES = 128 * 1024 * 1024
+
+# Extensions Windows executes, or hands to a script host, when a file is opened
+# through its shell association. The Library never opens one and never lets a
+# rename produce one: "open" on such an artifact would be arbitrary code
+# execution, which is hard-denied by policy.
+EXECUTABLE_EXTENSIONS = frozenset({
+    "exe","com","bat","cmd","ps1","psm1","psd1","ps1xml","psc1","vbs","vbe","vb","js","jse",
+    "wsf","wsh","ws","wsc","msi","msp","mst","scr","pif","lnk","url","hta","cpl","jar",
+    "reg","dll","sys","drv","ocx","appx","appxbundle","msix","msixbundle","appref-ms",
+    "application","gadget","inf","scf","py","pyw","pyz","pyc","sct","msc","chm",
+    "settingcontent-ms","library-ms","search-ms","diagcab","xbap","iso","img","vhd","vhdx",
+})
 
 _IMAGE = {"png","jpg","jpeg","webp","gif","bmp","tif","tiff","svg"}
 _VIDEO = {"mp4","mkv","mov","avi","webm","m4v"}
@@ -60,6 +70,57 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def is_executable_name(name: str) -> bool:
+    """True when the shell would run, rather than display, a file of this name."""
+    cleaned = name.strip().rstrip(". ").lower()
+    return any(cleaned.endswith("." + ext) for ext in EXECUTABLE_EXTENSIONS)
+
+
+def is_link_or_reparse_point(path: str | Path) -> bool:
+    """True for symlinks, junctions and any other Windows reparse point."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def same_path(a: str | Path, b: str | Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+
+
+def file_identity(path: Path) -> dict[str, object]:
+    """
+    What identifies the exact file Qronos registered.
+
+    The volume/file index survives renames and in-place edits; the content hash
+    survives copies and cross-volume moves. A file at the recorded path that
+    matches neither is a different file, whatever its name.
+    """
+    st = os.stat(path)
+    size = int(st.st_size)
+    return {
+        "size": size,
+        "sha256": _sha256(path) if size <= HASH_INLINE_MAX_BYTES else "",
+        "dev": int(st.st_dev),
+        "ino": int(st.st_ino),
+    }
+
+
+def identity_matches(recorded: dict[str, object], path: Path, *, content_hash: str = "") -> bool:
+    """True only when the file at ``path`` is provably the recorded artifact."""
+    st = os.stat(path)
+    ino = int(recorded.get("ino") or 0)
+    if ino and ino == int(st.st_ino) and int(recorded.get("dev") or 0) == int(st.st_dev):
+        return True
+    expected = str(recorded.get("sha256") or content_hash or "")
+    if expected and st.st_size <= HASH_INLINE_MAX_BYTES:
+        return _sha256(path) == expected
+    return False
+
+
 @dataclass(frozen=True)
 class Artifact:
     id: str
@@ -84,6 +145,15 @@ class Artifact:
     thumbnail_path: str
     last_verified_at: float
     link_error_reason: str
+    # Not public: the registry's private record of which file it registered.
+    file_identity: str = ""
+
+    def identity(self) -> dict[str, object]:
+        try:
+            parsed = json.loads(self.file_identity) if self.file_identity else {}
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def public(self) -> dict[str, object]:
         return {
@@ -118,7 +188,9 @@ class ArtifactRegistry:
         path: str | Path | None = None,
         artifact_root: str | Path | None = None,
     ) -> None:
-        loc = load_storage_locations(create=True)
+        # Explicit locations (tests, embedded callers) must not touch the
+        # user's real storage locator.
+        loc = load_storage_locations(create=True) if path is None or artifact_root is None else None
         self.path = Path(path) if path is not None else Path(loc.library_db_root) / "library.sqlite3"
         self.artifact_root = Path(artifact_root) if artifact_root is not None else Path(loc.artifact_root)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,8 +236,23 @@ class ArtifactRegistry:
                     link_error_reason TEXT NOT NULL DEFAULT ''
                 )
             """)
+            columns = {str(row[1]) for row in c.execute("PRAGMA table_info(artifacts)").fetchall()}
+            if "file_identity" not in columns:
+                c.execute("ALTER TABLE artifacts ADD COLUMN file_identity TEXT NOT NULL DEFAULT ''")
             c.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_hash ON artifacts(content_hash)")
+            # Approvals for Library mutations must survive between the separate
+            # prepare and commit CLI processes. Only a hash of each token is
+            # stored, and each row is consumed exactly once.
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS library_pending_actions (
+                    token_hash TEXT PRIMARY KEY,
+                    operation TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                )
+            """)
 
     def _ensure_welcome_artifact(self) -> None:
         with self._connection() as c:
@@ -192,12 +279,17 @@ class ArtifactRegistry:
         source_request_id: str = "",
         unread: bool = True,
     ) -> Artifact:
-        p = Path(path).expanduser().resolve()
+        raw = Path(path).expanduser()
+        if is_link_or_reparse_point(raw):
+            raise PermissionError("Links and reparse points cannot be registered as artifacts.")
+        p = raw.resolve()
         if not p.is_file():
             raise FileNotFoundError(str(p))
         category, ext, icon, mime = classify(str(p))
-        stat = p.stat()
-        content_hash = _sha256(p) if stat.st_size <= HASH_INLINE_MAX_BYTES else ""
+        st = p.stat()
+        identity = file_identity(p)
+        content_hash = str(identity["sha256"])
+        identity_json = json.dumps(identity, sort_keys=True)
         now = time.time()
         artifact_id = f"art-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
         target_id = artifact_id
@@ -215,6 +307,7 @@ class ArtifactRegistry:
                     UPDATE artifacts
                     SET name=?, category=?, extension=?, icon_key=?, mime_type=?,
                         size_bytes=?, modified_at=?, origin=?, content_hash=?,
+                        file_identity=?,
                         read_state=?,
                         source_conversation_id=?,
                         source_message_id=?,
@@ -230,10 +323,11 @@ class ArtifactRegistry:
                         ext,
                         icon,
                         mime,
-                        int(stat.st_size),
-                        float(stat.st_mtime or now),
+                        int(st.st_size),
+                        float(st.st_mtime or now),
                         origin,
                         content_hash,
+                        identity_json,
                         "NEW" if unread else "SEEN",
                         source_conversation_id,
                         source_message_id,
@@ -248,8 +342,9 @@ class ArtifactRegistry:
                     INSERT INTO artifacts (
                         id,name,category,extension,icon_key,mime_type,path_or_url,size_bytes,
                         created_at,modified_at,origin,content_hash,read_state,
-                        source_conversation_id,source_message_id,source_request_id,last_verified_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        source_conversation_id,source_message_id,source_request_id,last_verified_at,
+                        file_identity
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         artifact_id,
@@ -259,9 +354,9 @@ class ArtifactRegistry:
                         icon,
                         mime,
                         str(p),
-                        int(stat.st_size),
-                        float(stat.st_ctime or now),
-                        float(stat.st_mtime or now),
+                        int(st.st_size),
+                        float(st.st_ctime or now),
+                        float(st.st_mtime or now),
                         origin,
                         content_hash,
                         "NEW" if unread else "SEEN",
@@ -269,6 +364,7 @@ class ArtifactRegistry:
                         source_message_id,
                         source_request_id,
                         now,
+                        identity_json,
                     ),
                 )
 
@@ -329,25 +425,60 @@ class ArtifactRegistry:
         with self._connection() as c:
             c.executemany("UPDATE artifacts SET read_state='SEEN' WHERE id=?",[(x,) for x in clean])
 
-    def rename(self, artifact_id: str, new_name: str) -> Artifact:
-        item=self.get(artifact_id); cleaned=new_name.strip()
-        if not cleaned: raise ValueError("Name must not be empty.")
-        if item.category == "link":
-            with self._connection() as c: c.execute("UPDATE artifacts SET name=?, modified_at=? WHERE id=?",(cleaned,time.time(),artifact_id))
-            return self.get(artifact_id)
-        src=Path(item.path_or_url); dest=src.with_name(cleaned)
-        if dest.exists(): raise FileExistsError(str(dest))
-        src.rename(dest)
-        category,ext,icon,mime=classify(str(dest))
+    # Metadata-only mutation. The filesystem side of every Library change lives
+    # in core.library_executor, which calls these only after the file operation
+    # succeeded and was verified. Each update is conditional on the path the
+    # executor verified, so a concurrent change is detected, not overwritten.
+
+    def relocate(self, artifact_id: str, new_path: Path, *, expected_path: str) -> Artifact:
+        p=Path(new_path); category,ext,icon,mime=classify(str(p)); st=p.stat(); identity=file_identity(p); now=time.time()
         with self._connection() as c:
-            c.execute("UPDATE artifacts SET name=?, path_or_url=?, category=?, extension=?, icon_key=?, mime_type=?, modified_at=? WHERE id=?",(dest.name,str(dest),category,ext,icon,mime,time.time(),artifact_id))
+            changed=c.execute(
+                "UPDATE artifacts SET path_or_url=?, name=?, category=?, extension=?, icon_key=?, mime_type=?, size_bytes=?, modified_at=?, content_hash=?, file_identity=?, availability_status='AVAILABLE', link_error_reason='', last_verified_at=? WHERE id=? AND path_or_url=?",
+                (str(p),p.name,category,ext,icon,mime,int(st.st_size),now,str(identity["sha256"]),json.dumps(identity,sort_keys=True),now,artifact_id,expected_path),
+            ).rowcount
+        if changed != 1: raise RuntimeError("Artifact metadata changed concurrently; nothing was updated.")
+        self._recompute_duplicates(); return self.get(artifact_id)
+
+    def rename_link(self, artifact_id: str, new_name: str, *, expected_path: str) -> Artifact:
+        cleaned=new_name.strip()
+        if not cleaned: raise ValueError("Name must not be empty.")
+        with self._connection() as c:
+            changed=c.execute("UPDATE artifacts SET name=?, modified_at=? WHERE id=? AND category='link' AND path_or_url=?",(cleaned,time.time(),artifact_id,expected_path)).rowcount
+        if changed != 1: raise RuntimeError("Artifact metadata changed concurrently; nothing was updated.")
         return self.get(artifact_id)
+
+    def remove(self, artifact_id: str, *, expected_path: str) -> None:
+        with self._connection() as c:
+            changed=c.execute("DELETE FROM artifacts WHERE id=? AND path_or_url=?",(artifact_id,expected_path)).rowcount
+        if changed != 1: raise RuntimeError("Artifact metadata changed concurrently; nothing was removed.")
+        self._recompute_duplicates()
+
+    def put_pending_action(self, token_hash: str, operation: str, payload: dict[str, object], *, now: float, expires_at: float) -> None:
+        with self._connection() as c:
+            c.execute("DELETE FROM library_pending_actions WHERE expires_at <= ?",(now,))
+            c.execute("INSERT INTO library_pending_actions (token_hash,operation,payload,created_at,expires_at) VALUES (?,?,?,?,?)",(token_hash,operation,json.dumps(payload,ensure_ascii=False,sort_keys=True),now,expires_at))
+
+    def get_pending_action(self, token_hash: str) -> tuple[str, dict[str, object], float] | None:
+        with self._connection() as c:
+            row=c.execute("SELECT operation,payload,expires_at FROM library_pending_actions WHERE token_hash=?",(token_hash,)).fetchone()
+        if row is None: return None
+        payload=json.loads(row["payload"])
+        return str(row["operation"]),(payload if isinstance(payload,dict) else {}),float(row["expires_at"])
+
+    def consume_pending_action(self, token_hash: str) -> bool:
+        """Remove one pending approval. True only for the one caller that removed it."""
+        with self._connection() as c:
+            return c.execute("DELETE FROM library_pending_actions WHERE token_hash=?",(token_hash,)).rowcount == 1
 
     def open(self, artifact_id: str) -> None:
         item=self.get(artifact_id)
         if item.category == "link": webbrowser.open(item.path_or_url); return
         path=Path(item.path_or_url)
+        if is_link_or_reparse_point(path): raise PermissionError("Library does not open links or reparse points.")
         if not path.is_file(): raise FileNotFoundError(str(path))
+        if not same_path(path.resolve(strict=True),path): raise PermissionError("Artifact path now resolves somewhere else; refusing to open it.")
+        if is_executable_name(path.name): raise PermissionError("Library does not open executable or script files.")
         os.startfile(str(path))
 
     def open_folder(self, artifact_id: str | None = None) -> None:
@@ -361,61 +492,3 @@ class ArtifactRegistry:
                 subprocess.Popen(["explorer.exe", str(path.parent)])
             return
         subprocess.Popen(["explorer.exe", str(self.artifact_root)])
-
-    def copy(self, ids: list[str], destination: str) -> list[dict[str, object]]:
-        dest=Path(destination); dest.mkdir(parents=True,exist_ok=True); results=[]
-        for artifact_id in ids:
-            try:
-                item=self.get(artifact_id)
-                if item.category == "link": raise ValueError("Links cannot be copied as files.")
-                src=Path(item.path_or_url); target=dest/src.name
-                if target.exists():
-                    stem,suffix=target.stem,target.suffix; i=2
-                    while target.exists(): target=dest/f"{stem} ({i}){suffix}"; i+=1
-                shutil.copy2(src,target)
-                created=self.register_file(target,origin="Copied by Qronos",source_conversation_id=item.source_conversation_id,source_message_id=item.source_message_id,source_request_id=item.source_request_id)
-                results.append({"id":artifact_id,"ok":True,"newArtifactId":created.id})
-            except Exception as exc: results.append({"id":artifact_id,"ok":False,"error":str(exc)})
-        return results
-
-    def move(self, ids: list[str], destination: str) -> list[dict[str, object]]:
-        dest=Path(destination); dest.mkdir(parents=True,exist_ok=True); results=[]
-        for artifact_id in ids:
-            try:
-                item=self.get(artifact_id)
-                if item.category == "link": raise ValueError("Links cannot be moved as files.")
-                src=Path(item.path_or_url); target=dest/src.name
-                if target.exists(): raise FileExistsError(str(target))
-                shutil.move(str(src),str(target))
-                category,ext,icon,mime=classify(str(target)); stat=target.stat()
-                with self._connection() as c:
-                    c.execute("UPDATE artifacts SET path_or_url=?, name=?, category=?, extension=?, icon_key=?, mime_type=?, size_bytes=?, modified_at=?, availability_status='AVAILABLE', link_error_reason='' WHERE id=?",(str(target),target.name,category,ext,icon,mime,int(stat.st_size),time.time(),artifact_id))
-                results.append({"id":artifact_id,"ok":True})
-            except Exception as exc: results.append({"id":artifact_id,"ok":False,"error":str(exc)})
-        self._recompute_duplicates(); return results
-
-    def delete(self, ids: list[str], *, forever: bool) -> list[dict[str, object]]:
-        results=[]
-        for artifact_id in ids:
-            try:
-                item=self.get(artifact_id)
-                if item.category != "link":
-                    path=Path(item.path_or_url)
-                    if path.exists():
-                        if forever: path.unlink()
-                        else: _send_to_recycle_bin(path)
-                with self._connection() as c: c.execute("DELETE FROM artifacts WHERE id=?",(artifact_id,))
-                results.append({"id":artifact_id,"ok":True})
-            except Exception as exc: results.append({"id":artifact_id,"ok":False,"error":str(exc)})
-        self._recompute_duplicates(); return results
-
-
-def _send_to_recycle_bin(path: Path) -> None:
-    if os.name != "nt":
-        raise RuntimeError("Recycle Bin is supported on Windows only.")
-    FO_DELETE=3; FOF_SILENT=0x0004; FOF_NOCONFIRMATION=0x0010; FOF_ALLOWUNDO=0x0040; FOF_NOERRORUI=0x0400
-    class SHFILEOPSTRUCTW(ctypes.Structure):
-        _fields_=[("hwnd",wintypes.HWND),("wFunc",wintypes.UINT),("pFrom",wintypes.LPCWSTR),("pTo",wintypes.LPCWSTR),("fFlags",wintypes.WORD),("fAnyOperationsAborted",wintypes.BOOL),("hNameMappings",ctypes.c_void_p),("lpszProgressTitle",wintypes.LPCWSTR)]
-    op=SHFILEOPSTRUCTW(); op.wFunc=FO_DELETE; op.pFrom=str(path)+"\0\0"; op.fFlags=FOF_SILENT|FOF_NOCONFIRMATION|FOF_ALLOWUNDO|FOF_NOERRORUI
-    result=ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
-    if result != 0 or op.fAnyOperationsAborted: raise OSError(f"Recycle Bin operation failed: {result}")

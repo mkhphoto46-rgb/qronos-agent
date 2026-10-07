@@ -21,9 +21,15 @@ export async function refreshLibrary(){ if(inFlight)return; inFlight=true; try{ 
 export async function markLibrarySeen(ids:string[]){ if(!ids.length)return; await command("mark_seen",{ids}); await refreshLibrary(); }
 export async function libraryOpen(id:string){ await command("open",{id}); }
 export async function libraryOpenFolder(id?:string){ await command("open_folder",id?{id}:{}); }
-export async function libraryRename(id:string,name:string){ await command("rename",{id,name}); await refreshLibrary(); }
-export async function libraryDelete(ids:string[],forever:boolean){ const result=await command<{ok:boolean;results:{id:string;ok:boolean;error?:string}[]}>(forever?"delete_forever":"delete",{ids}); await refreshLibrary(); return result.results||[]; }
 export async function libraryPickFolder(){ const result=await command<{ok:boolean;path:string}>("pick_folder"); return result.path||""; }
-export async function libraryCopy(ids:string[],destination:string){ const result=await command<{ok:boolean;results:{id:string;ok:boolean;error?:string}[]}>("copy",{ids,destination}); await refreshLibrary(); return result.results||[]; }
-export async function libraryMove(ids:string[],destination:string){ const result=await command<{ok:boolean;results:{id:string;ok:boolean;error?:string}[]}>("move",{ids,destination}); await refreshLibrary(); return result.results||[]; }
+// File mutations are two-phase. The backend validates one exact operation and
+// returns a single-use approval; commit runs only what that approval covers.
+// Permanent deletion is hard-denied by the backend and has no client call.
+export type LibraryMutation = "rename" | "copy" | "move" | "delete";
+export type LibraryApproval = { token:string; operation:LibraryMutation; decision:string; confirmation:"none"|"click"|"typed"; typedPhrase:string; expiresAt:number; destination:string; newName:string; targets:{id:string;name:string;pathOrUrl:string}[] };
+export type LibraryItemResult = { id:string; ok:boolean; outcome:string; error?:string; newArtifactId?:string };
+export type LibraryCommitResult = { results:LibraryItemResult[]; succeeded:number; failed:number; refused:number; complete:boolean };
+export async function libraryPrepare(action:LibraryMutation,ids:string[],extra:{destination?:string;name?:string}={}){ const result=await command<{ok:boolean;approval:LibraryApproval}>("prepare",{action,ids,...extra}); return result.approval; }
+export async function libraryCommit(approval:LibraryApproval,typedConfirmation=""){ try{ return await command<LibraryCommitResult&{ok:boolean}>("commit",{action:approval.operation,token:approval.token,typedConfirmation}); } finally { await refreshLibrary(); } }
+export async function libraryCancel(approval:LibraryApproval){ try{ await command("cancel",{token:approval.token}); }catch{ /* an expired approval is already void */ } }
 export function useLibraryStore(){ const value=useSyncExternalStore(subscribe,getSnapshot,getSnapshot); useEffect(()=>{ if(value.loading)void refreshLibrary(); },[value.loading]); return {...value, unreadCount:value.artifacts.filter((a)=>a.readState==="NEW").length, duplicateCount:value.artifacts.filter((a)=>a.duplicateState==="DUPLICATE").length, linkErrorCount:value.artifacts.filter((a)=>a.availabilityStatus==="LINK_ERROR").length}; }

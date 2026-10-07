@@ -37,6 +37,7 @@ EXECUTOR_MODULES: tuple[str, ...] = (
     "core.file_executor",
     "core.computer_executor",
     "core.screen_capture",
+    "core.library_executor",
 )
 
 # The one sanctioned route to performing an action.
@@ -74,9 +75,10 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "does not send input, activate applications or change windows."
     ),
     "core.artifact_registry": (
-        "Its shutil/subprocess/ctypes use serves direct user-controlled Library "
-        "operations reached through the Tauri library_command control plane, "
-        "not model/runtime action execution."
+        "Uses subprocess only to show an artifact or the Library folder in "
+        "Explorer on a direct Library UI request. It mutates no files: every "
+        "Library rename/copy/move/delete goes through core.library_executor, "
+        "which reaches the gate."
     ),
     "core.memory_runtime": (
         "Starts, supervises, and stops only Qronos's dedicated local CPU-only "
