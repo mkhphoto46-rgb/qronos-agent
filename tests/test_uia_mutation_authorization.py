@@ -319,7 +319,10 @@ public static class QronosBoundWindowReader {
     encoded = base64.b64encode(script.encode("utf-16-le")).decode()
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-        capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW,
+        # Cold PowerShell/Add-Type startup can exceed 10 seconds on a busy
+        # Windows CI runner. This budget belongs only to this synthetic test;
+        # native action deadlines remain unchanged.
+        capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ("synthetic-mutation-reached" if accepted else "blocked")
@@ -330,6 +333,6 @@ def test_native_window_reader_declarations_compile_without_querying_windows():
     encoded = base64.b64encode(native._WINDOW_STATE_READER_SCRIPT.encode("utf-16-le")).decode()
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-        capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW,
+        capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
