@@ -1,5 +1,6 @@
 from unittest.mock import patch
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,15 @@ def test_legacy_web_transport_refuses_before_network_io():
 def test_ungrounded_paint_input_is_disabled():
     with pytest.raises(RuntimeError, match="grounding"):
         _default_gui_action(KNOWN_APPS["paint"], ComputerOperation.DRAW_BASIC_HOUSE)
+
+
+def test_webview_has_no_ungated_native_opener_permission():
+    root = Path(__file__).resolve().parent.parent
+    for path in (root / "desktop/src-tauri/capabilities").glob("*.json"):
+        capability = json.loads(path.read_text(encoding="utf-8"))
+        for permission in capability.get("permissions", []):
+            identifier = permission if isinstance(permission, str) else permission["identifier"]
+            assert not identifier.startswith("opener:"), path.name
 
 
 def test_product_network_imports_require_an_explicit_reviewed_exception():
