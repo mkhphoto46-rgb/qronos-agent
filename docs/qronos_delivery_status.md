@@ -46,12 +46,18 @@ uses concrete verification and release gates instead.
   changes are serialised by an operating-system lock on a persistent lock file:
   a waiting process gives up after a bounded time with a "busy" result, an
   owner that exits or is killed releases the lock, and an active owner is never
-  displaced. Real concurrent Windows processes exercise this behaviour.
+  displaced. Real concurrent Windows processes exercise this behaviour. Older
+  Qronos builds used a different locking protocol, so older and newer versions
+  running together do not share a guaranteed lock: close every older Qronos
+  instance before upgrading or changing storage locations.
 - A new GPU model load is deferred when it would not fit the video memory that
   is free now. The check uses the model's real footprint where known (its
   observed resident size, otherwise its installed size), never less than the
   configured estimate. If that capacity cannot be confirmed, a cold GPU load is
-  deferred with an explanation: no request is sent and nothing is unloaded.
+  deferred with an explanation. The refusal can follow the usual slot
+  preparation, which unloads Qronos's other configured models to make room; no
+  inference request is sent, and models outside Qronos's configuration are
+  left untouched.
   Already-resident (warm) reuse, systems without GPU telemetry and legacy
   integrations without a size reader keep their previous behaviour. A model
   that can never fit the card entirely keeps the earlier partial-offload check,
@@ -88,34 +94,45 @@ provisioned from the official openWakeWord v0.5.1 release that the pinned
 `openwakeword` 0.6.0 package declares. They passed interface and shape checks
 with synthetic audio only. The custom Qronos wake head
 (`models/wake_word/qronos.onnx` and its external data) is still absent, so the
-wake word cannot work yet. Installed builds need their assets placed
-separately; the installer contains no model weights, speech binaries or
-private data.
+wake word cannot work yet. A filename-only search of the development model
+drive found no copy, so its source must come from the user. Installed builds
+need their assets placed separately; the installer contains no model weights,
+speech binaries or private data.
+
+Pointed at the development asset root, the frozen backend's read-only setup
+diagnostics confirmed that the exact configured Fast, Heavy and Vision model
+tags are installed and that the speech-recognition, speech-synthesis and
+openWakeWord feature assets are present. They also report what is missing:
+the custom wake head and its data, and the optional persistent recognizer
+executable (`whisper-server.exe`). Presence does not verify quality or live
+behaviour.
 
 ## Evidence and its limits
 
 The combined Windows development suite for this checkpoint's source passed
 **3,749 tests**, with **7 skips** and **1,198 passing subtests**. 42 frontend
 behaviour tests, strict TypeScript and the Vite production build passed. 25
-Rust tests passed; one frozen-bundle transport test is ignored by default and
-runs only against an explicitly supplied trusted bundle. Debug and release
-checks of all Rust targets and 33 native, gate and approval contract tests
-(46 subtests) passed.
+Rust unit tests passed; the frozen-bundle transport test, ignored by default,
+is covered below. Debug and release checks of all Rust targets and 33 native,
+gate and approval contract tests (46 subtests) passed.
 
-The previous review build's actual frozen backend passed isolated settings,
-permissions, Library, memory, setup diagnostics and bridge
-startup/ping/shutdown checks outside the source checkout, and its NSIS
-installer built locally. This checkpoint changes that source, so it needs a
-fresh frozen runtime, smoke test and installer build; that result is recorded
-separately and is not implied by this document. GitHub built the preceding
-combined desktop on Windows and Linux. After correcting the CI-discovered
-file identity and fixture issues, final checks were blocked before runner
-allocation by the GitHub account's billing/spending restriction. Final Linux
-source validation remains outstanding.
+A fresh frozen runtime was built from this checkpoint's source and its
+complete runtime manifest verified, including again after the installer was
+built. The frozen backend passed isolated settings, permissions, Library and
+memory checks and bridge startup/ping/shutdown outside the source checkout.
+The smoke profile deliberately contains no models or voice assets, so it
+reports them as missing; that says nothing about a provisioned machine. The
+normally ignored frozen private-transport test passed once against this
+bundle. The NSIS installer built locally and is unsigned. GitHub built the
+preceding combined desktop on Windows and Linux. After correcting the
+CI-discovered file identity and fixture issues, final checks were blocked
+before runner allocation by the GitHub account's billing/spending restriction.
+Final Linux source validation remains outstanding.
 
-These checks use temporary state and fake native action boundaries. They do
-not establish microphone quality, wake-word accuracy, model performance, native
-GUI behavior or acceptance on a clean Windows machine. Browser layout previews
+These checks use temporary state and fake native action boundaries. Synthetic
+model latencies were measured as above, but sustained and full model
+performance, warm Heavy latency, microphone quality, wake-word accuracy, native
+GUI behavior and acceptance on a clean Windows machine are not established. Browser layout previews
 are not native GUI acceptance. The installer is unsigned and has not been
 approved for public release. Source review chunks remain open as pull
 requests rather than merged release code.
@@ -126,7 +143,8 @@ requests rather than merged release code.
    and Persian speech live. STT/TTS asset presence must be followed by live
    testing. The persistent recognizer server is optional and requires its
    separate executable. Place the required assets for installed builds.
-2. Measure cold/warm model latency (including warm Heavy), memory/VRAM pressure,
+2. Beyond the single synthetic runs, measure sustained cold/warm model latency
+   (including the unmeasured warm Heavy latency), memory/VRAM pressure,
    interruption, recovery and Fast/Heavy switching on the target hardware. Test
    resource protection while the user is working in other applications,
    including partial offload, growth of other applications' memory use and
@@ -136,7 +154,9 @@ requests rather than merged release code.
    real applications and a disposable test profile.
 4. Install and uninstall on a clean Windows machine without development Python
    or Node. Check user-data persistence, errors for missing assets and upgrade
-   behavior. Review redistribution licenses for every shipped binary and model.
+   behavior, with every older Qronos instance closed first because the storage
+   lock protocol changed. Review redistribution licenses for every shipped
+   binary and model.
 5. Resolve the GitHub billing/spending restriction and run current-head Windows
    and Linux checks. Review and merge the focused pull requests in dependency
    order after those checks pass. Establish installer signing and an

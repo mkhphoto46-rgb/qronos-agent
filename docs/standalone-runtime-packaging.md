@@ -29,7 +29,9 @@ Successful smoke output has `"ok": true` and reports bridge
 startup/ping/shutdown as passed. The smoke test does not open a microphone,
 camera or application, and does not load a model. It isolates settings,
 history, permissions, storage and the user profile from the developer's data.
-The desktop's bounded service transport, and an optional test that exercises
+That isolated profile deliberately has no models or voice assets, so the smoke
+output lists them as missing; this is expected and does not describe a
+provisioned machine. The desktop's bounded service transport, and an optional test that exercises
 a trusted frozen bundle through it, are described in
 `bounded-desktop-service-ipc.md`.
 
@@ -56,6 +58,11 @@ when that location overlaps the program checkout or another protected path,
 the validated default moves to `Documents/Qronos Files` and reports the change.
 Existing files are not migrated automatically.
 
+Storage-location changes are serialised with an operating-system lock that
+older Qronos builds do not use. Older and newer versions running at the same
+time therefore do not share a guaranteed lock: close every older Qronos
+instance before installing this build or changing storage locations.
+
 Approved native voice binaries and local models are provisioned separately
 under `RuntimeAssets` in that local data directory, preserving the existing
 `runtime/` and `models/` subdirectories. Expand **Local asset folder** in the
@@ -69,7 +76,9 @@ To inspect missing assets, run the installed backend's `doctor` service.
 bounded read-only request. It never starts Ollama, pulls or loads models.
 Asset presence alone does not demonstrate model quality or hardware support.
 At run time, a new GPU model load is deferred when the free video memory
-cannot be confirmed to fit it.
+cannot be confirmed to fit it. Qronos may already have unloaded its other
+configured models while preparing the slot; no inference request is sent and
+models outside Qronos's configuration are left untouched.
 
 The desktop's local setup report lists each missing asset and configured model
 role, with a read-only refresh. Wake-word provisioning includes the Qronos
