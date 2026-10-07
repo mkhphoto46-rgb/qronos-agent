@@ -84,6 +84,46 @@ fn emit_runtime_event(app: &AppHandle, event: RuntimeEvent) {
     let _ = app.emit(RUNTIME_EVENT_NAME, event);
 }
 
+fn setup_snapshot_output(mut command: std::process::Command) -> Result<serde_json::Value, String> {
+    command.arg("--models").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().map_err(|_| "Could not inspect local Qronos setup.".to_string())?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Local setup inspection timed out or became unavailable.".to_string());
+            }
+        }
+    }
+    let output = child.wait_with_output().map_err(|_| "Local setup inspection failed.".to_string())?;
+    if !output.status.success() || output.stdout.len() > 64 * 1024 {
+        return Err("Local setup inspection returned no usable report.".to_string());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Local setup inspection returned an invalid report.".to_string())?;
+    if value.get("schemaVersion").and_then(|v| v.as_u64()) != Some(1)
+        || !value.get("features").is_some_and(|v| v.is_object())
+        || !value.get("modelServer").is_some_and(|v| v.is_object()) {
+        return Err("Local setup report uses an unsupported format.".to_string());
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+pub async fn runtime_setup_snapshot(state: State<'_, RuntimeManagerState>) -> Result<serde_json::Value, String> {
+    let command = state.require_backend()?.command(Service::Doctor)?;
+    tauri::async_runtime::spawn_blocking(move || setup_snapshot_output(command))
+        .await.map_err(|_| "Local setup inspection could not finish.".to_string())?
+}
+
 fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);

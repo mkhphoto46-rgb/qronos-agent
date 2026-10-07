@@ -20,6 +20,9 @@ ASSET_GROUPS = {
     "wakeWord": (
         "models/wake_word/qronos.onnx",
         "models/wake_word/qronos.onnx.data",
+        "models/openwakeword/melspectrogram.onnx",
+        "models/openwakeword/embedding_model.onnx",
+        "models/openwakeword/silero_vad.onnx",
     ),
     "speechRecognition": (
         "runtime/whisper/bin/Release/whisper-cli.exe",

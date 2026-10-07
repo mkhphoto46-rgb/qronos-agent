@@ -17,6 +17,8 @@ DEFAULT_MODEL_PATH = (
 DEFAULT_THRESHOLD = 0.660167
 DEFAULT_FRAME_SIZE = 1_280
 DEFAULT_CONFIRMATION_FRAMES = 2
+DEFAULT_FEATURE_MODEL_ROOT = CONFIG.paths.models / "openwakeword"
+FEATURE_MODEL_FILES = ("melspectrogram.onnx", "embedding_model.onnx", "silero_vad.onnx")
 
 # Silero VAD filters non-speech audio before it can become a
 # wake-word activation. 0.5 is the standard openWakeWord
@@ -39,8 +41,16 @@ def _load_openwakeword_model(
     Import OpenWakeWord only when the engine is started.
     """
 
+    feature_paths = {name: DEFAULT_FEATURE_MODEL_ROOT / name for name in FEATURE_MODEL_FILES}
+    missing = [name for name, path in feature_paths.items() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Wake-word support assets are missing from the local asset folder: "
+            + ", ".join(missing)
+        )
     try:
         from openwakeword.model import Model
+        from openwakeword.vad import VAD
 
     except ImportError as exc:
         raise RuntimeError(
@@ -49,9 +59,18 @@ def _load_openwakeword_model(
             "-m pip install -r requirements.txt"
         ) from exc
 
-    return Model(
-        **kwargs
+    # openWakeWord 0.6 otherwise looks inside its installed Python package for
+    # model weights. Keep every weight in the separately provisioned asset root.
+    threshold = kwargs.pop("vad_threshold", DEFAULT_VAD_THRESHOLD)
+    model = Model(
+        **kwargs,
+        vad_threshold=0,
+        melspec_model_path=str(feature_paths["melspectrogram.onnx"]),
+        embedding_model_path=str(feature_paths["embedding_model.onnx"]),
     )
+    model.vad = VAD(model_path=str(feature_paths["silero_vad.onnx"]))
+    model.vad_threshold = threshold
+    return model
 
 
 class OpenWakeWordEngine:

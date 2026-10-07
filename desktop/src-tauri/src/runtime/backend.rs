@@ -20,6 +20,7 @@ pub(super) enum Service {
     Audio,
     Settings,
     Permissions,
+    Doctor,
 }
 
 impl Service {
@@ -31,6 +32,7 @@ impl Service {
             Self::Audio => "audio",
             Self::Settings => "settings",
             Self::Permissions => "permissions",
+            Self::Doctor => "doctor",
         }
     }
 
@@ -43,6 +45,7 @@ impl Service {
             Self::Audio => "core.audio_output_cli",
             Self::Settings => "core.settings_cli",
             Self::Permissions => "core.permissions_cli",
+            Self::Doctor => "core.runtime_preflight",
         }
     }
 }
