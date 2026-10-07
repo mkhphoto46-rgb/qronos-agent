@@ -6,13 +6,15 @@ import socket
 import subprocess
 import threading
 import time
-import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import BinaryIO
 
 from core.config import CONFIG
+from core.local_ipc import (
+    local_host, local_port, local_timeout, process_owns_listener, request_bytes,
+)
 from core.speech_runtime import SpeechRuntime
 from core.windows_sidecar_guard import (
     SidecarAlreadyRunning,
@@ -78,25 +80,10 @@ class WhisperServerRuntime(SpeechRuntime):
         log_dir: str | Path = CONFIG.paths.temp,
         sidecar_guard_factory=None,
     ) -> None:
-        if host != "127.0.0.1":
-            raise ValueError(
-                "WhisperServerRuntime must bind to 127.0.0.1."
-            )
-
-        if not 1 <= port <= 65535:
-            raise ValueError(
-                "port must be between 1 and 65535."
-            )
-
-        if startup_timeout_seconds <= 0:
-            raise ValueError(
-                "startup_timeout_seconds must be greater than zero."
-            )
-
-        if request_timeout_seconds <= 0:
-            raise ValueError(
-                "request_timeout_seconds must be greater than zero."
-            )
+        host = local_host(host)
+        port = local_port(port)
+        startup_timeout_seconds = local_timeout(startup_timeout_seconds)
+        request_timeout_seconds = local_timeout(request_timeout_seconds)
 
         if best_of <= 0:
             raise ValueError(
@@ -162,10 +149,9 @@ class WhisperServerRuntime(SpeechRuntime):
 
     @property
     def inference_url(self) -> str:
-        return (
-            f"http://{self.host}:"
-            f"{self.port}/inference"
-        )
+        host = local_host(self.host)
+        port = local_port(self.port)
+        return f"http://{host}:{port}/inference"
 
     @property
     def is_running(self) -> bool:
@@ -186,11 +172,13 @@ class WhisperServerRuntime(SpeechRuntime):
         if not self.is_running:
             return False
 
+        if not process_owns_listener(self._process, self.port):
+            return False
         try:
             with socket.create_connection(
                 (
-                    self.host,
-                    self.port,
+                    local_host(self.host),
+                    local_port(self.port),
                 ),
                 timeout=0.25,
             ):
@@ -213,9 +201,9 @@ class WhisperServerRuntime(SpeechRuntime):
             "-bs",
             str(self.beam_size),
             "--host",
-            self.host,
+            local_host(self.host),
             "--port",
-            str(self.port),
+            str(local_port(self.port)),
         ]
 
     def prepare(self) -> None:
@@ -281,7 +269,7 @@ class WhisperServerRuntime(SpeechRuntime):
                         "whisper-server.exe did not return a valid PID."
                     )
 
-                guard.bind_process(pid)
+                guard.bind_process(pid, process_handle=getattr(process, "_handle", None))
                 self._process = process
                 self._sidecar_guard = guard
 
@@ -471,21 +459,16 @@ class WhisperServerRuntime(SpeechRuntime):
         )
 
         with self._request_lock:
+            with self._lifecycle_lock:
+                process = self._process
+            if not process_owns_listener(process, self.port):
+                raise RuntimeError("Whisper sidecar no longer owns its local endpoint.")
             try:
-                with urllib.request.urlopen(
-                    request,
-                    timeout=self.request_timeout_seconds,
-                ) as response:
-                    raw = response.read()
-
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                OSError,
-            ) as exc:
-                raise RuntimeError(
-                    "Whisper server transcription request failed."
-                ) from exc
+                raw = request_bytes(
+                    request, timeout=self.request_timeout_seconds, owner=process,
+                )
+            except Exception:
+                raise RuntimeError("Whisper server transcription request failed.") from None
 
         try:
             payload = json.loads(
@@ -497,11 +480,13 @@ class WhisperServerRuntime(SpeechRuntime):
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,
-        ) as exc:
+        ):
             raise RuntimeError(
                 "Whisper server returned invalid UTF-8 JSON."
-            ) from exc
+            ) from None
 
+        if not isinstance(payload, dict):
+            raise RuntimeError("Whisper server response must be a JSON object.")
         transcript = payload.get(
             "text"
         )

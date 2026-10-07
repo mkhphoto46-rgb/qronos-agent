@@ -27,12 +27,12 @@ Design rules:
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import subprocess
 import threading
 import time
-import urllib.error
 import urllib.request
 import wave
 from enum import Enum
@@ -41,6 +41,9 @@ from typing import Callable
 from uuid import uuid4
 
 from core.config import CONFIG
+from core.local_ipc import (
+    local_host, local_port, local_timeout, process_owns_listener, request_bytes,
+)
 from core.resource_guard import read_gpu_status
 from core.resource_ownership import (
     GLOBAL_RESOURCE_LEDGER,
@@ -167,8 +170,14 @@ class ChatterboxRuntime(VoiceRuntime):
         if steps <= 0:
             raise ValueError("steps must be greater than zero")
 
-        if idle_seconds <= 0:
-            raise ValueError("idle_seconds must be greater than zero")
+        host = local_host(host)
+        if port is not None:
+            port = local_port(port)
+        if not math.isfinite(idle_seconds) or idle_seconds <= 0:
+            raise ValueError("idle_seconds must be finite and greater than zero")
+        startup_timeout = local_timeout(startup_timeout)
+        request_timeout = local_timeout(request_timeout)
+        retry_seconds = local_timeout(retry_seconds)
 
         self.executable_path = Path(executable_path)
         self.voice_model_path = Path(voice_model_path)
@@ -525,7 +534,7 @@ class ChatterboxRuntime(VoiceRuntime):
                 self._create_reservation_locked()
 
             chosen_port = (
-                self.port
+                local_port(self.port)
                 if self.port is not None
                 else _choose_free_loopback_port(
                     self.host
@@ -536,7 +545,7 @@ class ChatterboxRuntime(VoiceRuntime):
                 str(self.executable_path),
                 "--server",
                 "--host",
-                self.host,
+                local_host(self.host),
                 "--port",
                 str(chosen_port),
                 "--backend",
@@ -572,7 +581,7 @@ class ChatterboxRuntime(VoiceRuntime):
                         "CrispASR did not return a valid process identifier."
                     )
 
-                guard.bind_process(pid)
+                guard.bind_process(pid, process_handle=getattr(process, "_handle", None))
 
             except SidecarAlreadyRunning as exc:
                 with self._lock:
@@ -714,13 +723,21 @@ class ChatterboxRuntime(VoiceRuntime):
         self,
         text: str,
     ) -> bytes:
-        port = self.active_port
+        with self._lock:
+            port = self._active_port
+            process = self._process
+        # Keep eviction available while inference is in flight; the captured
+        # connection cannot be retargeted when release terminates this child.
 
         if port is None:
             raise VoiceUnavailable(
                 "The local voice server has no active port."
             )
 
+        if not process_owns_listener(process, port):
+            raise VoiceUnavailable("Chatterbox sidecar no longer owns its local endpoint.")
+        host = local_host(self.host)
+        port = local_port(port)
         body = json.dumps(
             {
                 "model": "chatterbox",
@@ -731,7 +748,7 @@ class ChatterboxRuntime(VoiceRuntime):
         ).encode("utf-8")
 
         request = urllib.request.Request(
-            f"http://{self.host}:{port}/v1/audio/speech",
+            f"http://{host}:{port}/v1/audio/speech",
             data=body,
             headers={
                 "Content-Type": "application/json; charset=utf-8",
@@ -740,26 +757,9 @@ class ChatterboxRuntime(VoiceRuntime):
         )
 
         try:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.request_timeout,
-            ) as response:
-                audio = response.read()
-
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )[:500]
-
-            raise VoiceUnavailable(
-                f"Chatterbox HTTP error {exc.code}: {detail}"
-            ) from exc
-
-        except urllib.error.URLError as exc:
-            raise VoiceUnavailable(
-                f"Chatterbox server unavailable: {exc.reason}"
-            ) from exc
+            audio = request_bytes(request, timeout=self.request_timeout, owner=process)
+        except Exception:
+            raise VoiceUnavailable("Chatterbox local speech request failed.") from None
 
         if len(audio) <= 1000:
             raise VoiceUnavailable(
@@ -1171,6 +1171,7 @@ def _choose_free_loopback_port(
     """
     Ask Windows for an unused local TCP port.
     """
+    host = local_host(host)
     with socket.socket(
         socket.AF_INET,
         socket.SOCK_STREAM,
