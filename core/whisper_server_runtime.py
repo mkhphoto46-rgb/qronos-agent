@@ -21,8 +21,7 @@ from core.windows_sidecar_guard import (
 
 
 DEFAULT_WHISPER_SERVER_EXE = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "bin"
     / "Release"
@@ -30,8 +29,7 @@ DEFAULT_WHISPER_SERVER_EXE = (
 )
 
 DEFAULT_WHISPER_MODEL = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "models"
     / "ggml-large-v3-turbo-q5_0.bin"

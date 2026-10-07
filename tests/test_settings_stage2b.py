@@ -647,7 +647,7 @@ class SettingsStage2BTests(unittest.TestCase):
             rust_source,
         )
         self.assertIn(
-            'join("audio_output_cli.py")',
+            "command(Service::Audio)?",
             rust_source,
         )
         self.assertIn(

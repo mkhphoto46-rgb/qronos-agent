@@ -29,6 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
     )
 
 from core.action_audit import ActionAuditLog
+from core.config import CONFIG
 from core.actions import ActionOutcome
 from core.file_action_parser import FileActionParseError, parse_file_action
 from core.file_executor import FileAction, FileExecutor, FileOperation, PreparedFileAction
@@ -288,18 +289,12 @@ CONVERSATION_END_PHRASES = {
 }
 
 VOICE_LATENCY_LOG_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "runtime"
-    / "chatterbox"
-    / "temp"
+    CONFIG.paths.voice_temp
     / "voice_latency_latest.json"
 )
 
 VOICE_PLAYBACK_TELEMETRY_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "runtime"
-    / "chatterbox"
-    / "temp"
+    CONFIG.paths.voice_temp
     / "voice_playback_latest.json"
 )
 

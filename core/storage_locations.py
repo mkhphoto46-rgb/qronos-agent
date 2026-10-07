@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import threading
 
+from core.config import CONFIG
+
 _LOCK = threading.RLock()
 
 
@@ -21,6 +23,8 @@ def _documents() -> Path:
 
 
 def locator_path() -> Path:
+    if CONFIG.paths.packaged:
+        return CONFIG.paths.data / "storage_locations.json"
     return _local_app_data() / "Qronos" / "storage_locations.json"
 
 
@@ -47,7 +51,7 @@ class StorageLocations:
 
 
 def _defaults() -> StorageLocations:
-    local = _local_app_data() / "Qronos"
+    local = CONFIG.paths.data if CONFIG.paths.packaged else _local_app_data() / "Qronos"
     docs = _documents() / "Qronos"
     return StorageLocations(
         data_root=str(local),

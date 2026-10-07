@@ -9,15 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from core.config import CONFIG
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ALLOWED_AUDIO_ROOT = (
-    PROJECT_ROOT
-    / "runtime"
-    / "chatterbox"
-    / "temp"
-)
+ALLOWED_AUDIO_ROOT = CONFIG.paths.voice_temp
 
 
 def _get_sounddevice() -> Any:

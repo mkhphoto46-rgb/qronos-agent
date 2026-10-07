@@ -17,6 +17,7 @@ import psutil
 import requests
 
 from core.activity_guard import ActivityGuard, ActivityMode, ResourcePressure
+from core.config import CONFIG
 from core.user_memory import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_VERSION,
@@ -167,7 +168,9 @@ class MemorySidecarManager:
         self._owned = False
         self._supervisor_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._pid_file = (
+        self._pid_file = CONFIG.paths.temp / "qronos_memory_sidecar_owner.json" if (
+            CONFIG.paths.packaged and project_root is None
+        ) else (
             self.project_root
             / "runtime"
             / "temp"

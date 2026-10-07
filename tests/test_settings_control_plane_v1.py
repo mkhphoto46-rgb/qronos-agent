@@ -232,7 +232,7 @@ class SettingsControlPlaneV1Tests(unittest.TestCase):
             runtime_source,
         )
         self.assertIn(
-            'root.join("core").join("settings_cli.py")',
+            "command(Service::Settings)?",
             runtime_source,
         )
         self.assertIn(

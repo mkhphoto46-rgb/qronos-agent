@@ -9,8 +9,7 @@ from core.speech_runtime import SpeechRuntime
 
 
 DEFAULT_WHISPER_EXE = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "bin"
     / "Release"
@@ -18,8 +17,7 @@ DEFAULT_WHISPER_EXE = (
 )
 
 DEFAULT_WHISPER_MODEL = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "models"
     / "ggml-large-v3-turbo-q5_0.bin"

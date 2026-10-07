@@ -1,10 +1,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+mod backend;
+use backend::{Backend, Service};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -56,13 +58,11 @@ pub struct RuntimeManagerState {
     // race to overwrite each other.
     settings_command: Mutex<()>,
 
-    /// None when there is no source checkout to run the Python side from,
-    /// which is every installed copy until the runtime is packaged.
-    project_root: Option<PathBuf>,
+    backend: Option<Backend>,
 }
 
 impl RuntimeManagerState {
-    pub fn new(project_root: Option<PathBuf>) -> Self {
+    fn new(backend: Option<Backend>) -> Self {
         Self {
             process: Mutex::new(None),
             native_audio: Mutex::new(NativeAudioPlaybackState {
@@ -70,101 +70,14 @@ impl RuntimeManagerState {
                 stop_generation: 0,
             }),
             settings_command: Mutex::new(()),
-            project_root,
+            backend,
         }
     }
 
-    /// The checkout, or a message explaining why there is not one.
-    fn require_root(&self) -> Result<&Path, String> {
-        self.project_root
-            .as_deref()
-            .ok_or_else(|| "The Qronos voice runtime is not available in this build. It runs from a source checkout, and this copy was installed without the Python side packaged alongside it.".to_string())
+    fn require_backend(&self) -> Result<&Backend, String> {
+        self.backend.as_ref().ok_or_else(||
+            "The bundled Qronos backend is unavailable. Install a complete Qronos build to enable runtime services.".to_string())
     }
-}
-
-/// Locate the source checkout the Python runtime lives in.
-///
-/// A development-mode mechanism, and only that. An installed Qronos has no
-/// `core/` beside its executable, so this returns None there and the runtime
-/// reports itself unavailable — the truth, until the Python side is packaged
-/// with the application.
-///
-/// The compile-time CARGO_MANIFEST_DIR fallback is behind debug_assertions
-/// deliberately. In a release build it embedded the build machine's absolute
-/// path in the shipped binary, so the developer's Windows username travelled
-/// inside the installer, and the application appeared to work when run from
-/// anywhere on that one machine while failing on every other. A bug that
-/// reproduces nowhere except the developer's own computer is the expensive
-/// kind.
-fn find_project_root() -> Option<PathBuf> {
-    fn looks_like_the_checkout(candidate: &Path) -> bool {
-        candidate.join("core").is_dir() && candidate.join("desktop").is_dir()
-    }
-
-    if let Ok(current) = std::env::current_dir() {
-        if let Some(found) = current.ancestors().find(|c| looks_like_the_checkout(c)) {
-            return Some(found.to_path_buf());
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-        if let Some(found) = manifest.ancestors().find(|c| looks_like_the_checkout(c)) {
-            return Some(found.to_path_buf());
-        }
-    }
-
-    None
-}
-
-fn python_candidates(project_root: &Path) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        project_root
-            .join(".venv")
-            .join("Scripts")
-            .join("python.exe"),
-        project_root.join("venv").join("Scripts").join("python.exe"),
-    ];
-
-    if let Ok(executable) = std::env::var("PYTHON") {
-        if !executable.trim().is_empty() {
-            candidates.push(PathBuf::from(executable));
-        }
-    }
-
-    candidates.push(PathBuf::from("python"));
-    candidates.push(PathBuf::from("py"));
-
-    candidates
-}
-
-fn resolve_python(project_root: &Path) -> Result<PathBuf, String> {
-    for candidate in python_candidates(project_root) {
-        if candidate.is_absolute() {
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-            continue;
-        }
-
-        let probe = Command::new(&candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        if probe.map(|status| status.success()).unwrap_or(false) {
-            return Ok(candidate);
-        }
-    }
-
-    Err("No usable Python runtime was found for Qronos development mode.".to_string())
-}
-
-fn runtime_script(project_root: &Path) -> PathBuf {
-    project_root.join("core").join("runtime_bridge.py")
 }
 
 fn emit_runtime_event(app: &AppHandle, event: RuntimeEvent) {
@@ -265,23 +178,14 @@ fn require_task_id(task_id: &str) -> Result<&str, String> {
 }
 
 pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // Qronos may be moved between drives, so the Chatterbox playback scope
-    // must come from the checkout discovered at runtime instead of embedding
-    // an absolute development-machine path in tauri.conf.json.
-    let project_root = find_project_root();
-
-    if let Some(root) = project_root.as_ref() {
-        let chatterbox_temp = root
-            .join("runtime")
-            .join("chatterbox")
-            .join("temp");
-
+    let resources = app.path().resource_dir().ok();
+    let local_data = app.path().local_data_dir().ok();
+    let backend = backend::discover(resources.as_deref(), local_data.as_deref())?;
+    if let Some(backend) = backend.as_ref() {
         app.asset_protocol_scope()
-            .allow_directory(&chatterbox_temp, true)?;
+            .allow_directory(backend.playback_root(), true)?;
     }
-
-    app.manage(RuntimeManagerState::new(project_root));
-
+    app.manage(RuntimeManagerState::new(backend));
     Ok(())
 }
 
@@ -345,25 +249,8 @@ pub fn start_runtime(
         *guard = None;
     }
 
-    let project_root = state.require_root()?;
-    let script = runtime_script(project_root);
-
-    if !script.is_file() {
-        return Err(format!(
-            "Runtime bridge script was not found: {}",
-            script.display()
-        ));
-    }
-
-    let python = resolve_python(project_root)?;
-
-    let mut command = Command::new(python);
+    let mut command = state.require_backend()?.command(Service::Bridge)?;
     command
-        .arg("-u")
-        .arg("-m")
-        .arg("core.runtime_bridge")
-        .current_dir(project_root)
-        .env("PYTHONUTF8", "1")
         .env("QRONOS_MEMORY_RUNTIME", "1")
         .env("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "1")
         .stdin(Stdio::piped())
@@ -526,18 +413,9 @@ pub fn library_command(
     if cleaned.is_empty() {
         return Err("Library operation must not be empty.".to_string());
     }
-    let root = state.require_root()?;
-    let python = resolve_python(root)?;
-    let script = root.join("core").join("library_cli.py");
-    if !script.is_file() {
-        return Err(format!("Qronos Library backend is missing: {}", script.display()));
-    }
-    let mut command = Command::new(python);
+    let mut command = state.require_backend()?.command(Service::Library)?;
     command
-        .arg(script)
         .arg(cleaned)
-        .current_dir(root)
-        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -573,18 +451,9 @@ pub fn memory_command(
     if cleaned.is_empty() {
         return Err("Memory operation must not be empty.".to_string());
     }
-    let root = state.require_root()?;
-    let python = resolve_python(root)?;
-    let script = root.join("core").join("memory_cli.py");
-    if !script.is_file() {
-        return Err(format!("Qronos Memory backend is missing: {}", script.display()));
-    }
-    let mut command = Command::new(python);
+    let mut command = state.require_backend()?.command(Service::Memory)?;
     command
-        .arg(script)
         .arg(cleaned)
-        .current_dir(root)
-        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -671,23 +540,9 @@ fn native_audio_output_play_blocking(
         audio.stop_generation
     };
 
-    let root = state.require_root()?;
-    let python = resolve_python(root)?;
-    let script = root.join("core").join("audio_output_cli.py");
-
-    if !script.is_file() {
-        return Err(format!(
-            "Qronos native audio output backend is missing: {}",
-            script.display()
-        ));
-    }
-
-    let mut command = Command::new(python);
+    let mut command = state.require_backend()?.command(Service::Audio)?;
     command
-        .arg(script)
         .arg("play")
-        .current_dir(root)
-        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -937,23 +792,9 @@ pub fn settings_command(
         .lock()
         .map_err(|_| "Settings command lock failed.".to_string())?;
 
-    let root = state.require_root()?;
-    let python = resolve_python(root)?;
-    let script = root.join("core").join("settings_cli.py");
-
-    if !script.is_file() {
-        return Err(format!(
-            "Qronos Settings backend is missing: {}",
-            script.display()
-        ));
-    }
-
-    let mut command = Command::new(python);
+    let mut command = state.require_backend()?.command(Service::Settings)?;
     command
-        .arg(script)
         .arg(cleaned)
-        .current_dir(root)
-        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1018,23 +859,9 @@ pub fn permissions_command(
         return Err("Permissions operation must not be empty.".to_string());
     }
 
-    let root = state.require_root()?;
-    let python = resolve_python(root)?;
-    let script = root.join("core").join("permissions_cli.py");
-
-    if !script.is_file() {
-        return Err(format!(
-            "Qronos Permissions backend is missing: {}",
-            script.display()
-        ));
-    }
-
-    let mut command = Command::new(python);
+    let mut command = state.require_backend()?.command(Service::Permissions)?;
     command
-        .arg(script)
         .arg(cleaned)
-        .current_dir(root)
-        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

@@ -81,7 +81,9 @@ def test_permissions_tauri_command_is_registered() -> None:
     ).read_text(encoding="utf-8")
 
     assert "pub fn permissions_command(" in runtime
-    assert 'join("permissions_cli.py")' in runtime
+    assert "command(Service::Permissions)?" in runtime
+    backend = (ROOT / "desktop/src-tauri/src/runtime/backend.rs").read_text(encoding="utf-8")
+    assert '"core.permissions_cli"' in backend
     assert "runtime::permissions_command" in lib
 
 

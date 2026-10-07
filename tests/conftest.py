@@ -9,6 +9,16 @@ import core.windows_accessibility_mutation as accessibility_mutation
 
 
 @pytest.fixture(autouse=True)
+def isolate_qronos_storage_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy storage defaults must not read or write the real user profile."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
+    monkeypatch.setenv("QRONOS_CONVERSATION_HISTORY_PATH", str(tmp_path / "history.sqlite3"))
+    monkeypatch.setenv("QRONOS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+
+
+@pytest.fixture(autouse=True)
 def isolate_qronos_permission_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

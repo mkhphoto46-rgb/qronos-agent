@@ -58,7 +58,7 @@ from core.windows_sidecar_guard import (
 )
 
 
-DEFAULT_ROOT = CONFIG.paths.root / "runtime" / "chatterbox"
+DEFAULT_ROOT = CONFIG.paths.runtime_assets / "chatterbox"
 
 DEFAULT_EXECUTABLE = (
     DEFAULT_ROOT
@@ -79,8 +79,8 @@ DEFAULT_CODEC_MODEL = (
     / "chatterbox-s3gen-q8_0.gguf"
 )
 
-DEFAULT_TEMP_DIR = DEFAULT_ROOT / "temp"
-DEFAULT_CACHE_DIR = DEFAULT_ROOT / "cache"
+DEFAULT_TEMP_DIR = CONFIG.paths.voice_temp
+DEFAULT_CACHE_DIR = CONFIG.paths.voice_cache
 
 DEFAULT_HOST = "127.0.0.1"
 
