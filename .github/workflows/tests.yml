@@ -110,6 +110,9 @@ jobs:
       - name: Check application and Vite TypeScript
         run: npm run typecheck
 
+      - name: Test conversation runtime events
+        run: npm test
+
       - name: Install pinned Rust toolchain
         shell: bash
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
