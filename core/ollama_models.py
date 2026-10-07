@@ -5,15 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
-import requests
+from core.local_ipc import local_model_base_url, requests_client as requests
 
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
-# Pulling a model transfers gigabytes. The read timeout has to tolerate a slow
-# link without being unbounded, because an unbounded request would hang the
-# caller for ever if the daemon stopped responding mid-transfer.
-PULL_TIMEOUT_SECONDS = 3_600
 QUERY_TIMEOUT_SECONDS = 5
 DELETE_TIMEOUT_SECONDS = 30
 
@@ -110,7 +106,15 @@ class OllamaModelCatalog:
     """
 
     def __init__(self, base_url: str = OLLAMA_BASE_URL) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = base_url
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        self._base_url = local_model_base_url(value)
 
     # ------------------------------------------------------------------ reads
 
@@ -122,8 +126,9 @@ class OllamaModelCatalog:
                 timeout=QUERY_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            return True
-        except requests.RequestException:
+            data = response.json()
+            return isinstance(data, dict) and isinstance(data.get("version"), str)
+        except (requests.RequestException, ValueError):
             return False
 
     def list_installed_models(self) -> tuple[InstalledModel, ...]:
@@ -136,11 +141,17 @@ class OllamaModelCatalog:
 
         models: list[InstalledModel] = []
 
-        for entry in self._as_list(data.get("models")):
+        entries = data.get("models", [])
+        if not isinstance(entries, list):
+            raise RuntimeError("Local Ollama installed-model metadata has an invalid shape.")
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
 
-            name = str(entry.get("name", "")).strip()
+            name = entry.get("name", "")
+            if not isinstance(name, str) or len(name) > 256 or any(ord(c) < 32 for c in name):
+                raise RuntimeError("Local Ollama model name metadata is invalid.")
+            name = name.strip()
 
             if not name:
                 continue
@@ -185,8 +196,12 @@ class OllamaModelCatalog:
             timeout=QUERY_TIMEOUT_SECONDS,
         )
 
-        details = data.get("details")
-        details = details if isinstance(details, dict) else {}
+        details = data.get("details", {})
+        if not isinstance(details, dict) or any(
+            not isinstance(details.get(key, ""), str)
+            for key in ("family", "parameter_size", "quantization_level")
+        ):
+            raise RuntimeError("Local Ollama model details metadata is invalid.")
 
         return ModelDetails(
             name=model_name,
@@ -216,38 +231,20 @@ class OllamaModelCatalog:
                 timeout=DELETE_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-        except requests.RequestException as exc:
+        except requests.RequestException:
             raise RuntimeError(
-                f"Could not delete model: {model_name}"
-            ) from exc
+                "Could not delete the requested local model."
+            ) from None
 
     def pull_model(self, model_name: str) -> None:
-        """
-        Download a model into the local store.
-
-        Blocking, with a bounded timeout. Callers must run the storage preflight
-        in :mod:`core.storage_policy` before calling this: an unchecked pull is
-        how a disk gets filled.
-
-        ``stream`` is false so the request completes or fails as a unit rather
-        than leaving the caller to interpret a partial progress stream. Real
-        progress reporting belongs in the Task Event layer, and honest
-        indeterminate progress is preferred to a fabricated percentage.
-        """
-        if not model_name.strip():
+        """Terminal policy refusal: a local /api/pull would fetch public content."""
+        if not isinstance(model_name, str) or not model_name.strip():
             raise ValueError("model_name must not be empty.")
-
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/pull",
-                json={"name": model_name, "stream": False},
-                timeout=PULL_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise RuntimeError(
-                f"Could not pull model: {model_name}"
-            ) from exc
+        raise PermissionError(
+            "Model registry downloads are disabled by the offline policy. "
+            "Obtain approved weights through the visible browser workflow, "
+            "then import them locally. Storage preflight does not authorize a download."
+        )
 
     # ---------------------------------------------------------------- helpers
 
@@ -258,12 +255,16 @@ class OllamaModelCatalog:
                 timeout=QUERY_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-        except requests.RequestException as exc:
+        except requests.RequestException:
             raise RuntimeError(
                 f"Ollama API is unavailable: {route}"
-            ) from exc
+            ) from None
 
-        return self._as_dict(response.json(), route)
+        try:
+            data = response.json()
+        except ValueError:
+            raise RuntimeError("Local Ollama returned invalid JSON metadata.") from None
+        return self._as_dict(data, route)
 
     def _post_json(
         self,
@@ -278,12 +279,16 @@ class OllamaModelCatalog:
                 timeout=timeout,
             )
             response.raise_for_status()
-        except requests.RequestException as exc:
+        except requests.RequestException:
             raise RuntimeError(
                 f"Ollama API is unavailable: {route}"
-            ) from exc
+            ) from None
 
-        return self._as_dict(response.json(), route)
+        try:
+            data = response.json()
+        except ValueError:
+            raise RuntimeError("Local Ollama returned invalid JSON metadata.") from None
+        return self._as_dict(data, route)
 
     @staticmethod
     def _as_dict(value: Any, route: str) -> dict[str, Any]:
@@ -293,10 +298,6 @@ class OllamaModelCatalog:
             )
 
         return value
-
-    @staticmethod
-    def _as_list(value: Any) -> list[Any]:
-        return value if isinstance(value, list) else []
 
     @staticmethod
     def _as_int(value: Any) -> int:
@@ -309,7 +310,7 @@ class OllamaModelCatalog:
         """
         try:
             return max(0, int(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
 
