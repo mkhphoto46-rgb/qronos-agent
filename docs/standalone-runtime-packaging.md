@@ -55,8 +55,8 @@ Existing files are not migrated automatically.
 
 Approved native voice binaries and local models are provisioned separately
 under `RuntimeAssets` in that local data directory, preserving the existing
-`runtime/` and `models/` subdirectories. Use **OPEN LOCAL ASSET FOLDER** in the
-desktop's local setup report to find the effective path. An absolute
+`runtime/` and `models/` subdirectories. Expand **Local asset folder** in the
+desktop's local setup report to read the effective path. An absolute
 `QRONOS_ASSET_ROOT` can select an existing asset directory. No
 development-machine models, private data or credentials are automatically
 copied into an installer.

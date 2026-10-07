@@ -46,8 +46,10 @@ passed. The production npm dependency audit reported no vulnerabilities.
 The actual frozen backend passed isolated settings, permissions, Library,
 memory, setup diagnostics and bridge startup/ping/shutdown checks outside the
 source checkout. The NSIS installer built locally. GitHub built the preceding
-combined desktop on Windows and Linux; the final source checks are being run
-after correcting the CI-discovered file identity and fixture issues.
+combined desktop on Windows and Linux. After correcting the CI-discovered
+file identity and fixture issues, final checks were blocked before runner
+allocation by the GitHub account's billing/spending restriction. Final Linux
+source validation remains outstanding.
 
 These checks use temporary state and fake native action boundaries. They do
 not establish microphone quality, wake-word accuracy, model performance, native
