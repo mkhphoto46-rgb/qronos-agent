@@ -98,7 +98,13 @@ _REASONS: dict[str, str] = {
     "not_directory": "the path exists but is not a folder",
     "protected": "the path is inside a system, program or Qronos program folder",
     "overlaps_state": "the Library files folder must not contain or sit inside Qronos data folders",
+    "contains_program": "the folder contains the Qronos program folder",
 }
+
+# Ordered default folders inside Documents. The first is the established
+# layout; the second is used only when the first is unusable, most often
+# because Documents\Qronos is itself a Qronos program checkout.
+DOCUMENTS_FOLDERS: tuple[str, ...] = ("Qronos", "Qronos Files")
 
 
 class StorageLocationError(ValueError):
@@ -132,6 +138,9 @@ class LocationProblem:
     code: str
     message: str
     stored: str = ""
+    # "warning": something the user chose or stored is not used.
+    # "info": Qronos chose a different default and says which and why.
+    severity: str = "warning"
 
     def public(self) -> dict[str, str]:
         return {
@@ -140,6 +149,7 @@ class LocationProblem:
             "code": self.code,
             "message": self.message,
             "stored": self.stored,
+            "severity": self.severity,
         }
 
 
@@ -202,18 +212,75 @@ def locator_path() -> Path:
     return _local_app_data() / "Qronos" / "storage_locations.json"
 
 
-def _defaults() -> StorageLocations:
+def _default_candidates() -> dict[str, tuple[Path, ...]]:
     local = CONFIG.paths.data if CONFIG.paths.packaged else _local_app_data() / "Qronos"
-    docs = _documents() / "Qronos"
-    return StorageLocations(
-        data_root=str(local),
-        history_root=str(local / "History"),
-        memory_root=str(local / "Memory"),
-        library_db_root=str(local / "Library"),
-        artifact_root=str(docs / "Library"),
-        cache_root=str(local / "Cache"),
-        backup_root=str(docs / "Backups"),
-    )
+    documents = _documents()
+    return {
+        "dataRoot": (local,),
+        "historyRoot": (local / "History",),
+        "memoryRoot": (local / "Memory",),
+        "libraryDbRoot": (local / "Library",),
+        "artifactRoot": tuple(documents / name / "Library" for name in DOCUMENTS_FOLDERS),
+        "cacheRoot": (local / "Cache",),
+        "backupRoot": tuple(documents / name / "Backups" for name in DOCUMENTS_FOLDERS),
+    }
+
+
+def _default_state() -> tuple[StorageLocations, tuple[LocationProblem, ...]]:
+    """
+    Defaults pass the same validation as stored values.
+
+    An unusable default is never used: the next candidate is taken and an
+    "info" note says which and why, or, if none is usable, the root is left
+    empty (unavailable) with a warning. Nothing here writes to disk.
+    """
+    values: dict[str, str] = {}
+    notes: list[LocationProblem] = []
+    for key, options in _default_candidates().items():
+        label = LOCATION_LABELS[key]
+        first_error: StorageLocationError | None = None
+        chosen = ""
+        for index, option in enumerate(options):
+            try:
+                chosen = str(validate_location(key, str(option)))
+            except StorageLocationError as exc:
+                first_error = first_error or exc
+                continue
+            if index and first_error is not None:
+                notes.append(
+                    LocationProblem(
+                        key=key,
+                        code="default_relocated",
+                        severity="info",
+                        stored=_shown(str(options[0])),
+                        message=(
+                            f"The usual {label} folder cannot be used: "
+                            f"{_REASONS.get(first_error.code, first_error.code)}. "
+                            f"Qronos uses {chosen} instead. Nothing was moved; "
+                            "you can choose another folder at any time."
+                        ),
+                    )
+                )
+            break
+        if not chosen and first_error is not None:
+            notes.append(
+                LocationProblem(
+                    key=key,
+                    code="no_safe_default",
+                    stored=_shown(str(options[0])),
+                    message=(
+                        f"{label} has no usable default folder: "
+                        f"{_REASONS.get(first_error.code, first_error.code)}. "
+                        f"Choose a folder for {label}; until then it is unavailable."
+                    ),
+                )
+            )
+        values[key] = chosen
+    return StorageLocations(**{_FIELDS[k]: values[k] for k in LOCATION_KEYS}), tuple(notes)
+
+
+def _defaults() -> StorageLocations:
+    return _default_state()[0]
 
 
 # ------------------------------------------------------------- validation
@@ -269,7 +336,10 @@ def validate_location(key: str, value: object) -> Path:
         raise StorageLocationError("relative", _REASONS["relative"])
 
     path = Path(os.path.normpath(text))
-    if path.exists() and not path.is_dir():
+    # The folder, or the nearest part of its path that already exists, must be
+    # a directory; otherwise creating it later is bound to fail.
+    existing = next((p for p in (path, *path.parents) if p.exists()), None)
+    if existing is not None and not existing.is_dir():
         raise StorageLocationError("not_directory", _REASONS["not_directory"])
 
     # Judge both the path as written and, for an existing link, where it goes.
@@ -278,19 +348,29 @@ def validate_location(key: str, value: object) -> Path:
         for candidate in candidates:
             if is_within(candidate, root) or is_within(candidate, _resolved(root)):
                 raise StorageLocationError("protected", _REASONS["protected"])
+            # Library files are registered and acted on by the Library, so
+            # that root must not contain program or application folders.
+            if key == "artifactRoot" and (
+                is_within(root, candidate) or is_within(_resolved(root), candidate)
+            ):
+                raise StorageLocationError("contains_program", _REASONS["contains_program"])
     return path
 
 
-def _problem(key: str, code: str, stored: object) -> LocationProblem:
+def _problem(key: str, code: str, stored: object, fallback: str) -> LocationProblem:
     label = LOCATION_LABELS.get(key, "Storage")
     reason = _REASONS.get(code, code)
+    now = (
+        "Qronos is using the default folder for now"
+        if fallback
+        else "There is no usable default, so it is unavailable for now"
+    )
     return LocationProblem(
         key=key,
         code=code,
         message=(
-            f"{label} location is not usable: {reason}. Qronos is using the "
-            "default folder for now and kept the stored setting unchanged. "
-            f"Choose a new folder for {label} to fix this."
+            f"{label} location is not usable: {reason}. {now} and kept the "
+            f"stored setting unchanged. Choose a new folder for {label} to fix this."
         ),
         stored=_shown(stored),
     )
@@ -337,38 +417,54 @@ def _read_locator(path: Path) -> tuple[str, dict[str, object]]:
 def read_storage_state() -> StorageState:
     """Effective locations plus diagnostics. Read-only."""
     with _LOCK:
-        defaults = _defaults()
+        defaults, default_notes = _default_state()
         path = locator_path()
         status, raw = _read_locator(path)
 
         if status in {"corrupt", "newer"}:
-            return StorageState(defaults, path, status, (_locator_problem(status),))
+            return StorageState(defaults, path, status, (_locator_problem(status), *default_notes))
 
         values = defaults.to_public_dict()
         problems: list[LocationProblem] = []
+        chosen: set[str] = set()
         for key in LOCATION_KEYS:
             if key not in raw:
                 continue
             try:
                 values[key] = str(validate_location(key, raw[key]))
+                chosen.add(key)
             except StorageLocationError as exc:
-                problems.append(_problem(key, exc.code, raw[key]))
+                problems.append(_problem(key, exc.code, raw[key], defaults.get(key)))
 
         locations = StorageLocations(**{_FIELDS[k]: values[k] for k in LOCATION_KEYS})
         if "artifactRoot" in raw and not any(p.key == "artifactRoot" for p in problems):
             try:
                 _check_overlap("artifactRoot", Path(locations.artifact_root), locations)
             except StorageLocationError as exc:
-                problems.append(_problem("artifactRoot", exc.code, raw.get("artifactRoot", "")))
+                problems.append(
+                    _problem("artifactRoot", exc.code, raw.get("artifactRoot", ""), defaults.artifact_root)
+                )
+                chosen.discard("artifactRoot")
                 values["artifactRoot"] = defaults.artifact_root
                 locations = StorageLocations(**{_FIELDS[k]: values[k] for k in LOCATION_KEYS})
-        return StorageState(locations, path, status, tuple(problems))
+        # A default note matters only for a root that actually uses the default.
+        notes = tuple(n for n in default_notes if n.key not in chosen)
+        return StorageState(locations, path, status, (*problems, *notes))
 
 
 # --------------------------------------------------------------- bootstrap
 
 
+def _usable(locations: StorageLocations) -> dict[str, str]:
+    """Roots worth persisting: an unavailable (empty) root is never written."""
+    return {key: value for key, value in locations.to_public_dict().items() if value}
+
+
 def _mkdir_root(raw: str) -> Path:
+    if not raw:
+        raise StorageLocationError(
+            "unavailable", "This storage location has no usable folder; choose one first."
+        )
     if not is_absolute_local(raw) or is_network_or_device_path(raw):
         # Belt and braces: effective locations are validated, but nothing in
         # this module may ever create a directory relative to the cwd.
@@ -389,7 +485,8 @@ def ensure_storage_root(key: str, state: StorageState | None = None) -> Path:
 def ensure_storage_directories(locations: StorageLocations | None = None) -> None:
     locations = locations or read_storage_state().locations
     for key in LOCATION_KEYS:
-        if key != "dataRoot":
+        # An unavailable root (no usable default) is reported, never created.
+        if key != "dataRoot" and locations.get(key):
             _mkdir_root(locations.get(key))
 
 
@@ -406,7 +503,7 @@ def load_storage_locations(*, create: bool = False) -> StorageLocations:
                     if not state.locator_path.exists():
                         _write_locator(
                             state.locator_path,
-                            {"schemaVersion": LOCATOR_SCHEMA_VERSION, **state.locations.to_public_dict()},
+                            {"schemaVersion": LOCATOR_SCHEMA_VERSION, **_usable(state.locations)},
                         )
             ensure_storage_directories(state.locations)
         return state.locations
@@ -471,6 +568,8 @@ def _check_overlap(key: str, path: Path, locations: StorageLocations) -> None:
     else:
         others = [Path(locations.artifact_root)]
     for other in others:
+        if not str(other) or not other.is_absolute():
+            continue
         if is_within(other, path) or is_within(path, other):
             raise StorageLocationError("overlaps_state", _REASONS["overlaps_state"])
 
@@ -527,7 +626,7 @@ def change_storage_location(key: str, destination: object) -> dict[str, object]:
                 raw = {}
             document: dict[str, object] = dict(raw)
             if status != "ok":
-                document.update(state.locations.to_public_dict())
+                document.update(_usable(state.locations))
             document["schemaVersion"] = LOCATOR_SCHEMA_VERSION
             document[key] = str(path)
             _write_locator(state.locator_path, document)

@@ -14,7 +14,11 @@ import uuid
 import webbrowser
 
 from core.path_safety import is_link_or_reparse_point, same_path
-from core.storage_locations import read_storage_state
+from core.storage_locations import (
+    StorageLocationError,
+    read_storage_state,
+    validate_location,
+)
 
 HASH_INLINE_MAX_BYTES = 128 * 1024 * 1024
 
@@ -181,10 +185,18 @@ class ArtifactRegistry:
         # The locator is read (never written) only for a location the caller
         # did not supply; only the two roots this registry uses are created.
         loc = read_storage_state().locations if path is None or artifact_root is None else None
+        if loc is not None and ((path is None and not loc.library_db_root) or (artifact_root is None and not loc.artifact_root)):
+            raise StorageLocationError(
+                "unavailable",
+                "The Library has no usable folder; choose one for the Library first.",
+            )
         self.path = Path(path) if path is not None else Path(loc.library_db_root) / "library.sqlite3"
         self.artifact_root = Path(artifact_root) if artifact_root is not None else Path(loc.artifact_root)
-        if not self.path.is_absolute() or not self.artifact_root.is_absolute():
-            raise ValueError("Library locations must be absolute paths.")
+        # Both roots this registry creates pass the storage policy, explicit
+        # ones included, so it can never create folders in the program folder,
+        # the working directory or a system folder.
+        validate_location("libraryDbRoot", str(self.path.parent))
+        validate_location("artifactRoot", str(self.artifact_root))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
