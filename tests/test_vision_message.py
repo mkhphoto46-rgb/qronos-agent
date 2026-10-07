@@ -352,11 +352,12 @@ class RecordingHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
 
-        RecordingHandler.received.append(json.loads(body))
-
-        reply = json.dumps(
-            {"message": {"content": "A blue rectangle."}, "done": True}
-        ).encode("utf-8")
+        if self.path == "/api/show":
+            payload = {"model_info": {"general.architecture": "fixture"}}
+        else:
+            RecordingHandler.received.append(json.loads(body))
+            payload = {"message": {"content": "A blue rectangle."}, "done": True}
+        reply = json.dumps(payload).encode("utf-8")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

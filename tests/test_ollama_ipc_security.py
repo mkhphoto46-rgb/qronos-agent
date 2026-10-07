@@ -136,7 +136,7 @@ def test_local_ipc_never_follows_redirects_or_environment_proxies(monkeypatch):
             runtime.stop_model("qwen3:4b")
         with pytest.raises(RuntimeError, match="HTTP 307"):
             runtime.chat("qwen3:4b", prompt="private", timeout_seconds=1)
-        assert received == ["/api/version", "/api/ps", "/api/tags", "/api/generate", "/api/chat"]
+        assert received == ["/api/version", "/api/ps", "/api/tags", "/api/show", "/api/show"]
     finally:
         server.shutdown()
         server.server_close()

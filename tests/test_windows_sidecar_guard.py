@@ -129,7 +129,7 @@ class TestWindowsSidecarGuard(unittest.TestCase):
         )
 
         try:
-            guard.bind_process(child.pid)
+            guard.bind_process(child.pid, process_handle=child._handle)
             guard.close()
             child.wait(timeout=5.0)
             self.assertIsNotNone(
@@ -158,7 +158,7 @@ class TestWindowsSidecarGuard(unittest.TestCase):
                 f"g=WindowsSidecarGuard.acquire({mutex_name!r});"
                 "p=subprocess.Popen([sys.executable,'-c',"
                 "'import time; time.sleep(60)']);"
-                "g.bind_process(p.pid);"
+                "g.bind_process(p.pid,process_handle=p._handle);"
                 f"Path({str(pid_file)!r}).write_text(str(p.pid),encoding='utf-8');"
                 "time.sleep(0.15);"
                 "os._exit(0)"

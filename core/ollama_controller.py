@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 import os
-import math
 import re
 import shutil
 import subprocess
@@ -12,7 +11,10 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-import requests
+from core.inference_cancellation import (
+    LocalInferenceCancellation, inference_cancellation_scope, inference_checkpoint,
+)
+from core.local_ipc import local_model_base_url, local_timeout, requests_client as requests
 
 from core import vision_image
 from core.brain_runtime import (
@@ -82,26 +84,7 @@ class OllamaController(BrainRuntime):
 
     @base_url.setter
     def base_url(self, value: str) -> None:
-        try:
-            parsed = urlparse(value)
-            host = (parsed.hostname or "").lower()
-            port = parsed.port
-            valid = (
-                parsed.scheme == "http"
-                and host in {"127.0.0.1", "localhost", "::1"}
-                and (port is None or port > 0)
-                and parsed.username is None and parsed.password is None
-                and parsed.path in {"", "/"}
-                and not parsed.params and not parsed.query and not parsed.fragment
-            )
-        except (TypeError, ValueError):
-            valid = False
-        if not valid:
-            raise ValueError("Ollama IPC requires an explicit loopback HTTP endpoint.")
-        # Do not depend on environment DNS/hosts resolution for localhost.
-        host = "127.0.0.1" if host == "localhost" else host
-        authority = f"[{host}]" if host == "::1" else host
-        self._base_url = f"http://{authority}" + (f":{port}" if port is not None else "")
+        self._base_url = local_model_base_url(value)
 
     def _probe(self, timeout_seconds: float = 3.0) -> bool:
         try:
@@ -133,6 +116,7 @@ class OllamaController(BrainRuntime):
         Startup is process-serialized so simultaneous first-use requests do not
         race several ``ollama serve`` children after a Windows reboot.
         """
+        inference_checkpoint()
         if self._probe(0.5):
             return True
         if not auto_start or not self._auto_start_enabled():
@@ -140,8 +124,13 @@ class OllamaController(BrainRuntime):
         if not self._is_local_base_url():
             return False
 
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-        with _BOOTSTRAP_LOCK:
+        deadline = time.monotonic() + local_timeout(timeout_seconds)
+        while not _BOOTSTRAP_LOCK.acquire(timeout=0.05):
+            inference_checkpoint()
+            if time.monotonic() >= deadline:
+                return False
+        try:
+            inference_checkpoint()
             if self._probe(0.5):
                 return True
 
@@ -150,15 +139,23 @@ class OllamaController(BrainRuntime):
                 return False
 
             try:
+                inference_checkpoint()
                 self._start_local_server(executable)
             except OSError:
                 return False
 
             while time.monotonic() < deadline:
+                inference_checkpoint()
                 if self._probe(0.5):
                     return True
-                time.sleep(OLLAMA_START_POLL_SECONDS)
+                # Bound cooperative startup waiting even before a socket exists.
+                for _ in range(5):
+                    inference_checkpoint()
+                    time.sleep(OLLAMA_START_POLL_SECONDS / 5)
+        finally:
+            _BOOTSTRAP_LOCK.release()
 
+        inference_checkpoint()
         return self._probe(0.5)
 
     @staticmethod
@@ -216,6 +213,11 @@ class OllamaController(BrainRuntime):
         else:
             kwargs["start_new_session"] = True
 
+        environment = os.environ.copy()
+        environment["OLLAMA_NO_CLOUD"] = "1"
+        environment["OLLAMA_HOST"] = "127.0.0.1:11434"
+        kwargs["env"] = environment
+        inference_checkpoint()
         subprocess.Popen(
             [executable, "serve"],
             **kwargs,
@@ -243,51 +245,28 @@ class OllamaController(BrainRuntime):
                 "Ollama API is unavailable."
             ) from None
 
-        data = response.json()
-
-        models: list[
-            BrainRuntimeModelStatus
-        ] = []
-
-        for model in data.get(
-            "models",
-            [],
-        ):
-            models.append(
-                BrainRuntimeModelStatus(
-                    name=str(
-                        model.get(
-                            "name",
-                            "",
-                        )
-                    ),
-                    size=str(
-                        model.get(
-                            "size",
-                            "",
-                        )
-                    ),
-                    processor=str(
-                        model.get(
-                            "processor",
-                            "",
-                        )
-                    ),
-                    context=int(
-                        model.get(
-                            "context_length",
-                            0,
-                        )
-                        or 0
-                    ),
-                    until=str(
-                        model.get(
-                            "expires_at",
-                            "",
-                        )
-                    ),
-                )
-            )
+        try:
+            data = response.json()
+        except ValueError:
+            raise RuntimeError("Local Ollama running-model inspection returned invalid JSON.") from None
+        if not isinstance(data, dict) or not isinstance(data.get("models", []), list):
+            raise RuntimeError("Local Ollama running-model inspection returned invalid metadata.")
+        models: list[BrainRuntimeModelStatus] = []
+        for model in data.get("models", []):
+            if not isinstance(model, dict):
+                raise RuntimeError("Local Ollama running-model inspection returned invalid metadata.")
+            name = model.get("name", "")
+            context = model.get("context_length", 0) or 0
+            if (not isinstance(name, str) or len(name) > 256
+                    or type(context) is not int or context < 0):
+                raise RuntimeError("Local Ollama running-model inspection returned invalid metadata.")
+            fields = {key: model.get(key, "") for key in ("size", "processor", "expires_at")}
+            if any(not isinstance(value, (str, int)) for value in fields.values()):
+                raise RuntimeError("Local Ollama running-model inspection returned invalid metadata.")
+            models.append(BrainRuntimeModelStatus(
+                name=name, size=str(fields["size"]), processor=str(fields["processor"]),
+                context=context, until=str(fields["expires_at"]),
+            ))
 
         return models
 
@@ -431,6 +410,29 @@ class OllamaController(BrainRuntime):
         keep_alive: str = "5m",
         response_format: Optional[dict] = None,
         timeout_seconds: float | None = None,
+        cancellation: LocalInferenceCancellation | None = None,
+    ) -> str:
+        """Run local chat in the supplied token or the worker's turn scope."""
+        with inference_cancellation_scope(cancellation):
+            result = self._chat(
+                model_name, prompt=prompt, messages=messages, think=think,
+                num_predict=num_predict, num_ctx=num_ctx, keep_alive=keep_alive,
+                response_format=response_format, timeout_seconds=timeout_seconds,
+            )
+            inference_checkpoint()
+            return result
+
+    def _chat(
+        self,
+        model_name: str,
+        prompt: str = "",
+        messages: Sequence[BrainMessage] | None = None,
+        think: bool | str = False,
+        num_predict: Optional[int] = None,
+        num_ctx: Optional[int] = None,
+        keep_alive: str = "5m",
+        response_format: Optional[dict] = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         """
         Send one chat request through the Ollama development runtime.
@@ -445,10 +447,7 @@ class OllamaController(BrainRuntime):
             else float(timeout_seconds)
         )
 
-        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
-            raise ValueError(
-                "timeout_seconds must be greater than zero."
-            )
+        effective_timeout = local_timeout(effective_timeout)
 
         if isinstance(think, str):
             cleaned_think = think.strip().lower()
@@ -509,6 +508,7 @@ class OllamaController(BrainRuntime):
         )
 
         for attempt in range(2):
+            inference_checkpoint()
             try:
                 response = requests.post(
                     f"{self.base_url}/api/chat",
@@ -518,10 +518,12 @@ class OllamaController(BrainRuntime):
                     proxies={"http": "", "https": ""},
                 )
 
+                inference_checkpoint()
                 _require_success(response)
                 break
 
             except requests.ConnectionError:
+                inference_checkpoint()
                 if (
                     attempt == 0
                     and self.ensure_ready(
@@ -567,6 +569,7 @@ class OllamaController(BrainRuntime):
                     f"Could not send request to Qronos local Brain ({diagnostic})."
                 ) from None
 
+        inference_checkpoint()
         if response is None:
             raise RuntimeError(
                 f"Could not send request to Qronos local Brain: unavailable ({diagnostic})."
@@ -579,25 +582,14 @@ class OllamaController(BrainRuntime):
         if not isinstance(data, dict):
             raise RuntimeError(f"Qronos local Brain returned an invalid response ({diagnostic}).")
         message = data.get("message", {})
-
         if not isinstance(message, dict):
-            message = {}
-
-        content = str(
-            message.get(
-                "content",
-                "",
-            )
-            or ""
-        )
-
-        thinking = str(
-            message.get(
-                "thinking",
-                "",
-            )
-            or ""
-        )
+            raise RuntimeError(f"Qronos local Brain returned an invalid message ({diagnostic}).")
+        content = message.get("content", "")
+        thinking = message.get("thinking", "")
+        content = "" if content is None else content
+        thinking = "" if thinking is None else thinking
+        if not isinstance(content, str) or not isinstance(thinking, str):
+            raise RuntimeError(f"Qronos local Brain returned invalid message text ({diagnostic}).")
 
         if (
             not content.strip()
