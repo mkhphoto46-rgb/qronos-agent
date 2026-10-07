@@ -31,7 +31,7 @@ export async function libraryPickFolder(){ const result=await command<{ok:boolea
 // File mutations are two-phase. The backend validates one exact operation and
 // returns a single-use approval; commit runs only what that approval covers.
 // Permanent deletion is hard-denied by the backend and has no client call.
-export type LibraryMutation = "rename" | "copy" | "move" | "delete";
+export type LibraryMutation = "rename" | "copy" | "move" | "delete" | "open_link";
 export type LibraryApproval = { token:string; operation:LibraryMutation; decision:string; confirmation:"none"|"click"|"secret"; expiresAt:number; destination:string; newName:string; targets:{id:string;name:string;pathOrUrl:string}[] };
 export type LibraryItemResult = { id:string; ok:boolean; outcome:string; error?:string; newArtifactId?:string };
 export type LibraryCommitResult = { results:LibraryItemResult[]; succeeded:number; failed:number; refused:number; complete:boolean };

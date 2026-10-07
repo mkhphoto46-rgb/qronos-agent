@@ -84,6 +84,7 @@ from core.artifact_registry import (
     is_link_or_reparse_point,
     same_path,
 )
+from core.link_policy import UnsafeLink, validate_web_url
 from core.path_safety import drive_status
 from core.storage_locations import load_storage_locations, program_roots
 from security.gate import ActionGrantUnavailable, Verdict, evaluate, issue_grant
@@ -113,6 +114,7 @@ class LibraryOperation(Enum):
     MOVE = "move"
     DELETE = "delete"
     DELETE_FOREVER = "delete_forever"
+    OPEN_LINK = "open_link"
 
 
 _CATEGORY: dict[LibraryOperation, ActionCategory] = {
@@ -121,6 +123,7 @@ _CATEGORY: dict[LibraryOperation, ActionCategory] = {
     LibraryOperation.MOVE: ActionCategory.CREATE_OR_EDIT_FILE,
     LibraryOperation.DELETE: ActionCategory.DELETE_RECOVERABLE,
     LibraryOperation.DELETE_FOREVER: ActionCategory.IRREVERSIBLE_DESTRUCTION,
+    LibraryOperation.OPEN_LINK: ActionCategory.BROWSER_NAVIGATION,
 }
 
 _SUMMARY: dict[LibraryOperation, str] = {
@@ -129,6 +132,7 @@ _SUMMARY: dict[LibraryOperation, str] = {
     LibraryOperation.MOVE: "Move one Library artifact to a user-selected folder.",
     LibraryOperation.DELETE: "Move one Library artifact to the Recycle Bin.",
     LibraryOperation.DELETE_FOREVER: "Permanently delete one Library artifact.",
+    LibraryOperation.OPEN_LINK: "Open one saved web link in a visible browser.",
 }
 
 # How the Library UI satisfies each decision. The UI dialog shows the exact
@@ -142,6 +146,12 @@ _CONFIRMATION: dict[PermissionDecision, str] = {
     PermissionDecision.REQUIRE_UI_CONFIRMATION: "click",
     PermissionDecision.REQUIRE_TYPED_SECRET: "secret",
 }
+
+BROWSER_UNAVAILABLE = (
+    "Opening web links is not available in this build. Qronos opens websites "
+    "only through its reviewed, permission-gated browser workflow, which is "
+    "not installed here. Use COPY LINK to open it in your own browser."
+)
 
 PERMANENT_DELETE_REFUSAL = (
     "Permanent deletion is irreversible destruction, which Qronos hard-denies. "
@@ -167,6 +177,10 @@ class _ItemRefused(Exception):
 
 
 Recycler = Callable[[Path], None]
+# Hands one validated public http(s) URL to a visible browser. Supplied by the
+# reviewed browser workflow; there is no default, so without one link opening
+# fails closed.
+BrowserLauncher = Callable[[str], None]
 EvaluateFn = Callable[..., Verdict]
 Clock = Callable[[], float]
 
@@ -431,6 +445,7 @@ class LibraryExecutor:
         approval_ttl: float = APPROVAL_TTL_SECONDS,
         protected_roots: tuple[Path, ...] | None = None,
         approval_secrets: ApprovalSecretStore | None = None,
+        browser: BrowserLauncher | None = None,
     ) -> None:
         self.registry = registry
         self.audit = audit
@@ -440,6 +455,7 @@ class LibraryExecutor:
         self._ttl = float(approval_ttl)
         self._protected_roots = protected_roots
         self._secrets = approval_secrets
+        self._browser = browser
 
     @property
     def approval_secrets(self) -> ApprovalSecretStore:
@@ -468,6 +484,8 @@ class LibraryExecutor:
 
         if op is LibraryOperation.RENAME and len(artifact_ids) != 1:
             raise LibraryActionRefused("Rename applies to exactly one artifact.")
+        if op is LibraryOperation.OPEN_LINK and len(artifact_ids) != 1:
+            raise LibraryActionRefused("Open one link at a time.")
 
         requests = [self._request(op, artifact_id) for artifact_id in artifact_ids]
         verdicts = [self._decide(request) for request in requests]
@@ -506,6 +524,14 @@ class LibraryExecutor:
             raise LibraryActionRefused(
                 f"{decision.value} cannot be satisfied from the Library.",
                 results=tuple(self._refusal(r, decision.value) for r in requests),
+            )
+
+        if op is LibraryOperation.OPEN_LINK and self._browser is None:
+            # Decided and audited above; refused here because the only
+            # sanctioned route to a website is not available in this build.
+            raise LibraryActionRefused(
+                BROWSER_UNAVAILABLE,
+                results=tuple(self._refusal(r, BROWSER_UNAVAILABLE) for r in requests),
             )
 
         if decision is PermissionDecision.REQUIRE_TYPED_SECRET:
@@ -909,6 +935,15 @@ class LibraryExecutor:
         except KeyError:
             raise _ItemRefused("Unknown artifact; refresh the Library.") from None
 
+        if op is LibraryOperation.OPEN_LINK:
+            if artifact.category != "link":
+                raise _ItemRefused("Only saved web links open in the browser.")
+            try:
+                validate_web_url(artifact.path_or_url)
+            except UnsafeLink as exc:
+                raise _ItemRefused(str(exc)) from None
+            return _Target(artifact=artifact, request=request, path=None)
+
         if artifact.category == "link":
             if op in {LibraryOperation.COPY, LibraryOperation.MOVE}:
                 raise _ItemRefused("Links cannot be copied or moved as files.")
@@ -1007,6 +1042,8 @@ class LibraryExecutor:
                 )
             elif op is LibraryOperation.DELETE:
                 self._delete(artifact, path)
+            elif op is LibraryOperation.OPEN_LINK:
+                self._open_link(artifact)
             else:
                 raise _ItemRefused(PERMANENT_DELETE_REFUSAL)
         except (_ItemRefused, LibraryActionRefused) as exc:
@@ -1125,6 +1162,17 @@ class LibraryExecutor:
                 created.unlink()
             raise
         return registered.id
+
+    def _open_link(self, artifact: Artifact) -> None:
+        if artifact.category != "link":
+            raise _ItemRefused("Only saved web links open in the browser.")
+        try:
+            url = validate_web_url(artifact.path_or_url)
+        except UnsafeLink as exc:
+            raise _ItemRefused(str(exc)) from None
+        if self._browser is None:
+            raise _ItemRefused(BROWSER_UNAVAILABLE)
+        self._browser(url)
 
     def _delete(self, artifact: Artifact, path: Path | None) -> None:
         if path is None:

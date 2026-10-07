@@ -11,8 +11,7 @@ import sqlite3
 import subprocess
 import time
 import uuid
-import webbrowser
-
+from core.link_policy import validate_web_url
 from core.path_safety import is_link_or_reparse_point, same_path
 from core.storage_locations import (
     StorageLocationError,
@@ -376,9 +375,9 @@ class ArtifactRegistry:
         return self.get(target_id)
 
     def register_link(self, url: str, *, name: str, origin: str = "Saved by Qronos", source_conversation_id: str = "", source_message_id: str = "", source_request_id: str = "") -> Artifact:
-        cleaned = url.strip()
-        if not cleaned.startswith(("http://", "https://")):
-            raise ValueError("Only http/https links are supported.")
+        # Only plain public http(s) links are saved; anything a browser should
+        # not be handed (other schemes, credentials, local addresses) is refused.
+        cleaned = validate_web_url(url)
         now = time.time(); artifact_id=f"art-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
         with self._connection() as c:
             c.execute("""INSERT INTO artifacts (id,name,category,extension,icon_key,mime_type,path_or_url,size_bytes,created_at,modified_at,origin,read_state,source_conversation_id,source_message_id,source_request_id,last_verified_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -477,12 +476,15 @@ class ArtifactRegistry:
 
     def open(self, artifact_id: str) -> None:
         item=self.get(artifact_id)
-        if item.category == "link": webbrowser.open(item.path_or_url); return
+        # A web link reaches the internet only through the browser, so it is
+        # opened by the gated, audited Library flow (open_link), never here.
+        if item.category == "link": raise PermissionError("Web links open through the Library approval flow, not directly.")
         path=Path(item.path_or_url)
         if is_link_or_reparse_point(path): raise PermissionError("Library does not open links or reparse points.")
         if not path.is_file(): raise FileNotFoundError(str(path))
         if not same_path(path.resolve(strict=True),path): raise PermissionError("Artifact path now resolves somewhere else; refusing to open it.")
         if is_executable_name(path.name): raise PermissionError("Library does not open executable or script files.")
+        if not identity_matches(item.identity(), path, content_hash=item.content_hash): raise PermissionError("The file at this path is no longer the artifact Qronos registered; refusing to open it.")
         os.startfile(str(path))
 
     def open_folder(self, artifact_id: str | None = None) -> None:
