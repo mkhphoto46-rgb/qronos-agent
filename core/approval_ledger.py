@@ -202,10 +202,15 @@ class ApprovalLedger:
 
     def close(self) -> tuple[ApprovalTicket, ...]:
         """Revoke everything and refuse all later issue/take. Idempotent."""
-        revoked = self.revoke_all(STALE_CLOSED)
         with self._lock:
+            # Closing and revocation share one critical section: an issuer
+            # cannot slip a new ticket between revocation and the closed flag.
             self._closed = True
-        return revoked
+            revoked = tuple(self._open.values())
+            self._open.clear()
+            for ticket in revoked:
+                self._settle_locked(ticket.approval_id, STALE_CLOSED)
+            return revoked
 
     def _expire_locked(self) -> None:
         now = self._clock()

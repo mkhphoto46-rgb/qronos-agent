@@ -111,6 +111,54 @@ def test_revoke_kinds_only_touches_those_kinds():
     assert ledger.take(paint.approval_id).kind is ApprovalKind.PAINT_DRAW
 
 
+def test_close_cannot_leave_a_concurrently_issued_ticket_open():
+    ledger = ApprovalLedger()
+    first = ledger.issue(ApprovalKind.SCREEN_READ, "before close")
+    lock_released = threading.Event()
+    issuer_finished = threading.Event()
+    outcomes = []
+
+    class WaitingIssuerLock:
+        """Run a waiting issuer immediately after close releases its lock."""
+
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.scheduled = False
+
+        def __enter__(self):
+            self.lock.acquire()
+
+        def __exit__(self, *_args):
+            self.lock.release()
+            if threading.current_thread().name == "ledger-closer" and not self.scheduled:
+                self.scheduled = True
+                lock_released.set()
+                assert issuer_finished.wait(5)
+
+    ledger._lock = WaitingIssuerLock()
+
+    def issue_while_closing():
+        assert lock_released.wait(5)
+        try:
+            outcomes.append(ledger.issue(ApprovalKind.SCREEN_READ, "during close"))
+        except StaleApproval as exc:
+            outcomes.append(exc.reason)
+        finally:
+            issuer_finished.set()
+
+    issuer = threading.Thread(target=issue_while_closing)
+    revoked = []
+    closer = threading.Thread(target=lambda: revoked.extend(ledger.close()), name="ledger-closer")
+    issuer.start()
+    closer.start()
+    closer.join(10)
+    issuer.join(10)
+    assert not closer.is_alive() and not issuer.is_alive()
+    assert outcomes == [STALE_CLOSED]
+    assert revoked == [first]
+    assert ledger.open_tickets() == ()
+
+
 def test_concurrent_answers_cannot_both_win():
     ledger = ApprovalLedger()
     ticket = ledger.issue(ApprovalKind.PAINT_DRAW, "p")
