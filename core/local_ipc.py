@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import errno
 import http.client
 import json as json_module
 import math
 import re
+import select
 import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from core.inference_cancellation import (
+    LocalInferenceCancelled, current_inference_cancellation, inference_checkpoint,
+)
 
 import psutil
 import requests as _requests
@@ -29,46 +35,123 @@ class LocalIpcError(RuntimeError):
     """A local request failed; the message never contains server/user data."""
 
 
-def _deadline_adapter(deadline: float, budget: dict):
-    """Enforce elapsed deadlines even if a peer drips HTTP headers/body bytes.
+class _DeadlineSocket(socket.socket):
+    """Own the exact socket object before connect; never close a reused fd."""
 
-    requests' ordinary timeout is an inactivity timeout. SocketIO uses
-    recv_into, so decreasing that timeout before every read prevents a slow
-    local peer from holding a model request open indefinitely.
-    """
-    class DeadlineSocket(socket.socket):
-        def __init__(self, original, request_deadline):
-            idle_timeout = original.gettimeout()
-            super().__init__(original.family, original.type, original.proto,
-                             fileno=original.detach())
-            self.deadline = request_deadline
+    def __init__(self, family, deadline, timeout):
+        super().__init__(family, socket.SOCK_STREAM)
+        self.deadline = deadline
+        self.settimeout(timeout)
+        self._cancellation = current_inference_cancellation()
+        self._release_abort = None
+        if self._cancellation is not None:
+            self._release_abort = self._cancellation._register_abort(self._abort)
+
+    def _checkpoint(self):
+        if self._cancellation is not None:
+            self._cancellation.raise_if_cancelled()
+
+    def _abort(self):
+        # SocketIO may still hold a makefile reference. shutdown, followed by
+        # close, interrupts that read and signals EOF to the peer immediately.
+        try:
+            self.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.close()
+        # Do not wait for a response.makefile reference to be released by the
+        # worker. Closing the socket object sets its fd to -1; later SocketIO
+        # cleanup cannot close a newly allocated socket that reused that fd.
+        self._real_close()
+
+    def _real_close(self):
+        # HTTP/1.0 closes the connection object immediately after headers,
+        # while response.makefile still owns the body socket. Keep the abort
+        # registered until the final SocketIO reference releases the real fd.
+        super()._real_close()
+        release = getattr(self, "_release_abort", None)
+        if release is not None:
+            self._release_abort = None
+            release()
+
+    def _arm(self):
+        self._checkpoint()
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout("Local model elapsed deadline exceeded.")
+        self.settimeout(min(self.gettimeout() or remaining, remaining))
+
+    def recv(self, *args):
+        self._arm()
+        return super().recv(*args)
+
+    def recv_into(self, *args):
+        self._arm()
+        return super().recv_into(*args)
+
+    def sendall(self, *args, **kwargs):
+        self._arm()
+        return super().sendall(*args, **kwargs)
+
+    def connect(self, address):
+        # No blocking OS connect: cancellation can close the socket even when
+        # a loopback listener's backlog is full. Origins are numeric loopback,
+        # so there is no DNS operation to outlive this request.
+        self._checkpoint()
+        idle_timeout = self.gettimeout()
+        self.setblocking(False)
+        pending = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY,
+                   getattr(errno, "WSAEWOULDBLOCK", 10035),
+                   getattr(errno, "WSAEINPROGRESS", 10036)}
+        try:
+            error = self.connect_ex(address)
+            while error in pending:
+                self._checkpoint()
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout("Local model elapsed deadline exceeded.")
+                _, writable, exceptional = select.select([], [self], [self], min(remaining, 0.05))
+                if writable or exceptional:
+                    error = self.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            self._checkpoint()
+            if error:
+                raise OSError(error, "Local IPC connection failed.")
             self.settimeout(idle_timeout)
+        except BaseException:
+            self.close()
+            self._checkpoint()
+            raise
 
-        def _arm(self):
-            remaining = self.deadline - time.monotonic()
-            if remaining <= 0:
-                raise socket.timeout("Local model elapsed deadline exceeded.")
-            self.settimeout(min(self.gettimeout() or remaining, remaining))
 
-        def recv_into(self, *args):
-            self._arm()
-            return super().recv_into(*args)
+def _connect_socket(host, port, *, deadline, timeout, options=()):
+    if host not in {"127.0.0.1", "::1"}:
+        raise LocalIpcError("Local IPC requires a numeric loopback connection.")
+    sock = _DeadlineSocket(socket.AF_INET6 if host == "::1" else socket.AF_INET,
+                           deadline, timeout)
+    try:
+        for option in options or ():
+            sock.setsockopt(*option)
+        sock.connect((host, port))
+        return sock
+    except BaseException:
+        sock.close()
+        raise
 
-        def sendall(self, *args, **kwargs):
-            self._arm()
-            return super().sendall(*args, **kwargs)
 
+def _deadline_adapter(deadline: float, budget: dict):
+    """Bound total elapsed time and support request-scoped socket aborts."""
     class DeadlineConnection(_HttpConnection):
         def request(self, *args, **kwargs):
+            inference_checkpoint()
             self.request_deadline = min(deadline, time.monotonic() + float(self.timeout))
             budget["deadline"] = self.request_deadline
-            if isinstance(self.sock, DeadlineSocket):
+            if isinstance(self.sock, _DeadlineSocket):
                 self.sock.deadline = self.request_deadline
             return super().request(*args, **kwargs)
 
-        def connect(self):
-            super().connect()
-            self.sock = DeadlineSocket(self.sock, self.request_deadline)
+        def _new_conn(self):
+            return _connect_socket(self.host, self.port, deadline=self.request_deadline,
+                                   timeout=float(self.timeout), options=self.socket_options)
 
     class DeadlinePool(_HttpPool):
         ConnectionCls = DeadlineConnection
@@ -135,6 +218,7 @@ class LocalModelRequests:
 
     @staticmethod
     def _read_response(response):
+        inference_checkpoint()
         if not 200 <= response.status_code < 300:
             safe = _requests.Response()
             safe.status_code = response.status_code
@@ -144,12 +228,14 @@ class LocalModelRequests:
         chunks = []
         size = 0
         for chunk in response.iter_content(chunk_size=64 * 1024):
+            inference_checkpoint()
             size += len(chunk)
             if size > MAX_MODEL_RESPONSE_BYTES:
                 raise _requests.RequestException("Local model response exceeded its limit.")
             chunks.append(chunk)
         response._content = b"".join(chunks)
         response._content_consumed = True
+        inference_checkpoint()
         return response
 
     @staticmethod
@@ -185,6 +271,7 @@ class LocalModelRequests:
     @staticmethod
     def _request(method: str, url: str, *, timeout: float, json=None,
                  allow_redirects: bool = False, proxies=None):
+        inference_checkpoint()
         url = _model_request_url(url)
         timeout = local_timeout(timeout)
         if allow_redirects:
@@ -199,6 +286,7 @@ class LocalModelRequests:
                 session.mount("http://", _deadline_adapter(deadline, budget))
                 if urllib.parse.urlsplit(url).path in {"/api/chat", "/api/embed", "/api/generate"}:
                     LocalModelRequests._assert_local_inference(session, url, json, timeout)
+                inference_checkpoint()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise _requests.Timeout("Local model request timed out.")
@@ -206,15 +294,28 @@ class LocalModelRequests:
                                      allow_redirects=False, stream=True) as response:
                     return LocalModelRequests._read_response(response)
         except _requests.HTTPError:
+            inference_checkpoint()
             raise
         except _requests.Timeout:
+            inference_checkpoint()
             raise _requests.Timeout("Local model request timed out.") from None
         except _requests.ConnectionError:
+            inference_checkpoint()
             if time.monotonic() >= budget["deadline"]:
                 raise _requests.Timeout("Local model request timed out.") from None
             raise _requests.ConnectionError("Local model connection failed.") from None
         except _requests.RequestException:
+            inference_checkpoint()
             raise _requests.RequestException("Local model request failed.") from None
+
+        except PermissionError:
+            inference_checkpoint()
+            raise
+        except (OSError, ValueError):
+            inference_checkpoint()
+            if time.monotonic() >= budget["deadline"]:
+                raise _requests.Timeout("Local model request timed out.") from None
+            raise _requests.ConnectionError("Local model connection failed.") from None
 
 
 requests_client = LocalModelRequests()
@@ -278,7 +379,10 @@ def request_json(method: str, url: str, *, timeout: float, json=None, owner=None
     try:
         raw = request_bytes(request, timeout=timeout, owner=owner)
         return json_module.loads(raw.decode("utf-8"))
+    except LocalInferenceCancelled:
+        raise
     except Exception:
+        inference_checkpoint()
         raise LocalIpcError("Local sidecar JSON request failed.") from None
 
 
@@ -289,14 +393,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def request_bytes(request: urllib.request.Request, *, timeout: float, owner=None) -> bytes:
     # Rebuild only the URL: local_host canonicalizes localhost to numeric IPv4.
+    inference_checkpoint()
     request.full_url = _local_request_url(request.full_url)
     timeout = local_timeout(timeout)
+    deadline = time.monotonic() + timeout
     # Verify the *accepted connection* belongs to the captured process before
     # HTTP headers or sensitive audio/text leave the client socket. A listener
     # check alone has a check-to-connect race when that process exits.
     class OwnedConnection(http.client.HTTPConnection):
         def connect(self):
-            super().connect()
+            self.sock = _connect_socket(self.host, self.port, deadline=deadline, timeout=timeout)
             if owner is not None and not process_owns_connection(owner, self.sock):
                 self.close()
                 raise LocalIpcError("Local sidecar connection ownership is unavailable.")
@@ -312,11 +418,17 @@ def request_bytes(request: urllib.request.Request, *, timeout: float, owner=None
         with opener.open(request, timeout=timeout) as response:
             if not 200 <= response.status < 300:
                 raise LocalIpcError("Local sidecar returned a non-success response.")
-            return response.read()
+            result = response.read()
+            inference_checkpoint()
+            return result
+    except LocalInferenceCancelled:
+        raise
     except urllib.error.HTTPError as exc:
         exc.close()
+        inference_checkpoint()
         raise LocalIpcError("Local sidecar binary request failed.") from None
     except Exception:
+        inference_checkpoint()
         raise LocalIpcError("Local sidecar binary request failed.") from None
 
 
