@@ -1714,6 +1714,11 @@ function App() {
               case "file_action_declined":
               case "file_action_refused":
               case "file_action_failed":
+              // Stop/Pause/shutdown revoked the pending approval, or an
+              // answer named one that is no longer usable: close the
+              // dialog; the runtime will not write.
+              case "file_action_cancelled":
+              case "file_action_stale":
                 setPendingFileApproval(
                   null,
                 );

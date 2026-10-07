@@ -44,6 +44,7 @@ STALE_USED = "already_answered"
 STALE_EXPIRED = "expired"
 STALE_SUPERSEDED = "superseded"
 STALE_CLOSED = "runtime_shutdown"
+STALE_WRONG_KIND = "wrong_kind"
 
 
 class ApprovalKind(Enum):
@@ -104,8 +105,13 @@ class ApprovalLedger:
         question: str,
         *,
         payload: Any = None,
+        payload_fn: Callable[[str], Any] | None = None,
         window: int | None = None,
     ) -> ApprovalTicket:
+        """
+        Open one prompt identity. ``payload_fn`` builds the payload from the
+        new identity when the payload must carry it.
+        """
         with self._lock:
             if self._closed:
                 raise StaleApproval(STALE_CLOSED)
@@ -115,6 +121,8 @@ class ApprovalLedger:
             ):
                 raise RuntimeError("Approval identity generator returned an unusable value.")
             now = self._clock()
+            if payload_fn is not None:
+                payload = payload_fn(approval_id)
             ticket = ApprovalTicket(
                 approval_id=approval_id,
                 kind=kind,
@@ -141,8 +149,19 @@ class ApprovalLedger:
             self._expire_locked()
             return tuple(self._open.values())
 
-    def take(self, approval_id: str) -> ApprovalTicket:
-        """Consume one identity exactly once, or raise StaleApproval."""
+    def take(
+        self,
+        approval_id: str,
+        *,
+        kinds: tuple[ApprovalKind, ...] | None = None,
+    ) -> ApprovalTicket:
+        """
+        Consume one identity exactly once, or raise StaleApproval.
+
+        With ``kinds``, an identity of another kind is refused and left
+        untouched: a file decision can never consume a screen prompt, nor
+        the reverse.
+        """
         value = str(approval_id or "")
         if not APPROVAL_ID_PATTERN.match(value):
             raise StaleApproval(STALE_MALFORMED)
@@ -150,9 +169,12 @@ class ApprovalLedger:
             if self._closed:
                 raise StaleApproval(STALE_CLOSED)
             self._expire_locked()
-            ticket = self._open.pop(value, None)
+            ticket = self._open.get(value)
             if ticket is None:
                 raise StaleApproval(self._settled.get(value, STALE_UNKNOWN))
+            if kinds is not None and ticket.kind not in kinds:
+                raise StaleApproval(STALE_WRONG_KIND)
+            del self._open[value]
             self._settle_locked(value, STALE_USED)
             return ticket
 
