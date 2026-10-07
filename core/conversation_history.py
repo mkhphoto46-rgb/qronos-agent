@@ -11,7 +11,7 @@ import time
 import uuid
 
 from core.brain_runtime import BrainMessage, BrainMessageRole
-from core.storage_locations import load_storage_locations
+from core.storage_locations import ensure_storage_root
 
 
 DEFAULT_CONTEXT_MAX_MESSAGES = 10
@@ -47,8 +47,8 @@ def _default_history_path() -> Path:
     if override:
         return Path(override)
 
-    locations = load_storage_locations(create=True)
-    destination = Path(locations.history_root) / "conversation_history.sqlite3"
+    # Creates only the validated history root, never every storage root.
+    destination = ensure_storage_root("historyRoot") / "conversation_history.sqlite3"
     _migrate_legacy_history(_legacy_history_path(), destination)
     return destination
 

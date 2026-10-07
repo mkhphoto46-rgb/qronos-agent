@@ -8,13 +8,13 @@ import mimetypes
 import os
 from pathlib import Path
 import sqlite3
-import stat
 import subprocess
 import time
 import uuid
 import webbrowser
 
-from core.storage_locations import load_storage_locations
+from core.path_safety import is_link_or_reparse_point, same_path
+from core.storage_locations import read_storage_state
 
 HASH_INLINE_MAX_BYTES = 128 * 1024 * 1024
 
@@ -76,21 +76,9 @@ def is_executable_name(name: str) -> bool:
     return any(cleaned.endswith("." + ext) for ext in EXECUTABLE_EXTENSIONS)
 
 
-def is_link_or_reparse_point(path: str | Path) -> bool:
-    """True for symlinks, junctions and any other Windows reparse point."""
-    try:
-        st = os.lstat(path)
-    except FileNotFoundError:
-        return False
-    if stat.S_ISLNK(st.st_mode):
-        return True
-    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
-
-
-def same_path(a: str | Path, b: str | Path) -> bool:
-    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
-
-
+# is_link_or_reparse_point and same_path live in core.path_safety and are
+# re-exported here for existing callers. Links are symlinks, junctions, mount
+# points and app aliases; cloud-sync placeholders are not links.
 def file_identity(path: Path) -> dict[str, object]:
     """
     What identifies the exact file Qronos registered.
@@ -190,9 +178,13 @@ class ArtifactRegistry:
     ) -> None:
         # Explicit locations (tests, embedded callers) must not touch the
         # user's real storage locator.
-        loc = load_storage_locations(create=True) if path is None or artifact_root is None else None
+        # The locator is read (never written) only for a location the caller
+        # did not supply; only the two roots this registry uses are created.
+        loc = read_storage_state().locations if path is None or artifact_root is None else None
         self.path = Path(path) if path is not None else Path(loc.library_db_root) / "library.sqlite3"
         self.artifact_root = Path(artifact_root) if artifact_root is not None else Path(loc.artifact_root)
+        if not self.path.is_absolute() or not self.artifact_root.is_absolute():
+            raise ValueError("Library locations must be absolute paths.")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
