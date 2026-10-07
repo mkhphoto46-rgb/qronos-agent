@@ -11,6 +11,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from core.inference_cancellation import (
+    LocalInferenceCancellation, inference_cancellation_scope, inference_checkpoint,
+)
 from core.local_ipc import local_model_base_url, local_timeout, requests_client as requests
 
 from core import vision_image
@@ -113,6 +116,7 @@ class OllamaController(BrainRuntime):
         Startup is process-serialized so simultaneous first-use requests do not
         race several ``ollama serve`` children after a Windows reboot.
         """
+        inference_checkpoint()
         if self._probe(0.5):
             return True
         if not auto_start or not self._auto_start_enabled():
@@ -121,7 +125,12 @@ class OllamaController(BrainRuntime):
             return False
 
         deadline = time.monotonic() + local_timeout(timeout_seconds)
-        with _BOOTSTRAP_LOCK:
+        while not _BOOTSTRAP_LOCK.acquire(timeout=0.05):
+            inference_checkpoint()
+            if time.monotonic() >= deadline:
+                return False
+        try:
+            inference_checkpoint()
             if self._probe(0.5):
                 return True
 
@@ -130,15 +139,23 @@ class OllamaController(BrainRuntime):
                 return False
 
             try:
+                inference_checkpoint()
                 self._start_local_server(executable)
             except OSError:
                 return False
 
             while time.monotonic() < deadline:
+                inference_checkpoint()
                 if self._probe(0.5):
                     return True
-                time.sleep(OLLAMA_START_POLL_SECONDS)
+                # Bound cooperative startup waiting even before a socket exists.
+                for _ in range(5):
+                    inference_checkpoint()
+                    time.sleep(OLLAMA_START_POLL_SECONDS / 5)
+        finally:
+            _BOOTSTRAP_LOCK.release()
 
+        inference_checkpoint()
         return self._probe(0.5)
 
     @staticmethod
@@ -200,6 +217,7 @@ class OllamaController(BrainRuntime):
         environment["OLLAMA_NO_CLOUD"] = "1"
         environment["OLLAMA_HOST"] = "127.0.0.1:11434"
         kwargs["env"] = environment
+        inference_checkpoint()
         subprocess.Popen(
             [executable, "serve"],
             **kwargs,
@@ -392,6 +410,29 @@ class OllamaController(BrainRuntime):
         keep_alive: str = "5m",
         response_format: Optional[dict] = None,
         timeout_seconds: float | None = None,
+        cancellation: LocalInferenceCancellation | None = None,
+    ) -> str:
+        """Run local chat in the supplied token or the worker's turn scope."""
+        with inference_cancellation_scope(cancellation):
+            result = self._chat(
+                model_name, prompt=prompt, messages=messages, think=think,
+                num_predict=num_predict, num_ctx=num_ctx, keep_alive=keep_alive,
+                response_format=response_format, timeout_seconds=timeout_seconds,
+            )
+            inference_checkpoint()
+            return result
+
+    def _chat(
+        self,
+        model_name: str,
+        prompt: str = "",
+        messages: Sequence[BrainMessage] | None = None,
+        think: bool | str = False,
+        num_predict: Optional[int] = None,
+        num_ctx: Optional[int] = None,
+        keep_alive: str = "5m",
+        response_format: Optional[dict] = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         """
         Send one chat request through the Ollama development runtime.
@@ -467,6 +508,7 @@ class OllamaController(BrainRuntime):
         )
 
         for attempt in range(2):
+            inference_checkpoint()
             try:
                 response = requests.post(
                     f"{self.base_url}/api/chat",
@@ -476,10 +518,12 @@ class OllamaController(BrainRuntime):
                     proxies={"http": "", "https": ""},
                 )
 
+                inference_checkpoint()
                 _require_success(response)
                 break
 
             except requests.ConnectionError:
+                inference_checkpoint()
                 if (
                     attempt == 0
                     and self.ensure_ready(
@@ -525,6 +569,7 @@ class OllamaController(BrainRuntime):
                     f"Could not send request to Qronos local Brain ({diagnostic})."
                 ) from None
 
+        inference_checkpoint()
         if response is None:
             raise RuntimeError(
                 f"Could not send request to Qronos local Brain: unavailable ({diagnostic})."
