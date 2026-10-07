@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import type {
@@ -25,10 +26,8 @@ import {
 } from "./conversationStore";
 import { useLibraryStore } from "./libraryStore";
 import {
-  ScreenPromptQueue,
-  parseDiscardedApprovalIds,
-  parseScreenPrompt,
-  screenPromptText,
+  ScreenApprovalController,
+  applyScreenApprovalEvent,
 } from "./screenApproval";
 import {
   refreshSettings,
@@ -47,6 +46,7 @@ import { setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
+import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
 import type { OrbState } from "./components/OrbState";
@@ -218,53 +218,51 @@ function App() {
     null,
   );
 
-  const screenApprovalOpenRef =
-    useRef(false);
+  // Screen/Paint approvals: one nonblocking app-native dialog at a time,
+  // answered only with each prompt's single-use backend approvalId. Runtime
+  // events keep flowing while it is shown, so a revocation dismisses the
+  // matching prompt immediately and sends nothing.
+  const screenApprovalRef =
+    useRef<ScreenApprovalController | null>(null);
 
-  // Screen/Paint prompts waiting to be shown. Each is answered with its own
-  // single-use backend approvalId; revoked prompts are dropped unseen.
-  const screenPromptQueueRef =
-    useRef(new ScreenPromptQueue());
-
-  const pumpScreenPrompts =
-    useCallback(() => {
-      if (screenApprovalOpenRef.current) {
-        return;
-      }
-
-      const prompt =
-        screenPromptQueueRef.current.next();
-
-      if (!prompt) {
-        return;
-      }
-
-      screenApprovalOpenRef.current = true;
-      setScenario("thinking");
-
-      window.setTimeout(() => {
-        const approved = window.confirm(
-          screenPromptText(prompt),
-        );
-
-        void invoke("look_at_screen", {
+  if (screenApprovalRef.current === null) {
+    screenApprovalRef.current = new ScreenApprovalController(
+      (prompt, approved) =>
+        invoke("look_at_screen", {
           approvalId: prompt.approvalId,
           approved,
           windowOnly: true,
-        })
-          .catch((error) => {
-            console.error(
-              "[Qronos Screen Approval] failed:",
-              error,
-            );
-            setScenario("idle");
-          })
-          .finally(() => {
-            screenApprovalOpenRef.current = false;
-            pumpScreenPrompts();
-          });
-      }, 0);
-    }, [setScenario]);
+        }),
+      (error) => {
+        console.error(
+          "[Qronos Screen Approval] failed:",
+          error,
+        );
+      },
+    );
+  }
+
+  const screenApproval = screenApprovalRef.current;
+
+  const screenApprovalView = useSyncExternalStore(
+    screenApproval.subscribe,
+    screenApproval.getSnapshot,
+  );
+
+  useEffect(
+    () => () => {
+      // Unmount: drop every displayed/waiting prompt without answering.
+      screenApproval.clear();
+    },
+    [screenApproval],
+  );
+
+  const answerScreenApproval = useCallback(
+    (approvalId: string, approved: boolean) => {
+      void screenApproval.answer(approvalId, approved);
+    },
+    [screenApproval],
+  );
 
   const [
     fileApprovalSubmitting,
@@ -1288,6 +1286,16 @@ function App() {
               );
             }
 
+            // Screen/Paint prompts, their revocation and the end of the
+            // runtime that asked them. Never blocks this handler.
+            if (screenApprovalRef.current !== null) {
+              applyScreenApprovalEvent(
+                screenApprovalRef.current,
+                event.payload.eventType,
+                event.payload.message,
+              );
+            }
+
             switch (
               event.payload.eventType
             ) {
@@ -1571,37 +1579,10 @@ function App() {
                 break;
               }
 
-              case "voice_needs_screen": {
-                const prompt = parseScreenPrompt(
-                  event.payload.message,
-                );
-
-                if (!prompt) {
-                  // Never answer a prompt without its backend identity.
-                  console.error(
-                    "[Qronos Screen Approval] prompt without a valid approvalId ignored.",
-                  );
-                  break;
-                }
-
-                screenPromptQueueRef.current.enqueue(
-                  prompt,
-                );
-                pumpScreenPrompts();
+              case "voice_needs_screen":
+                // The prompt itself was routed to the approval dialog above.
+                setScenario("thinking");
                 break;
-              }
-
-              case "computer_approval_discarded": {
-                // Stop/Pause/shutdown revoked these prompts; never show
-                // one that is still waiting. One already on screen is
-                // answered as stale by the runtime.
-                screenPromptQueueRef.current.discard(
-                  parseDiscardedApprovalIds(
-                    event.payload.message,
-                  ),
-                );
-                break;
-              }
 
               case "screen_approval_stale": {
                 console.info(
@@ -2598,6 +2579,11 @@ function App() {
           </span>
         </div>
       </section>
+
+      <ScreenApprovalDialog
+        view={screenApprovalView}
+        onAnswer={answerScreenApproval}
+      />
 
       {pendingFileApproval && (
         <div
