@@ -101,6 +101,7 @@ SCOPE_LIMITS = (
 
 _COLLECTED_NAME = re.compile(r"(licen[cs]e|copying|notice|unlicense|copyright)", re.IGNORECASE)
 _LICENCE_NAME = re.compile(r"(licen[cs]e|copying|unlicense)", re.IGNORECASE)
+_AUXILIARY_NAME = re.compile(r"(authors|notice|copyright|readme|contributors|credits)", re.IGNORECASE)
 _LABEL_ONLY = re.compile(r"(spdx-license-identifier:\s*)?[a-z0-9.+\-()/ ]+", re.IGNORECASE | re.ASCII)
 _MAX_LABEL_CHARS = 80
 _MAX_NOTICE_BYTES = 2 * 1024 * 1024
@@ -264,6 +265,8 @@ def _classify(name: str, data: bytes, declared: bool) -> str:
     base = PurePosixPath(name).name
     if base.lower().endswith(".spdx"):
         return "spdx-metadata"
+    if _AUXILIARY_NAME.match(base):
+        return "auxiliary"  # authorship/notice metadata never counts, even as a declared license-file
     if declared or _LICENCE_NAME.match(base):
         return "licence" if _is_substantive(data) else "licence-label"
     return "auxiliary"

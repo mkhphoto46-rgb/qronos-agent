@@ -307,6 +307,24 @@ def test_a_missing_licence_fails_with_the_exact_identity(tmp_path, files, declar
         check_coverage([component(directory, declared=declared)], {})
 
 
+@pytest.mark.parametrize(("declared_file", "content"), [
+    ("AUTHORS", "Example Author\nA Contributor\n"),
+    ("NOTICE", "Example required notice\nAuthors: Example\n"),
+    ("COPYRIGHT", "Copyright 2020 Example Holder\nAll rights reserved.\n"),
+    ("README.md", "# demo\nLicensed under MIT. See the repository for details.\n"),
+    ("docs/AUTHORS.txt", "Example Author <author@example.invalid>\n"),
+    ("TERMS", ""),
+    ("TERMS", "MIT OR Apache-2.0"),
+])
+def test_a_declared_license_file_with_only_metadata_or_a_label_does_not_count(tmp_path, declared_file, content):
+    directory = package_dir(tmp_path, files={declared_file: content})
+
+    with pytest.raises(NoticeError, match=r"demo@1\.0\.0: no licence text"):
+        check_coverage([component(directory, license_file=declared_file)], {})
+    (found,) = notices.notice_files(component(directory, license_file=declared_file)),
+    assert [item.role for item in found] == (["licence-label"] if declared_file == "TERMS" else ["auxiliary"])
+
+
 def test_auxiliary_files_stay_collectable_but_never_count(tmp_path):
     directory = package_dir(tmp_path, files={"NOTICE": "Attribution", "LICENSE": "MIT"})
     item = component(directory)
