@@ -183,15 +183,32 @@ def test_valid_custom_and_cloud_synced_roots_are_kept(profile: Profile) -> None:
     assert not not_yet.exists() and not synced.exists(), "reading must not create roots"
 
 
+def _directory_link(link: Path, target: Path) -> None:
+    """A real redirecting directory link: an NTFS junction on Windows, a
+    directory symlink on POSIX (where unprivileged symlinks are allowed)."""
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def _remove_directory_link(link: Path) -> None:
+    # Removes the link itself, never the target's contents.
+    if os.name == "nt":
+        os.rmdir(link)
+    else:
+        link.unlink()
+
+
 def test_existing_junction_root_is_allowed_but_judged_by_its_target(
     profile: Profile, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import _winapi
-
     real = profile.tmp / "OtherDrive" / "QronosHistory"
     real.mkdir(parents=True)
     link = profile.custom / "HistoryLink"
-    _winapi.CreateJunction(str(real), str(link))
+    _directory_link(link, real)
     try:
         profile.write_locator({"historyRoot": str(link)})
         assert read_storage_state().problems == ()
@@ -200,15 +217,15 @@ def test_existing_junction_root_is_allowed_but_judged_by_its_target(
         protected.mkdir()
         monkeypatch.setenv("SystemRoot", str(protected))
         sneaky = profile.custom / "LooksHarmless"
-        _winapi.CreateJunction(str(protected), str(sneaky))
+        _directory_link(sneaky, protected)
         try:
             profile.write_locator({"historyRoot": str(sneaky)})
             (problem,) = read_storage_state().problems
             assert problem.code == "protected"
         finally:
-            os.rmdir(sneaky)
+            _remove_directory_link(sneaky)
     finally:
-        os.rmdir(link)
+        _remove_directory_link(link)
 
 
 # ---------------------------------------------------------------- corrupt and newer locators
@@ -494,15 +511,15 @@ def test_only_redirecting_reparse_points_count_as_links(
 
 
 def test_a_real_junction_is_a_link(tmp_path: Path) -> None:
-    import _winapi
-
+    # Windows: a real NTFS junction (name-surrogate reparse point).
+    # POSIX: a real directory symlink, the equivalent redirecting link.
     target = tmp_path / "t"
     target.mkdir()
     link = tmp_path / "j"
-    _winapi.CreateJunction(str(target), str(link))
+    _directory_link(link, target)
     try:
         assert path_safety.is_link_or_reparse_point(link) is True
         assert path_safety.is_link_or_reparse_point(target) is False
         assert path_safety.is_link_or_reparse_point(tmp_path / "missing") is False
     finally:
-        os.rmdir(link)
+        _remove_directory_link(link)
