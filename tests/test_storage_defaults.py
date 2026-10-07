@@ -119,16 +119,19 @@ def test_corrupt_or_newer_locator_never_reaches_the_checkout(checkout: Checkout,
 @pytest.mark.parametrize(
     "stored, code",
     [
-        ("Library", "relative"),
-        ("{program}\\Library", "protected"),
-        ("{program}\\Library\\Nested", "protected"),
-        ("{documents}", "contains_program"),
+        (lambda c: "Library", "relative"),
+        # Built with platform-native joins: a "\\" inside a POSIX file name is
+        # an ordinary character, not a separator.
+        (lambda c: str(c.program / "Library"), "protected"),
+        (lambda c: str(c.program / "Library" / "Nested"), "protected"),
+        (lambda c: str(c.documents), "contains_program"),
     ],
+    ids=["relative", "inside-program", "nested-inside-program", "contains-program"],
 )
 def test_invalid_stored_library_root_falls_back_outside_the_checkout(
-    checkout: Checkout, stored: str, code: str,
+    checkout: Checkout, stored, code: str,
 ) -> None:
-    value = stored.format(program=checkout.program, documents=checkout.documents)
+    value = stored(checkout)
     original = checkout.write_locator({"artifactRoot": value, "backupRoot": "Backups"})
 
     state = read_storage_state()

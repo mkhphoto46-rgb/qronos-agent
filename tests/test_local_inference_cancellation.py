@@ -22,7 +22,8 @@ from core.ollama_controller import OllamaController
 @pytest.fixture
 def slow_daemon(monkeypatch):
     state = {"path": "/api/chat", "phase": "headers", "received": [],
-             "blocked": threading.Event(), "closed": threading.Event()}
+             "blocked": threading.Event(), "closed": threading.Event(),
+             "body_started": threading.Event()}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -39,6 +40,9 @@ def slow_daemon(monkeypatch):
                     self.wfile.write(body)
                     return
                 if state["phase"] == "body":
+                    # Publish the phase before flushing bytes: a fast client
+                    # can start its body read as soon as headers arrive.
+                    state["body_started"].set()
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -216,6 +220,9 @@ def test_old_token_cannot_close_new_request_on_same_controller(slow_daemon):
     assert slow_daemon["blocked"].wait(2)
     old.cancel()
     assert_cancelled(thread, result, old)
+    # The client worker and server EOF observer finish independently. Drain
+    # the old connection before reusing these events for the next request.
+    assert slow_daemon["closed"].wait(0.75)
     slow_daemon["blocked"].clear()
     slow_daemon["closed"].clear()
     current = LocalInferenceCancellation()
@@ -282,7 +289,7 @@ def test_http10_body_socket_is_closed_before_cancel_returns(slow_daemon, monkeyp
     original = local_ipc._DeadlineSocket.recv_into
 
     def observe_body(sock, *args):
-        if slow_daemon["blocked"].is_set() and sock._closed and sock.fileno() != -1:
+        if slow_daemon["body_started"].is_set() and sock._closed and sock.fileno() != -1:
             sockets.append(sock)
             reading.set()
         return original(sock, *args)
@@ -292,6 +299,7 @@ def test_http10_body_socket_is_closed_before_cancel_returns(slow_daemon, monkeyp
     thread, result = start_worker(lambda: OllamaController(slow_daemon["url"]).chat(
         "local:4b", prompt="private", cancellation=token))
     assert reading.wait(2), "Fixture did not reach HTTP/1.0 response body ownership"
+    assert slow_daemon["blocked"].wait(2), "Fixture did not flush its partial body"
     assert token._aborters
     token.cancel()
     assert all(sock.fileno() == -1 for sock in sockets)
