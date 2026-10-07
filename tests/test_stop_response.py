@@ -21,6 +21,9 @@ class StopResponseRuntimeTests(unittest.TestCase):
         runtime._computer_actions = ActiveActionRegistry()
         runtime._approval_lock = threading.Lock()
         runtime._approvals = ApprovalLedger()
+        runtime._file_write_approval_lease_until = 0.0
+        runtime._file_approval_clock = lambda: 0.0
+        runtime.file_executor = None
         runtime.paint_draw_executor = None
         runtime._notify = lambda *args, **kwargs: None
         runtime._write_voice_playback_telemetry = (

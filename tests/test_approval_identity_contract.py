@@ -299,3 +299,20 @@ def test_desktop_prompt_helper_behaviour(tmp_path):
     assert out["order"] == ["d" * 24, "f" * 24, None]
     assert out["reEnqueueShown"] is False
     assert "Paint" in out["text"] and re.search("[؀-ۿ]", out["text"])
+
+
+def test_take_with_kinds_leaves_other_kinds_untouched():
+    ledger = ApprovalLedger()
+    screen = ledger.issue(ApprovalKind.SCREEN_READ, "q")
+
+    with pytest.raises(StaleApproval) as raised:
+        ledger.take(screen.approval_id, kinds=(ApprovalKind.FILE_ACTION,))
+
+    assert raised.value.reason == "wrong_kind"
+    assert ledger.take(screen.approval_id, kinds=(ApprovalKind.SCREEN_READ,)) == screen
+
+
+def test_payload_fn_receives_the_issued_identity():
+    ledger = ApprovalLedger()
+    ticket = ledger.issue(ApprovalKind.FILE_ACTION, "req", payload_fn=lambda approval_id: {"token": approval_id})
+    assert ticket.payload == {"token": ticket.approval_id}

@@ -6,7 +6,6 @@ import os
 import re
 import sys
 import threading
-import uuid
 import wave
 from pathlib import Path
 
@@ -30,7 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from core.action_audit import ActionAuditLog
 from core.config import CONFIG
-from core.actions import ActionOutcome
+from core.actions import ActionOutcome, ActionResult
 from core.file_action_parser import FileActionParseError, parse_file_action
 from core.file_executor import FileAction, FileExecutor, FileOperation, PreparedFileAction
 from core.file_resolver import (
@@ -1411,7 +1410,6 @@ class QronosRuntime:
         self._approvals = ApprovalLedger()
         # Makes "check nothing is pending, then issue" atomic.
         self._approval_lock = threading.Lock()
-        self.pending_file_actions: dict[str, PendingFileTextAction] = {}
         # One explicit UI approval grants a short, process-local lease for
         # ordinary reversible file-write actions. The window is fixed: auto-
         # approved actions never extend it. Restart and global Pause revoke it.
@@ -2513,7 +2511,7 @@ class QronosRuntime:
                 scheduler.set_paused(paused)
 
         if paused:
-            self._clear_file_write_approval_lease("runtime_paused")
+            self._discard_pending_file_approvals(CANCEL_REASON_PAUSE)
             # Pause stops GUI work the same way Stop does: in-flight actions
             # are cancelled cooperatively (releasing held buttons), turns in
             # progress cannot start new actions, and pending approvals are
@@ -4669,6 +4667,17 @@ class QronosRuntime:
         request_id: str,
         started_at: float,
     ) -> None:
+        stopped = self._computer_actions.stopped_since_turn_start()
+        if stopped:
+            # Stop/Pause/shutdown arrived while this turn was still routing:
+            # never prepare, auto-approve or prompt for a file write.
+            self._finish_text_file_action(
+                request_id=request_id,
+                response="لغو شد؛ هیچ تغییری روی فایل‌ها انجام نشد.",
+                started_at=started_at,
+            )
+            return
+
         if self.pending_file_actions:
             raise RuntimeError(
                 "Another file action is already awaiting approval."
@@ -4692,6 +4701,16 @@ class QronosRuntime:
 
         prepared = self.file_executor.prepare(action)
         verdict = prepared.verdict
+
+        if self._computer_actions.stopped_since_turn_start():
+            # Stop landed while the request was being parsed/prepared: no
+            # auto-approved write, no lease use, no prompt.
+            self._finish_text_file_action(
+                request_id=request_id,
+                response="لغو شد؛ هیچ تغییری روی فایل‌ها انجام نشد.",
+                started_at=started_at,
+            )
+            return
 
         if verdict.refused:
             self._finish_text_file_action(
@@ -4769,13 +4788,17 @@ class QronosRuntime:
             return
 
         if self._file_write_approval_lease_active():
-            token = uuid.uuid4().hex
-            self.pending_file_actions[token] = PendingFileTextAction(
-                token=token,
-                prepared=prepared,
-                request_id=request_id,
-                started_at=started_at,
+            ticket = self._approvals.issue(
+                ApprovalKind.FILE_ACTION,
+                request_id,
+                payload_fn=lambda approval_id: PendingFileTextAction(
+                    token=approval_id,
+                    prepared=prepared,
+                    request_id=request_id,
+                    started_at=started_at,
+                ),
             )
+            token = ticket.approval_id
             self._notify(
                 "file_action_approval_lease_used",
                 "ready",
@@ -4799,14 +4822,17 @@ class QronosRuntime:
             )
             return
 
-        token = uuid.uuid4().hex
-        pending = PendingFileTextAction(
-            token=token,
-            prepared=prepared,
-            request_id=request_id,
-            started_at=started_at,
+        ticket = self._approvals.issue(
+            ApprovalKind.FILE_ACTION,
+            request_id,
+            payload_fn=lambda approval_id: PendingFileTextAction(
+                token=approval_id,
+                prepared=prepared,
+                request_id=request_id,
+                started_at=started_at,
+            ),
         )
-        self.pending_file_actions[token] = pending
+        token = ticket.approval_id
 
         action_payload = {
             "actionToken": token,
@@ -4842,17 +4868,21 @@ class QronosRuntime:
                 "File action decision needs an action token."
             )
 
-        pending = self.pending_file_actions.pop(
-            token,
-            None,
-        )
-        if pending is None:
-            self._notify(
-                "runtime_warning",
-                "warning",
-                "Ignored an unknown or stale file-action approval token.",
-            )
+        if self.runtime_paused:
+            # Pause revoked every pending file action already; never write
+            # while paused, whatever the answer names.
+            self._notify_file_stale(token, CANCEL_REASON_PAUSE)
             return
+
+        try:
+            ticket = self._approvals.take(
+                token,
+                kinds=(ApprovalKind.FILE_ACTION,),
+            )
+        except StaleApproval as exc:
+            self._notify_file_stale(token, exc.reason)
+            return
+        pending: PendingFileTextAction = ticket.payload
 
         if self.file_executor is None:
             self._fail_text_file_action(
@@ -6296,6 +6326,78 @@ class QronosRuntime:
                     window=self.last_foreground_window,
                 )
 
+    @property
+    def pending_file_actions(self) -> dict[str, PendingFileTextAction]:
+        """Open file approvals by their single-use identity (a view)."""
+        return {
+            ticket.approval_id: ticket.payload
+            for ticket in self._approvals.open_tickets()
+            if ticket.kind is ApprovalKind.FILE_ACTION
+        }
+
+    def _discard_pending_file_approvals(self, reason: str) -> int:
+        """
+        Revoke every file action still waiting for its UI answer and end the
+        reversible-write lease. A late "approve" for a revoked identity is
+        refused (file_action_stale) and cannot write. Each discarded request
+        is audited as cancelled and its text request is answered. Idempotent.
+        """
+        revoked = self._approvals.revoke_kinds(
+            (ApprovalKind.FILE_ACTION,),
+            reason,
+        )
+        for ticket in revoked:
+            pending: PendingFileTextAction = ticket.payload
+            audit = getattr(self.file_executor, "audit", None)
+            if audit is not None:
+                try:
+                    audit.record_result(
+                        pending.prepared.request,
+                        ActionResult(
+                            action_id=pending.prepared.request.action_id,
+                            outcome=ActionOutcome.CANCELLED,
+                            detail=f"Discarded before approval ({reason}); nothing was written.",
+                        ),
+                    )
+                except Exception as exc:
+                    self._notify(
+                        "runtime_warning",
+                        "warning",
+                        f"Could not audit a discarded file approval: {type(exc).__name__}",
+                    )
+            self._notify(
+                "file_action_cancelled",
+                "ready",
+                json.dumps(
+                    {
+                        "actionToken": ticket.approval_id,
+                        "requestId": pending.request_id,
+                        "actionId": pending.prepared.request.action_id,
+                        "reason": reason,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            self._finish_text_file_action(
+                request_id=pending.request_id,
+                response="لغو شد؛ هیچ تغییری روی فایل‌ها انجام نشد.",
+                started_at=pending.started_at,
+            )
+        self._clear_file_write_approval_lease(reason)
+        return len(revoked)
+
+    def _notify_file_stale(self, action_token: str, reason: str) -> None:
+        self._notify(
+            "file_action_stale",
+            "ready",
+            json.dumps(
+                {"actionToken": action_token, "reason": reason},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+
     def _issue_paint_prompt(
         self,
         kind: ApprovalKind,
@@ -6396,6 +6498,9 @@ class QronosRuntime:
         pending_approvals_discarded = self._discard_pending_approvals(
             CANCEL_REASON_USER_STOP
         )
+        pending_file_approvals_discarded = self._discard_pending_file_approvals(
+            CANCEL_REASON_USER_STOP
+        )
 
         with self._lock:
             busy = bool(self._busy)
@@ -6446,6 +6551,7 @@ class QronosRuntime:
                     "playbackId": playback_id,
                     "computerActionsCancelled": computer_actions_cancelled,
                     "pendingApprovalsDiscarded": pending_approvals_discarded,
+                    "pendingFileApprovalsDiscarded": pending_file_approvals_discarded,
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -6458,6 +6564,7 @@ class QronosRuntime:
             "playbackId": playback_id,
             "computerActionsCancelled": computer_actions_cancelled,
             "pendingApprovalsDiscarded": pending_approvals_discarded,
+            "pendingFileApprovalsDiscarded": pending_file_approvals_discarded,
         }
 
 
@@ -8693,7 +8800,14 @@ class QronosRuntime:
             window = self.last_foreground_window
             if approval_id:
                 try:
-                    ticket = self._approvals.take(approval_id)
+                    ticket = self._approvals.take(
+                        approval_id,
+                        kinds=(
+                            ApprovalKind.PAINT_DRAW,
+                            ApprovalKind.PAINT_UNDO,
+                            ApprovalKind.SCREEN_READ,
+                        ),
+                    )
                 except StaleApproval as exc:
                     self._notify_stale_screen_answer(
                         exc.reason,
@@ -8964,6 +9078,7 @@ class QronosRuntime:
         # pending approvals are discarded so a late answer finds nothing.
         self._computer_actions.close()
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
+        self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
 
