@@ -9,6 +9,17 @@
 - Legacy direct HTTP web transport disabled; removed its production registration.
 - Offline rule with explicit paired mobile WAN transport exception.
 - Paint drawing intent/schema prototype; native drawing deliberately disabled.
+- Cooperative Stop for in-flight computer/Paint actions: one cancellation token
+  per action, checked between native steps and inside stroke loops; every exit
+  path after mouse-down releases the button. Runtime shutdown cancels the same
+  way. Cancelled/partial outcomes are audited as `cancelled`.
+- Honest undo records: Windows-control actions are journaled as irreversible
+  with a reason. A Paint drawing is journaled as exactly reversible only when
+  its edit count is certain and canvas evidence exists; undo rechecks
+  permission, exact window/process/layout and an unchanged canvas before
+  sending any Ctrl+Z, stops as soon as the canvas matches its pre-drawing
+  state, and never replays a partial undo. Covered by fake-input tests only;
+  no live Paint validation and no user-facing "undo" command yet.
 
 ## Remaining work (not completed capabilities)
 
@@ -18,8 +29,9 @@
    web provider module was direct HTTP, not browser control. Browser research is
    currently unavailable through the removed worker.
 3. Implement fresh screenshot/window identity binding and validated Vision target
-   coordinates; integrate mouse/keyboard actions with cancellation, focus checks,
-   permission checks, audit and observed postconditions.
+   coordinates; integrate mouse/keyboard actions with focus checks, permission
+   checks, audit and observed postconditions. Cancellation is wired for Paint
+   drawing and ComputerExecutor; calculator/accessibility actions are not yet.
 4. Live app/file/drive testing with memory and sidecar monitoring.
 5. Telegram exact-contact/latest-incoming-file workflow and printer workflow.
 6. Device Link internet transport and native phone app; no relay deployed yet.

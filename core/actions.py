@@ -59,6 +59,10 @@ class ActionOutcome(Enum):
     # may run later, unchanged, once somebody says yes.
     AWAITING_APPROVAL = "awaiting_approval"
 
+    # Stopped by the user (or shutdown) part-way. Unlike REFUSED it may have
+    # touched the machine already; the detail and the undo journal say what.
+    CANCELLED = "cancelled"
+
 
 class InvalidAction(ValueError):
     """An action could not be built or read back."""
@@ -200,10 +204,11 @@ class ActionResult:
 
     @property
     def ran(self) -> bool:
-        """True only when the action actually touched the machine."""
+        """True when the action ran far enough that it may have touched the machine."""
         return self.outcome in {
             ActionOutcome.SUCCEEDED,
             ActionOutcome.FAILED,
+            ActionOutcome.CANCELLED,
         }
 
     def to_json(self) -> dict[str, Any]:

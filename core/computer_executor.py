@@ -15,6 +15,7 @@ from typing import Callable, Protocol
 from core.windows_app_activation import activate_application
 
 from core.action_audit import ActionAuditLog, AuditEvent
+from core.action_cancellation import ActionCancelled, CancellationToken, checkpoint
 from core.actions import (
     ActionOutcome,
     ActionRequest,
@@ -457,6 +458,28 @@ class ComputerExecution:
     window_binding: WindowBinding | None = None
 
 
+#: Why Qronos does not reverse a completed Windows-control action itself.
+#: Recorded with every entry so "undo" can answer truthfully instead of
+#: claiming a reversal nobody can perform. Fixed vocabulary, never free text.
+_UNDO_UNAVAILABLE_REASONS: dict[ComputerOperation, str] = {
+    # Activation may reuse an instance the user already had open, and closing
+    # an app can discard the user's unsaved work. Never automatic.
+    ComputerOperation.OPEN_APP: "closing_app_could_discard_user_state",
+    # Explorer delegates to the shell; Qronos owns no exact window to close.
+    ComputerOperation.OPEN_LOCATION: "explorer_window_not_owned",
+    ComputerOperation.CLOSE_APP: "closed_process_cannot_be_restored",
+    ComputerOperation.FOCUS_WINDOW: "previous_window_state_not_captured",
+    ComputerOperation.MINIMIZE_WINDOW: "previous_window_state_not_captured",
+    ComputerOperation.MAXIMIZE_WINDOW: "previous_window_state_not_captured",
+    ComputerOperation.DRAW_BASIC_HOUSE: "gui_edits_not_tracked",
+}
+
+
+def undo_unavailable_restoration(reason: str) -> dict[str, str]:
+    """Restoration data for an IRREVERSIBLE entry: why automatic undo is unavailable."""
+    return {"automaticUndo": "unavailable", "reason": str(reason)}
+
+
 class ProcessLike(Protocol):
     pid: int
     def poll(self) -> int | None: ...
@@ -594,6 +617,19 @@ class ComputerExecutor:
             int(launch_binding_settle_observations),
         )
 
+    def _pause(
+        self,
+        seconds: float,
+        cancel_token: CancellationToken | None,
+    ) -> None:
+        """Sleep between native steps, honouring cooperative cancellation."""
+        checkpoint(cancel_token)
+        if cancel_token is not None and self._sleep is time.sleep:
+            cancel_token.sleep(seconds)
+            return
+        self._sleep(seconds)
+        checkpoint(cancel_token)
+
     def resolve_app_id(self, query: str) -> str:
         return resolve_application_id(query, dynamic=self.dynamic_apps)
 
@@ -653,6 +689,7 @@ class ComputerExecutor:
         *,
         timeout_seconds: float = 3.0,
         poll_seconds: float = 0.10,
+        cancel_token: CancellationToken | None = None,
     ) -> WindowSnapshot:
         """
         Bring the exact bound application to foreground.
@@ -926,8 +963,9 @@ class ComputerExecutor:
                         "Windows did not grant foreground to the exact bound application root."
                     )
 
-                self._sleep(
-                    poll
+                self._pause(
+                    poll,
+                    cancel_token,
                 )
 
         finally:
@@ -956,6 +994,7 @@ class ComputerExecutor:
         self,
         spec: AppSpec,
         pid: int,
+        cancel_token: CancellationToken | None = None,
     ) -> WindowBinding:
         """
         Bind an exact packaged-app PID only after its content HWND settles.
@@ -1013,8 +1052,9 @@ class ComputerExecutor:
                     attempt + 1
                     < self._launch_binding_attempts
                 ):
-                    self._sleep(
-                        self._launch_binding_poll_seconds
+                    self._pause(
+                        self._launch_binding_poll_seconds,
+                        cancel_token,
                     )
 
 
@@ -1219,8 +1259,9 @@ class ComputerExecutor:
                 < self._launch_binding_attempts
             ):
 
-                self._sleep(
-                    self._launch_binding_poll_seconds
+                self._pause(
+                    self._launch_binding_poll_seconds,
+                    cancel_token,
                 )
 
 
@@ -1245,8 +1286,19 @@ class ComputerExecutor:
         verdict = self._evaluate_request(request)
         return PreparedComputerAction(action=action, request=request, verdict=verdict)
 
-    def execute(self, action: ComputerAction, *, approval: PermissionDecision | None = None) -> ComputerExecution:
-        return self.execute_prepared(self.prepare(action), approval=approval, reevaluate=False)
+    def execute(
+        self,
+        action: ComputerAction,
+        *,
+        approval: PermissionDecision | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> ComputerExecution:
+        return self.execute_prepared(
+            self.prepare(action),
+            approval=approval,
+            reevaluate=False,
+            cancel_token=cancel_token,
+        )
 
     def execute_prepared(
         self,
@@ -1254,6 +1306,7 @@ class ComputerExecutor:
         *,
         approval: PermissionDecision | None = None,
         reevaluate: bool = True,
+        cancel_token: CancellationToken | None = None,
     ) -> ComputerExecution:
         if not isinstance(prepared, PreparedComputerAction):
             raise InvalidAction("execute_prepared requires a PreparedComputerAction.")
@@ -1265,7 +1318,12 @@ class ComputerExecutor:
                 return ComputerExecution(prepared.request, verdict, verdict.as_result())
             if self.audit is not None:
                 self.audit.record(AuditEvent.APPROVED, prepared.request, decision=verdict.decision)
-        return self._run(prepared.action, prepared.request, verdict)
+        return self._run(
+            prepared.action,
+            prepared.request,
+            verdict,
+            cancel_token=cancel_token,
+        )
 
     def decline_prepared(self, prepared: PreparedComputerAction) -> ComputerExecution:
         if not isinstance(prepared, PreparedComputerAction):
@@ -1292,14 +1350,39 @@ class ComputerExecutor:
             audit=self.audit.record_verdict if self.audit is not None else None,
         )
 
-    def _run(self, action: ComputerAction, request: ActionRequest, verdict: Verdict) -> ComputerExecution:
+    def _run(
+        self,
+        action: ComputerAction,
+        request: ActionRequest,
+        verdict: Verdict,
+        *,
+        cancel_token: CancellationToken | None = None,
+    ) -> ComputerExecution:
         window_binding: WindowBinding | None = None
+        effects: list[str] = []
         try:
-            detail, window_binding = self._perform_with_context(action)
+            detail, window_binding = self._perform_with_context(
+                action,
+                cancel_token=cancel_token,
+                effects=effects,
+            )
             result = ActionResult(
                 action_id=request.action_id,
                 outcome=ActionOutcome.SUCCEEDED,
                 detail=detail,
+            )
+        except ActionCancelled as exc:
+            result = ActionResult(
+                action_id=request.action_id,
+                outcome=ActionOutcome.CANCELLED,
+                detail=(
+                    f"Cancelled ({exc.reason}) "
+                    + (
+                        "after Windows had already received the request."
+                        if effects
+                        else "before any Windows side effect."
+                    )
+                ),
             )
         except Exception as exc:
             result = ActionResult(
@@ -1310,8 +1393,23 @@ class ComputerExecutor:
         if self.audit is not None:
             self.audit.record_result(request, result)
         undo_entry: UndoEntry | None = None
-        if result.outcome is ActionOutcome.SUCCEEDED and self.journal is not None:
-            undo_entry = self.journal.record(request, Reversal.NOTHING_TO_UNDO, {})
+        # Every action that changed something gets a journal entry, whatever
+        # its outcome, and no entry promises a reversal Qronos cannot perform:
+        # these Windows-control effects are recorded as irreversible with the
+        # reason, never as "nothing to undo".
+        if self.journal is not None and (
+            result.outcome is ActionOutcome.SUCCEEDED or effects
+        ):
+            undo_entry = self.journal.record(
+                request,
+                Reversal.IRREVERSIBLE,
+                undo_unavailable_restoration(
+                    _UNDO_UNAVAILABLE_REASONS.get(
+                        action.operation,
+                        "automatic_undo_not_supported",
+                    )
+                ),
+            )
         return ComputerExecution(
             request, verdict, result, undo_entry, window_binding
         )
@@ -1324,23 +1422,39 @@ class ComputerExecutor:
     def _perform_with_context(
         self,
         action: ComputerAction,
+        *,
+        cancel_token: CancellationToken | None = None,
+        effects: list[str] | None = None,
     ) -> tuple[str, WindowBinding | None]:
+        """
+        Perform one operation. ``effects`` (caller-owned) receives a marker as
+        soon as Windows has been asked to change something, so a later failure
+        or cancellation is still reported as having had a side effect.
+        """
+        sink = effects if effects is not None else []
+        checkpoint(cancel_token)
         if action.operation is ComputerOperation.OPEN_LOCATION:
             path = Path(action.location).resolve(strict=False)
             if not path.is_dir():
                 raise FileNotFoundError(f"Directory does not exist: {path}")
+            sink.append("location_opened")
             self._location_opener(str(path))
             return f"Opened directory {path} in Windows Explorer.", None
 
         spec = get_app_spec(action.app_id)
         if action.operation is ComputerOperation.OPEN_APP:
             if spec.aumid:
+                sink.append("app_activation_requested")
                 pid = int(self._packaged_launcher(spec.aumid) or 0)
                 if pid <= 0:
                     raise RuntimeError(
                         "Windows packaged-app activation did not return a valid process identifier."
                     )
-                binding = self._wait_for_launched_window(spec, pid)
+                binding = self._wait_for_launched_window(
+                    spec,
+                    pid,
+                    cancel_token=cancel_token,
+                )
                 return (
                     f"Opened {spec.display_name}; pid={pid}; hwnd={binding.hwnd}; "
                     "verification=packaged-app activation and exact-pid window binding succeeded.",
@@ -1348,12 +1462,17 @@ class ComputerExecutor:
                 )
 
             if spec.shortcut:
+                sink.append("app_launch_requested")
                 _launch_trusted_shortcut(spec)
                 if self._verification_delay_seconds:
-                    self._sleep(max(0.45, self._verification_delay_seconds))
+                    self._pause(
+                        max(0.45, self._verification_delay_seconds),
+                        cancel_token,
+                    )
                 return f"Opened {spec.display_name} from installed-app catalog.", None
 
             command = (spec.executable,)
+            sink.append("app_launch_requested")
             if spec.app_id in KNOWN_APPS:
                 process = self._launcher(command)
             else:
@@ -1362,7 +1481,7 @@ class ComputerExecutor:
             if pid <= 0:
                 raise RuntimeError("Windows did not return a valid process identifier.")
             if self._verification_delay_seconds:
-                self._sleep(self._verification_delay_seconds)
+                self._pause(self._verification_delay_seconds, cancel_token)
             return_code = process.poll()
             if return_code is not None and int(return_code) != 0:
                 raise RuntimeError(f"{spec.display_name} launch exited with code {return_code}.")
@@ -1388,11 +1507,13 @@ class ComputerExecutor:
             ComputerOperation.MINIMIZE_WINDOW,
             ComputerOperation.MAXIMIZE_WINDOW,
         }:
+            sink.append("window_action_requested")
             return self._window_action(spec, action.operation), None
 
         if action.operation is ComputerOperation.DRAW_BASIC_HOUSE:
             if spec.app_id != "paint":
                 raise InvalidAction("DRAW_BASIC_HOUSE is restricted to Microsoft Paint.")
+            sink.append("gui_action_requested")
             return self._gui_action(spec, action.operation), None
 
         raise InvalidAction(f"Unsupported computer operation: {action.operation!r}.")

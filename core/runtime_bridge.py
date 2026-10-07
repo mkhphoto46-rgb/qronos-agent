@@ -102,6 +102,11 @@ from core.intent_gate import IntentGate
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.undo_journal import UndoJournal
+from core.action_cancellation import (
+    CANCEL_REASON_SHUTDOWN,
+    CANCEL_REASON_USER_STOP,
+    ActiveActionRegistry,
+)
 from core.vision_ocr import read_screen_text
 from core.vision_worker import build_vision_worker
 from core.whisper_cpp_runtime import WhisperCppRuntime
@@ -149,6 +154,9 @@ class PendingPaintDrawAction:
 VOICE_PLAYBACK_STARTED_ACTION = "qronos.voice_playback_started"
 VOICE_PLAYBACK_COMPLETE_ACTION = "qronos.voice_playback_complete"
 STOP_RESPONSE_ACTION = "qronos.stop_response"
+
+# How long shutdown waits for cancelled GUI actions to release input state.
+COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS = 2.0
 
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
@@ -600,6 +608,31 @@ def _computer_capability_response() -> str:
         "Minimize و Maximize پشتیبانی می‌شود. فرمان‌های Shell و Terminal همچنان "
         "خارج از Windows Control هستند."
     )
+
+
+COMPUTER_ACTION_CANCELLED_RESPONSE = "عملیات با دستور توقف متوقف شد و ادامه نیافت."
+
+
+def _paint_draw_cancelled_response(execution: Any) -> str:
+    """Honest user-facing summary of a Paint drawing stopped by the user."""
+    effects = execution.side_effects
+    if not effects.any:
+        return "نقاشی پیش از هر تغییری در Paint متوقف شد."
+    if not effects.touched_canvas:
+        if effects.toolbar_clicks:
+            return (
+                "نقاشی پیش از کشیدن روی بوم متوقف شد؛ "
+                "ابزار، رنگ یا ضخامت انتخاب‌شدهٔ Paint ممکن است تغییر کرده باشد."
+            )
+        return "نقاشی پیش از کشیدن روی بوم متوقف شد؛ فقط Paint باز یا فعال شد."
+    response = (
+        "نقاشی با دستور توقف متوقف شد و دکمهٔ ماوس رها شد؛ "
+        f"{effects.strokes_completed} خط از {effects.strokes_planned} خط کامل شد "
+        "و هیچ ادامه یا تلاش دوباره‌ای انجام نمی‌شود."
+    )
+    if not execution.undo_available:
+        response += " بازگردانی خودکار این تغییرات در دسترس نیست."
+    return response
 
 
 def _computer_action_success_response(
@@ -1306,6 +1339,12 @@ class QronosRuntime:
         # session alive. A running model HTTP request is not force-killed, but
         # later response/TTS phases are suppressed at deterministic checkpoints.
         self._voice_response_stop_requested = threading.Event()
+
+        # In-flight user-visible computer/Paint actions. Stop cancels exactly
+        # the actions registered here (cooperatively, releasing any held mouse
+        # button); queue tasks, file actions and other processes are never in
+        # this registry. Cancelling grants nothing.
+        self._computer_actions = ActiveActionRegistry()
 
         # A real spoken turn must be distinguished from a wake candidate
         # that never produced valid speech. Brain/resource/TTS failures
@@ -2879,7 +2918,17 @@ class QronosRuntime:
             )
             return True
         if verdict.allowed:
-            execution = self.computer_executor.execute_prepared(prepared, reevaluate=False)
+            with self._computer_actions.begin("computer_action") as cancel_token:
+                execution = self.computer_executor.execute_prepared(
+                    prepared, reevaluate=False, cancel_token=cancel_token,
+                )
+            if execution.result.outcome is ActionOutcome.CANCELLED:
+                self._finish_text_file_action(
+                    request_id=request_id,
+                    response=COMPUTER_ACTION_CANCELLED_RESPONSE,
+                    started_at=started_at,
+                )
+                return True
             if execution.result.outcome is not ActionOutcome.SUCCEEDED:
                 self._fail_text_file_action(
                     request_id=request_id,
@@ -2940,9 +2989,15 @@ class QronosRuntime:
                 report["voiceNamedLocationNeedsOtherApproval"] = verdict.decision.value
                 report["voiceComputerDeferred"] = False
                 return "محل را پیدا کردم، اما باز کردنش به نوع دیگری از تأیید نیاز دارد."
-        execution = self.computer_executor.execute_prepared(
-            prepared, approval=approval, reevaluate=False,
-        )
+        with self._computer_actions.begin("computer_action") as cancel_token:
+            execution = self.computer_executor.execute_prepared(
+                prepared, approval=approval, reevaluate=False,
+                cancel_token=cancel_token,
+            )
+        if execution.result.outcome is ActionOutcome.CANCELLED:
+            report["voiceComputerCancelled"] = True
+            report["voiceComputerDeferred"] = False
+            return COMPUTER_ACTION_CANCELLED_RESPONSE
         if execution.result.outcome is not ActionOutcome.SUCCEEDED:
             report["voiceNamedLocationFailed"] = True
             report["voiceNamedLocationFailure"] = execution.result.detail
@@ -2982,11 +3037,19 @@ class QronosRuntime:
             return True
 
         if gui.allowed and screen.allowed:
-            execution = self.paint_draw_executor.execute_prepared(
-                prepared,
-                reevaluate=True,
-            )
-            if execution.result.outcome is ActionOutcome.SUCCEEDED:
+            with self._computer_actions.begin("paint_draw") as cancel_token:
+                execution = self.paint_draw_executor.execute_prepared(
+                    prepared,
+                    reevaluate=True,
+                    cancel_token=cancel_token,
+                )
+            if execution.result.outcome is ActionOutcome.CANCELLED:
+                self._finish_text_file_action(
+                    request_id=request_id,
+                    response=_paint_draw_cancelled_response(execution),
+                    started_at=started_at,
+                )
+            elif execution.result.outcome is ActionOutcome.SUCCEEDED:
                 self._finish_text_file_action(
                     request_id=request_id,
                     response=(
@@ -3093,13 +3156,23 @@ class QronosRuntime:
                 report["voiceComputerDeferred"] = False
                 return "مشاهدهٔ تأییدی Paint به نوع دیگری از تأیید نیاز دارد."
 
-        execution = self.paint_draw_executor.execute_prepared(
-            prepared,
-            gui_approval=gui_approval,
-            screen_approval=screen_approval,
-            reevaluate=True,
-        )
+        with self._computer_actions.begin("paint_draw") as cancel_token:
+            execution = self.paint_draw_executor.execute_prepared(
+                prepared,
+                gui_approval=gui_approval,
+                screen_approval=screen_approval,
+                reevaluate=True,
+                cancel_token=cancel_token,
+            )
         report["computerActionId"] = execution.request.action_id
+        report["paintDrawUndoAvailable"] = execution.undo_available
+        if execution.result.outcome is ActionOutcome.CANCELLED:
+            report["voiceComputerCancelled"] = True
+            report["voiceComputerDeferred"] = False
+            report["paintDrawCanvasEdits"] = (
+                execution.side_effects.canvas_marks_committed
+            )
+            return _paint_draw_cancelled_response(execution)
         if execution.result.outcome is ActionOutcome.SUCCEEDED:
             report["voiceComputerExecuted"] = True
             report["voiceComputerDeferred"] = False
@@ -3419,10 +3492,19 @@ class QronosRuntime:
             return True
 
         if verdict.allowed:
-            execution = self.computer_executor.execute_prepared(
-                prepared,
-                reevaluate=False,
-            )
+            with self._computer_actions.begin("computer_action") as cancel_token:
+                execution = self.computer_executor.execute_prepared(
+                    prepared,
+                    reevaluate=False,
+                    cancel_token=cancel_token,
+                )
+            if execution.result.outcome is ActionOutcome.CANCELLED:
+                self._finish_text_file_action(
+                    request_id=request_id,
+                    response=COMPUTER_ACTION_CANCELLED_RESPONSE,
+                    started_at=started_at,
+                )
+                return True
             if execution.result.outcome is not ActionOutcome.SUCCEEDED:
                 self._fail_text_file_action(
                     request_id=request_id,
@@ -3579,15 +3661,22 @@ class QronosRuntime:
                     "با فرمان صوتی فعلی اجرا نشد."
                 )
 
-        execution = self.computer_executor.execute_prepared(
-            prepared,
-            approval=approval,
-            reevaluate=False,
-        )
+        with self._computer_actions.begin("computer_action") as cancel_token:
+            execution = self.computer_executor.execute_prepared(
+                prepared,
+                approval=approval,
+                reevaluate=False,
+                cancel_token=cancel_token,
+            )
 
         report["computerOperation"] = action.operation.value
         report["computerAppId"] = action.app_id
         report["computerActionId"] = execution.request.action_id
+
+        if execution.result.outcome is ActionOutcome.CANCELLED:
+            report["voiceComputerCancelled"] = True
+            report["voiceComputerDeferred"] = False
+            return COMPUTER_ACTION_CANCELLED_RESPONSE
 
         if execution.result.outcome is not ActionOutcome.SUCCEEDED:
             report["voiceComputerFailed"] = True
@@ -5150,9 +5239,18 @@ class QronosRuntime:
         voice turn to suppress remaining response/TTS phases. The active Brain
         HTTP call is not force-killed; its result is discarded at the next
         checkpoint instead.
+
+        In-flight computer/Paint actions are cancelled cooperatively: each
+        stops at its next checkpoint (between native steps or pointer moves)
+        after releasing any mouse button it holds. Only actions registered
+        before this call are affected; the next command starts fresh.
         """
         now_perf = time.perf_counter()
         now_epoch = time.time()
+
+        computer_actions_cancelled = len(
+            self._computer_actions.cancel_all(CANCEL_REASON_USER_STOP)
+        )
 
         with self._lock:
             busy = bool(self._busy)
@@ -5201,6 +5299,7 @@ class QronosRuntime:
                     "busyTurnStopRequested": busy,
                     "playbackCancelled": playback_cancelled,
                     "playbackId": playback_id,
+                    "computerActionsCancelled": computer_actions_cancelled,
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -5211,6 +5310,7 @@ class QronosRuntime:
             "busyTurnStopRequested": busy,
             "playbackCancelled": playback_cancelled,
             "playbackId": playback_id,
+            "computerActionsCancelled": computer_actions_cancelled,
         }
 
 
@@ -7222,18 +7322,41 @@ class QronosRuntime:
             )
             return True
 
-        execution = self.paint_draw_executor.execute_prepared(
-            pending.prepared,
-            gui_approval=pending.gui_approval,
-            screen_approval=PermissionDecision.REQUIRE_UI_CONFIRMATION,
-            reevaluate=True,
-        )
+        with self._computer_actions.begin("paint_draw") as cancel_token:
+            execution = self.paint_draw_executor.execute_prepared(
+                pending.prepared,
+                gui_approval=pending.gui_approval,
+                screen_approval=PermissionDecision.REQUIRE_UI_CONFIRMATION,
+                reevaluate=True,
+                cancel_token=cancel_token,
+            )
 
-        if execution.result.outcome is ActionOutcome.SUCCEEDED:
+        if execution.result.outcome is ActionOutcome.CANCELLED:
+            response = _paint_draw_cancelled_response(execution)
+            effects = execution.side_effects
+            self._notify(
+                "paint_draw_cancelled",
+                "ready",
+                json.dumps(
+                    {
+                        "actionId": execution.request.action_id,
+                        "strokesPlanned": effects.strokes_planned,
+                        "strokesCompleted": effects.strokes_completed,
+                        "canvasEdits": effects.canvas_marks_committed,
+                        "unprovenReleases": effects.canvas_marks_unproven,
+                        "toolbarClicks": effects.toolbar_clicks,
+                        "undoAvailable": execution.undo_available,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        elif execution.result.outcome is ActionOutcome.SUCCEEDED:
             response = "انجام شد. نقاشی در Paint اجرا و نتیجهٔ واقعی آن تأیید شد."
             payload: dict[str, Any] = {
                 "actionId": execution.request.action_id,
                 "verified": True,
+                "undoAvailable": execution.undo_available,
             }
             if execution.run is not None:
                 payload.update(
@@ -7459,6 +7582,12 @@ class QronosRuntime:
         )
 
     def close(self) -> None:
+        # Stop in-flight GUI actions first and give them a bounded moment to
+        # unwind, so a stroke releases its mouse button before the process
+        # exits. Daemon workers that do not finish in time are abandoned.
+        self._computer_actions.cancel_all(CANCEL_REASON_SHUTDOWN)
+        self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
+
         self._input_meter_enabled = False
         self._stop_standalone_input_meter()
         self.stop_wake_listener()
