@@ -82,11 +82,65 @@ def tree_digest(directory: Path) -> str:
 
 
 def generate(tmp_path: Path, components: list[Component], exceptions: dict | None = None,
-             out: str = "out", private: tuple[str, ...] = ()) -> dict:
+             out: str = "out", private: tuple[str, ...] = (), upstream: dict | None = None) -> dict:
     exceptions = exceptions or {}
-    files = check_coverage(components, exceptions)
+    files = check_coverage(components, exceptions, upstream)
     return write_notices(components, files, exceptions, tmp_path / out,
-                         notices.WINDOWS_TARGET, private)
+                         notices.WINDOWS_TARGET, private, upstream)
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+UPSTREAM_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+UPSTREAM_LICENCE = b"MIT License\r\n\r\nCopyright (c) 2020 Example Holder\r\n"
+UPSTREAM_NOTICE = b"Example NOTICE\n"
+
+
+def upstream_package(tmp_path: Path) -> tuple[Path, Component]:
+    """A published package without licence text, plus its identity file."""
+    directory = tmp_path / "pkg"
+    directory.mkdir()
+    (directory / "Cargo.toml.orig").write_bytes(b"[package]\nname = \"demo\"\n")
+    return directory, component(directory)
+
+
+def upstream_registry(tmp_path: Path, **overrides) -> Path:
+    """A registry with one entry for component() and its vendored files."""
+    base = tmp_path / "upstream"
+    texts = base / "texts" / "example__demo-0123456789ab"
+    texts.mkdir(parents=True)
+    (texts / "LICENSE").write_bytes(UPSTREAM_LICENCE)
+    (texts / "NOTICE").write_bytes(UPSTREAM_NOTICE)
+
+    def text(name: str, data: bytes, role: str) -> dict:
+        return {"file": f"example__demo-0123456789ab/{name}", "sha256": sha256(data), "role": role,
+                "repository": "https://github.com/example/demo", "revision": UPSTREAM_COMMIT,
+                "sourcePath": name,
+                "url": f"https://raw.githubusercontent.com/example/demo/{UPSTREAM_COMMIT}/{name}"}
+
+    entry = {
+        "ecosystem": "rust", "name": "demo", "version": "1.0.0", "provenance": "sum",
+        "declaredLicense": "MIT",
+        "upstream": {"repository": "https://github.com/example/demo", "revision": UPSTREAM_COMMIT,
+                     "packagePath": "demo", "pinnedBy": ".cargo_vcs_info.json git.sha1"},
+        "identity": [{"path": "Cargo.toml.orig",
+                      "sha256": sha256(b"[package]\nname = \"demo\"\n")}],
+        "texts": [text("LICENSE", UPSTREAM_LICENCE, "licence"),
+                  text("NOTICE", UPSTREAM_NOTICE, "notice")],
+        "note": "Repository-root licence at the exact packaged revision.",
+    }
+    entry.update(overrides)
+    registry = base / "registry.json"
+    registry.write_text(json.dumps({"schema": 1, "packages": [entry]}), encoding="utf-8")
+    return registry
+
+
+def rewrite_entry(registry: Path, change) -> None:
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    change(data["packages"][0])
+    registry.write_text(json.dumps(data), encoding="utf-8")
 
 
 # ------------------------------------------------------------ graph scope
@@ -94,16 +148,16 @@ def generate(tmp_path: Path, components: list[Component], exceptions: dict | Non
 
 def test_the_rust_closure_follows_normal_edges_only(tmp_path):
     crates = {name: make_crate(tmp_path, name, "1.0.0", {"LICENSE": name})
-              for name in ("linked", "transitive", "buildonly", "builddep", "devonly")}
+              for name in ("normal", "transitive", "buildonly", "builddep", "devonly")}
     graph = metadata(list(crates.values()), {
-        ROOT_ID: [("linked 1.0.0", None), ("buildonly 1.0.0", "build"), ("devonly 1.0.0", "dev")],
-        "linked 1.0.0": [("transitive 1.0.0", None)],
+        ROOT_ID: [("normal 1.0.0", None), ("buildonly 1.0.0", "build"), ("devonly 1.0.0", "dev")],
+        "normal 1.0.0": [("transitive 1.0.0", None)],
         "buildonly 1.0.0": [("builddep 1.0.0", None)],
     })
 
     names = {item.name for item in rust_components(graph, {})}
 
-    assert names == {"linked", "transitive"}
+    assert names == {"normal", "transitive"}
 
 
 def test_a_local_path_dependency_is_not_treated_as_third_party(tmp_path):
@@ -131,7 +185,7 @@ def test_the_real_lock_production_closure_is_the_bundled_frontend():
     assert not any(name in key for key in keys for name in ("vite", "typescript", "@tauri-apps/cli"))
 
 
-def test_the_real_locked_rust_graph_covers_the_linked_crates(monkeypatch):
+def test_the_real_locked_rust_closure_has_the_expected_scope(monkeypatch):
     for name, value in TOOLCHAIN_HOMES.items():
         monkeypatch.setenv(name, value)
     try:
@@ -142,9 +196,9 @@ def test_the_real_locked_rust_graph_covers_the_linked_crates(monkeypatch):
     checksums = notices.cargo_lock_checksums(notices.CARGO_MANIFEST.parent / "Cargo.lock")
     found = {item.name: item for item in rust_components(graph, checksums)}
 
-    for linked in ("tauri", "wry", "tao", "webview2-com", "serde", "tokio", "windows-sys",
-                   "tauri-plugin-single-instance"):
-        assert linked in found
+    for expected in ("tauri", "wry", "tao", "webview2-com", "serde", "tokio", "windows-sys",
+                     "tauri-plugin-single-instance"):
+        assert expected in found
     assert "tauri-build" not in found  # build-dependency only
     assert all(item.provenance for item in found.values())  # every crate has a lock checksum
 
@@ -319,6 +373,169 @@ def test_a_foreign_non_empty_output_directory_is_not_deleted(tmp_path):
     with pytest.raises(NoticeError, match="not created by this tool"):
         generate(tmp_path, [component(directory)])
     assert (tmp_path / "out" / "keep.txt").read_text(encoding="utf-8") == "user file"
+
+
+# ------------------------------------------------ verified upstream texts
+
+
+def test_a_pinned_upstream_text_completes_the_exact_package(tmp_path):
+    _, item = upstream_package(tmp_path)
+    upstream = notices.load_upstream(upstream_registry(tmp_path))
+
+    inventory = generate(tmp_path, [item], upstream=upstream)
+
+    (record,) = inventory["components"]
+    assert record["licenceTextPresent"] is False  # the published package itself has none
+    assert record["licenceTextSource"] == "verified-upstream"
+    assert record["declaredLicense"] == "MIT" and record["exception"] is None
+    folder = "licenses/rust/demo-1.0.0/upstream/example__demo-0123456789ab"
+    assert [entry["path"] for entry in record["upstream"]["files"]] == [f"{folder}/LICENSE", f"{folder}/NOTICE"]
+    assert record["upstream"]["files"][0]["sha256"] == sha256(UPSTREAM_LICENCE)
+    assert record["upstream"]["files"][0]["revision"] == UPSTREAM_COMMIT
+    # Bytes, line endings and the holder line are preserved exactly.
+    assert (tmp_path / "out" / folder / "LICENSE").read_bytes() == UPSTREAM_LICENCE
+    text = (tmp_path / "out" / notices.NOTICE_TEXT).read_text(encoding="utf-8")
+    assert "Copyright (c) 2020 Example Holder" in text and UPSTREAM_COMMIT in text
+
+
+def test_a_corrupted_vendored_text_is_refused(tmp_path):
+    registry = upstream_registry(tmp_path)
+    vendored = registry.parent / "texts/example__demo-0123456789ab/LICENSE"
+    vendored.write_bytes(UPSTREAM_LICENCE.replace(b"\r\n", b"\n"))  # e.g. an end-of-line rewrite
+
+    with pytest.raises(NoticeError, match="does not match its pinned SHA-256"):
+        notices.load_upstream(registry)
+
+
+@pytest.mark.parametrize(("change", "message"), [
+    (lambda entry: entry["texts"][0].update(file="../../outside/LICENSE"), "escapes"),
+    (lambda entry: entry["texts"][0].update(file="C:/temp/LICENSE"), "must be relative"),
+    (lambda entry: entry["texts"][0].update(sourcePath="COPYING"), "does not mirror"),
+    (lambda entry: entry["texts"][0].update(file="example__demo-0123456789ab/MISSING", sourcePath="MISSING"),
+     "missing"),
+    (lambda entry: entry["identity"][0].update(path="../escape"), "escapes"),
+    (lambda entry: entry["texts"][0].update(url="https://example.com/main/LICENSE"), "immutable"),
+    (lambda entry: entry["texts"][0].update(role="waiver"), "known role"),
+    (lambda entry: entry["texts"].append(dict(entry["texts"][0])), "listed twice"),
+    (lambda entry: entry["texts"].pop(0), "no vendored licence text"),
+    (lambda entry: entry.update(waiver=True), "expected exactly the fields"),
+    (lambda entry: entry.update(identity=[]), "non-empty"),
+])
+def test_an_unsafe_or_malformed_registry_entry_is_refused(tmp_path, change, message):
+    registry = upstream_registry(tmp_path)
+    rewrite_entry(registry, change)
+
+    with pytest.raises(NoticeError, match=message):
+        notices.load_upstream(registry)
+
+
+def test_duplicate_and_unreferenced_upstream_files_are_refused(tmp_path):
+    registry = upstream_registry(tmp_path)
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    data["packages"].append(data["packages"][0])
+    registry.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(NoticeError, match="duplicate entry"):
+        notices.load_upstream(registry)
+
+    data["packages"].pop()
+    registry.write_text(json.dumps(data), encoding="utf-8")
+    (registry.parent / "texts" / "example__demo-0123456789ab" / "COPYING").write_text("x", encoding="utf-8")
+    with pytest.raises(NoticeError, match="not referenced by the registry: example__demo-0123456789ab/COPYING"):
+        notices.load_upstream(registry)
+
+
+def test_a_junction_inside_the_vendored_tree_is_refused(tmp_path):
+    winapi = pytest.importorskip("_winapi")
+    registry = upstream_registry(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    winapi.CreateJunction(str(elsewhere), str(registry.parent / "texts" / "linked"))
+
+    with pytest.raises(NoticeError, match="is a link"):
+        notices.load_upstream(registry)
+
+
+@pytest.mark.parametrize(("change", "message"), [
+    ({"provenance": "other-checksum"}, "provenance other-checksum does not match the lock sum"),
+    ({"declaredLicense": "Apache-2.0"}, "declares 'Apache-2.0' but the package declares 'MIT'"),
+    ({"identity": [{"path": "Cargo.toml.orig", "sha256": "0" * 64}]}, "does not match the package"),
+    ({"identity": [{"path": "absent.txt", "sha256": "0" * 64}]}, "missing or unsafe"),
+])
+def test_an_upstream_entry_for_a_different_package_is_refused(tmp_path, change, message):
+    _, item = upstream_package(tmp_path)
+    upstream = notices.load_upstream(upstream_registry(tmp_path, **change))
+
+    with pytest.raises(NoticeError, match=message) as raised:
+        check_coverage([item], {}, upstream)
+    assert "no licence text" in str(raised.value)  # and the gap itself is still reported
+
+
+def test_a_stale_upstream_entry_is_refused(tmp_path):
+    directory, item = upstream_package(tmp_path)
+    upstream = notices.load_upstream(upstream_registry(tmp_path))
+
+    with pytest.raises(NoticeError, match="matches no covered package"):
+        check_coverage([component(directory, name="other")], {}, upstream)
+
+    (directory / "LICENSE").write_text("now published", encoding="utf-8")
+    with pytest.raises(NoticeError, match="ships its own licence text"):
+        check_coverage([item], {}, upstream)
+
+
+def test_an_exception_is_not_needed_and_is_stale_beside_upstream_text(tmp_path):
+    _, item = upstream_package(tmp_path)
+    upstream = notices.load_upstream(upstream_registry(tmp_path))
+    exception = {"ecosystem": "rust", "name": "demo", "version": "1.0.0", "provenance": "sum",
+                 "missing": "text", "reason": "r", "reviewedBy": "Root"}
+
+    with pytest.raises(NoticeError, match="matches no missing notice"):
+        check_coverage([item], {item.key: exception}, upstream)
+
+
+COMMITTED_UPSTREAM = {
+    ("npm", "@tauri-apps/plugin-opener", "2.5.4"),
+    ("rust", "alloc-stdlib", "0.2.4"), ("rust", "defmt-parser", "1.0.0"), ("rust", "selectors", "0.36.1"),
+    ("rust", "unic-char-property", "0.9.0"), ("rust", "unic-char-range", "0.9.0"),
+    ("rust", "unic-common", "0.9.0"), ("rust", "unic-ucd-ident", "0.9.0"), ("rust", "unic-ucd-version", "0.9.0"),
+    ("rust", "webview2-com", "0.38.2"), ("rust", "webview2-com-macros", "0.8.1"),
+    ("rust", "webview2-com-sys", "0.38.2"),
+}
+
+
+def test_the_committed_upstream_registry_verifies_offline():
+    upstream = notices.load_upstream()  # every vendored hash and path is checked here
+
+    assert set(upstream) == COMMITTED_UPSTREAM
+    for notice in upstream.values():
+        assert len(notice.entry["upstream"]["revision"]) == 40  # a full commit, not a branch
+        for meta, path in notice.texts:
+            assert meta["url"].startswith(("https://raw.githubusercontent.com/", "https://api.nuget.org/"))
+            assert meta["revision"] in meta["url"] and path.stat().st_size < 64 * 1024
+    # The committed lock provenance is what the entries pin.
+    lock = json.loads(notices.PACKAGE_LOCK.read_text(encoding="utf-8"))
+    opener = upstream[("npm", "@tauri-apps/plugin-opener", "2.5.4")]
+    assert opener.entry["provenance"] == lock["packages"]["node_modules/@tauri-apps/plugin-opener"]["integrity"]
+    checksums = notices.cargo_lock_checksums(notices.CARGO_MANIFEST.parent / "Cargo.lock")
+    for (ecosystem, name, version), notice in upstream.items():
+        if ecosystem == "rust":
+            assert notice.entry["provenance"] == checksums[(name, version)]
+
+
+def test_the_real_rust_closure_is_complete_with_the_committed_registry(monkeypatch):
+    for name, value in TOOLCHAIN_HOMES.items():
+        monkeypatch.setenv(name, value)
+    try:
+        graph = notices.cargo_metadata()
+    except (NoticeError, OSError):
+        pytest.skip("The offline locked Cargo registry is not available on this machine.")
+    checksums = notices.cargo_lock_checksums(notices.CARGO_MANIFEST.parent / "Cargo.lock")
+    crates = rust_components(graph, checksums)
+    upstream = {key: value for key, value in notices.load_upstream().items() if key[0] == "rust"}
+
+    files = check_coverage(crates, notices.load_exceptions(), upstream)  # identity hashes verified
+
+    without_own_text = {key for key, found in files.items() if not notices._has_licence_text(found)}
+    assert without_own_text == set(upstream)
 
 
 # ------------------------------------------------------------ determinism

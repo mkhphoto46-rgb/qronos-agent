@@ -1,0 +1,573 @@
+{
+  "schema": 1,
+  "comment": "Verified upstream licence and notice texts for exact desktop dependencies whose published package lacks licence text. Each entry pins the exact package (ecosystem, name, version, locked checksum or integrity, declared licence, local identity-file hashes) and each vendored file (immutable URL, revision, source path, SHA-256). Nothing here grants a licence; it reproduces upstream text. Changes need Root review.",
+  "packages": [
+    {
+      "ecosystem": "npm",
+      "name": "@tauri-apps/plugin-opener",
+      "version": "2.5.4",
+      "provenance": "sha512-1HnPkb+AmgO29HBazm4uPLKB+r7zzcTBW1d0fyYp1uP+jwtpoiNDGKMMzz58SFp49nOIrxdE3aUJtT57lfO9CQ==",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "upstream": {
+        "repository": "https://github.com/tauri-apps/plugins-workspace",
+        "revision": "5c7668b6bb7c9a509f394d584568b3a922161e50",
+        "packagePath": "plugins/opener",
+        "pinnedBy": "npm registry gitHead equals tag opener-js-v2.5.4; registry dist.integrity equals the lock; package.json, README.md and LICENSE.spdx are byte-identical to packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": "LICENSE.spdx",
+          "sha256": "eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef"
+        },
+        {
+          "path": "README.md",
+          "sha256": "b68b4a2064eb98eb0f11f45a7ffe9812083caf43dda0fae5377da5f868871a62"
+        },
+        {
+          "path": "package.json",
+          "sha256": "5aa3668625e3b32ec2db27d969b6b7f25b97dd2ec14e2e7b1fce5646b71fcf0c"
+        }
+      ],
+      "texts": [
+        {
+          "file": "tauri-apps__plugins-workspace-5c7668b6bb7c/plugins/opener/LICENSE_APACHE-2.0",
+          "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9",
+          "role": "licence",
+          "repository": "https://github.com/tauri-apps/plugins-workspace",
+          "revision": "5c7668b6bb7c9a509f394d584568b3a922161e50",
+          "sourcePath": "plugins/opener/LICENSE_APACHE-2.0",
+          "url": "https://raw.githubusercontent.com/tauri-apps/plugins-workspace/5c7668b6bb7c9a509f394d584568b3a922161e50/plugins/opener/LICENSE_APACHE-2.0"
+        },
+        {
+          "file": "tauri-apps__plugins-workspace-5c7668b6bb7c/plugins/opener/LICENSE_MIT",
+          "sha256": "89ff9689dcf9dd53968785d05a26f7898bb169dbfcada8d032b3e68cf0d55607",
+          "role": "licence",
+          "repository": "https://github.com/tauri-apps/plugins-workspace",
+          "revision": "5c7668b6bb7c9a509f394d584568b3a922161e50",
+          "sourcePath": "plugins/opener/LICENSE_MIT",
+          "url": "https://raw.githubusercontent.com/tauri-apps/plugins-workspace/5c7668b6bb7c9a509f394d584568b3a922161e50/plugins/opener/LICENSE_MIT"
+        }
+      ],
+      "note": "Package-directory licences at the tagged revision; the published tarball ships only LICENSE.spdx."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "alloc-stdlib",
+      "version": "0.2.4",
+      "provenance": "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195",
+      "declaredLicense": "BSD-3-Clause",
+      "upstream": {
+        "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+        "revision": "ae42d22078b98549e987d2f03d12df7b984fde47",
+        "packagePath": "alloc-stdlib",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 and path_in_vcs; Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "5d07554db80324e6f09a3074928e6ae0e7cea58248f4c1db3f32d9ce0ec85efb"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "77cff698112ee833c7c2e2b42c2b51677502ee04ca4a0c213155e3494a80fec3"
+        }
+      ],
+      "texts": [
+        {
+          "file": "dropbox__rust-alloc-no-stdlib-ae42d22078b9/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+          "role": "licence",
+          "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+          "revision": "ae42d22078b98549e987d2f03d12df7b984fde47",
+          "sourcePath": "LICENSE",
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE"
+        }
+      ],
+      "note": "Repository-root licence at the exact packaged revision; the crate directory has no licence file of its own."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "defmt-parser",
+      "version": "1.0.0",
+      "provenance": "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "upstream": {
+        "repository": "https://github.com/knurling-rs/defmt",
+        "revision": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+        "packagePath": "parser",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 and path_in_vcs; Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "7ab8f01085721143c43db5db2528806f393df2058d03c5b8da20634e14886a05"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "5d5c0e139cf4076aad5d1f8b992a7b8c9095f5443dab0f9d1da020101adea245"
+        }
+      ],
+      "texts": [
+        {
+          "file": "knurling-rs__defmt-4a8cdb44891e/LICENSE-APACHE",
+          "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+          "role": "licence",
+          "repository": "https://github.com/knurling-rs/defmt",
+          "revision": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+          "sourcePath": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE"
+        },
+        {
+          "file": "knurling-rs__defmt-4a8cdb44891e/LICENSE-MIT",
+          "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50",
+          "role": "licence",
+          "repository": "https://github.com/knurling-rs/defmt",
+          "revision": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+          "sourcePath": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT"
+        }
+      ],
+      "note": "Repository-root licences at the exact packaged revision; the crate directory has no licence file of its own."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "selectors",
+      "version": "0.36.1",
+      "provenance": "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c",
+      "declaredLicense": "MPL-2.0",
+      "upstream": {
+        "repository": "https://github.com/servo/stylo",
+        "revision": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+        "packagePath": "selectors",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 and path_in_vcs; Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "b9b619f8e31f591cd1326578b87ccb14b4f3687af65b505674522513ed4d276d"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "be6ed6441d04b710178c3b50052672755e15e5cf3780060ca9fdd2c8aba1d392"
+        },
+        {
+          "path": "lib.rs",
+          "sha256": "d54c6e13e9e952dac17d209171df8657e3cae93beaddace4906150cdec8d02e9"
+        }
+      ],
+      "texts": [
+        {
+          "file": "mozilla__bedrock-a15178c3c7c9/media/MPL/2.0/index.txt",
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+          "role": "designated-licence",
+          "repository": "https://github.com/mozilla/bedrock",
+          "revision": "a15178c3c7c976c67b3641af77cae0b66093a175",
+          "sourcePath": "media/MPL/2.0/index.txt",
+          "url": "https://raw.githubusercontent.com/mozilla/bedrock/a15178c3c7c976c67b3641af77cae0b66093a175/media/MPL/2.0/index.txt"
+        },
+        {
+          "file": "servo__stylo-635e1a19d029/selectors/lib.rs",
+          "sha256": "d54c6e13e9e952dac17d209171df8657e3cae93beaddace4906150cdec8d02e9",
+          "role": "notice",
+          "repository": "https://github.com/servo/stylo",
+          "revision": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+          "sourcePath": "selectors/lib.rs",
+          "url": "https://raw.githubusercontent.com/servo/stylo/635e1a19d02960588a00e189bd4bd5bdb150ec3d/selectors/lib.rs"
+        }
+      ],
+      "note": "The exact source repository has no licence file at this revision. Its source files carry the MPL-2.0 Exhibit A notice (selectors/lib.rs, byte-identical to the published crate), which designates https://mozilla.org/MPL/2.0/. The MPL-2.0 text is Mozilla's own file from the mozilla.org site repository, byte-identical to https://www.mozilla.org/media/MPL/2.0/index.txt when retrieved. Root review: this is designated text, not a file of the exact source repository."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "unic-char-property",
+      "version": "0.9.0",
+      "provenance": "a8c57a407d9b6fa02b4795eb81c5b6652060a15a7903ea981f3d723e6c0be221",
+      "declaredLicense": "MIT/Apache-2.0",
+      "upstream": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "packagePath": "unic/char/property",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 (no path_in_vcs recorded); Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "72a0e361aab8e7af18af799a6046b290a930d94b76c551bf0667e0726f9d42d1"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "132a2ace33bbc5f54a2c4a4b522f96b7260c9e0fdb7756a753b4017e101e86d0"
+        }
+      ],
+      "texts": [
+        {
+          "file": "open-i18n__rust-unic-5878605364af/COPYRIGHT.md",
+          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+          "role": "copyright",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
+        }
+      ],
+      "note": "Repository-root copyright statement and licences at the exact packaged revision. COPYRIGHT.md refers to the repository AUTHORS contributor list (names and e-mail addresses) at the same revision; it is not vendored (data minimisation)."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "unic-char-range",
+      "version": "0.9.0",
+      "provenance": "0398022d5f700414f6b899e10b8348231abf9173fa93144cbc1a43b9793c1fbc",
+      "declaredLicense": "MIT/Apache-2.0",
+      "upstream": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "packagePath": "unic/char/range",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 (no path_in_vcs recorded); Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "72a0e361aab8e7af18af799a6046b290a930d94b76c551bf0667e0726f9d42d1"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "d176bfd5d70a75b4b8b27ee24e9a8bdd3138aaa3bf0903a7f58497b4e4490f59"
+        }
+      ],
+      "texts": [
+        {
+          "file": "open-i18n__rust-unic-5878605364af/COPYRIGHT.md",
+          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+          "role": "copyright",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
+        }
+      ],
+      "note": "Repository-root copyright statement and licences at the exact packaged revision. COPYRIGHT.md refers to the repository AUTHORS contributor list (names and e-mail addresses) at the same revision; it is not vendored (data minimisation)."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "unic-common",
+      "version": "0.9.0",
+      "provenance": "80d7ff825a6a654ee85a63e80f92f054f904f21e7d12da4e22f9834a4aaa35bc",
+      "declaredLicense": "MIT/Apache-2.0",
+      "upstream": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "packagePath": "unic/common",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 (no path_in_vcs recorded); Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "72a0e361aab8e7af18af799a6046b290a930d94b76c551bf0667e0726f9d42d1"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "5c74ebf8b8eede95170fbef14b6050735ce8993ce265978f41562386cb0c2bb9"
+        }
+      ],
+      "texts": [
+        {
+          "file": "open-i18n__rust-unic-5878605364af/COPYRIGHT.md",
+          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+          "role": "copyright",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
+        }
+      ],
+      "note": "Repository-root copyright statement and licences at the exact packaged revision. COPYRIGHT.md refers to the repository AUTHORS contributor list (names and e-mail addresses) at the same revision; it is not vendored (data minimisation)."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "unic-ucd-ident",
+      "version": "0.9.0",
+      "provenance": "e230a37c0381caa9219d67cf063aa3a375ffed5bf541a452db16e744bdab6987",
+      "declaredLicense": "MIT/Apache-2.0",
+      "upstream": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+        "packagePath": "unic/ucd/ident",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 (no path_in_vcs recorded); Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "64e154b113a16828624a2baedc6e70e8e6ea8f5c8cf8455d2c255762c0f43a8a"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "9c1c7cfc028e70f52a6a5bdc126c9348837783e5e3e059429c05fadb9af8ec8d"
+        }
+      ],
+      "texts": [
+        {
+          "file": "open-i18n__rust-unic-8a6ce83063d9/COPYRIGHT.md",
+          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+          "role": "copyright",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+          "sourcePath": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md"
+        },
+        {
+          "file": "open-i18n__rust-unic-8a6ce83063d9/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+          "sourcePath": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE"
+        },
+        {
+          "file": "open-i18n__rust-unic-8a6ce83063d9/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+          "sourcePath": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT"
+        }
+      ],
+      "note": "Repository-root copyright statement and licences at the exact packaged revision. COPYRIGHT.md refers to the repository AUTHORS contributor list (names and e-mail addresses) at the same revision; it is not vendored (data minimisation)."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "unic-ucd-version",
+      "version": "0.9.0",
+      "provenance": "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4",
+      "declaredLicense": "MIT/Apache-2.0",
+      "upstream": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "packagePath": "unic/ucd/version",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 (no path_in_vcs recorded); Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "72a0e361aab8e7af18af799a6046b290a930d94b76c551bf0667e0726f9d42d1"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "6411d1d10e5bf720a19366db6ab5f4c84cf1156c7033fafbd941f64729bd027c"
+        }
+      ],
+      "texts": [
+        {
+          "file": "open-i18n__rust-unic-5878605364af/COPYRIGHT.md",
+          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+          "role": "copyright",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
+        },
+        {
+          "file": "open-i18n__rust-unic-5878605364af/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "role": "licence",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "5878605364af97a3358368a6eaef02104af2e016",
+          "sourcePath": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
+        }
+      ],
+      "note": "Repository-root copyright statement and licences at the exact packaged revision. COPYRIGHT.md refers to the repository AUTHORS contributor list (names and e-mail addresses) at the same revision; it is not vendored (data minimisation)."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "webview2-com",
+      "version": "0.38.2",
+      "provenance": "7130243a7a5b33c54a444e54842e6a9e133de08b5ad7b5861cd8ed9a6a5bc96a",
+      "declaredLicense": "MIT",
+      "upstream": {
+        "repository": "https://github.com/wravery/webview2-rs",
+        "revision": "b74dc5e2b394044bea5191052868ce7a106c202c",
+        "packagePath": "crates/webview2-com",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 and path_in_vcs; Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "cd98f3865caa97f47155b4238ea574245680de51fc689ab117b29ccac7566221"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "104bce84b453f732f4bd571e7c604d271380b02890d70f1c753af9d58063c7a4"
+        }
+      ],
+      "texts": [
+        {
+          "file": "wravery__webview2-rs-b74dc5e2b394/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "role": "licence",
+          "repository": "https://github.com/wravery/webview2-rs",
+          "revision": "b74dc5e2b394044bea5191052868ce7a106c202c",
+          "sourcePath": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE"
+        }
+      ],
+      "note": "Repository-root licence at the exact packaged revision."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "webview2-com-macros",
+      "version": "0.8.1",
+      "provenance": "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54",
+      "declaredLicense": "MIT",
+      "upstream": {
+        "repository": "https://github.com/wravery/webview2-rs",
+        "revision": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+        "packagePath": "crates/callback-macros",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 and path_in_vcs; Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "c24c2646f52e6cb4c1f382afc69fa99c0dc78d6d8e4316ade7e51707b4f9af8e"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "a615e325d5acebc64f6553724028cd5e3639397e534cef107f172540cb78d0fd"
+        }
+      ],
+      "texts": [
+        {
+          "file": "wravery__webview2-rs-dffa41a8a46d/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "role": "licence",
+          "repository": "https://github.com/wravery/webview2-rs",
+          "revision": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+          "sourcePath": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE"
+        }
+      ],
+      "note": "Repository-root licence at the exact packaged revision."
+    },
+    {
+      "ecosystem": "rust",
+      "name": "webview2-com-sys",
+      "version": "0.38.2",
+      "provenance": "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c",
+      "declaredLicense": "MIT",
+      "upstream": {
+        "repository": "https://github.com/wravery/webview2-rs",
+        "revision": "b74dc5e2b394044bea5191052868ce7a106c202c",
+        "packagePath": "crates/bindings",
+        "pinnedBy": ".cargo_vcs_info.json git.sha1 and path_in_vcs; Cargo.toml.orig is byte-identical to the manifest at packagePath in that revision"
+      },
+      "identity": [
+        {
+          "path": ".cargo_vcs_info.json",
+          "sha256": "8af502bd8832383dc1dd8bbd7fb00eb76a72b111688bc492e110bbac44cb005f"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "00229c125c597e4f0ddb9e598738ee5b38a9086fd59eea6d2577cdda5f8e5875"
+        },
+        {
+          "path": "x64/WebView2LoaderStatic.lib",
+          "sha256": "0659b741bde6348d4c4a6ec4ceb9af50e3d0048ed9cd3c8659bccbb61fde55ee"
+        }
+      ],
+      "texts": [
+        {
+          "file": "nuget__microsoft.web.webview2-1.0.3650.58/LICENSE.txt",
+          "sha256": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55",
+          "role": "embedded-licence",
+          "repository": "https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3650.58",
+          "revision": "1.0.3650.58",
+          "sourcePath": "LICENSE.txt",
+          "url": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3650.58/microsoft.web.webview2.1.0.3650.58.nupkg"
+        },
+        {
+          "file": "nuget__microsoft.web.webview2-1.0.3650.58/NOTICE.txt",
+          "sha256": "106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90",
+          "role": "embedded-notice",
+          "repository": "https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3650.58",
+          "revision": "1.0.3650.58",
+          "sourcePath": "NOTICE.txt",
+          "url": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3650.58/microsoft.web.webview2.1.0.3650.58.nupkg"
+        },
+        {
+          "file": "wravery__webview2-rs-b74dc5e2b394/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "role": "licence",
+          "repository": "https://github.com/wravery/webview2-rs",
+          "revision": "b74dc5e2b394044bea5191052868ce7a106c202c",
+          "sourcePath": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE"
+        }
+      ],
+      "note": "The repository-root licence at the exact packaged revision covers the bindings. On MSVC the crate statically links Microsoft's WebView2LoaderStatic.lib; the packaged x64 copy is byte-identical to build/native/x64/WebView2LoaderStatic.lib in Microsoft.Web.WebView2 1.0.3650.58 (nupkg SHA-512 equals the nuget.org catalog packageHash), whose LICENSE.txt and NOTICE.txt are included for that embedded component."
+    }
+  ]
+}

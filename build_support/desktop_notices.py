@@ -1,16 +1,16 @@
 """Collect third-party notices for the Qronos desktop application (NSIS installer).
 
-Covers what the desktop executable and its web frontend redistribute:
+The inventory is a conservative technical scope, not proof that every listed
+package is linked into the final executable:
 
-* Rust: the locked dependency graph from ``cargo metadata --offline --locked``
-  for the Windows target, following NORMAL dependency edges from the desktop
-  crate. Build-only and dev-only edges are excluded (their code is not linked
-  into the executable). Proc-macro crates reached through normal edges stay
-  in, so the set is deliberately conservative (over-inclusive).
+* Rust: the locked Windows normal-dependency closure from
+  ``cargo metadata --offline --locked`` for the installer target, following
+  NORMAL dependency edges from the desktop crate. Proc-macro crates reached
+  through normal edges are included; build-only and dev-only dependencies are
+  excluded.
 * npm: the production closure of ``desktop/package-lock.json`` - packages
   reachable from the root ``dependencies`` through dependency/optional/peer
-  edges, never ``dev``. These are the packages the frontend bundle can contain
-  (React, react-dom, scheduler and the Tauri JS packages).
+  edges, never ``dev`` (React, react-dom, scheduler and the Tauri JS packages).
 
 For every covered package the package-local LICENSE*/LICENCE*/COPYING*/
 NOTICE*/UNLICENSE*/COPYRIGHT* files and any declared Cargo ``license-file``
@@ -19,17 +19,26 @@ locked version; the installed node_modules package whose version matches the
 lock). Files ending in ``.spdx`` are copied but are SPDX metadata, not licence
 text.
 
+A published package that ships no licence text can be completed only from
+``build_support/desktop_notice_upstream``: small upstream licence/notice files
+vendored byte-for-byte, pinned by ``registry.json`` to the exact package
+(ecosystem, name, version, locked checksum/integrity, declared licence and
+hashes of local identity files) and, per file, to an immutable source URL,
+revision, source path and SHA-256. Every pin is verified offline here; a
+missing, mismatched, duplicate, stale or unsafe entry fails.
+
 A covered package without a declared licence expression or without any
-licence text fails the collection, unless an exception for that exact
-ecosystem/name/version/provenance is listed in
-``build_support/desktop_notice_exceptions.json`` for review. An exception
-records why; it never supplies or invents a licence grant.
+licence text (package-local or verified upstream) fails the collection, unless
+an exception for that exact ecosystem/name/version/provenance is listed in
+``build_support/desktop_notice_exceptions.json`` for review. Neither file
+supplies or invents a licence grant.
 
 Output (deterministic; no timestamps, no absolute paths):
     THIRD_PARTY_NOTICES-desktop.txt
     third-party-inventory-desktop.json
     licenses/rust/<crate>-<version>/<files>
     licenses/npm/<package>-<version>/<files>
+    licenses/<ecosystem>/<package>-<version>/upstream/<vendored files>
 
 This is technical notice packaging, not legal clearance for redistribution.
 """
@@ -37,6 +46,7 @@ This is technical notice packaging, not legal clearance for redistribution.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -54,6 +64,7 @@ DESKTOP = ROOT / "desktop"
 CARGO_MANIFEST = DESKTOP / "src-tauri" / "Cargo.toml"
 PACKAGE_LOCK = DESKTOP / "package-lock.json"
 EXCEPTIONS_PATH = ROOT / "build_support" / "desktop_notice_exceptions.json"
+UPSTREAM_REGISTRY = ROOT / "build_support" / "desktop_notice_upstream" / "registry.json"
 
 #: The installer is built for this target; cargo metadata filters to it.
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
@@ -71,6 +82,18 @@ _MAX_NOTICE_BYTES = 2 * 1024 * 1024
 _CRATE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _VERSION = re.compile(r"^[0-9A-Za-z.+-]+$")
 _NPM_NAME = re.compile(r"^(@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+#: Identity files may be large binaries (e.g. a statically linked library).
+_MAX_IDENTITY_BYTES = 64 * 1024 * 1024
+_UPSTREAM_ROLES = frozenset({"licence", "designated-licence", "copyright", "notice",
+                             "embedded-licence", "embedded-notice"})
+#: Roles that count as licence text for the package itself.
+_LICENCE_ROLES = frozenset({"licence", "designated-licence"})
+_ENTRY_FIELDS = frozenset({"ecosystem", "name", "version", "provenance", "declaredLicense",
+                           "upstream", "identity", "texts", "note"})
+_SOURCE_FIELDS = frozenset({"repository", "revision", "packagePath", "pinnedBy"})
+_IDENTITY_FIELDS = frozenset({"path", "sha256"})
+_TEXT_FIELDS = frozenset({"file", "sha256", "role", "repository", "revision", "sourcePath", "url"})
 
 
 class NoticeError(RuntimeError):
@@ -123,18 +146,22 @@ def _relative_parts(value: str) -> tuple[str, ...]:
     return parts
 
 
-def _contained_file(directory: Path, parts: tuple[str, ...]) -> Path:
+def _contained_file(directory: Path, parts: tuple[str, ...], limit: int = _MAX_NOTICE_BYTES) -> Path:
     candidate = directory
     for part in parts:
         candidate = candidate / part
         if _is_link(candidate):
-            raise NoticeError(f"Notice path {'/'.join(parts)!r} is or passes through a link.")
+            raise NoticeError(f"Notice path {'/'.join(parts)!r} is missing, is a link or passes through one.")
     resolved = candidate.resolve(strict=True)
     if directory not in resolved.parents or not resolved.is_file():
         raise NoticeError(f"Notice path {'/'.join(parts)!r} is not a file inside its package.")
-    if resolved.stat().st_size > _MAX_NOTICE_BYTES:
-        raise NoticeError(f"Notice file {'/'.join(parts)!r} is larger than {_MAX_NOTICE_BYTES} bytes.")
+    if resolved.stat().st_size > limit:
+        raise NoticeError(f"Notice file {'/'.join(parts)!r} is larger than {limit} bytes.")
     return resolved
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _package_directory(path: Path) -> Path:
@@ -316,21 +343,141 @@ def load_exceptions(path: Path = EXCEPTIONS_PATH) -> dict[tuple[str, str, str], 
     return exceptions
 
 
+# ------------------------------------------------- verified upstream texts
+
+
+@dataclass(frozen=True)
+class UpstreamNotice:
+    """Vendored upstream texts pinned to one exact package; hashes already verified."""
+
+    entry: dict[str, Any]
+    texts: tuple[tuple[dict[str, Any], Path], ...]
+
+
+def _fields(value: Any, expected: frozenset[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise NoticeError(f"{label}: expected exactly the fields {sorted(expected)}.")
+    if any(not isinstance(item, (str, list, dict)) or not item for item in value.values()):
+        raise NoticeError(f"{label}: every field must be a non-empty value.")
+    return value
+
+
+def _vendored_files(texts_root: Path) -> set[Path]:
+    """Every file under the vendored tree; links anywhere in it are refused."""
+    found: set[Path] = set()
+    for current, directories, names in os.walk(texts_root, followlinks=False):
+        for name in sorted(directories) + sorted(names):
+            path = Path(current) / name
+            if _is_link(path):
+                raise NoticeError(f"Vendored upstream path {path.relative_to(texts_root).as_posix()!r} is a link.")
+            if name in names:
+                found.add(path.resolve(strict=True))
+    return found
+
+
+def load_upstream(path: Path = UPSTREAM_REGISTRY) -> dict[tuple[str, str, str], UpstreamNotice]:
+    """Verified upstream notice entries keyed by exact package identity."""
+    if not path.exists():
+        return {}
+    if _is_link(path):
+        raise NoticeError("The upstream notice registry must not be a link.")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema") != 1 or not isinstance(data.get("packages"), list):
+        raise NoticeError("The upstream notice registry needs schema 1 and a packages list.")
+    texts_root = _package_directory(path.parent / "texts") if data["packages"] else None
+    registry: dict[tuple[str, str, str], UpstreamNotice] = {}
+    referenced: set[Path] = set()
+    for entry in data["packages"]:
+        label = "upstream entry"
+        entry = _fields(entry, _ENTRY_FIELDS, label)
+        label = f"upstream entry {entry['ecosystem']}/{entry['name']}@{entry['version']}"
+        if any(not isinstance(entry[name], str) for name in
+               ("ecosystem", "name", "version", "provenance", "declaredLicense", "note")):
+            raise NoticeError(f"{label}: identity fields must be text.")
+        key = (entry["ecosystem"], entry["name"], entry["version"])
+        if key in registry:
+            raise NoticeError(f"{label}: duplicate entry.")
+        source = _fields(entry["upstream"], _SOURCE_FIELDS, f"{label} upstream")
+        if not source["repository"].startswith("https://"):
+            raise NoticeError(f"{label}: the upstream repository must be an https URL.")
+        identity_paths: set[tuple[str, ...]] = set()
+        for item in entry["identity"] if isinstance(entry["identity"], list) else [None]:
+            item = _fields(item, _IDENTITY_FIELDS, f"{label} identity")
+            parts = _relative_parts(item["path"])
+            if not _SHA256.match(item["sha256"]) or parts in identity_paths:
+                raise NoticeError(f"{label}: identity {item['path']!r} needs one lower-case SHA-256.")
+            identity_paths.add(parts)
+        texts: list[tuple[dict[str, Any], Path]] = []
+        for text in entry["texts"] if isinstance(entry["texts"], list) else [None]:
+            text = _fields(text, _TEXT_FIELDS, f"{label} text")
+            if text["role"] not in _UPSTREAM_ROLES or not _SHA256.match(text["sha256"]):
+                raise NoticeError(f"{label}: text {text['file']!r} needs a known role and a SHA-256.")
+            if not text["url"].startswith("https://") or text["revision"] not in text["url"] \
+                    or not text["repository"].startswith("https://"):
+                raise NoticeError(f"{label}: text {text['file']!r} needs an immutable https URL "
+                                  "that names its revision.")
+            file_parts, source_parts = _relative_parts(text["file"]), _relative_parts(text["sourcePath"])
+            if len(file_parts) <= len(source_parts) or file_parts[-len(source_parts):] != source_parts:
+                raise NoticeError(f"{label}: vendored file {text['file']!r} does not mirror its sourcePath.")
+            vendored = _contained_file(texts_root, file_parts)
+            if any(vendored == other for _, other in texts):
+                raise NoticeError(f"{label}: vendored file {text['file']!r} is listed twice.")
+            if _sha256(vendored) != text["sha256"]:
+                raise NoticeError(f"{label}: vendored file {text['file']!r} does not match its pinned SHA-256.")
+            texts.append((text, vendored))
+            referenced.add(vendored)
+        if not any(text["role"] in _LICENCE_ROLES for text, _ in texts):
+            raise NoticeError(f"{label}: no vendored licence text.")
+        registry[key] = UpstreamNotice(entry, tuple(sorted(texts, key=lambda pair: pair[0]["file"])))
+    if texts_root is not None:
+        stale = sorted(path.relative_to(texts_root).as_posix()
+                       for path in _vendored_files(texts_root) - referenced)
+        if stale:
+            raise NoticeError("Vendored upstream files are not referenced by the registry: " + ", ".join(stale))
+    return registry
+
+
+def _upstream_problem(component: Component, found: list[tuple[str, Path]], notice: UpstreamNotice) -> str | None:
+    """Why a verified upstream entry cannot stand in for this exact package, if it cannot."""
+    entry = notice.entry
+    if _has_licence_text(found):
+        return "ships its own licence text, so its upstream entry is stale"
+    if entry["provenance"] != component.provenance:
+        return f"upstream entry provenance {entry['provenance']} does not match the lock {component.provenance}"
+    if entry["declaredLicense"] != component.declared_license:
+        return (f"upstream entry declares {entry['declaredLicense']!r} but the package declares "
+                f"{component.declared_license!r}")
+    for item in entry["identity"]:
+        try:
+            local = _contained_file(component.directory, _relative_parts(item["path"]), _MAX_IDENTITY_BYTES)
+        except (NoticeError, OSError):
+            return f"identity file {item['path']!r} is missing or unsafe in the installed package"
+        if _sha256(local) != item["sha256"]:
+            return f"identity file {item['path']!r} does not match the package the upstream text was verified for"
+    return None
+
+
 def check_coverage(
     components: list[Component],
     exceptions: dict[tuple[str, str, str], dict[str, Any]],
+    upstream: dict[tuple[str, str, str], UpstreamNotice] | None = None,
 ) -> dict[tuple[str, str, str], list[tuple[str, Path]]]:
-    """Every covered package has an expression and text, or an exact exception."""
+    """Every covered package has an expression and text (own or verified upstream), or an exact exception."""
+    upstream = upstream or {}
     files: dict[tuple[str, str, str], list[tuple[str, Path]]] = {}
     problems: list[str] = []
     used: set[tuple[str, str, str]] = set()
     for component in sorted(components, key=lambda item: item.key):
         found = notice_files(component)
         files[component.key] = found
+        notice = upstream.get(component.key)
+        problem = None if notice is None else _upstream_problem(component, found, notice)
+        if problem:
+            problems.append(f"{component.ecosystem} {component.name}@{component.version}: {problem}")
         missing = []
         if not component.declared_license:
             missing.append("expression")
-        if not _has_licence_text(found):
+        if not _has_licence_text(found) and (notice is None or problem):
             missing.append("text")
         for kind in missing:
             exception = exceptions.get(component.key)
@@ -342,6 +489,8 @@ def check_coverage(
                             f"no licence {kind} (provenance {component.provenance})")
     stale = sorted(set(exceptions) - used)
     problems += [f"exception {e}/{n}@{v} matches no missing notice" for e, n, v in stale]
+    problems += [f"upstream entry {e}/{n}@{v} matches no covered package"
+                 for e, n, v in sorted(set(upstream) - set(files))]
     if problems:
         raise NoticeError("Desktop third-party notices are incomplete:\n  " + "\n  ".join(problems))
     return files
@@ -368,29 +517,38 @@ def write_notices(
     out_dir: Path,
     target: str,
     private_prefixes: tuple[str, ...],
+    upstream: dict[tuple[str, str, str], UpstreamNotice] | None = None,
 ) -> dict[str, Any]:
+    upstream = upstream or {}
     _prepare_output(out_dir)
     records = []
     text = [
         "Qronos desktop application - third-party notices",
         "=" * 49,
-        f"Rust: normal-dependency closure of the desktop crate for {target}, from Cargo.lock "
-        "(offline, locked). Build-only and dev-only crates excluded; proc-macro crates included.",
+        f"Rust: locked normal-dependency closure of the desktop crate for {target}, from Cargo.lock "
+        "(offline, locked), including proc-macro crates reached through normal edges and excluding "
+        "build-only and dev-only dependencies. This is a conservative inventory, not proof that every "
+        "listed crate is linked into the executable.",
         "npm: production closure of desktop/package-lock.json (no dev dependencies).",
         "Each section names the package, its declared licence expression as published, its source "
-        "and its locked checksum/integrity, followed by the package's own notice files.",
+        "and its locked checksum/integrity, followed by the package's own notice files. Where the "
+        "published package ships no licence text, verified upstream files from its pinned source "
+        "revision follow, each with its immutable URL and SHA-256.",
         "This file is a technical notice collection, not legal advice or redistribution clearance.",
         "",
     ]
     for component in sorted(components, key=lambda item: item.key):
         found = files[component.key]
         exception = exceptions.get(component.key)
+        notice = upstream.get(component.key)
+        vendored = [] if notice is None else [(f"upstream/{meta['file']}", path) for meta, path in notice.texts]
         relative = []
-        for name, path in found:
+        for name, path in found + vendored:
             destination = out_dir / component.folder / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(path.read_bytes())
             relative.append(f"{component.folder}/{name}")
+        own_text = _has_licence_text(found)
         record = {
             "ecosystem": component.ecosystem,
             "name": component.name,
@@ -400,7 +558,17 @@ def write_notices(
             "source": component.source,
             "provenance": component.provenance,
             "noticeFiles": relative,
-            "licenceTextPresent": _has_licence_text(found),
+            "licenceTextPresent": own_text,
+            "licenceTextSource": ("package" if own_text else "verified-upstream" if notice
+                                  else "reviewed-exception"),
+            "upstream": None if notice is None else {
+                "source": notice.entry["upstream"],
+                "note": notice.entry["note"],
+                "files": [{"path": f"{component.folder}/upstream/{meta['file']}",
+                           **{name: meta[name] for name in ("role", "sha256", "url", "repository",
+                                                            "revision", "sourcePath")}}
+                          for meta, _ in notice.texts],
+            },
             "exception": None if exception is None else {
                 "missing": exception["missing"], "reason": exception["reason"],
                 "reviewedBy": exception["reviewedBy"]},
@@ -415,12 +583,21 @@ def write_notices(
             text.append(f"Reviewed exception (missing {exception['missing']}): {exception['reason']}")
         for name, path in found:
             text += ["", f"--- {name} ---", path.read_bytes().decode("utf-8", errors="replace").rstrip("\n")]
+        if notice is not None:
+            source = notice.entry["upstream"]
+            text += ["", f"Verified upstream notices: {source['repository']} at {source['revision']} "
+                         f"({source['packagePath']}). {notice.entry['note']}"]
+            for meta, path in notice.texts:
+                text += ["", f"--- upstream {meta['role']}: {meta['sourcePath']} ---",
+                         f"From {meta['url']} (SHA-256 {meta['sha256']})",
+                         path.read_bytes().decode("utf-8", errors="replace").rstrip("\n")]
         text.append("")
     inventory = {
-        "schema": 1,
+        "schema": 2,
         "target": target,
         "scope": {
-            "rust": "normal-dependency closure (proc-macros included; build/dev-only excluded)",
+            "rust": ("locked normal-dependency closure for the target, including normal-edge proc-macro "
+                     "dependencies, excluding build/dev-only dependencies; conservative, not proof of linkage"),
             "npm": "package-lock production closure (no dev)",
         },
         "counts": {
@@ -457,6 +634,7 @@ def collect_desktop_notices(
     node_modules: Path | None = None,
     target: str = WINDOWS_TARGET,
     exceptions_path: Path = EXCEPTIONS_PATH,
+    upstream_path: Path = UPSTREAM_REGISTRY,
     runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     metadata = cargo_metadata(CARGO_MANIFEST, target, runner)
@@ -465,10 +643,11 @@ def collect_desktop_notices(
     node_root = node_modules if node_modules is not None else DESKTOP / "node_modules"
     components += npm_components(lock, node_root)
     exceptions = load_exceptions(exceptions_path)
-    files = check_coverage(components, exceptions)
+    upstream = load_upstream(upstream_path)
+    files = check_coverage(components, exceptions, upstream)
     private = (str(ROOT), str(Path.home()), str(node_root.resolve()),
                *{str(component.directory.parent) for component in components if component.ecosystem == "rust"})
-    return write_notices(components, files, exceptions, out_dir, target, private)
+    return write_notices(components, files, exceptions, out_dir, target, private, upstream)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -478,10 +657,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="Installed node_modules to read (default: desktop/node_modules).")
     parser.add_argument("--target", default=WINDOWS_TARGET)
     parser.add_argument("--exceptions", type=Path, default=EXCEPTIONS_PATH)
+    parser.add_argument("--upstream", type=Path, default=UPSTREAM_REGISTRY,
+                        help="Verified upstream notice registry (default: the committed one).")
     arguments = parser.parse_args(argv)
     try:
         inventory = collect_desktop_notices(arguments.out, node_modules=arguments.node_modules,
-                                            target=arguments.target, exceptions_path=arguments.exceptions)
+                                            target=arguments.target, exceptions_path=arguments.exceptions,
+                                            upstream_path=arguments.upstream)
     except NoticeError as error:
         print(str(error), file=sys.stderr)
         return 2
