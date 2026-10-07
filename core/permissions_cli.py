@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.action_audit import DEFAULT_ACTION_AUDIT_PATH
+from core.approval_secret import ApprovalSecretError, ApprovalSecretStore
 from core.permission_control import (
     permission_store_path,
     reset_permission,
@@ -111,6 +112,46 @@ def policy_snapshot() -> list[dict[str, object]]:
     return items
 
 
+def approval_secret_status(
+    store: ApprovalSecretStore | None = None,
+) -> dict[str, object]:
+    """Whether a secret is set and whether verification is locked. Never the secret."""
+    try:
+        return (store or ApprovalSecretStore()).status().public()
+    except ApprovalSecretError as exc:
+        return {
+            "configured": False,
+            "available": False,
+            "lockedUntil": 0.0,
+            "remainingAttempts": 0,
+            "error": str(exc),
+        }
+
+
+def set_approval_secret(
+    payload: dict[str, object],
+    store: ApprovalSecretStore | None = None,
+) -> dict[str, object]:
+    """
+    Explicit user operation from the Permissions view: set or change the secret.
+
+    The submitted values are removed from the payload before anything else can
+    see it, and only the resulting status is returned.
+    """
+    new_secret = payload.pop("newSecret", "")
+    current_secret = payload.pop("currentSecret", None)
+    try:
+        status = (store or ApprovalSecretStore()).set_secret(
+            new_secret,
+            current_secret=current_secret,
+        )
+    except ApprovalSecretError as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        del new_secret, current_secret
+    return {"ok": True, "approvalSecret": status.public()}
+
+
 def build_snapshot(
     *,
     audit_path: str | Path = DEFAULT_ACTION_AUDIT_PATH,
@@ -118,6 +159,7 @@ def build_snapshot(
     path = Path(audit_path)
 
     return {
+        "approvalSecret": approval_secret_status(),
         "ok": True,
         "mutable": True,
         "policySource": "security/permissions.py + permissions_v2.json",
@@ -172,11 +214,15 @@ def main() -> int:
                 payload.get("permissionId", ""),
             ),
         }
+    elif operation == "approval_secret_status":
+        result = {"ok": True, "approvalSecret": approval_secret_status()}
+    elif operation == "approval_secret_set":
+        result = set_approval_secret(payload)
     else:
         raise ValueError(f"Unsupported permissions operation: {operation}")
 
     print(json.dumps(result, ensure_ascii=False))
-    return 0
+    return 0 if result.get("ok") else 1
 
 
 if __name__ == "__main__":

@@ -66,6 +66,13 @@ from core.action_audit import (
     AuditEvent,
 )
 from core.actions import ActionOutcome, ActionRequest
+from core.approval_secret import (
+    ApprovalSecretError,
+    ApprovalSecretLocked,
+    ApprovalSecretStore,
+    InvalidApprovalSecret,
+    SETUP_HINT,
+)
 from core.artifact_registry import (
     Artifact,
     ArtifactRegistry,
@@ -122,14 +129,14 @@ _SUMMARY: dict[LibraryOperation, str] = {
 
 # How the Library UI satisfies each decision. The UI dialog shows the exact
 # operation, targets and destination, which is at least what a spoken "yes"
-# gives, so it also satisfies voice confirmation. TYPED_SECRET is satisfied by
-# a typed, target-count-bound confirmation phrase: there is no user secret
-# store yet, and that limitation is stated rather than hidden.
+# gives, so it also satisfies voice confirmation. TYPED_SECRET is satisfied only
+# by the user's approval secret, verified locally by core.approval_secret at
+# commit. A phrase shown in the dialog is not a secret and is not accepted.
 _CONFIRMATION: dict[PermissionDecision, str] = {
     PermissionDecision.ALLOW: "none",
     PermissionDecision.REQUIRE_VOICE_CONFIRMATION: "click",
     PermissionDecision.REQUIRE_UI_CONFIRMATION: "click",
-    PermissionDecision.REQUIRE_TYPED_SECRET: "typed",
+    PermissionDecision.REQUIRE_TYPED_SECRET: "secret",
 }
 
 PERMANENT_DELETE_REFUSAL = (
@@ -380,6 +387,7 @@ class LibraryExecutor:
         clock: Clock = time.time,
         approval_ttl: float = APPROVAL_TTL_SECONDS,
         protected_roots: tuple[Path, ...] | None = None,
+        approval_secrets: ApprovalSecretStore | None = None,
     ) -> None:
         self.registry = registry
         self.audit = audit
@@ -388,6 +396,13 @@ class LibraryExecutor:
         self._clock = clock
         self._ttl = float(approval_ttl)
         self._protected_roots = protected_roots
+        self._secrets = approval_secrets
+
+    @property
+    def approval_secrets(self) -> ApprovalSecretStore:
+        if self._secrets is None:
+            self._secrets = ApprovalSecretStore()
+        return self._secrets
 
     # ------------------------------------------------------------ public API
 
@@ -450,6 +465,10 @@ class LibraryExecutor:
                 results=tuple(self._refusal(r, decision.value) for r in requests),
             )
 
+        if decision is PermissionDecision.REQUIRE_TYPED_SECRET:
+            # Fail closed before showing a dialog that could never succeed.
+            self._require_secret_ready(requests)
+
         dest: Path | None = None
         if op in {LibraryOperation.COPY, LibraryOperation.MOVE}:
             try:
@@ -499,7 +518,6 @@ class LibraryExecutor:
         token = secrets.token_urlsafe(32)
         now = float(self._clock())
         expires_at = now + self._ttl
-        phrase = f"DELETE {len(targets)}" if confirmation == "typed" else ""
 
         self.registry.put_pending_action(
             _token_hash(token),
@@ -508,7 +526,6 @@ class LibraryExecutor:
                 "decision": decision.value,
                 "destination": "" if dest is None else str(dest),
                 "newName": clean_name,
-                "typedPhrase": phrase,
                 "items": [
                     {
                         "id": t.artifact.id,
@@ -528,7 +545,6 @@ class LibraryExecutor:
             "operation": op.value,
             "decision": decision.value,
             "confirmation": confirmation,
-            "typedPhrase": phrase,
             "expiresAt": expires_at,
             "destination": "" if dest is None else str(dest),
             "newName": clean_name,
@@ -547,7 +563,7 @@ class LibraryExecutor:
         token: object,
         *,
         operation: object,
-        typed_confirmation: object = "",
+        secret: object = "",
     ) -> dict[str, object]:
         """
         Run exactly what ``prepare`` approved, once.
@@ -555,7 +571,8 @@ class LibraryExecutor:
         Policy is re-evaluated for the same action ids, so a permission change
         made while the dialog was open is honoured. Each target is re-verified
         against what was approved; a target that changed is refused, not
-        retargeted.
+        retargeted. ``secret`` is used only to verify a TYPED_SECRET approval
+        and is never stored, returned or logged.
         """
         op = _operation(operation)
         token_hash = _token_hash(str(token or ""))
@@ -584,12 +601,14 @@ class LibraryExecutor:
                 results=tuple(self._refusal(r, "approval expired") for r in requests),
             )
 
-        phrase = str(payload.get("typedPhrase", ""))
-        if phrase and str(typed_confirmation or "").strip().upper() != phrase:
-            # Not consumed: the person may retype. Nothing was attempted.
-            raise LibraryActionRefused(
-                f"Type {phrase} to confirm. Nothing was changed."
-            )
+        approved_decision = str(payload.get("decision", ""))
+        secret_verified = False
+        if approved_decision == PermissionDecision.REQUIRE_TYPED_SECRET.value:
+            # Checked before the token is consumed: a wrong secret leaves the
+            # approval usable until it expires, and every wrong guess counts
+            # toward the persisted lockout.
+            self._verify_secret(secret, requests)
+            secret_verified = True
 
         if not self.registry.consume_pending_action(token_hash):
             raise LibraryActionRefused(
@@ -604,12 +623,13 @@ class LibraryExecutor:
                 ),
             )
 
-        approved_decision = str(payload.get("decision", ""))
         results: list[dict[str, object]] = []
 
         for item, request in zip(items, requests):
             results.append(
-                self._commit_item(op, item, request, approved_decision, payload)
+                self._commit_item(
+                    op, item, request, approved_decision, payload, secret_verified
+                )
             )
 
         counts = {
@@ -709,6 +729,48 @@ class LibraryExecutor:
             "outcome": ActionOutcome.REFUSED.value,
             "error": reason,
         }
+
+    # -------------------------------------------------------- approval secret
+
+    def _require_secret_ready(self, requests: list[ActionRequest]) -> None:
+        try:
+            status = self.approval_secrets.status()
+        except ApprovalSecretError as exc:
+            message = str(exc)
+        else:
+            if not status.configured:
+                message = SETUP_HINT
+            elif status.locked_until:
+                message = str(ApprovalSecretLocked(status.locked_until))
+            else:
+                return
+        raise LibraryActionRefused(
+            message,
+            results=tuple(self._refusal(r, message) for r in requests),
+        )
+
+    def _verify_secret(self, secret: object, requests: list[ActionRequest]) -> None:
+        if not isinstance(secret, str) or not secret:
+            raise LibraryActionRefused(
+                "Enter your approval secret to confirm. Nothing was changed."
+            )
+        try:
+            verified = self.approval_secrets.verify(secret)
+        except InvalidApprovalSecret:
+            verified = False
+        except ApprovalSecretError as exc:
+            message = f"{exc} Nothing was changed."
+            raise LibraryActionRefused(
+                message,
+                results=tuple(self._refusal(r, str(exc)) for r in requests),
+            ) from None
+        if not verified:
+            raise LibraryActionRefused(
+                "The approval secret is wrong. Nothing was changed.",
+                results=tuple(
+                    self._refusal(r, "approval secret rejected") for r in requests
+                ),
+            )
 
     # ------------------------------------------------------------ validation
 
@@ -826,6 +888,7 @@ class LibraryExecutor:
         request: ActionRequest,
         approved_decision: str,
         payload: Mapping[str, Any],
+        secret_verified: bool,
     ) -> dict[str, object]:
         verdict = self._decide(request)
 
@@ -837,6 +900,12 @@ class LibraryExecutor:
                 request,
                 "The permission policy changed after approval; prepare the action again.",
             )
+
+        if (
+            verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET
+            and not secret_verified
+        ):
+            return self._refusal(request, "The approval secret was not verified.")
 
         try:
             issue_grant(
