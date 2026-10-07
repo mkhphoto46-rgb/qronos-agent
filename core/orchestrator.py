@@ -409,6 +409,10 @@ class Orchestrator:
                 already_resident=selection.already_resident,
             )
 
+            background = priority is WorkloadPriority.BACKGROUND
+            reservation_was_ours = (
+                self._active_brain_reservation(selection.model.name) is None
+            )
             reservation = self._reserve_brain_resources(
                 selection.model.name,
                 selection.model.estimated_vram_gb,
@@ -434,7 +438,20 @@ class Orchestrator:
                 # If keep_alive is enabled, retain the reservation while Ollama
                 # actually keeps this model resident.  A later role swap or
                 # keep-alive expiry is reconciled by _sync_resident_brain_ownership.
-                if not _keep_alive_enabled(keep_alive):
+                if background:
+                    # Background work may share a model the user's own turn is
+                    # using right now. It never unloads a model here and never
+                    # ends a reservation it did not create; its caller decides,
+                    # with foreground ownership in view, what it may unload.
+                    # keep_alive still reaches the model runtime, which
+                    # unloads only once every request using the model is done.
+                    if reservation_was_ours:
+                        self._release_brain_resources(
+                            reservation.reservation_id
+                        )
+
+                    self._sync_resident_brain_ownership()
+                elif not _keep_alive_enabled(keep_alive):
                     try:
                         self.runtime.stop_model(
                             selection.model.name
@@ -471,6 +488,44 @@ class Orchestrator:
                 output="",
                 error=str(exc),
             )
+
+    def resident_brain_names(self) -> frozenset[str]:
+        """
+        Configured Qronos brains loaded right now. Raises when unknown.
+
+        Unknown is not empty: a caller deciding what it may unload must not
+        mistake "could not ask" for "nothing was loaded".
+        """
+        running = {
+            item.name
+            for item in self.runtime.list_running_models()
+            if item.name
+        }
+
+        return frozenset(
+            running.intersection(self._brain_profiles_by_name().keys())
+        )
+
+    def release_brains_loaded_since(self, before: frozenset[str]) -> bool:
+        """
+        Unload only the Qronos brains that were not resident in ``before``.
+
+        For background work, which must give back what it loaded without
+        evicting a brain that was already warm for the user's own turns.
+        """
+        changed = False
+
+        for model_name in self.resident_brain_names() - set(before):
+            try:
+                self.runtime.stop_model(model_name)
+                changed = True
+            except Exception:
+                pass
+
+        self._sync_resident_brain_ownership()
+        self.telemetry.invalidate()
+
+        return changed
 
     def release_brains_for_voice_phase(self) -> bool:
         """

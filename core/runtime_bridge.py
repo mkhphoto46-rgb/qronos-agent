@@ -1667,12 +1667,49 @@ class QronosRuntime:
                 notify=self._notify_queued_conversation,
                 foreground_busy=lambda: self.is_busy,
                 runtime_paused=lambda: self.runtime_paused,
-                release_brains=self._release_brains_for_voice_phase,
+                release_brains=self._release_queue_brains,
+                resident_brains=self._queue_resident_brains,
                 already_answered=self._queued_request_already_answered,
                 storage_blocks_start=self._queue_storage_blocks_start,
             )
 
         return self._conversation_executor
+
+    def _queue_resident_brains(self) -> frozenset[str] | None:
+        """Brains resident before a queued run, or None when unknown."""
+        resident = getattr(self.orchestrator, "resident_brain_names", None)
+
+        if not callable(resident):
+            return None
+
+        return frozenset(resident())
+
+    def _release_queue_brains(
+        self,
+        resident_before: frozenset[str] | None,
+    ) -> None:
+        """
+        Unload what a queued run loaded, and only that.
+
+        When residency before the run is unknown, nothing is unloaded: an
+        idle model left loaded expires by itself, while evicting a model the
+        user's conversation had warm cannot be undone. An orchestrator with
+        no notion of residency gets the older, all-Qronos release.
+        """
+        release = getattr(
+            self.orchestrator,
+            "release_brains_loaded_since",
+            None,
+        )
+
+        if not callable(release):
+            self._release_brains_for_voice_phase()
+            return
+
+        if resident_before is None:
+            return
+
+        release(resident_before)
 
     def _queued_request_already_answered(self, request_id: str) -> bool:
         """

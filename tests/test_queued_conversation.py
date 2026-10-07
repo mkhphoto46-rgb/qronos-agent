@@ -724,7 +724,7 @@ def test_a_paused_runtime_defers_rather_than_runs() -> None:
         notify=lambda work, phase, fields: seen.append(phase),
         foreground_busy=lambda: False,
         runtime_paused=lambda: True,
-        release_brains=brain.release_brains_for_voice_phase,
+        release_brains=lambda before: brain.release_brains_for_voice_phase(),
     )
 
     result = executor.execute(QueuedConversationWork(request, executor))

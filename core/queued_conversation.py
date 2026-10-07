@@ -208,8 +208,9 @@ class ConversationQueueExecutor:
         notify: ProgressNotifier,
         foreground_busy: Callable[[], bool],
         runtime_paused: Callable[[], bool],
-        release_brains: Callable[[], None],
+        release_brains: Callable[[frozenset[str] | None], None],
         already_answered: Callable[[str], bool] = lambda request_id: False,
+        resident_brains: Callable[[], frozenset[str] | None] = lambda: None,
         storage_blocks_start: Callable[[], str | None] = lambda: None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
@@ -221,6 +222,7 @@ class ConversationQueueExecutor:
         self._runtime_paused = runtime_paused
         self._release_brains = release_brains
         self._already_answered = already_answered
+        self._resident_brains = resident_brains
         self._storage_blocks_start = storage_blocks_start
         self._clock = clock
 
@@ -245,7 +247,8 @@ class ConversationQueueExecutor:
 
     def execute(self, work: QueuedConversationWork) -> WorkResult:
         started = self._clock()
-        loaded_model = [False]
+        # [called the brain, brains resident just before it (None: unknown)]
+        loaded_model: list = [False, None]
 
         try:
             result = self._execute(work, started, loaded_model)
@@ -253,7 +256,7 @@ class ConversationQueueExecutor:
             result = self._failed(work, started, f"{exc}")
         finally:
             if loaded_model[0]:
-                self._release_after_run()
+                self._release_after_run(loaded_model[1])
 
         return result
 
@@ -333,6 +336,12 @@ class ConversationQueueExecutor:
             )
 
             orchestrator = self._orchestrator()
+
+            try:
+                loaded_model[1] = self._resident_brains()
+            except Exception:
+                loaded_model[1] = None
+
             loaded_model[0] = True
 
             try:
@@ -522,21 +531,25 @@ class ConversationQueueExecutor:
         except Exception:
             return True
 
-    def _release_after_run(self) -> None:
+    def _release_after_run(self, resident_before: frozenset[str] | None) -> None:
         """
-        Give the model slot back, unless the user's turn now owns it.
+        Give back what this run loaded, unless the user's turn now owns it.
 
         Background work must not keep a brain resident after it is done. But
         unloading while the user's own turn is running could pull the model
         out from under that turn, which is exactly the competition this
         module exists to avoid. In that case the foreground turn manages
         residency, as it always has.
+
+        ``resident_before`` is what was loaded before this run touched the
+        brain. Only what it added is given back: a brain that was already
+        warm for the user's own conversation is not this run's to evict.
         """
         if self._foreground_is_busy():
             return
 
         try:
-            self._release_brains()
+            self._release_brains(resident_before)
         except Exception:
             pass
 
