@@ -49,17 +49,103 @@ class PermissionsUiV2Stage2ContractTests(unittest.TestCase):
         self.assertIn("setPermissionCustomRule(selected.id, category, policy)", self.view)
         self.assertIn("resetPermission(selected.id)", self.view)
 
-    def test_pause_actions_is_owned_by_runtime_not_demo_queue(self) -> None:
-        self.assertIn("runtimePaused={", self.app)
-        self.assertIn("runtimePaused", self.app)
-        self.assertIn('"runtime_set_paused"', self.app)
-        self.assertIn("setRuntimePaused(", self.app)
+    def test_pause_actions_is_owned_by_runtime_and_separate_from_queue_hold(
+        self,
+    ) -> None:
+        """
+        Two controls, two commands, two states - and neither stands in for
+        the other.
+
+        Pause Actions (PermissionsView) pauses all of Qronos through
+        ``runtime_set_paused``. The Smart Queue's Hold, mounted in the app
+        through QueueDrawer, holds only queued work through
+        ``queue_set_paused``. Each is checked at the place it is wired, not
+        by a string being absent from App.tsx, and the backend is checked to
+        keep the two states independent.
+        """
+        src = ROOT / "desktop" / "src"
+        drawer = (src / "components" / "QueueDrawer.tsx").read_text(
+            encoding="utf-8"
+        )
+        panel = (src / "components" / "SmartQueuePanel.tsx").read_text(
+            encoding="utf-8"
+        )
+        store = (src / "queueStore.ts").read_text(encoding="utf-8")
+        rust = (
+            ROOT / "desktop" / "src-tauri" / "src" / "runtime" / "mod.rs"
+        ).read_text(encoding="utf-8")
+
+        # Pause Actions: PermissionsView's control drives the runtime pause.
         self.assertIn("onToggleRuntimePaused(!runtimePaused)", self.view)
         self.assertIn("aria-pressed={runtimePaused}", self.view)
-        self.assertNotIn("smartQueue", self.view)
-        self.assertNotIn("<SmartQueuePanel", self.app)
-        self.assertNotIn("waitingCount", self.app)
-        self.assertNotIn('"queue_set_paused"', self.app)
+        self.assertIn("runtimePaused={", self.app)
+        self.assertRegex(
+            self.app,
+            r"onToggleRuntimePaused=\{\s*setRuntimePause\s*\}",
+        )
+        runtime_pause = self.app.split("const setRuntimePause", 1)[1].split(
+            "[],", 1
+        )[0]
+        self.assertIn('"runtime_set_paused"', runtime_pause)
+        self.assertNotIn("queue_set_paused", runtime_pause)
+        self.assertIn("setRuntimePaused(", runtime_pause)
+        for queue_wiring in (
+            "queue_set_paused",
+            "QueueDrawer",
+            "SmartQueue",
+            "smartQueue",
+            "queueStore",
+        ):
+            self.assertNotIn(queue_wiring, self.view)
+
+        # Queue Hold: the panel is mounted, and its Hold reaches only the
+        # queue's own command.
+        self.assertIn("<QueueDrawer", self.app)
+        self.assertIn("<SmartQueuePanel", drawer)
+        self.assertRegex(
+            drawer,
+            r"onTogglePaused=\{\(held\) => void setQueueHeld\(held\)\}",
+        )
+        hold = store.split("export function setQueueHeld", 1)[1].split("}", 1)[0]
+        self.assertIn('"queue_set_paused"', hold)
+        self.assertNotIn("runtime_set_paused", store)
+        self.assertNotIn("runtime_set_paused", drawer)
+        # The panel shows Qronos's pause but offers no control for it.
+        self.assertIn("snapshot?.runtimePaused", panel)
+        self.assertNotIn("runtime_set_paused", panel)
+        self.assertNotIn("onToggleRuntimePaused", panel)
+
+        # Rust keeps them as two commands with two payloads.
+        for command in ("queue_set_paused", "runtime_set_paused"):
+            body = rust.split(f"pub fn {command}(", 1)[1].split("\n}", 1)[0]
+            self.assertIn(f'"command": "{command}"', body)
+
+        # And the backend keeps two independent states.
+        from core.load_signal import LoadLevel, LoadSnapshot
+        from core.queue_scheduler import QueueScheduler
+        from core.resource_governor import ResourceGovernor
+        from core.safe_queue import SafeQueue
+
+        class Free:
+            def observe(self):
+                return None
+
+            def snapshot(self):
+                return LoadSnapshot(LoadLevel.FREE, 0.0, None, 0, 0.0)
+
+        scheduler = QueueScheduler(
+            queue=SafeQueue(),
+            governor=ResourceGovernor(),
+            monitor=Free(),  # type: ignore[arg-type]
+        )
+        scheduler.set_runtime_paused(True)
+        self.assertFalse(scheduler.view().paused)
+        self.assertTrue(scheduler.view().runtime_paused)
+
+        scheduler.set_paused(True)
+        scheduler.set_runtime_paused(False)
+        self.assertTrue(scheduler.view().paused)
+        self.assertFalse(scheduler.view().runtime_paused)
 
     def test_security_activity_is_top_level_and_has_no_manual_refresh(self) -> None:
         activity = self.view.split(
