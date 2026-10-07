@@ -372,33 +372,37 @@ def test_concurrent_processes_do_not_lose_each_others_changes(profile: Profile) 
             env={**os.environ}, cwd=profile.cwd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         ))
-    for proc in procs:
-        out, err = proc.communicate(timeout=120)
-        assert proc.returncode == 0, err.decode("utf-8", "replace")
+    try:
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            assert proc.returncode == 0, err.decode("utf-8", "replace")
+    finally:
+        for proc in procs:  # only the children started here
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=30)
 
     stored = json.loads(profile.locator.read_text(encoding="utf-8"))
     for key in ("historyRoot", "memoryRoot", "cacheRoot", "backupRoot"):
         assert stored[key] == str(profile.custom / key)
-    assert not list(profile.locator.parent.glob("*.lock"))
+    # The lock file is persistent by design (exclusion is an OS lock on it).
+    assert [p.name for p in profile.locator.parent.glob("*.lock")] == [profile.locator.name + ".lock"]
     assert not list(profile.locator.parent.glob("*.tmp"))
 
 
-def test_lock_held_elsewhere_times_out_but_a_stale_lock_is_recovered(
-    profile: Profile, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_leftover_lock_file_is_not_a_lock(profile: Profile) -> None:
+    # Exclusion is an OS lock on an open handle, not the file's existence. A
+    # lock file left by an older version or a crashed process, of any age or
+    # content, neither blocks a change nor gets deleted. Held-lock, busy and
+    # abrupt-exit behaviour is covered with real processes in
+    # tests/test_storage_lock.py.
     profile.locator.parent.mkdir(parents=True)
     lock = profile.locator.with_name(profile.locator.name + ".lock")
     lock.write_text("held", encoding="utf-8")
-    monkeypatch.setattr(sl, "LOCK_TIMEOUT_SECONDS", 0.3)
-
-    with pytest.raises(StorageLocationError) as caught:
-        change_storage_location("historyRoot", str(profile.custom / "H1"))
-    assert caught.value.code == "busy"
-
-    old = time.time() - 3600
-    os.utime(lock, (old, old))
-    change_storage_location("historyRoot", str(profile.custom / "H2"))
-    assert not lock.exists()
+    for age in (0, 3600):
+        os.utime(lock, (time.time() - age, time.time() - age))
+        change_storage_location("historyRoot", str(profile.custom / f"H{age}"))
+        assert lock.is_file()
 
 
 # ---------------------------------------------------------------- profile

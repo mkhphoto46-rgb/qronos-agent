@@ -32,9 +32,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import errno
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import threading
@@ -47,6 +49,7 @@ from core.path_safety import (
     drive_status,
     has_control_characters,
     is_absolute_local,
+    is_link_or_reparse_point,
     is_network_or_device_path,
     is_within,
 )
@@ -55,8 +58,19 @@ _LOCK = threading.RLock()
 
 LOCATOR_SCHEMA_VERSION = 1
 MAX_SHOWN_VALUE_CHARS = 260
+# Bounded waits for the locator lock and for Windows to let a writer replace
+# a locator that a lock-free reader has open for an instant. There is no
+# "stale lock" age: an OS lock disappears with its owner's handle.
 LOCK_TIMEOUT_SECONDS = 10.0
-STALE_LOCK_SECONDS = 30.0
+LOCK_POLL_SECONDS = 0.02
+REPLACE_TIMEOUT_SECONDS = 2.0
+READ_RETRY_SECONDS = 1.0
+
+# errno values msvcrt.locking uses for "range already locked".
+_LOCK_HELD_ERRNOS = frozenset({errno.EACCES, getattr(errno, "EDEADLK", 36), getattr(errno, "EDEADLOCK", 36)})
+# ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION while another process has
+# the file open.
+_WINDOWS_IN_USE_ERRORS = frozenset({5, 32})
 
 # The source tree (development) or PyInstaller's _internal folder (installed).
 PROGRAM_ROOT = Path(__file__).resolve().parent.parent
@@ -456,12 +470,31 @@ def _locator_problem(code: str) -> LocationProblem:
     )
 
 
+def _read_locator_text(path: Path) -> str:
+    """
+    Read the locator without the lock. On Windows the name is briefly
+    inaccessible while a writer replaces it; that instant is waited out
+    within READ_RETRY_SECONDS instead of being misreported as a corrupt
+    locator (which would send this process to the default roots).
+    """
+    deadline = time.monotonic() + READ_RETRY_SECONDS
+    while True:
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(LOCK_POLL_SECONDS)
+
+
 def _read_locator(path: Path) -> tuple[str, dict[str, object]]:
     """("missing"|"ok"|"corrupt"|"newer", raw dict). Never writes."""
     if not path.exists():
         return "missing", {}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(_read_locator_text(path))
+    except FileNotFoundError:
+        return "missing", {}
     except (OSError, UnicodeDecodeError, ValueError):
         return "corrupt", {}
     if not isinstance(raw, dict):
@@ -572,33 +605,187 @@ def load_storage_locations(*, create: bool = False) -> StorageLocations:
 # ------------------------------------------------------------------ change
 
 
+def locator_lock_path(path: Path) -> Path:
+    """
+    The persistent lock file next to the locator.
+
+    It is created once and intentionally never deleted: exclusion comes from
+    an operating-system lock held on its open handle, not from the file's
+    existence. Leaving an empty file behind is harmless; it holds no data.
+    """
+    return path.with_name(path.name + ".lock")
+
+
+def _open_lock_file(lock: Path) -> int:
+    """
+    Open (creating if needed) the lock file, refusing anything that is not an
+    ordinary file: a link or junction, a folder, or a device. Errors are
+    reported, never retried: they are not contention.
+    """
+    invalid = StorageLocationError(
+        "lock_invalid",
+        "The storage lock file is a link, folder or device, so Qronos will not "
+        "use it and changed nothing.",
+    )
+    try:
+        before = os.lstat(lock)
+    except FileNotFoundError:
+        before = None
+    except OSError as exc:
+        raise StorageLocationError(
+            "lock_unavailable", "The storage lock file could not be inspected; nothing was changed."
+        ) from exc
+    if before is not None and (is_link_or_reparse_point(lock) or not stat.S_ISREG(before.st_mode)):
+        raise invalid
+
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(lock, flags, 0o600)
+    except PermissionError as exc:
+        raise StorageLocationError(
+            "lock_denied",
+            "Qronos is not allowed to open the storage lock file; nothing was changed.",
+        ) from exc
+    except OSError as exc:
+        raise StorageLocationError(
+            "lock_unavailable", "The storage lock file could not be opened; nothing was changed."
+        ) from exc
+
+    # The name must still be the ordinary file that was opened (not swapped
+    # for a link between the check and the open).
+    try:
+        opened = os.fstat(fd)
+        after = os.lstat(lock)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or is_link_or_reparse_point(lock)
+            or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise invalid
+    except BaseException as exc:
+        os.close(fd)
+        if isinstance(exc, OSError):
+            raise StorageLocationError(
+                "lock_unavailable", "The storage lock file could not be inspected; nothing was changed."
+            ) from exc
+        raise
+    return fd
+
+
+def _try_lock(fd: int) -> bool:
+    """One non-blocking attempt. False means another owner holds the lock."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            # LockFile reports a held range as EACCES (lock violation).
+            if exc.errno in _LOCK_HELD_ERRNOS:
+                return False
+            raise
+        return True
+
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 @contextmanager
 def _locator_lock(path: Path) -> Iterator[None]:
-    """Cross-process exclusion for read-modify-write of the locator."""
+    """
+    Cross-process exclusion for read-modify-write of the locator.
+
+    The exclusion is an operating-system advisory lock (LockFile through
+    msvcrt on Windows, flock on POSIX) on a persistent lock file. The old
+    scheme created and deleted the lock file on every acquisition; on Windows
+    a concurrent CREATE_NEW then intermittently fails with ACCESS_DENIED
+    while the name is mid-create or mid-delete, which escaped as an unhandled
+    PermissionError. With an OS lock:
+
+    - an owner that exits or is killed releases the lock with its handle, so
+      nothing ever needs to be declared stale and an active owner, however
+      slow, is never robbed;
+    - a lock belongs to the handle that took it, so an old owner can only
+      release its own lock, never a successor's;
+    - waiting is bounded by LOCK_TIMEOUT_SECONDS and ends in a truthful
+      "busy"; permission, invalid-path and other errors are reported at once.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_name(path.name + ".lock")
-    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
-    while True:
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            break
-        except FileExistsError:
-            try:
-                if time.time() - lock.stat().st_mtime > STALE_LOCK_SECONDS:
-                    lock.unlink(missing_ok=True)
-                    continue
-            except OSError:
-                pass
-            if time.monotonic() > deadline:
-                raise StorageLocationError(
-                    "busy", "Storage locations are being changed elsewhere; try again."
-                ) from None
-            time.sleep(0.05)
+    fd = _open_lock_file(locator_lock_path(path))
     try:
-        yield
+        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                acquired = _try_lock(fd)
+            except OSError as exc:
+                raise StorageLocationError(
+                    "lock_unavailable", "The storage lock could not be taken; nothing was changed."
+                ) from exc
+            if acquired:
+                break
+            if time.monotonic() >= deadline:
+                raise StorageLocationError(
+                    "busy",
+                    "Storage locations are being changed by another Qronos process; "
+                    "nothing was changed. Try again.",
+                )
+            time.sleep(LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            try:
+                _unlock(fd)
+            except OSError:
+                pass  # closing the handle below releases the lock regardless
     finally:
         os.close(fd)
-        lock.unlink(missing_ok=True)
+
+
+def _replace_locator(temporary: Path, path: Path) -> None:
+    """
+    Atomically replace the locator, under the locator lock.
+
+    Writers are serialised by the lock, but readers are lock-free, and Windows
+    refuses to replace a file that any process has open (ACCESS_DENIED or
+    SHARING_VIOLATION), even for the instant a reader takes to read it. Only
+    that Windows condition is waited out, within REPLACE_TIMEOUT_SECONDS;
+    anything else, or a denial that outlasts the bound, is reported.
+    """
+    deadline = time.monotonic() + REPLACE_TIMEOUT_SECONDS
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as exc:
+            transient = os.name == "nt" and getattr(exc, "winerror", None) in _WINDOWS_IN_USE_ERRORS
+            if not transient or time.monotonic() >= deadline:
+                raise StorageLocationError(
+                    "locator_write_failed",
+                    "The storage locator could not be replaced (access denied); nothing was changed.",
+                ) from exc
+            time.sleep(LOCK_POLL_SECONDS)
+        except OSError as exc:
+            raise StorageLocationError(
+                "locator_write_failed", "The storage locator could not be replaced; nothing was changed."
+            ) from exc
 
 
 def _write_locator(path: Path, document: dict[str, object]) -> None:
@@ -609,7 +796,7 @@ def _write_locator(path: Path, document: dict[str, object]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_locator(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
