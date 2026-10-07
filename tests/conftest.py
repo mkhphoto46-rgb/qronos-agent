@@ -14,6 +14,7 @@ def isolate_qronos_storage_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
     monkeypatch.setenv("QRONOS_CONVERSATION_HISTORY_PATH", str(tmp_path / "history.sqlite3"))
     monkeypatch.setenv("QRONOS_SETTINGS_PATH", str(tmp_path / "settings.json"))
 
@@ -74,21 +75,9 @@ def isolate_qronos_conversation_and_settings_state(
         str(tmp_path / "queue_state.json"),
     )
 
-    # Anything that resolves storage locations — the artifact registry and
-    # user memory do so even when handed explicit paths — would otherwise
-    # read the user's own locator file and create every folder it names.
-    import core.storage_locations as storage_locations
-
-    monkeypatch.setattr(
-        storage_locations,
-        "_local_app_data",
-        lambda: tmp_path / "LocalAppData",
-    )
-    monkeypatch.setattr(
-        storage_locations,
-        "_documents",
-        lambda: tmp_path / "Documents",
-    )
+    # Profile isolation is environment-based above, so child CLI processes
+    # and their parent resolve the same storage roots. Patching just Python
+    # helpers here would hide persisted approvals from those children.
 
 
 @pytest.fixture(autouse=True)
