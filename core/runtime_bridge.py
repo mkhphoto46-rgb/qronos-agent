@@ -59,10 +59,14 @@ from core.paint_draw_integration import (
     EnvironmentPaintReferenceProvider,
     PaintDrawExecutor,
     PaintReferenceProvider,
+    PaintUndoExecution,
     PreparedPaintDrawAction,
+    PreparedPaintUndo,
 )
 from core.paint_draw_parser import (
+    PAINT_UNDO_AMBIGUOUS,
     PaintDrawParseError,
+    classify_paint_undo_request,
     parse_paint_draw_action,
 )
 from core.audio_input import AudioConfig, AudioInput, resolve_input_device
@@ -120,7 +124,7 @@ from core.compute_estimator import ComputeEstimator
 from core.intent_gate import IntentGate
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
-from core.undo_journal import UndoJournal
+from core.undo_journal import Reversal, UndoJournal
 from core.action_cancellation import (
     CANCEL_REASON_PAUSE,
     CANCEL_REASON_SHUTDOWN,
@@ -165,6 +169,13 @@ class PendingFileTextAction:
 @dataclass(frozen=True)
 class PendingPaintDrawAction:
     prepared: PreparedPaintDrawAction
+    gui_approval: PermissionDecision | None
+    transcript: str
+
+
+@dataclass(frozen=True)
+class PendingPaintUndoAction:
+    prepared: PreparedPaintUndo
     gui_approval: PermissionDecision | None
     transcript: str
 
@@ -635,6 +646,62 @@ def _computer_capability_response() -> str:
 
 
 COMPUTER_ACTION_CANCELLED_RESPONSE = "عملیات با دستور توقف متوقف شد و ادامه نیافت."
+
+
+PAINT_UNDO_RESPONSES = {
+    "ambiguous": (
+        "درخواست هم بازگردانی و هم کشیدن در Paint را داشت؛ هیچ کاری انجام نشد. "
+        "لطفاً فقط یکی را بگو."
+    ),
+    "nothing": "هیچ نقاشی قابل بازگردانی از Qronos ثبت نشده است.",
+    "not_paint": (
+        "آخرین تغییر قابل بازگردانی Qronos مربوط به Paint نیست؛ برای اینکه "
+        "کار دیگری برگردانده نشود، در Paint هیچ کلیدی ارسال نشد."
+    ),
+    "unavailable": (
+        "بازگردانی خودکار برای آخرین نقاشی Qronos در دسترس نیست؛ "
+        "هیچ Ctrl+Z ای ارسال نشد."
+    ),
+    "pending": "یک درخواست Paint دیگر هنوز منتظر تأیید صفحه است.",
+    "refused": "این عملیات طبق تنظیمات مجوز فعلی اجازه اجرا ندارد.",
+    "other_approval": "بازگردانی Paint به نوع دیگری از تأیید نیاز دارد و اجرا نشد.",
+    "voice_needed": (
+        "بازگردانی نقاشی در Paint طبق مجوز فعلی به تأیید صوتی نیاز دارد. "
+        "همین فرمان را با Voice بگو؛ برای مشاهدهٔ محدود بوم نیز تأیید روی "
+        "صفحه خواسته می‌شود."
+    ),
+}
+
+
+def _paint_undo_response(execution: PaintUndoExecution) -> str:
+    """Never claims success unless the canvas was verified restored."""
+    outcome = execution.result.outcome
+    steps = execution.steps_sent
+    if outcome is ActionOutcome.SUCCEEDED and execution.restored:
+        return (
+            "انجام شد. فقط تغییراتی که Qronos در Paint کشیده بود برگردانده شد "
+            "و بوم با حالت پیش از نقاشی تطبیق داده شد."
+        )
+    if outcome is ActionOutcome.AWAITING_APPROVAL:
+        return "مجوزها هنگام اجرا تغییر کردند و بازگردانی انجام نشد."
+    if outcome is ActionOutcome.CANCELLED:
+        if not steps:
+            return "بازگردانی پیش از ارسال هر کلیدی متوقف شد."
+        return (
+            f"بازگردانی با دستور توقف نیمه‌کاره ماند؛ {steps} مرحله برگشت و "
+            "Qronos دوباره تلاش نمی‌کند."
+        )
+    if steps:
+        return (
+            f"بازگردانی کامل نشد؛ {steps} مرحله برگشت اما بوم با حالت پیش از "
+            "نقاشی تطبیق ندارد. Qronos دوباره تلاش نمی‌کند؛ Redo در خود Paint "
+            "می‌تواند آن مراحل را برگرداند."
+        )
+    return (
+        "بازگردانی انجام نشد و هیچ کلیدی ارسال نشد؛ شرایط امن برقرار نبود "
+        "(مثلاً بوم بعد از نقاشی تغییر کرده، پنجره عوض شده یا شواهد آن دیگر "
+        "نگه داشته نمی‌شود)."
+    )
 
 
 def _calculator_cancelled_response(cancelled: Any) -> str:
@@ -1333,6 +1400,7 @@ class QronosRuntime:
         )
         self.paint_draw_executor: PaintDrawExecutor | None = None
         self.pending_paint_draw: PendingPaintDrawAction | None = None
+        self.pending_paint_undo: PendingPaintUndoAction | None = None
         self.pending_file_actions: dict[str, PendingFileTextAction] = {}
         # One explicit UI approval grants a short, process-local lease for
         # ordinary reversible file-write actions. The window is fixed: auto-
@@ -3594,6 +3662,197 @@ class QronosRuntime:
         report["voiceComputerDeferred"] = False
         return f"انجام شد. {resolved.display_name} باز شد."
 
+    def _select_paint_undo_target(self) -> tuple[str, str]:
+        """
+        Return (action_id, "") for the exact drawing a Paint undo may reverse,
+        or ("", reason_key) explaining why there is none.
+
+        Only the most recent reversible Qronos action qualifies (undo is a
+        stack), and only when it is an exact app-level Paint reversal.
+        """
+        journal = self.undo_journal
+        if journal is None:
+            return "", "nothing"
+        top = journal.next_undoable()
+        if top is not None:
+            if top.target == "app:paint" and top.reversal is Reversal.APP_UNDO_STEPS:
+                return top.action_id, ""
+            return "", "not_paint"
+        if any(entry.target == "app:paint" for entry in journal.entries()):
+            return "", "unavailable"
+        return "", "nothing"
+
+    def _prepare_paint_undo(
+        self,
+        text: str,
+        report: dict[str, Any],
+    ) -> tuple[PreparedPaintUndo | None, str]:
+        """Shared recognition for text/voice; (None, "") means not an undo."""
+        kind = classify_paint_undo_request(text)
+        if not kind:
+            return None, ""
+        report["computerOperation"] = "undo_paint_drawing"
+        report["computerAppId"] = "paint"
+        report["voiceComputerDeferred"] = False
+        if kind == PAINT_UNDO_AMBIGUOUS:
+            return None, PAINT_UNDO_RESPONSES["ambiguous"]
+        self._ensure_computer_runtime()
+        if self.paint_draw_executor is None:
+            raise RuntimeError("Qronos Paint draw executor did not prepare correctly.")
+        action_id, reason = self._select_paint_undo_target()
+        if not action_id:
+            report["paintUndoUnavailable"] = reason
+            return None, PAINT_UNDO_RESPONSES[reason]
+        report["paintUndoTarget"] = action_id
+        return self.paint_draw_executor.prepare_undo(action_id), ""
+
+    def _execute_paint_undo(
+        self,
+        prepared: PreparedPaintUndo,
+        *,
+        gui_approval: PermissionDecision | None,
+        screen_approval: PermissionDecision | None,
+        report: dict[str, Any],
+    ) -> str:
+        with self._computer_actions.begin("paint_undo") as cancel_token:
+            execution = self.paint_draw_executor.execute_undo(
+                prepared,
+                gui_approval=gui_approval,
+                screen_approval=screen_approval,
+                reevaluate=True,
+                cancel_token=cancel_token,
+            )
+        report["paintUndoOutcome"] = execution.result.outcome.value
+        report["paintUndoRestored"] = execution.restored
+        report["paintUndoStepsSent"] = execution.steps_sent
+        self._notify(
+            "paint_undo_completed" if execution.restored else "paint_undo_not_completed",
+            "ready",
+            json.dumps(
+                {
+                    "undoesActionId": execution.undoes_action_id,
+                    "outcome": execution.result.outcome.value,
+                    "restored": execution.restored,
+                    "stepsSent": execution.steps_sent,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+        return _paint_undo_response(execution)
+
+    def _prepare_voice_paint_undo_action(
+        self,
+        transcript: str,
+        report: dict[str, Any],
+    ) -> str | None:
+        """
+        Voice route for "undo my Paint drawing".
+
+        ``None``: not an undo request. ``""``: waiting for the on-screen
+        approval (same prompt, Stop/Pause/stale rules as drawing). Anything
+        else is the final spoken answer. Nothing here sends a keystroke
+        unless execute_undo proves the reversal is exact.
+        """
+        prepared, message = self._prepare_paint_undo(transcript, report)
+        if prepared is None:
+            return message or None
+
+        gui = prepared.gui_verdict
+        screen = prepared.screen_verdict
+        if gui.refused or screen.refused:
+            report["voiceComputerRefused"] = True
+            return PAINT_UNDO_RESPONSES["refused"]
+
+        gui_approval: PermissionDecision | None = None
+        if gui.needs_approval:
+            if gui.decision is not PermissionDecision.REQUIRE_VOICE_CONFIRMATION:
+                report["voiceComputerNeedsOtherApproval"] = gui.decision.value
+                return PAINT_UNDO_RESPONSES["other_approval"]
+            gui_approval = gui.decision
+
+        screen_approval: PermissionDecision | None = None
+        if screen.needs_approval:
+            if screen.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION:
+                screen_approval = screen.decision
+            elif screen.decision is PermissionDecision.REQUIRE_UI_CONFIRMATION:
+                stopped = self._computer_actions.stopped_since_turn_start()
+                if stopped:
+                    self.paint_draw_executor.discard_pending(prepared, reason=stopped)
+                    report["voiceComputerCancelled"] = True
+                    return COMPUTER_ACTION_CANCELLED_RESPONSE
+                with self._approval_lock:
+                    if (
+                        self.pending_paint_draw is not None
+                        or self.pending_paint_undo is not None
+                    ):
+                        return PAINT_UNDO_RESPONSES["pending"]
+                    self.pending_paint_undo = PendingPaintUndoAction(
+                        prepared=prepared,
+                        gui_approval=gui_approval,
+                        transcript=transcript,
+                    )
+                    self._discarded_approvals.pop(
+                        self._approval_key(transcript),
+                        None,
+                    )
+                report["paintDrawScreenApprovalPending"] = True
+                return ""
+            else:
+                report["voiceComputerNeedsOtherApproval"] = screen.decision.value
+                return PAINT_UNDO_RESPONSES["other_approval"]
+
+        return self._execute_paint_undo(
+            prepared,
+            gui_approval=gui_approval,
+            screen_approval=screen_approval,
+            report=report,
+        )
+
+    def _begin_text_paint_undo_action(
+        self,
+        text: str,
+        request_id: str,
+        started_at: float,
+    ) -> bool:
+        """Text route: runs only when policy needs no voice/UI approval."""
+        report: dict[str, Any] = {}
+        prepared, message = self._prepare_paint_undo(text, report)
+        if prepared is None:
+            if not message:
+                return False
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=message,
+                started_at=started_at,
+            )
+            return True
+
+        gui = prepared.gui_verdict
+        screen = prepared.screen_verdict
+        if gui.refused or screen.refused:
+            response = PAINT_UNDO_RESPONSES["refused"]
+        elif gui.allowed and screen.allowed:
+            response = self._execute_paint_undo(
+                prepared,
+                gui_approval=None,
+                screen_approval=None,
+                report=report,
+            )
+        elif (
+            gui.needs_approval
+            and gui.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION
+        ):
+            response = PAINT_UNDO_RESPONSES["voice_needed"]
+        else:
+            response = PAINT_UNDO_RESPONSES["other_approval"]
+        self._finish_text_file_action(
+            request_id=request_id,
+            response=response,
+            started_at=started_at,
+        )
+        return True
+
     def _begin_text_paint_draw_action(
         self,
         text: str,
@@ -3736,7 +3995,10 @@ class QronosRuntime:
                     report["voiceComputerDeferred"] = False
                     return COMPUTER_ACTION_CANCELLED_RESPONSE
                 with self._approval_lock:
-                    if self.pending_paint_draw is not None:
+                    if (
+                        self.pending_paint_draw is not None
+                        or self.pending_paint_undo is not None
+                    ):
                         report["voiceComputerDeferred"] = False
                         return "یک نقاشی دیگر هنوز منتظر تأیید صفحه است."
                     self.pending_paint_draw = PendingPaintDrawAction(
@@ -4071,6 +4333,13 @@ class QronosRuntime:
         if policy refused it. False means the caller should try another
         COMPUTER sub-parser such as exact-path File Control.
         """
+        if self._begin_text_paint_undo_action(
+            text,
+            request_id,
+            started_at,
+        ):
+            return True
+
         if self._begin_text_paint_draw_action(
             text,
             request_id,
@@ -4198,6 +4467,13 @@ class QronosRuntime:
             report["voiceComputerCapabilityQuery"] = True
             report["voiceComputerDeferred"] = False
             return _computer_capability_response()
+
+        paint_undo_response = self._prepare_voice_paint_undo_action(
+            transcript,
+            report,
+        )
+        if paint_undo_response is not None:
+            return paint_undo_response
 
         paint_draw_response = self._prepare_voice_paint_draw_action(
             transcript,
@@ -5949,11 +6225,14 @@ class QronosRuntime:
         """
         with self._approval_lock:
             paint = self.pending_paint_draw
+            undo = self.pending_paint_undo
             look = self.pending_look
             self.pending_paint_draw = None
+            self.pending_paint_undo = None
             self.pending_look = None
             for question in (
                 paint.transcript if paint is not None else None,
+                undo.transcript if undo is not None else None,
                 look,
             ):
                 key = self._approval_key(question)
@@ -5965,15 +6244,16 @@ class QronosRuntime:
                     next(iter(self._discarded_approvals))
                 )
 
-        discarded = int(paint is not None) + int(bool(look))
-        if paint is not None and self.paint_draw_executor is not None:
-            try:
-                self.paint_draw_executor.discard_pending(
-                    paint.prepared,
-                    reason=reason,
-                )
-            except Exception:
-                pass
+        discarded = int(paint is not None) + int(undo is not None) + int(bool(look))
+        for pending in (paint, undo):
+            if pending is not None and self.paint_draw_executor is not None:
+                try:
+                    self.paint_draw_executor.discard_pending(
+                        pending.prepared,
+                        reason=reason,
+                    )
+                except Exception:
+                    pass
         if discarded:
             self._notify(
                 "computer_approval_discarded",
@@ -8079,6 +8359,51 @@ class QronosRuntime:
                 self._start_standalone_input_meter()
 
 
+    def _resolve_pending_paint_undo_screen_decision(
+        self,
+        *,
+        approved: bool,
+    ) -> bool:
+        with self._approval_lock:
+            pending = self.pending_paint_undo
+            if pending is None:
+                return False
+            self.pending_paint_undo = None
+
+        self._ensure_computer_runtime()
+        if self.paint_draw_executor is None:
+            raise RuntimeError("Qronos Paint draw executor is not available.")
+
+        if not approved:
+            self.paint_draw_executor.decline_screen(pending.prepared)
+            self._notify(
+                "voice_screen_declined",
+                "ready",
+                "بازگردانی لغو شد؛ Qronos پنجرهٔ Paint را مشاهده یا تغییر نداد.",
+            )
+            return True
+
+        response = self._execute_paint_undo(
+            pending.prepared,
+            gui_approval=pending.gui_approval,
+            screen_approval=PermissionDecision.REQUIRE_UI_CONFIRMATION,
+            report={},
+        )
+
+        if self.conversation_session is not None:
+            if self.conversation_session.is_active:
+                self.conversation_session.begin_responding()
+                self.conversation_session.add_assistant_message(response)
+                self.conversation_session.begin_listening()
+
+        self._notify("voice_response", "ready", response)
+        self._notify(
+            "voice_turn_complete",
+            "ready",
+            "Paint undo turn completed.",
+        )
+        return True
+
     def _resolve_pending_paint_draw_screen_decision(
         self,
         *,
@@ -8225,7 +8550,7 @@ class QronosRuntime:
             return stale
         key = self._approval_key(question)
         with self._approval_lock:
-            pending = self.pending_paint_draw
+            pending = self.pending_paint_draw or self.pending_paint_undo
             if (
                 pending is not None
                 and key
@@ -8269,6 +8594,11 @@ class QronosRuntime:
                 return
 
             if self._resolve_pending_paint_draw_screen_decision(
+                approved=approved,
+            ):
+                return
+
+            if self._resolve_pending_paint_undo_screen_decision(
                 approved=approved,
             ):
                 return

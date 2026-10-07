@@ -21,6 +21,7 @@ class StopResponseRuntimeTests(unittest.TestCase):
         runtime._approval_lock = threading.Lock()
         runtime._discarded_approvals = {}
         runtime.pending_paint_draw = None
+        runtime.pending_paint_undo = None
         runtime.pending_look = None
         runtime.paint_draw_executor = None
         runtime._notify = lambda *args, **kwargs: None

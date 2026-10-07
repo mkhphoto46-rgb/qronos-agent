@@ -19,7 +19,10 @@
   permission, exact window/process/layout and an unchanged canvas before
   sending any Ctrl+Z, stops as soon as the canvas matches its pre-drawing
   state, and never replays a partial undo. Covered by fake-input tests only;
-  no live Paint validation and no user-facing "undo" command yet.
+  no live Paint validation. "Undo my Paint drawing" (the request must name
+  Paint) reaches this guarded undo through the same screen/UI approval and
+  Stop/Pause rules as drawing; it only reverses the most recent reversible
+  Qronos action, and only when that is a Paint drawing.
 
 ## Remaining work (not completed capabilities)
 
