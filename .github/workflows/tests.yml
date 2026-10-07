@@ -1,4 +1,4 @@
-name: Qronos Tests
+name: Qronos Validation
 
 on:
   push:
@@ -6,17 +6,19 @@ on:
       - "**"
 
   pull_request:
-    branches:
-      - main
-      - "feature/**"
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     name: Run Qronos Test Suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false
@@ -28,44 +30,117 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Display Python version
         run: python --version
 
       - name: Install project dependencies
-        shell: bash
         run: |
           python -m pip install --upgrade pip
-
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-          fi
-
-          if [ -f requirements-dev.txt ]; then
-            python -m pip install -r requirements-dev.txt
-          fi
+          python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Check Python dependencies
         run: python -m pip check
 
-      - name: Verify CI source
-        shell: bash
-        run: |
-          echo "===== COMMIT ====="
-          git rev-parse HEAD
-          git log -1 --oneline
-
-          echo "===== test_config.py ====="
-          sed -n '1,80p' tests/test_config.py
-
-          echo "===== test_ollama_controller.py ====="
-          sed -n '1,160p' tests/test_ollama_controller.py
-
-      - name: Run Qronos tests
+      - name: Run Qronos tests and release-source hygiene
         run: |
           python -m pytest tests -ra
+
+  desktop:
+    name: Build Qronos Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    defaults:
+      run:
+        working-directory: desktop
+
+    env:
+      CI: "true"
+      RUSTUP_TOOLCHAIN: "1.98.1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+      SEGMENT_DOWNLOAD_TIMEOUT_MINS: "5"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config libwebkit2gtk-4.1-dev \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install locked frontend dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Check production JavaScript dependency advisories
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Check application and Vite TypeScript
+        run: npm run typecheck
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+
+      # Cache compressed dependency downloads only. Do not cache credentials,
+      # node_modules, toolchains or multi-gigabyte compiled target directories.
+      - name: Restore Cargo dependency downloads
+        id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+
+      - name: Check all Rust targets with the lockfile
+        working-directory: desktop/src-tauri
+        run: cargo check --locked --all-targets
+
+      # This compiles and links the release executable and embeds the Vite
+      # production build. It neither launches the app nor makes installers.
+      - name: Build release Tauri application
+        run: npm run tauri -- build --ci --no-bundle -- --locked
+
+      - name: Save Cargo dependency downloads
+        if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
