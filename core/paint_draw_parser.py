@@ -88,3 +88,31 @@ def parse_paint_draw_action(text: str) -> PaintDrawAction:
         return PaintDrawAction(prompt=prompt)
     except ValueError as exc:
         raise PaintDrawParseError(str(exc)) from exc
+
+
+PAINT_UNDO = "undo"
+PAINT_UNDO_AMBIGUOUS = "ambiguous"
+
+_UNDO_RE = re.compile(
+    r"(?<!\w)(?:undo|revert)(?!\w)|(?:برگردون|برگردان|بازگردان|بازگردون|آندو)",
+    re.IGNORECASE,
+)
+
+
+def classify_paint_undo_request(text: str) -> str:
+    """
+    Recognize an explicit request to undo Qronos's own Paint drawing.
+
+    Returns ``PAINT_UNDO`` when the text names Paint and an undo verb,
+    ``PAINT_UNDO_AMBIGUOUS`` when it also asks to draw (both must never run
+    from one sentence), and ``""`` otherwise. Which drawing is reversed is
+    decided by the undo journal, never by the sentence.
+    """
+    cleaned = _normalise(text)
+    if not cleaned or len(cleaned) > MAX_DRAW_PROMPT_CHARS + 160:
+        return ""
+    if not _PAINT_RE.search(cleaned) or not _UNDO_RE.search(cleaned):
+        return ""
+    if _DRAW_RE.search(cleaned):
+        return PAINT_UNDO_AMBIGUOUS
+    return PAINT_UNDO

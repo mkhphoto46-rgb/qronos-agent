@@ -69,6 +69,16 @@ class TaskRouter:
         "نقاشی کن",
     )
 
+    UNDO_MARKERS = _markers(
+        "undo",
+        "revert",
+        "برگردون",
+        "برگردان",
+        "بازگردان",
+        "بازگردون",
+        "آندو",
+    )
+
     CALCULATOR_NAMES = _markers(
         "calculator",
         "calc",
@@ -363,6 +373,14 @@ class TaskRouter:
                 ),
             )
 
+        if self._looks_like_paint_undo(text):
+            # Never let "undo my Paint drawing" fall through to a chat model
+            # that could answer as if it had reversed something.
+            return RouteDecision(
+                task_type=TaskType.COMPUTER,
+                reason="The request explicitly asks to undo a Paint drawing.",
+            )
+
         if self._looks_like_paint_draw(text):
             return RouteDecision(
                 task_type=TaskType.COMPUTER,
@@ -412,6 +430,11 @@ class TaskRouter:
                 self.CALCULATOR_ACTION_MARKERS,
             )
         )
+
+    def _looks_like_paint_undo(self, text: str) -> bool:
+        return self._contains_any(
+            text, self.PAINT_NAMES
+        ) and self._contains_any(text, self.UNDO_MARKERS)
 
     def _looks_like_paint_draw(self, text: str) -> bool:
         return self._contains_any(
