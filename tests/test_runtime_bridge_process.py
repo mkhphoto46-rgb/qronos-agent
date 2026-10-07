@@ -17,8 +17,10 @@ file stays on the paths that touch nothing.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -37,6 +39,21 @@ class BridgeProcess:
     """A running bridge, with the plumbing to talk to it."""
 
     def __init__(self) -> None:
+        # Queued requests are real conversation work now: submitting one
+        # records the request in conversation history. The child gets its own
+        # throwaway history so the suite never writes into the user's, and it
+        # may not start a local model server on its own.
+        # Windows can hold a killed child's SQLite handle for a moment after
+        # it exits; a leftover temp file is not a test failure.
+        self._scratch = tempfile.TemporaryDirectory(
+            ignore_cleanup_errors=True,
+        )
+        env = dict(os.environ)
+        env["QRONOS_CONVERSATION_HISTORY_PATH"] = str(
+            Path(self._scratch.name) / "conversation_history.sqlite3"
+        )
+        env["QRONOS_OLLAMA_AUTO_START"] = "0"
+
         self.process = subprocess.Popen(
             [sys.executable, "-u", "-m", "core.runtime_bridge"],
             cwd=str(ROOT),
@@ -46,6 +63,7 @@ class BridgeProcess:
             text=True,
             encoding="utf-8",
             bufsize=1,
+            env=env,
         )
 
     def send(self, payload: dict) -> None:
@@ -110,6 +128,8 @@ class BridgeProcess:
                     stream.close()
                 except OSError:
                     pass
+
+        self._scratch.cleanup()
 
 
 class BridgeProcessTestCase(unittest.TestCase):
@@ -319,12 +339,44 @@ class QueueBridgeTestCase(BridgeProcessTestCase):
             "the bridge never sent a queue",
         )
 
+        # Held, so nothing submitted below can start. A queued request is
+        # answered by the local brain, and a protocol test must never load
+        # one — there is no fake brain in a child process.
+        self.bridge.send({"command": "queue_set_paused", "paused": True})
+        self.bridge.send({"command": "queue_list"})
+
+        deadline = time.time() + REPLY_TIMEOUT
+
+        while time.time() < deadline:
+            if self.queue()["paused"]:
+                break
+        else:
+            self.fail("the queue never reported itself held")
+
     def queue(self, timeout: float = REPLY_TIMEOUT) -> dict:
         event = self.bridge.read_until("queue_changed", timeout=timeout)
 
         self.assertIsNotNone(event, "no queue arrived")
 
         return json.loads(event["message"])
+
+    def submitted_tasks(self) -> list[dict]:
+        """
+        The tasks once a submission has reached the queue.
+
+        The pump's first pass announces the queue on its own schedule, so a
+        snapshot taken before the submission can still be in the pipe ahead
+        of the one that includes it.
+        """
+        deadline = time.time() + REPLY_TIMEOUT
+
+        while time.time() < deadline:
+            tasks = self.queue()["tasks"]
+
+            if tasks:
+                return tasks
+
+        self.fail("the submitted task never appeared")
 
 
 class TestTheQueueSurvivesShutdown(QueueBridgeTestCase):
@@ -380,7 +432,7 @@ class TestTheQueueProtocol(QueueBridgeTestCase):
             }
         )
 
-        tasks = self.queue()["tasks"]
+        tasks = self.submitted_tasks()
 
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0]["summary"], "analyse the quarterly numbers")
@@ -417,17 +469,64 @@ class TestTheQueueProtocol(QueueBridgeTestCase):
                 "weight": "heavy",
             }
         )
-        task_id = self.queue()["tasks"][0]["taskId"]
+        task_id = self.submitted_tasks()[0]["taskId"]
 
         self.bridge.send({"command": "queue_cancel", "taskId": task_id})
-        states = {task["state"] for task in self.queue()["tasks"]}
+        cancelled = self.bridge.read_until("queue_task_finished")
+
+        self.assertIsNotNone(cancelled, "the cancel was never announced")
+        self.bridge.send({"command": "queue_list"})
+
+        deadline = time.time() + REPLY_TIMEOUT
+        states = {"queued"}
+
+        while time.time() < deadline and "queued" in states:
+            states = {task["state"] for task in self.queue()["tasks"]}
 
         self.assertNotIn("queued", states)
 
     def test_pausing_is_reflected_in_the_queue(self) -> None:
         self.bridge.send({"command": "queue_set_paused", "paused": True})
+        self.bridge.send({"command": "queue_list"})
 
         self.assertTrue(self.queue()["paused"])
+
+    def test_a_submitted_request_is_announced_to_its_conversation(
+        self,
+    ) -> None:
+        self.bridge.send(
+            {
+                "command": "queue_submit",
+                "text": "explain the difference between a list and a tuple",
+                "requestId": "req-process-1",
+            }
+        )
+
+        update = self.bridge.read_until("queue_conversation_update")
+
+        self.assertIsNotNone(update)
+        payload = json.loads(update["message"])
+        self.assertEqual(payload["requestId"], "req-process-1")
+        self.assertEqual(payload["phase"], "queued")
+
+        task = self.submitted_tasks()[0]
+        self.assertEqual(task["kind"], "conversation")
+        self.assertEqual(task["requestId"], "req-process-1")
+
+    def test_an_action_request_is_refused_before_it_is_queued(self) -> None:
+        # Background work never takes an approval-gated path.
+        self.bridge.send(
+            {
+                "command": "queue_submit",
+                "text": "open notepad",
+                "requestId": "req-process-action",
+            }
+        )
+
+        refused = self.bridge.read_until("runtime_error")
+
+        self.assertIsNotNone(refused)
+        self.assertIn("cannot be queued", refused["message"])
 
 
 class TestBadQueueInput(QueueBridgeTestCase):

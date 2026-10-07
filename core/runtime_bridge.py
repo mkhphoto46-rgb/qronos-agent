@@ -91,6 +91,15 @@ from core.queue_scheduler import (
     QueueEventType,
     QueueScheduler,
     SchedulerConfig,
+    WorkOutcome,
+    WorkResult,
+)
+from core.queued_conversation import (
+    ConversationPhase,
+    ConversationQueueExecutor,
+    ConversationRequest,
+    QueuedConversationWork,
+    build_request as build_queued_conversation_request,
 )
 from core.resource_governor import ResourceGovernor, Weight
 from core.resource_policy import ResourceDecision
@@ -1183,6 +1192,7 @@ class QronosRuntime:
         # time — which would be a NameError at import.
         self._notify = notify if notify is not None else emit
         self._scheduler = scheduler
+        self._conversation_executor: ConversationQueueExecutor | None = None
 
         self.settings = (
             settings
@@ -1336,12 +1346,227 @@ class QronosRuntime:
                 queue=SafeQueue(),
                 governor=ResourceGovernor(),
                 monitor=monitor,
+                runner=self._run_queue_work_in_thread,
                 notify=self._on_queue_event,
                 config=_scheduler_config_from_environment(),
+                # The user's own voice/text/screen turn owns the model phase.
+                # Read without the runtime lock held by the caller: the pump
+                # thread asks this on every tick.
+                foreground_busy=lambda: self.is_busy,
             )
             self._scheduler.start()
 
             return self._scheduler
+
+    def _run_queue_work_in_thread(self, entry) -> None:
+        """
+        Hand queued work to its own thread and report back when it returns.
+
+        A two-minute generation on the pump thread would stop the pump from
+        renewing the work's lease or noticing that the machine got busy.
+        Returning None tells the scheduler the outcome will be reported
+        later, by this thread, through ``report_outcome``.
+        """
+        task_id = entry.task_id
+        work = entry.work
+
+        def run() -> None:
+            try:
+                outcome = work.run()
+            except Exception as exc:
+                outcome = WorkResult(WorkOutcome.FAILED, f"{exc}")
+
+            scheduler = self._scheduler
+
+            if scheduler is not None:
+                scheduler.report_outcome(task_id, outcome)
+
+        threading.Thread(
+            target=run,
+            name="qronos-queue-work",
+            daemon=True,
+        ).start()
+
+        return None
+
+    # ------------------------------------------------ queued conversations
+
+    def _conversation_queue_executor(self) -> ConversationQueueExecutor:
+        if self._conversation_executor is None:
+            self._conversation_executor = ConversationQueueExecutor(
+                orchestrator=self._orchestrator_for_queue,
+                route=self._route_for_queue,
+                record_answer=self._record_queued_answer,
+                notify=self._notify_queued_conversation,
+                foreground_busy=lambda: self.is_busy,
+                runtime_paused=lambda: self.runtime_paused,
+                release_brains=self._release_brains_for_voice_phase,
+            )
+
+        return self._conversation_executor
+
+    def _orchestrator_for_queue(self):
+        self._ensure_text_runtime()
+
+        if self.orchestrator is None:
+            raise RuntimeError(
+                "Qronos text runtime did not prepare correctly."
+            )
+
+        return self.orchestrator
+
+    def _route_for_queue(self, text: str) -> TaskType:
+        """
+        The production route for a request, as a direct text turn would pick.
+
+        Only the deterministic router and the Fast-to-Heavy promotion: no
+        brain is loaded to decide. The Calculator action is checked as the
+        text path checks it, before routing, because it is an action.
+        """
+        if _looks_like_calculator_semantic_action(
+            text,
+            self._last_computer_app_id,
+        ):
+            return TaskType.COMPUTER
+
+        if self.task_router is None:
+            self.task_router = TaskRouter()
+
+        routed = self.task_router.route(text).task_type
+        selected, _details = self._select_production_task_type(
+            text,
+            routed,
+        )
+
+        return selected
+
+    def _record_queued_answer(
+        self,
+        request: ConversationRequest,
+        response: str,
+    ) -> None:
+        self._record_conversation_message(
+            role="assistant",
+            text=response,
+            source="text",
+            request_id=request.request_id,
+        )
+
+    def _notify_queued_conversation(
+        self,
+        work: QueuedConversationWork,
+        phase: ConversationPhase,
+        fields: dict[str, Any],
+    ) -> None:
+        """
+        Tell the conversation where its queued request is.
+
+        Correlated by the original request id, so the answer — or the reason
+        there is none — lands on the request it belongs to rather than as a
+        count in a queue panel.
+        """
+        payload: dict[str, Any] = {
+            "taskId": work.task_id,
+            "requestId": work.request.request_id,
+            "route": work.request.route.value,
+            "phase": phase.value,
+        }
+        payload.update(fields)
+
+        self._notify(
+            "queue_conversation_update",
+            "error" if phase is ConversationPhase.FAILED else "ready",
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def submit_queued_conversation(
+        self,
+        *,
+        text: str,
+        request_id: str,
+        context: tuple = (),
+        user_message_recorded: bool,
+        route: TaskType | None = None,
+        heavy_requested: bool = False,
+        required_mb: int | None = None,
+        reason: str = "",
+    ) -> QueuedConversationWork:
+        """
+        Put one typed request in the queue as real, answerable work.
+
+        Refuses anything that is not plain Fast/Heavy reasoning before it
+        reaches the queue. Records the user's message now, unless the text
+        turn that deferred it already has, so the conversation shows the
+        request at once and the eventual answer attaches to it.
+        """
+        selected = route if route is not None else self._route_for_queue(text)
+        request = build_queued_conversation_request(
+            request_id=request_id,
+            text=text,
+            route=selected,
+            context=context,
+        )
+
+        scheduler = self.ensure_scheduler()
+        waiting = [
+            task
+            for task in scheduler.view().tasks
+            if task.get("kind") == "conversation"
+            and task.get("state") in ("queued", "paused", "running")
+        ]
+
+        if len(waiting) >= MAX_QUEUED_CONVERSATIONS:
+            raise ValueError(
+                "The queue already holds "
+                f"{MAX_QUEUED_CONVERSATIONS} waiting requests."
+            )
+
+        if any(task.get("requestId") == request_id for task in waiting):
+            raise ValueError(f"{request_id} is already queued.")
+
+        heavy = selected is TaskType.HEAVY or heavy_requested
+        weight = Weight.HEAVY if heavy else Weight.LIGHT
+
+        if required_mb is None:
+            profile = MODELS["heavy" if heavy else "fast"]
+            required_mb = required_vram_mb(profile.estimated_vram_gb)
+
+        if not user_message_recorded:
+            self._record_conversation_message(
+                role="user",
+                text=text,
+                source="text",
+                request_id=request_id,
+            )
+
+        work = QueuedConversationWork(
+            request,
+            self._conversation_queue_executor(),
+        )
+        # Identified, and announced, before the scheduler can see it: the
+        # pump may start it the instant it is submitted, and its progress
+        # must never arrive ahead of the news that it was queued.
+        work.task_id = f"q-{uuid.uuid4().hex[:8]}"
+
+        self._notify_queued_conversation(
+            work,
+            ConversationPhase.QUEUED,
+            {"reason": reason} if reason else {},
+        )
+
+        scheduler.submit(
+            work=work,
+            weight=weight,
+            summary=request.summary(),
+            required_vram_mb=required_mb,
+            task_id=work.task_id,
+        )
+
+        return work
 
     @property
     def scheduler(self) -> QueueScheduler | None:
@@ -1662,6 +1887,7 @@ class QronosRuntime:
 
         with self._lock:
             self._busy = value
+            scheduler = self._scheduler
 
             if (
                 not value
@@ -1669,6 +1895,20 @@ class QronosRuntime:
             ):
                 self._pending_wake_settings_reconcile = False
                 reconcile = True
+
+        if scheduler is not None:
+            if value:
+                # The user's turn takes the model phase. Queued work already
+                # running is told so: if the turn costs it its brain, it goes
+                # back in line instead of failing, and it does not unload
+                # models out from under this turn when it returns.
+                for work in scheduler.running_work():
+                    preempt = getattr(work, "preempt", None)
+
+                    if callable(preempt):
+                        preempt()
+            else:
+                scheduler.wake()
 
         if reconcile:
             self._reconcile_wake_setting()
@@ -3950,6 +4190,61 @@ class QronosRuntime:
             started_at=pending.started_at,
         )
 
+    def _defer_text_turn_to_queue(
+        self,
+        *,
+        text: str,
+        request_id: str,
+        context: tuple,
+        route: TaskType,
+        reason: str,
+        started_at: float,
+    ) -> None:
+        """
+        Turn a resource refusal into a queued request rather than a "no".
+
+        The user's message is already in the conversation, so it is not
+        recorded twice; the context is the one this turn captured before
+        recording it. If the queue cannot take it, the user gets the original
+        refusal plus why, exactly as before this path existed.
+        """
+        try:
+            work = self.submit_queued_conversation(
+                text=text,
+                request_id=request_id,
+                context=tuple(context or ()),
+                user_message_recorded=True,
+                route=route,
+                reason="resource_pressure",
+            )
+        except Exception as exc:
+            self._notify(
+                "text_error",
+                "error",
+                _text_event_message(
+                    request_id,
+                    error=f"{reason} The queue could not hold it: {exc}",
+                    route=route.value,
+                    elapsedSeconds=round(
+                        time.perf_counter() - started_at,
+                        3,
+                    ),
+                ),
+            )
+            return
+
+        self._notify(
+            "text_deferred",
+            "queued",
+            _text_event_message(
+                request_id,
+                taskId=work.task_id,
+                route=route.value,
+                reason="resource_pressure",
+                detail=reason,
+            ),
+        )
+
     def run_text_turn(
         self,
         text: str,
@@ -4180,6 +4475,23 @@ class QronosRuntime:
                     )
 
                 result = results[-1]
+
+                if (
+                    not result.success
+                    and getattr(result, "resource_blocked", False)
+                ):
+                    # Resource policy refused the brain, not the request.
+                    # Hand it to the queue, which answers it when the machine
+                    # allows, instead of telling the user no.
+                    self._defer_text_turn_to_queue(
+                        text=cleaned_text,
+                        request_id=cleaned_request_id,
+                        context=conversation_context,
+                        route=selected_task_type,
+                        reason=result.error or "",
+                        started_at=started,
+                    )
+                    return
 
                 if not result.success:
                     raise RuntimeError(
@@ -7458,6 +7770,51 @@ class QronosRuntime:
             ),
         )
 
+    def _interrupt_queued_conversations(self) -> None:
+        """
+        Say plainly which queued requests this runtime will never answer.
+
+        The queue is in memory and is not replayed after a restart, so every
+        request still waiting or running is lost with this process. Each is
+        cancelled first — a model call still under way on a worker thread
+        must not attach an answer after the runtime has closed — and then
+        reported to its conversation as interrupted, rather than left looking
+        as if an answer might still come.
+        """
+        scheduler = self._scheduler
+
+        if scheduler is None:
+            return
+
+        for task in scheduler.view().tasks:
+            if task.get("kind") != "conversation":
+                continue
+
+            if task.get("state") not in ("queued", "paused", "running"):
+                continue
+
+            work = scheduler.work_for(str(task.get("taskId", "")))
+
+            if not isinstance(work, QueuedConversationWork):
+                continue
+
+            if not work.cancel():
+                # Already committed: its answer was delivered.
+                continue
+
+            self._notify_queued_conversation(
+                work,
+                ConversationPhase.INTERRUPTED,
+                {
+                    "whileRunning": task.get("state") == "running",
+                    "detail": (
+                        "Qronos closed before this request was answered. "
+                        "It was not run again automatically; ask again "
+                        "when you are ready."
+                    ),
+                },
+            )
+
     def close(self) -> None:
         self._input_meter_enabled = False
         self._stop_standalone_input_meter()
@@ -7471,6 +7828,11 @@ class QronosRuntime:
         if self._scheduler is not None:
             try:
                 self._scheduler.stop()
+            except Exception:
+                pass
+
+            try:
+                self._interrupt_queued_conversations()
             except Exception:
                 pass
 
@@ -7515,6 +7877,7 @@ _QUEUE_EVENT_NAMES: dict[QueueEventType, tuple[str, str]] = {
     QueueEventType.FINISHED: ("queue_task_finished", "ready"),
     QueueEventType.FAILED: ("queue_task_finished", "error"),
     QueueEventType.CANCELLED: ("queue_task_finished", "ready"),
+    QueueEventType.DEFERRED: ("queue_task_deferred", "queued"),
     QueueEventType.OVERRIDE_REFUSED: ("queue_override_refused", "warning"),
     QueueEventType.HOLD_STATE: ("queue_hold_state", "busy"),
 }
@@ -7990,6 +8353,10 @@ MAX_SUMMARY_LENGTH = 200
 #: limit: the number arrives over a pipe and is used in arithmetic.
 MAX_REQUIRED_VRAM_MB = 1_048_576
 
+#: How many conversation requests may wait at once. Each one holds its
+#: request text and a bounded slice of conversation context in memory.
+MAX_QUEUED_CONVERSATIONS = 20
+
 #: Set to "1" to enable the commands that only exist for demonstrating the
 #: queue. Off by default, and off in anything a user installs, so a line
 #: arriving on stdin cannot reach them.
@@ -8053,18 +8420,55 @@ def handle_queue_submit(
     runtime: QronosRuntime,
     payload: dict[str, Any],
 ) -> None:
+    """
+    Queue a conversation request to be answered when the machine allows.
+
+    ``text`` is the request and ``requestId`` correlates the answer with it.
+    A payload carrying only ``summary`` — what the desktop's queue command
+    has always sent — is the same thing with the summary as the request and
+    a generated id, so every queued item is real work with a real answer.
+
+    Only Fast/Heavy reasoning is accepted. Anything routing to an action,
+    vision or the browser is refused here, before it is queued: those need
+    the user present to approve them, and the queue never runs them.
+    """
     if runtime._reject_if_runtime_paused("queue_submit"):
         return
 
-    summary = str(payload.get("summary", "")).strip()
+    raw_text = payload.get("text", payload.get("summary", ""))
 
-    if not summary:
+    if not isinstance(raw_text, str):
+        raise ValueError("A queued request must be text.")
+
+    text = raw_text.strip()
+
+    if not text:
         raise ValueError("A queued task must say what it is.")
 
-    if len(summary) > MAX_SUMMARY_LENGTH:
+    limit = (
+        MAX_TEXT_MESSAGE_LENGTH
+        if "text" in payload
+        else MAX_SUMMARY_LENGTH
+    )
+
+    if len(text) > limit:
         raise ValueError(
-            f"A task summary may be at most {MAX_SUMMARY_LENGTH} characters."
+            f"A queued request may be at most {limit} characters."
         )
+
+    raw_request_id = payload.get("requestId")
+
+    if raw_request_id is None:
+        request_id = f"queue-{uuid.uuid4().hex[:12]}"
+    elif not isinstance(raw_request_id, str) or not raw_request_id.strip():
+        raise ValueError("A queued request id must be non-empty text.")
+    elif len(raw_request_id.strip()) > MAX_TEXT_REQUEST_ID_LENGTH:
+        raise ValueError(
+            "A queued request id may be at most "
+            f"{MAX_TEXT_REQUEST_ID_LENGTH} characters."
+        )
+    else:
+        request_id = raw_request_id.strip()
 
     weight_name = str(payload.get("weight", "light")).strip().lower()
     weight = _WEIGHTS.get(weight_name)
@@ -8075,13 +8479,12 @@ def handle_queue_submit(
             f"expected one of {sorted(_WEIGHTS)}."
         )
 
-    profile = MODELS["heavy" if weight is Weight.HEAVY else "fast"]
     needs = payload.get("requiredVramMb")
 
     if needs is None:
-        # A task that did not say assumes it will load the brain its weight
-        # implies, which is the only kind of work the queue exists for.
-        needed_mb = required_vram_mb(profile.estimated_vram_gb)
+        # A task that did not say assumes it will load the brain its route
+        # implies, which is the only kind of work the queue runs.
+        needed_mb = None
     elif isinstance(needs, bool) or not isinstance(needs, int):
         raise ValueError("requiredVramMb must be a whole number of megabytes.")
     elif not 0 <= needs <= MAX_REQUIRED_VRAM_MB:
@@ -8091,11 +8494,19 @@ def handle_queue_submit(
     else:
         needed_mb = needs
 
-    runtime.ensure_scheduler().submit(
-        work=_DemonstrationWork(summary),
-        weight=weight,
-        summary=summary,
-        required_vram_mb=needed_mb,
+    # Captured before the request itself is recorded, as a direct text turn
+    # does, so the request is not duplicated into its own context.
+    context = runtime._conversation_brain_context()
+
+    runtime.submit_queued_conversation(
+        text=text,
+        request_id=request_id,
+        context=tuple(context),
+        user_message_recorded=False,
+        # The client may ask for more room than the route implies, never
+        # less: a Heavy route always holds the heavy slot.
+        heavy_requested=weight is Weight.HEAVY,
+        required_mb=needed_mb,
     )
 
 
@@ -8103,7 +8514,52 @@ def handle_queue_cancel(
     runtime: QronosRuntime,
     payload: dict[str, Any],
 ) -> None:
-    runtime.ensure_scheduler().cancel(_task_id_from(payload))
+    """
+    Cancel a task, and tell its conversation — once, and only if true.
+
+    A request whose answer is already committed cannot be un-sent, so that
+    cancel is refused and reported as refused, not as a cancellation.
+    """
+    task_id = _task_id_from(payload)
+    scheduler = runtime.ensure_scheduler()
+    work = scheduler.work_for(task_id)
+    was_running = work is not None and any(
+        running is work for running in scheduler.running_work()
+    )
+
+    if not scheduler.cancel(task_id):
+        runtime._notify(
+            "queue_cancel_refused",
+            "warning",
+            _compact(
+                {
+                    "taskId": task_id,
+                    "detail": (
+                        "This request has already been answered and "
+                        "cannot be cancelled."
+                    ),
+                }
+            ),
+        )
+        return
+
+    if isinstance(work, QueuedConversationWork):
+        runtime._notify_queued_conversation(
+            work,
+            ConversationPhase.CANCELLED,
+            {
+                "whileRunning": was_running,
+                # Incomplete work, said plainly: no answer was attached, and
+                # a model call already under way finishes unseen.
+                "detail": (
+                    "Cancelled while running. No answer was attached; the "
+                    "local model call already under way is allowed to "
+                    "finish and its output is discarded."
+                    if was_running
+                    else "Cancelled before it ran. Nothing was executed."
+                ),
+            },
+        )
 
 
 def handle_queue_override(
@@ -8247,30 +8703,6 @@ QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
     "queue_override": handle_queue_override,
     "queue_set_paused": handle_queue_set_paused,
 }
-
-
-class _DemonstrationWork:
-    """
-    A queued item with nothing behind it yet.
-
-    There is no background worker in Qronos to attach to: research routes to
-    ``TaskType.BROWSER``, whose worker is registered nowhere, and a spoken
-    heavy turn runs through the voice path rather than the queue. So what the
-    desktop can queue today is this — a placeholder that waits, is held, is
-    shown, can be overridden and cancelled, and produces nothing.
-
-    That is enough to exercise and demonstrate every part of the queue, and it
-    is honest about being a placeholder rather than pretending to be work.
-    """
-
-    def __init__(self, summary: str) -> None:
-        self.summary = summary
-
-    def describe(self) -> str:
-        return self.summary
-
-    def run(self) -> bool:
-        return True
 
 
 def main() -> int:

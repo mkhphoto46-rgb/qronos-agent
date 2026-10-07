@@ -44,6 +44,32 @@ def isolate_qronos_permission_state(
 
 
 @pytest.fixture(autouse=True)
+def isolate_qronos_conversation_and_settings_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Keep test turns out of the real user's conversation history and settings.
+
+    ``QronosRuntime()`` opens the canonical conversation history and settings
+    at their default locations under the user's profile. Any test that runs a
+    text turn, or queues one, records messages there. Every test gets its own
+    throwaway files instead; tests that set these variables themselves still
+    win for their own duration.
+    """
+
+    monkeypatch.setenv(
+        "QRONOS_CONVERSATION_HISTORY_PATH",
+        str(tmp_path / "conversation_history.sqlite3"),
+    )
+
+    monkeypatch.setenv(
+        "QRONOS_SETTINGS_PATH",
+        str(tmp_path / "settings.json"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def block_real_windows_computer_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
