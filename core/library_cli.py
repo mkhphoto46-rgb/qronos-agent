@@ -17,7 +17,11 @@ from core.library_executor import (
     PERMANENT_DELETE_REFUSAL,
     library_audit_path,
 )
-from core.storage_locations import load_storage_locations
+from core.storage_locations import (
+    StorageLocationError,
+    change_storage_location,
+    read_storage_state,
+)
 
 # File mutations are two-phase: "prepare" validates one exact operation and
 # returns a single-use approval, "commit" runs only what that approval covers.
@@ -57,11 +61,22 @@ def run(
     registry: ArtifactRegistry | None = None,
     executor: LibraryExecutor | None = None,
 ) -> dict[str, object]:
-    op=op.strip().lower(); registry=registry or ArtifactRegistry()
+    op=op.strip().lower()
+    # Storage locations are read and changed without opening the Library, so a
+    # bad Library location can still be diagnosed and fixed from the UI.
+    if op=="storage_status":
+        state=read_storage_state()
+        return {"ok":True,"locations":state.locations.to_public_dict(),"storage":state.public()}
+    if op=="set_storage_location":
+        try:
+            return {"ok":True,**change_storage_location(str(payload.get("key","")),payload.get("destination",""))}
+        except StorageLocationError as exc:
+            return {"ok":False,"code":exc.code,"error":str(exc)}
+    registry=registry or ArtifactRegistry()
     if op=="snapshot":
         items=[x.public() for x in registry.list()]
-        loc=load_storage_locations(create=True)
-        return {"ok":True,"artifacts":items,"locations":loc.to_public_dict()}
+        state=read_storage_state()
+        return {"ok":True,"artifacts":items,"locations":state.locations.to_public_dict(),"storage":state.public()}
     if op=="mark_seen": registry.mark_seen(_ids(payload)); return {"ok":True}
     if op=="open": registry.open(str(payload.get("id",""))); return {"ok":True}
     if op=="open_folder": registry.open_folder(str(payload.get("id","")) or None); return {"ok":True}

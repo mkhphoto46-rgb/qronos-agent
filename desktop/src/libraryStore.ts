@@ -10,14 +10,20 @@ export type LibraryArtifact = {
   thumbnailPath: string; lastVerifiedAt: number; linkErrorReason: string;
 };
 export type StorageLocations = { dataRoot:string; historyRoot:string; memoryRoot:string; libraryDbRoot:string; artifactRoot:string; cacheRoot:string; backupRoot:string };
-type Snapshot = { artifacts: LibraryArtifact[]; locations: StorageLocations | null; loading:boolean; error:string | null; revision:number };
-let snapshot: Snapshot = { artifacts:[], locations:null, loading:true, error:null, revision:0 };
+// Read-only storage diagnostics from the backend: invalid stored locations are
+// reported (the default folder is used meanwhile) and never rewritten silently.
+export type StorageProblem = { key:string; label:string; code:string; message:string; stored:string };
+export type StorageDiagnostics = { locatorStatus:"missing"|"ok"|"corrupt"|"newer"; locatorPath:string; writable:boolean; problems:StorageProblem[] };
+type Snapshot = { artifacts: LibraryArtifact[]; locations: StorageLocations | null; storage: StorageDiagnostics | null; loading:boolean; error:string | null; revision:number };
+let snapshot: Snapshot = { artifacts:[], locations:null, storage:null, loading:true, error:null, revision:0 };
 const subscribers=new Set<()=>void>(); let inFlight=false;
 function publish(next:Snapshot){ snapshot=next; subscribers.forEach((fn)=>fn()); }
 function subscribe(fn:()=>void){ subscribers.add(fn); if(subscribers.size===1)void refreshLibrary(); return()=>{ subscribers.delete(fn); }; }
 function getSnapshot(){ return snapshot; }
 async function command<T=Record<string,unknown>>(operation:string,payload:Record<string,unknown>={}){ return invoke<T>("library_command",{operation,payload}); }
-export async function refreshLibrary(){ if(inFlight)return; inFlight=true; try{ const result=await command<{ok:boolean;artifacts:LibraryArtifact[];locations:StorageLocations;error?:string}>("snapshot"); if(!result.ok)throw new Error(result.error||"Library snapshot failed."); publish({artifacts:result.artifacts,locations:result.locations,loading:false,error:null,revision:snapshot.revision+1}); }catch(error){ publish({...snapshot,loading:false,error:error instanceof Error?error.message:String(error),revision:snapshot.revision+1}); }finally{inFlight=false;} }
+export async function refreshLibrary(){ if(inFlight)return; inFlight=true; try{ const result=await command<{ok:boolean;artifacts:LibraryArtifact[];locations:StorageLocations;storage?:StorageDiagnostics;error?:string}>("snapshot"); if(!result.ok)throw new Error(result.error||"Library snapshot failed."); publish({artifacts:result.artifacts,locations:result.locations,storage:result.storage??null,loading:false,error:null,revision:snapshot.revision+1}); }catch(error){ let storage=snapshot.storage; try{ const status=await command<{ok:boolean;locations:StorageLocations;storage:StorageDiagnostics}>("storage_status"); storage=status.storage; }catch{ /* diagnostics unavailable too */ } publish({...snapshot,storage,loading:false,error:error instanceof Error?error.message:String(error),revision:snapshot.revision+1}); }finally{inFlight=false;} }
+// Explicit user choice of a new folder for one storage location. Existing files are not moved.
+export async function librarySetStorageLocation(key:string,destination:string){ const result=await command<{ok:boolean;message:string;preservedLocator:string}>("set_storage_location",{key,destination}); await refreshLibrary(); return result; }
 export async function markLibrarySeen(ids:string[]){ if(!ids.length)return; await command("mark_seen",{ids}); await refreshLibrary(); }
 export async function libraryOpen(id:string){ await command("open",{id}); }
 export async function libraryOpenFolder(id?:string){ await command("open_folder",id?{id}:{}); }

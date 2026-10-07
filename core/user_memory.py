@@ -16,7 +16,7 @@ import uuid
 import numpy as np
 from core.local_ipc import local_model_base_url, local_timeout, requests_client as requests
 
-from core.storage_locations import load_storage_locations
+from core.storage_locations import ensure_storage_root
 
 
 MEMORY_SCHEMA_VERSION = 1
@@ -455,11 +455,12 @@ class MemoryStore:
         *,
         provider: EmbeddingProvider | None = None,
     ) -> None:
-        if db_path is not None and vector_path is not None:
+        # An explicit database path decides the folder; the locator is read
+        # only when no path was given, and only the memory root is created.
+        if db_path is not None:
             root = Path(db_path).parent
         else:
-            locations = load_storage_locations(create=True)
-            root = Path(locations.memory_root)
+            root = ensure_storage_root("memoryRoot")
         self.db_path = Path(db_path) if db_path is not None else root / "user_memory.sqlite3"
         self.vector_path = (
             Path(vector_path)
