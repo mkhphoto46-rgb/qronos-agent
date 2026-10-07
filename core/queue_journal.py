@@ -376,27 +376,29 @@ class QueueJournal:
             now = self._clock()
 
             for record in records:
-                if record.state is RecordState.RUNNING:
-                    if answered(record.request_id):
-                        record = _finished(
-                            record,
-                            RecordState.DONE,
-                            "Answered just before Qronos closed.",
-                            now,
-                        )
-                        finished_early.append(record.task_id)
-                    else:
-                        record = replace(
-                            record,
-                            state=RecordState.INTERRUPTED,
-                            updated_at=now,
-                            detail=(
-                                "Qronos closed while this was running. It "
-                                "was not run again automatically; resume it "
-                                "to try again."
-                            ),
-                        )
-                        interrupted.append(record.task_id)
+                if not record.state.finished and answered(record.request_id):
+                    # Its answer is already in the conversation. Whatever the
+                    # file says - running, or a stale "queued" left by a save
+                    # that failed after it started - it must not run again.
+                    record = _finished(
+                        record,
+                        RecordState.DONE,
+                        "Answered before Qronos closed; not run again.",
+                        now,
+                    )
+                    finished_early.append(record.task_id)
+                elif record.state is RecordState.RUNNING:
+                    record = replace(
+                        record,
+                        state=RecordState.INTERRUPTED,
+                        updated_at=now,
+                        detail=(
+                            "Qronos closed while this was running. It was "
+                            "not run again automatically; resume it to try "
+                            "again."
+                        ),
+                    )
+                    interrupted.append(record.task_id)
 
                 self._records[record.task_id] = record
 
@@ -477,6 +479,12 @@ class QueueJournal:
             if record is None:
                 return self._status.durable
 
+            if record.state.finished:
+                # Final. A late worker, a stale view or a repeated event can
+                # never turn a cancelled, failed or answered request back into
+                # one that runs, or rewrite how it ended.
+                return self._status.durable
+
             next_attempts = record.attempts if attempts is None else attempts
             next_detail = record.detail if detail is None else detail
 
@@ -550,6 +558,30 @@ class QueueJournal:
     def paused(self) -> bool:
         with self._lock:
             return self._paused
+
+    def start_blocker(self) -> str | None:
+        """
+        Why queued work must not start right now, or None.
+
+        Only one case: the queue is saved to a file, but the last save
+        failed. The file then still says "queued" for anything that starts
+        now, and a crash would replay it unasked. The save is retried here,
+        so work resumes as soon as the disk does. A queue that was never
+        saved (no location, or a file it refuses to touch) has nothing on
+        disk that could replay, so it does not block.
+        """
+        with self._lock:
+            if self._status.problem is not StorageProblem.UNWRITABLE:
+                return None
+
+            if self._save():
+                return None
+
+            return (
+                "Qronos cannot save the queue right now, so it is not "
+                "starting queued work: if Qronos stopped mid-run it could not "
+                "record that honestly. It will try again."
+            )
 
     def status(self) -> StorageStatus:
         with self._lock:

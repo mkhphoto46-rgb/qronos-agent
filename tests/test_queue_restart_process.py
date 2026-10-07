@@ -270,6 +270,53 @@ class TestACrashMidRun(RestartTestCase):
         self.stop(second)
 
 
+class TestACrashAfterTheAnswerWasSaved(RestartTestCase):
+    def test_the_restarted_bridge_does_not_answer_twice(self) -> None:
+        first = self.start(QRONOS_TEST_CRASH_AFTER_ANSWER="1")
+        self.open_queue(first)
+        self.submit(first, "req-saved")
+
+        # It dies on its own, right after the answer reached the history and
+        # before the queue could record that.
+        self.assertEqual(first.process.wait(timeout=60), 3)
+        self.assertEqual(len(self.answers_in_history("req-saved")), 1)
+        self.assertEqual(
+            self.saved_state()["payload"]["records"][0]["state"],
+            "running",
+        )
+
+        second = self.start()
+        view = self.open_queue(second)
+
+        # Recognised as answered: not interrupted, not queued, not re-run.
+        self.assertEqual(view["tasks"], [])
+        self.assertEqual(view["recent"][0]["requestId"], "req-saved")
+        self.assertEqual(view["recent"][0]["state"], "done")
+
+        time.sleep(1.0)
+        self.events_until_pong(second)
+        self.assertEqual(len(self.answers_in_history("req-saved")), 1)
+
+        # And it cannot be queued again under the same id.
+        second.send(
+            {
+                "command": "queue_submit",
+                "text": QUESTION,
+                "requestId": "req-saved",
+            }
+        )
+        refused = second.read_until("runtime_error")
+        self.assertIsNotNone(refused)
+        self.assertIn("already queued", refused["message"])
+        self.stop(second)
+
+        self.assertEqual(len(self.answers_in_history("req-saved")), 1)
+        self.assertEqual(
+            self.saved_state()["payload"]["records"][0]["state"],
+            "done",
+        )
+
+
 class TestCancellationIsRemembered(RestartTestCase):
     def test_a_cancelled_request_does_not_come_back(self) -> None:
         first = self.start()

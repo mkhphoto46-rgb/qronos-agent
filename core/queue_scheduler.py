@@ -120,6 +120,10 @@ class HoldReason(Enum):
     #: phase and the GPU; queued work waits for it rather than competing.
     FOREGROUND_ACTIVE = "foreground_active"
 
+    #: The saved queue cannot record that work started, so starting it would
+    #: risk a silent replay after a crash. Waits until the save succeeds.
+    STORAGE_UNAVAILABLE = "storage_unavailable"
+
 
 class WorkOutcome(Enum):
     """How a piece of queued work ended, as the work itself reports it."""

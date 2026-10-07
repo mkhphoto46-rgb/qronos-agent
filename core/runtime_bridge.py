@@ -1668,9 +1668,34 @@ class QronosRuntime:
                 foreground_busy=lambda: self.is_busy,
                 runtime_paused=lambda: self.runtime_paused,
                 release_brains=self._release_brains_for_voice_phase,
+                already_answered=self._queued_request_already_answered,
+                storage_blocks_start=self._queue_storage_blocks_start,
             )
 
         return self._conversation_executor
+
+    def _queued_request_already_answered(self, request_id: str) -> bool:
+        """
+        Whether the conversation already holds an answer for this request.
+
+        A history that cannot be read right now is not evidence of an
+        answer; the request runs, as it would have before this check.
+        """
+        try:
+            return self.conversation_history.has_assistant_reply(request_id)
+        except Exception:
+            return False
+
+    def _queue_storage_blocks_start(self) -> str | None:
+        journal = self._queue_journal
+
+        if journal is None:
+            return None
+
+        blocked = journal.start_blocker()
+        self._report_storage_status()
+
+        return blocked
 
     def _orchestrator_for_queue(self):
         self._ensure_text_runtime()
@@ -8155,6 +8180,15 @@ class QronosRuntime:
 
             if not work.cancel():
                 continue
+
+            # Told it is lost, so it is cancelled - in the queue too. If the
+            # disk recovers before this process exits, the saved record then
+            # says what the user was told, instead of bringing the request
+            # back on the next start.
+            try:
+                scheduler.cancel(task_id)
+            except Exception:
+                pass
 
             self._notify_queued_conversation(
                 work,
