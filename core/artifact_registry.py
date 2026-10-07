@@ -83,34 +83,92 @@ def is_executable_name(name: str) -> bool:
 # is_link_or_reparse_point and same_path live in core.path_safety and are
 # re-exported here for existing callers. Links are symlinks, junctions, mount
 # points and app aliases; cloud-sync placeholders are not links.
+def _file_stat(path: Path) -> os.stat_result:
+    # One seam for identity reads, so tests can reproduce file-number reuse
+    # deterministically on any platform.
+    return os.stat(path)
+
+
+def _state_marker(st: os.stat_result) -> tuple[str, int]:
+    """
+    A timestamp the user cannot set with utime: the birth time where the
+    platform reports one, otherwise the inode change time (POSIX st_ctime),
+    which the kernel resets whenever a file is created or its inode changes.
+    """
+    birth = getattr(st, "st_birthtime_ns", None)
+    if birth is not None:
+        return "birth", int(birth)
+    return "ctime", int(st.st_ctime_ns)
+
+
 def file_identity(path: Path) -> dict[str, object]:
     """
     What identifies the exact file Qronos registered.
 
-    The volume/file index survives renames and in-place edits; the content hash
-    survives copies and cross-volume moves. A file at the recorded path that
-    matches neither is a different file, whatever its name.
+    A volume/file number alone is not identity: Linux file systems routinely
+    give a file created after a delete the number the deleted file had, so a
+    replaced file would look like the original. Identity is therefore either
+    the exact content (SHA-256, for files up to HASH_INLINE_MAX_BYTES) or, for
+    larger files that are not hashed, the exact recorded file state: volume,
+    file number, size, modification time and a marker the user cannot set.
     """
-    st = os.stat(path)
+    st = _file_stat(path)
     size = int(st.st_size)
+    marker_kind, marker = _state_marker(st)
     return {
         "size": size,
         "sha256": _sha256(path) if size <= HASH_INLINE_MAX_BYTES else "",
         "dev": int(st.st_dev),
         "ino": int(st.st_ino),
+        "mtime_ns": int(st.st_mtime_ns),
+        "marker_kind": marker_kind,
+        "marker_ns": marker,
     }
 
 
+def _same_file_state(recorded: dict[str, object], st: os.stat_result) -> bool:
+    """Exact unchanged state of an unhashed file. Missing fields never match."""
+    marker_kind, marker = _state_marker(st)
+    try:
+        return (
+            int(recorded["ino"]) != 0
+            and int(recorded["dev"]) == int(st.st_dev)
+            and int(recorded["ino"]) == int(st.st_ino)
+            and int(recorded["size"]) == int(st.st_size)
+            and int(recorded["mtime_ns"]) == int(st.st_mtime_ns)
+            and str(recorded["marker_kind"]) == marker_kind
+            and int(recorded["marker_ns"]) == marker
+        )
+    except (KeyError, TypeError, ValueError):
+        # Records written before this state was kept (or damaged ones) cannot
+        # prove anything about a large file: fail closed.
+        return False
+
+
 def identity_matches(recorded: dict[str, object], path: Path, *, content_hash: str = "") -> bool:
-    """True only when the file at ``path`` is provably the recorded artifact."""
-    st = os.stat(path)
-    ino = int(recorded.get("ino") or 0)
-    if ino and ino == int(st.st_ino) and int(recorded.get("dev") or 0) == int(st.st_dev):
-        return True
+    """
+    True only when the file at ``path`` is provably the recorded artifact.
+
+    Hashed artifacts must have exactly the recorded bytes: copies and
+    cross-volume moves keep them, in-place edits and replacements do not, and
+    a reused file number proves nothing. Unhashed (large) artifacts must be in
+    exactly the recorded file state; they are never hashed here, and one that
+    has grown past the hashing limit since registration is refused.
+    """
+    st = _file_stat(path)
+    size = int(st.st_size)
     expected = str(recorded.get("sha256") or content_hash or "")
-    if expected and st.st_size <= HASH_INLINE_MAX_BYTES:
+    if expected:
+        recorded_size = recorded.get("size")
+        try:
+            if recorded_size is not None and int(recorded_size) != size:
+                return False
+        except (TypeError, ValueError):
+            return False
+        if size > HASH_INLINE_MAX_BYTES:
+            return False
         return _sha256(path) == expected
-    return False
+    return _same_file_state(recorded, st)
 
 
 @dataclass(frozen=True)
