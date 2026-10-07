@@ -101,9 +101,11 @@ class TestVoiceComputerSafeDefer(unittest.TestCase):
             .__code__
             .co_names
         )
+        self.assertIn("_run_text_turn", source)
+        scoped_source = runtime_bridge.QronosRuntime._run_text_turn.__code__.co_names
         self.assertIn(
             "_begin_text_file_action",
-            source,
+            scoped_source,
         )
 
 

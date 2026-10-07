@@ -27,6 +27,8 @@ if hasattr(sys.stderr, "reconfigure"):
         errors="backslashreplace",
     )
 
+from core.foreground_lifecycle import ForegroundBusy, ForegroundLifecycle
+from core.inference_cancellation import LocalInferenceCancelled, inference_checkpoint
 from core.action_audit import ActionAuditLog
 from core.config import CONFIG
 from core.actions import ActionOutcome, ActionResult
@@ -156,6 +158,7 @@ SETTINGS_RELOAD_ACTION = "qronos.settings_reload"
 INPUT_METER_START_ACTION = "qronos.input_meter_start"
 INPUT_METER_STOP_ACTION = "qronos.input_meter_stop"
 TEXT_MESSAGE_COMMAND = "text_message"
+_FOREGROUND_INITIALIZATION_LOCK = threading.Lock()
 RUNTIME_SET_PAUSED_COMMAND = "runtime_set_paused"
 DESKTOP_WAKE_BOOTSTRAP_ENV = "QRONOS_DESKTOP_WAKE_BOOTSTRAP"
 CONVERSATION_HISTORY_REQUEST_ACTION = "qronos.conversation_history_request"
@@ -1309,6 +1312,7 @@ class QronosRuntime:
     ) -> None:
         self._lock = threading.Lock()
         self._busy = False
+        self._foreground = ForegroundLifecycle()
         # Global pause is deliberately process-local. It is never persisted,
         # so a Qronos runtime restart always returns to the active state.
         self._runtime_paused = False
@@ -2397,6 +2401,39 @@ class QronosRuntime:
             ),
         )
 
+    def _foreground_lifecycle(self) -> ForegroundLifecycle:
+        # Legacy bare-runtime helpers bypass __init__ and may omit _lock.
+        # Creation is still serialized, with the same real lifecycle rules.
+        lifecycle = getattr(self, "_foreground", None)
+        if lifecycle is None:
+            with _FOREGROUND_INITIALIZATION_LOCK:
+                lifecycle = getattr(self, "_foreground", None)
+                if lifecycle is None:
+                    lifecycle = self._foreground = ForegroundLifecycle()
+        return lifecycle
+
+    def _foreground_state(self):
+        return self.runtime_paused, self.is_busy
+
+    def _report_foreground_cancelled(self, kind, reason, *, request_id="", turn=None):
+        lifecycle = self._foreground_lifecycle()
+        with lifecycle.transition():
+            if not lifecycle.claim_cancellation_report(turn):
+                return
+            if kind == "text":
+                self._notify(
+                    "text_error", "cancelled",
+                    _text_event_message(request_id, status="cancelled", reason=reason,
+                                        error="Current Qronos request was cancelled."),
+                )
+            else:
+                self._last_voice_turn_had_valid_speech_evidence = False
+                session = getattr(self, "conversation_session", None)
+                if session is not None:
+                    session.close()
+                self._notify("voice_turn_stopped", "ready", _compact(
+                    {"status": "cancelled", "reason": reason, "channel": kind}))
+
     def _set_busy(self, value: bool) -> None:
         reconcile = False
 
@@ -2465,12 +2502,22 @@ class QronosRuntime:
         return True
 
     def _require_runtime_active(self, channel: str) -> None:
+        inference_checkpoint()
         if self.runtime_paused:
             raise RuntimeError(
                 f"Qronos runtime is temporarily paused; {channel} is unavailable."
             )
 
     def set_runtime_paused(self, paused: bool) -> None:
+        if not isinstance(paused, bool):
+            raise ValueError("runtime_set_paused needs paused to be true or false.")
+        lifecycle = self._foreground_lifecycle()
+        with lifecycle.transition():
+            if paused:
+                lifecycle.cancel_current(CANCEL_REASON_PAUSE)
+            self._set_runtime_paused(paused)
+
+    def _set_runtime_paused(self, paused: bool) -> None:
         if not isinstance(paused, bool):
             raise ValueError(
                 "runtime_set_paused needs paused to be true or false."
@@ -2519,8 +2566,8 @@ class QronosRuntime:
             self._computer_actions.cancel_all(CANCEL_REASON_PAUSE)
             self._discard_pending_approvals(CANCEL_REASON_PAUSE)
             # Stop accepting new voice input immediately and release idle voice
-            # resources. An already-running non-cancellable model call is not
-            # force-killed; downstream checkpoints suppress later phases.
+            # resources. The foreground token already closed its model HTTP
+            # connection; downstream checkpoints suppress later phases.
             self._stop_standalone_input_meter()
             self.stop_wake_listener()
             self._release_speech_runtime()
@@ -3329,25 +3376,26 @@ class QronosRuntime:
         response: str,
         started_at: float,
     ) -> None:
-        self._record_conversation_message(
-            role="assistant",
-            text=response,
-            source="text",
-            request_id=request_id,
-        )
-        self._notify(
-            "text_response",
-            "ready",
-            _text_event_message(
-                request_id,
+        with self._foreground_lifecycle().publication(action_outcome=True, terminal=True):
+            self._record_conversation_message(
+                role="assistant",
                 text=response,
-                route=TaskType.COMPUTER.value,
-                elapsedSeconds=round(
-                    time.perf_counter() - started_at,
-                    3,
+                source="text",
+                request_id=request_id,
+            )
+            self._notify(
+                "text_response",
+                "ready",
+                _text_event_message(
+                    request_id,
+                    text=response,
+                    route=TaskType.COMPUTER.value,
+                    elapsedSeconds=round(
+                        time.perf_counter() - started_at,
+                        3,
+                    ),
                 ),
-            ),
-        )
+            )
 
     def _fail_text_file_action(
         self,
@@ -3356,19 +3404,27 @@ class QronosRuntime:
         error: str,
         started_at: float,
     ) -> None:
-        self._notify(
-            "text_error",
-            "error",
-            _text_event_message(
-                request_id,
-                error=error,
-                route=TaskType.COMPUTER.value,
-                elapsedSeconds=round(
-                    time.perf_counter() - started_at,
-                    3,
+        lifecycle = self._foreground_lifecycle()
+        with lifecycle.publication(action_outcome=True, terminal=True):
+            turn = lifecycle.current
+            if turn is not None and turn.token.cancelled:
+                self._notify("text_error", "cancelled", _text_event_message(
+                    request_id, status="cancelled", reason=turn.token.reason,
+                    error="Current native action was cancelled. Completed changes may remain."))
+                return
+            self._notify(
+                "text_error",
+                "error",
+                _text_event_message(
+                    request_id,
+                    error=error,
+                    route=TaskType.COMPUTER.value,
+                    elapsedSeconds=round(
+                        time.perf_counter() - started_at,
+                        3,
+                    ),
                 ),
-            ),
-        )
+            )
 
     @staticmethod
     def _named_file_ambiguity_message(
@@ -5086,7 +5142,20 @@ class QronosRuntime:
             ),
         )
 
-    def run_text_turn(
+    def run_text_turn(self, text: str, request_id: str) -> None:
+        lifecycle = self._foreground_lifecycle()
+        turn = None
+        try:
+            with lifecycle.begin("text", state=self._foreground_state, on_cancel=
+                    lambda turn, exc: self._report_foreground_cancelled(
+                        "text", exc.reason, request_id=request_id, turn=turn)) as turn:
+                self._run_text_turn(text, request_id)
+        except ForegroundBusy as exc:
+            self._notify("text_error", "busy", _text_event_message(request_id, error=str(exc)))
+        except LocalInferenceCancelled as exc:
+            self._report_foreground_cancelled("text", exc.reason, request_id=request_id, turn=turn)
+
+    def _run_text_turn(
         self,
         text: str,
         request_id: str,
@@ -5325,14 +5394,15 @@ class QronosRuntime:
                     # Resource policy refused the brain, not the request.
                     # Hand it to the queue, which answers it when the machine
                     # allows, instead of telling the user no.
-                    self._defer_text_turn_to_queue(
-                        text=cleaned_text,
-                        request_id=cleaned_request_id,
-                        context=conversation_context,
-                        route=selected_task_type,
-                        reason=result.error or "",
-                        started_at=started,
-                    )
+                    with self._foreground_lifecycle().publication(terminal=True):
+                        self._defer_text_turn_to_queue(
+                            text=cleaned_text,
+                            request_id=cleaned_request_id,
+                            context=conversation_context,
+                            route=selected_task_type,
+                            reason=result.error or "",
+                            started_at=started,
+                        )
                     return
 
                 if not result.success:
@@ -5355,46 +5425,52 @@ class QronosRuntime:
                 - started
             )
 
-            self._record_conversation_message(
-                role="assistant",
-                text=response,
-                source="text",
-                request_id=cleaned_request_id,
-            )
-
-            self._notify(
-                "text_response",
-                "ready",
-                _text_event_message(
-                    cleaned_request_id,
+            with self._foreground_lifecycle().publication(terminal=True):
+                self._record_conversation_message(
+                    role="assistant",
                     text=response,
-                    route=route_name,
-                    elapsedSeconds=round(
-                        elapsed,
-                        3,
-                    ),
-                ),
-            )
+                    source="text",
+                    request_id=cleaned_request_id,
+                )
 
+                inference_checkpoint()
+                self._notify(
+                    "text_response",
+                    "ready",
+                    _text_event_message(
+                        cleaned_request_id,
+                        text=response,
+                        route=route_name,
+                        elapsedSeconds=round(
+                            elapsed,
+                            3,
+                        ),
+                    ),
+                )
+
+        except LocalInferenceCancelled:
+            raise
         except Exception as exc:
+            inference_checkpoint()
             elapsed = (
                 time.perf_counter()
                 - started
             )
 
-            self._notify(
-                "text_error",
-                "error",
-                _text_event_message(
-                    cleaned_request_id,
-                    error=str(exc),
-                    route=route_name,
-                    elapsedSeconds=round(
-                        elapsed,
-                        3,
+            with self._foreground_lifecycle().publication(terminal=True):
+                self._notify(
+                    "text_error",
+                    "error",
+                    _text_event_message(
+                        cleaned_request_id,
+                        error=str(exc),
+                        route=route_name,
+                        elapsedSeconds=round(
+                            elapsed,
+                            3,
+                        ),
                     ),
-                ),
-            )
+                )
 
         finally:
             self._set_busy(False)
@@ -6469,7 +6545,15 @@ class QronosRuntime:
             )
         return len(revoked)
 
-    def request_stop_response(
+    def request_stop_response(self) -> dict[str, Any]:
+        lifecycle = self._foreground_lifecycle()
+        with lifecycle.transition():
+            cancelled = lifecycle.cancel_current(CANCEL_REASON_USER_STOP)
+            result = self._request_stop_response()
+            result["foregroundInferenceCancelled"] = cancelled
+            return result
+
+    def _request_stop_response(
         self,
     ) -> dict[str, Any]:
         """
@@ -6477,9 +6561,9 @@ class QronosRuntime:
 
         Desktop audio is stopped independently at the media layer. This method
         releases the backend playback wait immediately and asks any in-flight
-        voice turn to suppress remaining response/TTS phases. The active Brain
-        HTTP call is not force-killed; its result is discarded at the next
-        checkpoint instead.
+        voice turn to suppress remaining response/TTS phases. The foreground
+        token closes its HTTP connection before this Stop acknowledgement;
+        downstream checks discard late results without retrying the provider.
 
         In-flight computer/Paint actions are cancelled cooperatively: each
         stops at its next checkpoint (between native steps or pointer moves)
@@ -6500,7 +6584,7 @@ class QronosRuntime:
         )
 
         with self._lock:
-            busy = bool(self._busy)
+            busy = bool(self._busy or self._foreground.active)
 
             if busy:
                 self._voice_response_stop_requested.set()
@@ -7132,6 +7216,7 @@ class QronosRuntime:
                     )
                 )
             except Exception as exc:
+                inference_checkpoint()
                 # If an early chunk is already playing, a later TTS failure
                 # must not invalidate that healthy audio. Degrade to the
                 # successfully generated prefix, keep the playback identity
@@ -7318,15 +7403,16 @@ class QronosRuntime:
                     "playbackId"
                 ] = playback_id
 
-            self._notify(
-                "voice_audio_ready",
-                "ready",
-                json.dumps(
-                    audio_payload,
-                    ensure_ascii=True,
-                    separators=(",", ":"),
-                ),
-            )
+            with self._foreground_lifecycle().publication():
+                self._notify(
+                    "voice_audio_ready",
+                    "ready",
+                    json.dumps(
+                        audio_payload,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                )
 
         if playback_id is not None:
             self.set_voice_playback_audio_metadata(
@@ -7340,27 +7426,28 @@ class QronosRuntime:
             # temporarily empty between chunks. This explicit finalization
             # event closes the producer side only after TTS generation has
             # genuinely finished (successfully, partially, or by Stop).
-            self._notify(
-                "voice_audio_stream_complete",
-                "ready",
-                json.dumps(
-                    {
-                        "playbackId": playback_id,
-                        "generatedChunkCount": len(
-                            spoken_chunks
-                        ),
-                        "plannedChunkCount": len(
-                            chunks
-                        ),
-                        "stoppedByUser":
-                            self._voice_response_stop_requested.is_set(),
-                        "partialTtsError":
-                            partial_tts_error,
-                    },
-                    ensure_ascii=True,
-                    separators=(",", ":"),
-                ),
-            )
+            with self._foreground_lifecycle().publication():
+                self._notify(
+                    "voice_audio_stream_complete",
+                    "ready",
+                    json.dumps(
+                        {
+                            "playbackId": playback_id,
+                            "generatedChunkCount": len(
+                                spoken_chunks
+                            ),
+                            "plannedChunkCount": len(
+                                chunks
+                            ),
+                            "stoppedByUser":
+                                self._voice_response_stop_requested.is_set(),
+                            "partialTtsError":
+                                partial_tts_error,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                )
 
         return {
             "chunks": chunks,
@@ -7469,6 +7556,7 @@ class QronosRuntime:
         Brain/resource failures from becoming a silent follow-up window and
         then an apparently random session close.
         """
+        inference_checkpoint()
         if (
             not self._last_voice_turn_had_valid_speech_evidence
             or assistant_message_added
@@ -7487,18 +7575,19 @@ class QronosRuntime:
         playback_id: int | None = None
 
         try:
-            self.conversation_session.begin_responding()
+            with self._foreground_lifecycle().publication():
+                self.conversation_session.begin_responding()
 
-            if user_message_added:
-                self.conversation_session.add_assistant_message(
-                    recovery_response
+                if user_message_added:
+                    self.conversation_session.add_assistant_message(
+                        recovery_response
+                    )
+
+                self._notify(
+                    "voice_response",
+                    "ready",
+                    recovery_response,
                 )
-
-            self._notify(
-                "voice_response",
-                "ready",
-                recovery_response,
-            )
 
             # A failed Brain turn may still have left a keep-alive model
             # resident. The local recovery voice must get the GPU phase slot.
@@ -7552,7 +7641,10 @@ class QronosRuntime:
 
             return playback_seconds
 
+        except LocalInferenceCancelled:
+            raise
         except Exception as recovery_exc:
+            inference_checkpoint()
             self._cancel_pending_voice_playback_wait()
 
             report[
@@ -7564,7 +7656,25 @@ class QronosRuntime:
             return 0.0
 
 
-    def _run_voice_turn(
+    def _run_voice_turn(self, trigger_source: str, detected_at_perf=None,
+                        wake_score=None, initial_frames=(), *, prepare_push_to_talk=False) -> float:
+        lifecycle = self._foreground_lifecycle()
+        turn = None
+        try:
+            with lifecycle.begin("voice", state=self._foreground_state, on_cancel=
+                    lambda turn, exc: self._report_foreground_cancelled(
+                        "voice", exc.reason, turn=turn)) as turn:
+                if prepare_push_to_talk:
+                    return self._prepared_push_to_talk_turn()
+                return self._run_voice_turn_scoped(trigger_source, detected_at_perf,
+                                                   wake_score, initial_frames)
+        except ForegroundBusy as exc:
+            self._notify("runtime_busy", "busy", str(exc))
+        except LocalInferenceCancelled as exc:
+            self._report_foreground_cancelled("voice", exc.reason, turn=turn)
+        return 0.0
+
+    def _run_voice_turn_scoped(
         self,
         trigger_source: str,
         detected_at_perf: float | None = None,
@@ -7764,6 +7874,7 @@ class QronosRuntime:
                 .strip()
             )
 
+            inference_checkpoint()
             primary_action_score = _voice_action_transcript_quality(transcript)
             if (
                 _voice_transcript_looks_actionish(transcript)
@@ -7775,6 +7886,7 @@ class QronosRuntime:
                     else "auto"
                 )
                 try:
+                    inference_checkpoint()
                     retry_transcript = (
                         self.speech_runtime.transcribe_file(
                             recording.audio_path,
@@ -7796,9 +7908,11 @@ class QronosRuntime:
                     else:
                         report["sttActionRetrySelected"] = False
                 except Exception as retry_exc:
+                    inference_checkpoint()
                     report["sttActionRetry"] = True
                     report["sttActionRetryFailure"] = str(retry_exc)
 
+            inference_checkpoint()
             stt_finished = time.perf_counter()
 
             stt_release_started = time.perf_counter()
@@ -7930,6 +8044,7 @@ class QronosRuntime:
                 )
             )
 
+            inference_checkpoint()
             route_finished = time.perf_counter()
 
             self._notify(
@@ -8094,6 +8209,7 @@ class QronosRuntime:
                     ),
                 )
 
+                inference_checkpoint()
                 if not results:
                     raise RuntimeError(
                         "Qronos did not return an execution result."
@@ -8112,6 +8228,10 @@ class QronosRuntime:
             brain_finished = time.perf_counter()
 
             if self._voice_response_stop_requested.is_set():
+                if selected_task_type is TaskType.COMPUTER and voice_computer_response:
+                    with self._foreground_lifecycle().publication(action_outcome=True):
+                        self._notify("voice_response", "ready", voice_computer_response)
+                inference_checkpoint()
                 report["stoppedByUserBeforeTts"] = True
                 report["stoppedAtEpoch"] = round(
                     time.time(),
@@ -8148,24 +8268,26 @@ class QronosRuntime:
                 3,
             )
 
-            self.conversation_session.begin_responding()
-            self.conversation_session.add_assistant_message(
-                response
-            )
-            assistant_message_added = True
+            with self._foreground_lifecycle().publication():
+                self.conversation_session.begin_responding()
+                self.conversation_session.add_assistant_message(
+                    response
+                )
+                assistant_message_added = True
 
-            self._record_conversation_message(
-                role="assistant",
-                text=response,
-                source="voice",
-                request_id=voice_request_id,
-            )
+                self._record_conversation_message(
+                    role="assistant",
+                    text=response,
+                    source="voice",
+                    request_id=voice_request_id,
+                )
 
-            self._notify(
-                "voice_response",
-                "ready",
-                response,
-            )
+                inference_checkpoint()
+                self._notify(
+                    "voice_response",
+                    "ready",
+                    response,
+                )
 
             self._require_runtime_active("voice output")
 
@@ -8202,6 +8324,7 @@ class QronosRuntime:
                 )
             )
 
+            inference_checkpoint()
             all_audio_ready = (
                 time.perf_counter()
             )
@@ -8418,17 +8541,25 @@ class QronosRuntime:
                 report
             )
 
-            self._notify(
-                "voice_turn_complete",
-                "ready",
-                (
-                    "Wake-word turn completed."
-                    if trigger_source == "wake_word"
-                    else "Push-to-talk turn completed."
-                ),
-            )
+            with self._foreground_lifecycle().publication(terminal=True):
+                self._notify(
+                    "voice_turn_complete",
+                    "ready",
+                    (
+                        "Wake-word turn completed."
+                        if trigger_source == "wake_word"
+                        else "Push-to-talk turn completed."
+                    ),
+                )
 
+        except LocalInferenceCancelled as exc:
+            report["status"] = "cancelled"
+            report["cancellationReason"] = exc.reason
+            self._cancel_pending_voice_playback_wait()
+            self._write_latency_report(report)
+            raise
         except TimeoutError as exc:
+            inference_checkpoint()
             if (
                 trigger_source == "followup"
                 and str(exc)
@@ -8465,11 +8596,12 @@ class QronosRuntime:
                 6,
             )
 
-            self._notify(
-                "runtime_error",
-                "error",
-                str(exc),
-            )
+            with self._foreground_lifecycle().publication():
+                self._notify(
+                    "runtime_error",
+                    "error",
+                    str(exc),
+                )
 
             self._cancel_pending_voice_playback_wait()
 
@@ -8494,17 +8626,19 @@ class QronosRuntime:
             )
 
         except Exception as exc:
+            inference_checkpoint()
             report["error"] = str(exc)
             report["failedAtEpoch"] = round(
                 time.time(),
                 6,
             )
 
-            self._notify(
-                "runtime_error",
-                "error",
-                str(exc),
-            )
+            with self._foreground_lifecycle().publication():
+                self._notify(
+                    "runtime_error",
+                    "error",
+                    str(exc),
+                )
 
             self._cancel_pending_voice_playback_wait()
 
@@ -8529,6 +8663,12 @@ class QronosRuntime:
             )
 
         finally:
+            turn = self._foreground_lifecycle().current
+            if turn is not None and turn.token.cancelled and report.get("status") != "cancelled":
+                report["status"] = "cancelled"
+                report["cancellationReason"] = turn.token.reason
+                report.pop("error", None)
+                self._write_latency_report(report)
             try:
                 self._clear_audio_spectrum()
             except Exception:
@@ -8546,28 +8686,38 @@ class QronosRuntime:
         return playback_seconds
 
     def push_to_talk(self) -> None:
-        # Never compete with the Settings-only meter for the microphone.
-        self._stop_standalone_input_meter()
-        self.prepare_wake_capture()
-        self._require_wake_capture_prepared()
+        self._run_voice_turn(trigger_source="push_to_talk", prepare_push_to_talk=True)
 
-        # Serialize GPU phases before warming Whisper for an explicit turn.
-        self._release_brains_for_voice_phase()
-
-        # Warm Whisper concurrently with command recording.
-        self._warm_speech_runtime_async()
-
+    def _prepared_push_to_talk_turn(self) -> float:
         try:
-            self._run_voice_turn(
-                trigger_source="push_to_talk",
-            )
+            # Never compete with the Settings-only meter for the microphone.
+            self._stop_standalone_input_meter()
+            self.prepare_wake_capture()
+            self._require_wake_capture_prepared()
+
+            # Serialize GPU phases before warming Whisper for an explicit turn.
+            self._release_brains_for_voice_phase()
+
+            # Warm Whisper concurrently with command recording.
+            self._warm_speech_runtime_async()
+
+            inference_checkpoint()
+            return self._run_voice_turn_scoped(trigger_source="push_to_talk")
+        except LocalInferenceCancelled:
+            raise
+        except Exception as exc:
+            inference_checkpoint()
+            with self._foreground_lifecycle().publication():
+                self._notify("runtime_error", "error", str(exc))
+            return 0.0
 
         finally:
             # Push-to-talk is one explicit turn, so do not retain VRAM.
             self._release_speech_runtime()
 
             if (
-                self._input_meter_enabled
+                not self._foreground_lifecycle().current.token.cancelled
+                and self._input_meter_enabled
                 and not self.wake_listener_running
                 and not self.runtime_paused
             ):
@@ -8761,6 +8911,31 @@ class QronosRuntime:
         )
 
     def look_at_screen(
+        self, approved=False, question="", window_only=False,
+        approval_id="", direct=False,
+    ) -> None:
+        if self._reject_if_runtime_paused("screen"):
+            return
+        lifecycle = self._foreground_lifecycle()
+        turn = None
+        try:
+            with lifecycle.begin("screen", state=self._foreground_state, on_cancel=
+                    lambda turn, exc: self._report_foreground_cancelled(
+                        "screen", exc.reason, turn=turn)) as turn:
+                self._look_at_screen(
+                    approved, question, window_only,
+                    approval_id=approval_id, direct=direct,
+                )
+        except ForegroundBusy as exc:
+            self._notify("runtime_busy", "busy", str(exc))
+        except LocalInferenceCancelled as exc:
+            if turn is None and exc.reason == CANCEL_REASON_SHUTDOWN:
+                self._notify("screen_approval_stale", "ready", _compact(
+                    {"reason": exc.reason, "approvalId": approval_id, "approved": bool(approved)}))
+            else:
+                self._report_foreground_cancelled("screen", exc.reason, turn=turn)
+
+    def _look_at_screen(
         self,
         approved: bool = False,
         question: str = "",
@@ -8869,7 +9044,9 @@ class QronosRuntime:
                 asked,
             )
 
+            inference_checkpoint()
             capture = self._capture_for(window_only, window=window)
+            inference_checkpoint()
 
             self._notify(
                 "voice_captured_screen",
@@ -8899,7 +9076,9 @@ class QronosRuntime:
                 images=(capture.image,),
             )
 
+            self._require_runtime_active("screen inference")
             results = self.orchestrator.execute_plan(plan)
+            inference_checkpoint()
 
             if not results:
                 raise RuntimeError(
@@ -8920,35 +9099,43 @@ class QronosRuntime:
                     "Qronos returned an empty response."
                 )
 
-            self.conversation_session.begin_responding()
-            self.conversation_session.add_assistant_message(response)
-            self.conversation_session.begin_listening()
+            with self._foreground_lifecycle().publication(terminal=True):
+                self.conversation_session.begin_responding()
+                self.conversation_session.add_assistant_message(response)
+                self.conversation_session.begin_listening()
 
-            self._notify(
-                "voice_response",
-                "ready",
-                response,
-            )
+                self._notify(
+                    "voice_response",
+                    "ready",
+                    response,
+                )
 
-            self._notify(
-                "voice_turn_complete",
-                "ready",
-                "Screen reading turn completed.",
-            )
+                inference_checkpoint()
+                self._notify(
+                    "voice_turn_complete",
+                    "ready",
+                    "Screen reading turn completed.",
+                )
 
+        except LocalInferenceCancelled:
+            raise
         except (CaptureRefused, CaptureUnavailable) as exc:
-            self._notify(
-                "voice_screen_unavailable",
-                "error",
-                str(exc),
-            )
+            inference_checkpoint()
+            with self._foreground_lifecycle().publication(terminal=True):
+                self._notify(
+                    "voice_screen_unavailable",
+                    "error",
+                    str(exc),
+                )
 
         except Exception as exc:
-            self._notify(
-                "runtime_error",
-                "error",
-                str(exc),
-            )
+            inference_checkpoint()
+            with self._foreground_lifecycle().publication(terminal=True):
+                self._notify(
+                    "runtime_error",
+                    "error",
+                    str(exc),
+                )
 
         finally:
             self._set_busy(False)
@@ -9068,6 +9255,12 @@ class QronosRuntime:
             )
 
     def close(self) -> None:
+        lifecycle = self._foreground_lifecycle()
+        with lifecycle.transition():
+            lifecycle.close()
+            self._close()
+
+    def _close(self) -> None:
         # Stop in-flight GUI actions first and give them a bounded moment to
         # unwind, so a stroke releases its mouse button before the process
         # exits. Daemon workers that do not finish in time are abandoned.
@@ -9825,12 +10018,13 @@ def handle_queue_cancel(
             ConversationPhase.CANCELLED,
             {
                 "whileRunning": was_running,
-                # Incomplete work, said plainly: no answer was attached, and
-                # a model call already under way finishes unseen.
+                # Close only this work item's local request connection. Late
+                # output is discarded; daemon GPU release is asynchronous.
                 "detail": (
                     "Cancelled while running. No answer was attached; the "
-                    "local model call already under way is allowed to "
-                    "finish and its output is discarded."
+                    "local model request already under way is closed and "
+                    "late output is discarded. No answer will be committed. "
+                    "GPU release may take longer."
                     if was_running
                     else "Cancelled before it ran. Nothing was executed."
                 ),
