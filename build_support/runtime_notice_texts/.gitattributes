@@ -1,2 +1,4 @@
 # Pinned upstream texts: keep their exact bytes so the recorded SHA-256 values match.
 * -text
+# Preserve upstream whitespace while keeping source diff checks strict elsewhere.
+portaudio-v19.7.0/LICENSE.txt whitespace=-blank-at-eol
