@@ -41,6 +41,7 @@ export type ConversationMessage = {
   requestId?: string;
   pending?: boolean;
   error?: boolean;
+  cancelled?: boolean;
   // Set while the request waits in, or runs from, the Smart Queue. The
   // bubble offers Cancel only while this is present.
   queueTaskId?: string;
@@ -78,6 +79,7 @@ type TextRuntimePayload = {
   requestId?: unknown;
   text?: unknown;
   error?: unknown;
+  status?: unknown;
 };
 
 type QueueConversationPayload = {
@@ -205,7 +207,7 @@ function friendlyRuntimeErrorText(
       "model is not installed",
     )
   ) {
-    return "??? ???? ???????? Qronos ??? ??? ????? ??? ????.";
+    return "مدل محلی مورد نیاز Qronos روی این دستگاه نصب نشده است.";
   }
 
   if (
@@ -231,7 +233,7 @@ function friendlyRuntimeErrorText(
       "winerror 10061",
     )
   ) {
-    return "??? ???? Qronos ?? ????? ????? ????? ??? ???? ???? ???.";
+    return "سرویس مدل محلی Qronos در دسترس نیست. وضعیت راه‌اندازی محلی را بررسی کنید.";
   }
 
   return value;
@@ -437,6 +439,7 @@ function replacePendingFallback(
   requestId: string,
   responseText: string,
   isError: boolean,
+  cancelled = false,
 ) {
   updateSnapshot(
     (current) => {
@@ -465,6 +468,7 @@ function replacePendingFallback(
                 : responseText,
               pending: false,
               error: isError,
+              cancelled,
             };
           },
         );
@@ -945,6 +949,22 @@ function handleRuntimeEvent(
   const isError =
     event.eventType ===
     "text_error";
+
+  if (
+    isError &&
+    event.status === "cancelled" &&
+    payload.status === "cancelled"
+  ) {
+    // This is a transient status bubble. The backend has not committed an
+    // assistant answer, and a stopped request must not lock the composer.
+    replacePendingFallback(
+      requestId,
+      QUEUE_ENDED_TEXT.cancelled,
+      false,
+      true,
+    );
+    return;
+  }
 
   const rawResponse =
     isError

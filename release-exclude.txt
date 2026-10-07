@@ -20,6 +20,7 @@
 # ---------------------------------------------------------------------------
 
 tests/
+desktop/tests/
 
 # The whole tools directory, not only tools/debug. The other scripts here
 # are live harnesses a developer runs by hand: they open microphones, talk

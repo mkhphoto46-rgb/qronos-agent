@@ -182,7 +182,8 @@ function ConversationSpine() {
           .filter(
             (message) =>
               !message.pending &&
-              !message.error,
+              !message.error &&
+              !message.cancelled,
           )
           .slice(-3)
           .reverse()
