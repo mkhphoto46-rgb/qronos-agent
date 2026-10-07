@@ -44,16 +44,22 @@ not replace code signing or authenticate a maliciously rewritten manifest.
 
 ## Installed data and optional local assets
 
-Writable settings, logs, memory, cache and temporary audio use
-`%LOCALAPPDATA%/Qronos`. Runtime code and default brain configuration remain
-inside the installed bundle. Existing Library/history location preferences
-still apply; generated user artifacts default to `Documents/Qronos`.
+Writable settings, logs, memory, cache and temporary audio use the operating
+system's local data directory, with a `Qronos` subdirectory (normally
+`%LOCALAPPDATA%/Qronos` on Windows). Runtime code and default brain configuration
+remain inside the installed bundle. Valid existing Library/history location
+preferences still apply. Generated artifacts normally use `Documents/Qronos`;
+when that location overlaps the program checkout or another protected path,
+the validated default moves to `Documents/Qronos Files` and reports the change.
+Existing files are not migrated automatically.
 
 Approved native voice binaries and local models are provisioned separately
-under `%LOCALAPPDATA%/Qronos/RuntimeAssets`, preserving the existing `runtime/`
-and `models/` subdirectories. An absolute `QRONOS_ASSET_ROOT` can select an
-existing asset directory. No development-machine models, private data or
-credentials are automatically copied into an installer.
+under `RuntimeAssets` in that local data directory, preserving the existing
+`runtime/` and `models/` subdirectories. Use **OPEN LOCAL ASSET FOLDER** in the
+desktop's local setup report to find the effective path. An absolute
+`QRONOS_ASSET_ROOT` can select an existing asset directory. No
+development-machine models, private data or credentials are automatically
+copied into an installer.
 
 To inspect missing assets, run the installed backend's `doctor` service.
 `doctor --models` also inspects names from the local Ollama server with a
