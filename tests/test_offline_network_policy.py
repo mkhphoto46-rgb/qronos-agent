@@ -26,13 +26,13 @@ def test_product_network_imports_require_an_explicit_reviewed_exception():
     # This inventory requires review of new direct-network paths. Behavioral
     # tests still prove the actual boundary for each hardened sidecar.
     exceptions = {
-        "core.local_ipc": "Bounded loopback HTTP with connection ownership, no proxy/redirects.",
+        "core.local_ipc": "Bounded loopback HTTP; sidecar ownership or local-model provenance; no proxy/redirects.",
         "core.memory_runtime": "Owned CPU sidecar lifecycle and fixed loopback port probe.",
         "core.whisper_server_runtime": "Owned STT sidecar request objects and loopback readiness.",
         "core.chatterbox_runtime": "Owned TTS sidecar request objects and loopback port allocation.",
         "core.ollama_controller": "Reviewed local Ollama inference controller.",
-        "core.user_memory": "Existing primary Ollama embedding adapter; separate HTTP review pending.",
-        "core.ollama_models": "Existing local Ollama model catalog; separate HTTP review pending.",
+        "core.user_memory": "Local embedding adapter through reviewed environment-free HTTP boundary.",
+        "core.ollama_models": "Local model metadata/deletion; registry downloads refused before IO.",
         "core.web_providers": "Disabled legacy transport; test proves refusal before requests IO.",
         "core.link_client": "Explicit authenticated/encrypted Device Link transport exception.",
         "core.link_server": "Permission-controlled Device Link listener and wake sockets.",

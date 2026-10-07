@@ -14,7 +14,7 @@ from typing import Protocol, Sequence
 import uuid
 
 import numpy as np
-import requests
+from core.local_ipc import local_model_base_url, local_timeout, requests_client as requests
 
 from core.storage_locations import load_storage_locations
 
@@ -82,13 +82,11 @@ class OllamaEmbeddingProvider:
         base_url: str = DEFAULT_OLLAMA_BASE_URL,
         timeout_seconds: float = 12.0,
     ) -> None:
-        cleaned = base_url.rstrip("/")
-        if cleaned not in {"http://127.0.0.1:11434", "http://localhost:11434"}:
-            raise ValueError("Memory embedding endpoint must remain local in V1.")
+        cleaned = local_model_base_url(base_url)
         self._model_name = model_name.strip()
         self._model_version = model_version.strip() or DEFAULT_EMBEDDING_VERSION
         self._base_url = cleaned
-        self._timeout = max(1.0, float(timeout_seconds))
+        self._timeout = local_timeout(timeout_seconds)
 
     @property
     def model_name(self) -> str:
@@ -110,7 +108,9 @@ class OllamaEmbeddingProvider:
             payload = response.json()
         except Exception as exc:
             return False, f"ollama_unavailable:{type(exc).__name__}"
-        models = payload.get("models", []) if isinstance(payload, dict) else []
+        if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+            return False, "invalid_embedding_model_metadata"
+        models = payload["models"]
         wanted = self._model_name.lower()
         for item in models:
             if not isinstance(item, dict):
@@ -133,23 +133,26 @@ class OllamaEmbeddingProvider:
         ready, reason = self.available()
         if not ready:
             raise EmbeddingUnavailable(reason)
-        response = requests.post(
-            f"{self._base_url}/api/embed",
-            json={
-                "model": self._model_name,
-                "input": cleaned,
-                "truncate": False,
-                "keep_alive": "0s",
-            },
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        vectors = payload.get("embeddings") if isinstance(payload, dict) else None
-        if not isinstance(vectors, list) or len(vectors) != len(cleaned):
-            raise RuntimeError("Ollama embedding response has an invalid shape.")
-        matrix = np.asarray(vectors, dtype=np.float32)
-        return _normalize_matrix(matrix)
+        try:
+            response = requests.post(
+                f"{self._base_url}/api/embed",
+                json={
+                    "model": self._model_name,
+                    "input": cleaned,
+                    "truncate": False,
+                    "keep_alive": "0s",
+                },
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            vectors = payload.get("embeddings") if isinstance(payload, dict) else None
+            if not isinstance(vectors, list) or len(vectors) != len(cleaned):
+                raise RuntimeError("Ollama embedding response has an invalid shape.")
+            matrix = np.asarray(vectors, dtype=np.float32)
+            return _normalize_matrix(matrix)
+        except Exception:
+            raise EmbeddingUnavailable("Local Ollama embedding request failed.") from None
 
 
 class DeterministicEmbeddingProvider:

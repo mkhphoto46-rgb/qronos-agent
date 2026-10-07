@@ -267,6 +267,7 @@ class MemorySidecarManager:
             env.update(
                 {
                     "OLLAMA_HOST": self.host,
+                    "OLLAMA_NO_CLOUD": "1",
                     "CUDA_VISIBLE_DEVICES": "-1",
                     "GGML_VK_VISIBLE_DEVICES": "-1",
                     "OLLAMA_VULKAN": "0",
