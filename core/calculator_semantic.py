@@ -10,6 +10,11 @@ from core.accessibility_action_executor import (
 from core.accessibility_targeting import (
     AccessibilityTargetLocator,
 )
+from core.action_cancellation import (
+    ActionCancelled,
+    CancellationToken,
+    checkpoint,
+)
 from core.actions import (
     ActionOutcome,
     ActionRequest,
@@ -44,6 +49,19 @@ class CalculatorSemanticPermissionRequired(PermissionError):
 
 class CalculatorSemanticExecutionError(RuntimeError):
     pass
+
+
+class CalculatorSemanticCancelled(CalculatorSemanticExecutionError):
+    """Stop/Pause/shutdown ended the sequence; ``steps_invoked`` were applied."""
+
+    def __init__(self, reason: str, *, steps_invoked: int, steps_total: int) -> None:
+        self.reason = reason
+        self.steps_invoked = int(steps_invoked)
+        self.steps_total = int(steps_total)
+        super().__init__(
+            f"Calculator sequence cancelled ({reason}) after "
+            f"{self.steps_invoked} of {self.steps_total} step(s)."
+        )
 
 
 @dataclass(frozen=True)
@@ -436,6 +454,21 @@ class CalculatorSemanticExecutor:
             computer_executor
         )
 
+    @staticmethod
+    def _boundary(
+        cancel_token: CancellationToken | None,
+        total_steps: int,
+    ) -> None:
+        """A checkpoint before any Calculator step has been invoked."""
+        try:
+            checkpoint(cancel_token)
+        except ActionCancelled as exc:
+            raise CalculatorSemanticCancelled(
+                exc.reason,
+                steps_invoked=0,
+                steps_total=total_steps,
+            ) from exc
+
     def _approval(
         self,
         verdict,
@@ -461,7 +494,16 @@ class CalculatorSemanticExecutor:
         plan: CalculatorSemanticPlan,
         *,
         voice_confirmed: bool,
+        cancel_token: CancellationToken | None = None,
     ) -> CalculatorSemanticRun:
+        """
+        Stop is honoured before launch, after launch, after UIA discovery,
+        before the grant and before every Invoke. One Invoke is a single
+        native call: it completes or fails as a unit, and Stop takes effect
+        at the next boundary. A stopped sequence sends no recovery input.
+        """
+        total_steps = len(plan.automation_ids)
+        self._boundary(cancel_token, total_steps)
 
         # ----------------------------------------------------
         # 1. Open/activate Calculator through Qronos's normal
@@ -492,8 +534,16 @@ class CalculatorSemanticExecutor:
                 prepared_open,
                 approval=open_approval,
                 reevaluate=False,
+                cancel_token=cancel_token,
             )
         )
+
+        if opened.result.outcome is ActionOutcome.CANCELLED:
+            raise CalculatorSemanticCancelled(
+                cancel_token.reason if cancel_token is not None else "cancelled",
+                steps_invoked=0,
+                steps_total=total_steps,
+            )
 
         if (
             opened.result.outcome
@@ -514,6 +564,8 @@ class CalculatorSemanticExecutor:
         # ----------------------------------------------------
         # 2. Discover exact UIA controls by AutomationID.
         # ----------------------------------------------------
+
+        self._boundary(cancel_token, total_steps)
 
         elements = (
             actionable_elements_in_window(
@@ -589,6 +641,8 @@ class CalculatorSemanticExecutor:
         # 3. One bounded GUI request for this exact sequence.
         # ----------------------------------------------------
 
+        self._boundary(cancel_token, total_steps)
+
         request = ActionRequest(
             category=ActionCategory.GUI_AUTOMATION,
             target=f"app:{binding.app_id}",
@@ -652,6 +706,7 @@ class CalculatorSemanticExecutor:
             self.computer_executor.window_binder,
             self.computer_executor,
             locator,
+            cancel_token=cancel_token,
         )
 
         invoked: list[str] = []
@@ -662,6 +717,7 @@ class CalculatorSemanticExecutor:
                 step_elements
             ):
 
+                checkpoint(cancel_token)
                 run = executor.invoke_target(
                     binding,
                     expected.name,
@@ -686,12 +742,16 @@ class CalculatorSemanticExecutor:
                     actual_runtime_id
                 )
 
-                time.sleep(
+                settle = (
                     0.08
                     if index + 1
                     < len(step_elements)
                     else 0.18
                 )
+                if cancel_token is not None:
+                    cancel_token.sleep(settle)
+                else:
+                    time.sleep(settle)
 
             # ------------------------------------------------
             # 4. Independent machine-readable postcondition.
@@ -758,6 +818,31 @@ class CalculatorSemanticExecutor:
                 hwnd=binding.hwnd,
                 pid=binding.snapshot.pid,
             )
+
+        except ActionCancelled as exc:
+
+            # Stop means no further input, including recovery: the display
+            # may hold a partial expression, and the outcome says so.
+            result = ActionResult(
+                action_id=request.action_id,
+                outcome=ActionOutcome.CANCELLED,
+                detail=(
+                    f"Cancelled ({exc.reason}) after {len(invoked)} of "
+                    f"{total_steps} Calculator step(s); no recovery input sent."
+                ),
+            )
+
+            if audit is not None:
+                audit.record_result(
+                    request,
+                    result,
+                )
+
+            raise CalculatorSemanticCancelled(
+                exc.reason,
+                steps_invoked=len(invoked),
+                steps_total=total_steps,
+            ) from exc
 
         except Exception as exc:
 

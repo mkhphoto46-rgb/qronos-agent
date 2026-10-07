@@ -477,6 +477,24 @@ class PaintDrawExecutor:
             outcome=ActionOutcome.REFUSED,
         )
 
+    def discard_pending(self, prepared: PreparedPaintDrawAction, *, reason: str) -> None:
+        """
+        Audit a prepared drawing that Stop/Pause/shutdown discarded while it
+        was still waiting for approval. Nothing ran; the approval it was
+        waiting for can no longer be used.
+        """
+        if self.audit is None:
+            return
+        for request in (prepared.screen_request, prepared.gui_request):
+            self.audit.record_result(
+                request,
+                ActionResult(
+                    action_id=request.action_id,
+                    outcome=ActionOutcome.CANCELLED,
+                    detail=f"Discarded before approval ({reason}); nothing ran.",
+                ),
+            )
+
     def _evaluate_request(self, request: ActionRequest) -> Verdict:
         return self._evaluate(
             request,

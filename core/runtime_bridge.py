@@ -122,6 +122,7 @@ from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.undo_journal import UndoJournal
 from core.action_cancellation import (
+    CANCEL_REASON_PAUSE,
     CANCEL_REASON_SHUTDOWN,
     CANCEL_REASON_USER_STOP,
     ActiveActionRegistry,
@@ -176,6 +177,10 @@ STOP_RESPONSE_ACTION = "qronos.stop_response"
 
 # How long shutdown waits for cancelled GUI actions to release input state.
 COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS = 2.0
+
+# How many discarded approval questions are remembered so their delayed
+# answers can be refused rather than acted on.
+MAX_DISCARDED_APPROVALS = 32
 
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
@@ -630,6 +635,17 @@ def _computer_capability_response() -> str:
 
 
 COMPUTER_ACTION_CANCELLED_RESPONSE = "عملیات با دستور توقف متوقف شد و ادامه نیافت."
+
+
+def _calculator_cancelled_response(cancelled: Any) -> str:
+    """Honest summary of a Calculator sequence stopped part-way."""
+    if not cancelled.steps_invoked:
+        return COMPUTER_ACTION_CANCELLED_RESPONSE
+    return (
+        "محاسبه با دستور توقف متوقف شد؛ "
+        f"{cancelled.steps_invoked} از {cancelled.steps_total} دکمه زده شد "
+        "و ممکن است عبارت نیمه‌کاره در Calculator مانده باشد."
+    )
 
 
 def _paint_draw_cancelled_response(execution: Any) -> str:
@@ -1326,6 +1342,13 @@ class QronosRuntime:
         self.screen_capture: ScreenCapture | None = None
         self.last_foreground_window: int | None = None
         self.pending_look: str | None = None
+        # Guards pending screen/Paint approvals, which are created by turn
+        # workers, answered by approval workers and discarded by Stop/Pause/
+        # shutdown on the command thread.
+        self._approval_lock = threading.Lock()
+        # Normalized questions whose approval prompts were discarded. A late
+        # answer naming one of them is stale and must never be acted on.
+        self._discarded_approvals: dict[str, str] = {}
         self.orchestrator: Orchestrator | None = None
         self.conversation_session: ConversationSession | None = None
         self.conversation_history = ConversationHistory()
@@ -2348,7 +2371,12 @@ class QronosRuntime:
 
         if paused:
             self._clear_file_write_approval_lease("runtime_paused")
-            self.pending_paint_draw = None
+            # Pause stops GUI work the same way Stop does: in-flight actions
+            # are cancelled cooperatively (releasing held buttons), turns in
+            # progress cannot start new actions, and pending approvals are
+            # discarded so Resume can never revive them.
+            self._computer_actions.cancel_all(CANCEL_REASON_PAUSE)
+            self._discard_pending_approvals(CANCEL_REASON_PAUSE)
             # Stop accepting new voice input immediately and release idle voice
             # resources. An already-running non-cancellable model call is not
             # force-killed; downstream checkpoints suppress later phases.
@@ -3698,14 +3726,28 @@ class QronosRuntime:
             if screen.decision is PermissionDecision.REQUIRE_VOICE_CONFIRMATION:
                 screen_approval = screen.decision
             elif screen.decision is PermissionDecision.REQUIRE_UI_CONFIRMATION:
-                if self.pending_paint_draw is not None:
+                stopped = self._computer_actions.stopped_since_turn_start()
+                if stopped:
+                    # Stop/Pause/shutdown arrived while this turn was still
+                    # routing; it must not open a prompt that could later
+                    # approve the stopped request.
+                    self.paint_draw_executor.discard_pending(prepared, reason=stopped)
+                    report["voiceComputerCancelled"] = True
                     report["voiceComputerDeferred"] = False
-                    return "یک نقاشی دیگر هنوز منتظر تأیید صفحه است."
-                self.pending_paint_draw = PendingPaintDrawAction(
-                    prepared=prepared,
-                    gui_approval=gui_approval,
-                    transcript=transcript,
-                )
+                    return COMPUTER_ACTION_CANCELLED_RESPONSE
+                with self._approval_lock:
+                    if self.pending_paint_draw is not None:
+                        report["voiceComputerDeferred"] = False
+                        return "یک نقاشی دیگر هنوز منتظر تأیید صفحه است."
+                    self.pending_paint_draw = PendingPaintDrawAction(
+                        prepared=prepared,
+                        gui_approval=gui_approval,
+                        transcript=transcript,
+                    )
+                    self._discarded_approvals.pop(
+                        self._approval_key(transcript),
+                        None,
+                    )
                 report["paintDrawScreenApprovalPending"] = True
                 report["voiceComputerDeferred"] = False
                 return ""
@@ -3772,6 +3814,7 @@ class QronosRuntime:
         try:
             from core.calculator_semantic import (
                 CalculatorSemanticExecutor,
+                CalculatorSemanticCancelled,
                 CalculatorSemanticParseError,
                 CalculatorSemanticPermissionRequired,
                 parse_calculator_semantic_command,
@@ -3816,10 +3859,20 @@ class QronosRuntime:
         )
 
         try:
-            run = executor.execute(
-                plan,
-                voice_confirmed=False,
+            with self._computer_actions.begin("calculator") as cancel_token:
+                run = executor.execute(
+                    plan,
+                    voice_confirmed=False,
+                    cancel_token=cancel_token,
+                )
+
+        except CalculatorSemanticCancelled as cancelled:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=_calculator_cancelled_response(cancelled),
+                started_at=started_at,
             )
+            return True
 
         except CalculatorSemanticPermissionRequired:
             self._finish_text_file_action(
@@ -3879,6 +3932,7 @@ class QronosRuntime:
         try:
             from core.calculator_semantic import (
                 CalculatorSemanticExecutor,
+                CalculatorSemanticCancelled,
                 CalculatorSemanticParseError,
                 CalculatorSemanticPermissionRequired,
                 parse_calculator_semantic_command,
@@ -3921,10 +3975,18 @@ class QronosRuntime:
         )
 
         try:
-            run = executor.execute(
-                plan,
-                voice_confirmed=True,
-            )
+            with self._computer_actions.begin("calculator") as cancel_token:
+                run = executor.execute(
+                    plan,
+                    voice_confirmed=True,
+                    cancel_token=cancel_token,
+                )
+
+        except CalculatorSemanticCancelled as cancelled:
+            report["voiceComputerCancelled"] = True
+            report["voiceComputerDeferred"] = False
+            report["calculatorStepsInvoked"] = cancelled.steps_invoked
+            return _calculator_cancelled_response(cancelled)
 
         except CalculatorSemanticPermissionRequired:
             report[
@@ -4693,6 +4755,7 @@ class QronosRuntime:
             return
 
         self._set_busy(True)
+        self._computer_actions.mark_turn_start()
         started = time.perf_counter()
         route_name = ""
 
@@ -5858,6 +5921,71 @@ class QronosRuntime:
         )
         return True
 
+    @staticmethod
+    def _approval_key(text: str | None) -> str:
+        return " ".join(str(text or "").split()).casefold()
+
+    def _forget_discarded_approval(self, text: str | None) -> None:
+        """A fresh prompt for the same question supersedes its tombstone."""
+        key = self._approval_key(text)
+        if key:
+            with self._approval_lock:
+                self._discarded_approvals.pop(key, None)
+
+    def _stale_approval_reason(self, question: str | None) -> str:
+        key = self._approval_key(question)
+        if not key:
+            return ""
+        with self._approval_lock:
+            return self._discarded_approvals.get(key, "")
+
+    def _discard_pending_approvals(self, reason: str) -> int:
+        """
+        Drop every computer/Paint/screen approval still waiting for an answer.
+
+        The prompt may already be on screen; its later answer finds nothing
+        to approve and is refused as stale. Nothing ran, and the discard is
+        audited for a prepared Paint drawing. Idempotent.
+        """
+        with self._approval_lock:
+            paint = self.pending_paint_draw
+            look = self.pending_look
+            self.pending_paint_draw = None
+            self.pending_look = None
+            for question in (
+                paint.transcript if paint is not None else None,
+                look,
+            ):
+                key = self._approval_key(question)
+                if key:
+                    self._discarded_approvals.pop(key, None)
+                    self._discarded_approvals[key] = reason
+            while len(self._discarded_approvals) > MAX_DISCARDED_APPROVALS:
+                self._discarded_approvals.pop(
+                    next(iter(self._discarded_approvals))
+                )
+
+        discarded = int(paint is not None) + int(bool(look))
+        if paint is not None and self.paint_draw_executor is not None:
+            try:
+                self.paint_draw_executor.discard_pending(
+                    paint.prepared,
+                    reason=reason,
+                )
+            except Exception:
+                pass
+        if discarded:
+            self._notify(
+                "computer_approval_discarded",
+                "ready",
+                json.dumps(
+                    {"reason": reason, "discarded": discarded},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+            )
+        return discarded
+
     def request_stop_response(
         self,
     ) -> dict[str, Any]:
@@ -5880,6 +6008,9 @@ class QronosRuntime:
 
         computer_actions_cancelled = len(
             self._computer_actions.cancel_all(CANCEL_REASON_USER_STOP)
+        )
+        pending_approvals_discarded = self._discard_pending_approvals(
+            CANCEL_REASON_USER_STOP
         )
 
         with self._lock:
@@ -5930,6 +6061,7 @@ class QronosRuntime:
                     "playbackCancelled": playback_cancelled,
                     "playbackId": playback_id,
                     "computerActionsCancelled": computer_actions_cancelled,
+                    "pendingApprovalsDiscarded": pending_approvals_discarded,
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -5941,6 +6073,7 @@ class QronosRuntime:
             "playbackCancelled": playback_cancelled,
             "playbackId": playback_id,
             "computerActionsCancelled": computer_actions_cancelled,
+            "pendingApprovalsDiscarded": pending_approvals_discarded,
         }
 
 
@@ -6976,6 +7109,7 @@ class QronosRuntime:
 
         self._set_busy(True)
         self._voice_response_stop_requested.clear()
+        self._computer_actions.mark_turn_start()
         playback_seconds = 0.0
         user_message_added = False
         assistant_message_added = False
@@ -7317,7 +7451,23 @@ class QronosRuntime:
             )
 
             if selected_task_type is TaskType.VISION:
-                self.pending_look = transcript
+                if self._computer_actions.stopped_since_turn_start():
+                    # Stopped while routing: never open a screen prompt
+                    # whose later answer would act on the stopped request.
+                    report["visionApprovalCancelled"] = True
+                    self._notify(
+                        "voice_turn_stopped",
+                        "ready",
+                        "Current Qronos response was stopped by the user.",
+                    )
+                    self._write_latency_report(report)
+                    return 0.0
+                with self._approval_lock:
+                    self.pending_look = transcript
+                    self._discarded_approvals.pop(
+                        self._approval_key(transcript),
+                        None,
+                    )
                 self.conversation_session.begin_listening()
 
                 self._notify(
@@ -7934,10 +8084,11 @@ class QronosRuntime:
         *,
         approved: bool,
     ) -> bool:
-        pending = self.pending_paint_draw
-        if pending is None:
-            return False
-        self.pending_paint_draw = None
+        with self._approval_lock:
+            pending = self.pending_paint_draw
+            if pending is None:
+                return False
+            self.pending_paint_draw = None
 
         self._ensure_computer_runtime()
         if self.paint_draw_executor is None:
@@ -8058,6 +8209,31 @@ class QronosRuntime:
         )
         return True
 
+    def _screen_decision_refusal(self, question: str | None) -> str:
+        """
+        Why a screen/Paint approval answer must not be acted on, or "".
+
+        - shutdown has begun;
+        - the answer names a prompt that Stop/Pause/shutdown discarded;
+        - a Paint drawing is pending and the answer names a different
+          request (an old prompt's answer must not approve a newer one).
+        """
+        if self._computer_actions.closed:
+            return CANCEL_REASON_SHUTDOWN
+        stale = self._stale_approval_reason(question)
+        if stale:
+            return stale
+        key = self._approval_key(question)
+        with self._approval_lock:
+            pending = self.pending_paint_draw
+            if (
+                pending is not None
+                and key
+                and key != self._approval_key(pending.transcript)
+            ):
+                return "approval_does_not_match_pending_request"
+        return ""
+
     def look_at_screen(
         self,
         approved: bool = False,
@@ -8076,15 +8252,30 @@ class QronosRuntime:
             return
 
         self._set_busy(True)
+        self._computer_actions.mark_turn_start()
 
         try:
+            refusal = self._screen_decision_refusal(question)
+            if refusal:
+                self._notify(
+                    "screen_approval_stale",
+                    "ready",
+                    json.dumps(
+                        {"reason": refusal, "approved": bool(approved)},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                )
+                return
+
             if self._resolve_pending_paint_draw_screen_decision(
                 approved=approved,
             ):
                 return
 
-            asked = (question or self.pending_look or "").strip()
-            self.pending_look = None
+            with self._approval_lock:
+                asked = (question or self.pending_look or "").strip()
+                self.pending_look = None
 
             if not asked:
                 raise RuntimeError(
@@ -8297,7 +8488,10 @@ class QronosRuntime:
         # Stop in-flight GUI actions first and give them a bounded moment to
         # unwind, so a stroke releases its mouse button before the process
         # exits. Daemon workers that do not finish in time are abandoned.
-        self._computer_actions.cancel_all(CANCEL_REASON_SHUTDOWN)
+        # After close() nothing may run: the registry refuses new actions and
+        # pending approvals are discarded so a late answer finds nothing.
+        self._computer_actions.close()
+        self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
 
         self._input_meter_enabled = False

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.action_cancellation import CancellationToken, checkpoint
 from core.input_capabilities import InputCapabilities
 from core.keyboard_control import KeyboardResult
 from core.input_safety import BoundInputAuthorization
@@ -53,7 +54,13 @@ class VisualActionExecutor:
         locator: VisualTargetLocator,
         *,
         inputs: InputCapabilities | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> None:
+        # One executor serves one user-visible action. The token is checked
+        # between steps and before every native input; it never relaxes an
+        # authorization check. One click or one typed string is a single
+        # native call: Stop takes effect at the next boundary after it.
+        self.cancel_token = cancel_token
         self.binder = binder
         self.computer_executor = computer_executor
         self.capture = capture
@@ -63,6 +70,20 @@ class VisualActionExecutor:
             if inputs is not None
             else InputCapabilities.for_binder(binder)
         )
+
+    def _checkpoint(self) -> None:
+        checkpoint(self.cancel_token)
+
+    def _acquire_foreground(self, binding: WindowBinding) -> None:
+        self._checkpoint()
+        if self.cancel_token is None:
+            self.computer_executor.acquire_foreground(binding)
+        else:
+            self.computer_executor.acquire_foreground(
+                binding,
+                cancel_token=self.cancel_token,
+            )
+        self._checkpoint()
 
     def click_target(
         self,
@@ -105,7 +126,7 @@ class VisualActionExecutor:
             )
 
         # The window must be the exact foreground target when pixels are read.
-        self.computer_executor.acquire_foreground(binding)
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -131,8 +152,8 @@ class VisualActionExecutor:
 
         # Vision inference may take seconds and another window can steal
         # foreground. Never click until the exact bound HWND is foreground
-        # again.
-        self.computer_executor.acquire_foreground(binding)
+        # again. A Stop during inference ends the action here.
+        self._acquire_foreground(binding)
 
         # This is intentionally strict. If focus acquisition resized/moved
         # the application, old vision coordinates expire and no click occurs.
@@ -162,6 +183,8 @@ class VisualActionExecutor:
             grant,
             binding,
         ).restrict(scope)
+
+        self._checkpoint()
 
         clicked = self.inputs.click.click_at(
             binding,
@@ -221,7 +244,7 @@ class VisualActionExecutor:
 
         # Vision inference can take time. Before keyboard input, reacquire
         # and revalidate the exact application window again.
-        self.computer_executor.acquire_foreground(binding)
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -233,6 +256,8 @@ class VisualActionExecutor:
             grant,
             binding,
         )
+
+        self._checkpoint()
 
         typed = self.inputs.keyboard.type_text(
             binding,
@@ -269,7 +294,7 @@ class VisualActionExecutor:
         if not name:
             raise ValueError("press_key requires a key name.")
 
-        self.computer_executor.acquire_foreground(binding)
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -281,6 +306,8 @@ class VisualActionExecutor:
             grant,
             binding,
         )
+
+        self._checkpoint()
 
         result = self.inputs.keyboard.press(
             binding,
