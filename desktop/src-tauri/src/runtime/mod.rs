@@ -265,11 +265,22 @@ fn require_task_id(task_id: &str) -> Result<&str, String> {
 }
 
 pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // Never fails now. A missing checkout used to abort setup, which Tauri
-    // turns into a panic before the window appears: an installed Qronos
-    // would not start at all, and with no message anybody could act on. It
-    // starts, and says so when the voice runtime is actually asked for.
-    app.manage(RuntimeManagerState::new(find_project_root()));
+    // Qronos may be moved between drives, so the Chatterbox playback scope
+    // must come from the checkout discovered at runtime instead of embedding
+    // an absolute development-machine path in tauri.conf.json.
+    let project_root = find_project_root();
+
+    if let Some(root) = project_root.as_ref() {
+        let chatterbox_temp = root
+            .join("runtime")
+            .join("chatterbox")
+            .join("temp");
+
+        app.asset_protocol_scope()
+            .allow_directory(&chatterbox_temp, true)?;
+    }
+
+    app.manage(RuntimeManagerState::new(project_root));
 
     Ok(())
 }

@@ -127,7 +127,7 @@ type QronosOrbProps = {
   audioSpectrum?: number[];
 };
 
-const MAX_DPR = 1.5;
+const MAX_DPR = 1.25;
 
 const VISUAL_STATES: Record<OrbState, VisualState> = {
   idle: {
@@ -716,7 +716,7 @@ function QronosOrb({
     const audioSpectrumParticles:
       AudioSpectrumParticle[] = [];
 
-    const audioParticleCount = 640;
+    const audioParticleCount = 360;
     const audioBandCount = 32;
 
     for (
@@ -791,8 +791,8 @@ function QronosOrb({
         () => 0,
       );
 
-    const latitudeBands = 60;
-    const equatorBands = 220;
+    const latitudeBands = 48;
+    const equatorBands = 150;
 
     for (
       let latIndex = 0;
@@ -891,7 +891,7 @@ function QronosOrb({
       }
     }
 
-    const shell2Count = 2300;
+    const shell2Count = 1400;
 
     for (
       let index = 0;
@@ -963,7 +963,7 @@ function QronosOrb({
       });
     }
 
-    const shell3Count = 1450;
+    const shell3Count = 900;
 
     for (
       let index = 0;
@@ -1075,7 +1075,7 @@ function QronosOrb({
 
       ambientParticles.push({
         angle:
-          (index / 260) *
+          (index / 180) *
           Math.PI *
           2,
 
@@ -1143,7 +1143,7 @@ function QronosOrb({
 
       backRoamingParticles.push({
         angle:
-          (index / 760) *
+          (index / 420) *
           Math.PI *
           2,
 
@@ -1212,7 +1212,7 @@ function QronosOrb({
 
       frontRoamingParticles.push({
         angle:
-          (index / 980) *
+          (index / 560) *
           Math.PI *
           2,
 
@@ -1315,6 +1315,8 @@ function QronosOrb({
     let animationFrame = 0;
 
     let previousTimestamp = 0;
+
+    let lastRenderedTimestamp = 0;
 
     let bodyRotationPhase = 0;
 
@@ -2582,6 +2584,32 @@ function QronosOrb({
     const render = (
       timestamp: number,
     ) => {
+      const targetFps =
+        stateRef.current === "idle"
+          ? 30
+          : 45;
+
+      const minimumFrameMs =
+        1000 /
+        targetFps;
+
+      if (
+        lastRenderedTimestamp > 0 &&
+        timestamp -
+          lastRenderedTimestamp <
+          minimumFrameMs
+      ) {
+        animationFrame =
+          requestAnimationFrame(
+            render,
+          );
+
+        return;
+      }
+
+      lastRenderedTimestamp =
+        timestamp;
+
       const time =
         timestamp / 1000;
 

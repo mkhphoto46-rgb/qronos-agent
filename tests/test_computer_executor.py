@@ -237,6 +237,142 @@ class ComputerExecutorTests(unittest.TestCase):
         self.assertIn("hwnd=9876", result.result.detail)
         self.assertIn("exact-pid window binding succeeded", result.result.detail)
 
+
+    def test_calculator_uses_packaged_activation_and_exact_pid_binding(self) -> None:
+        executable_calls = []
+        packaged_calls = []
+        bind_calls = []
+
+        binding = SimpleNamespace(
+            hwnd=2468
+        )
+
+        class FakeBinder:
+            def bind(
+                self,
+                target,
+                *,
+                require_foreground=False,
+                expected_pid=None,
+            ):
+                bind_calls.append(
+                    (
+                        target.app_id,
+                        tuple(target.process_names),
+                        require_foreground,
+                        expected_pid,
+                    )
+                )
+
+                return binding
+
+            def revalidate(
+                self,
+                binding,
+                **kwargs,
+            ):
+                return "snapshot"
+
+        executor = ComputerExecutor(
+            audit=ActionAuditLog(
+                path=None
+            ),
+            journal=UndoJournal(
+                path=None
+            ),
+            evaluate_fn=evaluator_for(
+                PermissionDecision.ALLOW
+            ),
+            launcher=lambda command: executable_calls.append(
+                command
+            ),
+            packaged_launcher=lambda aumid: (
+                packaged_calls.append(
+                    aumid
+                )
+                or 6728
+            ),
+            window_binder=FakeBinder(),
+            verification_delay_seconds=0,
+        )
+
+        result = executor.execute(
+            ComputerAction(
+                ComputerOperation.OPEN_APP,
+                app_id="calculator",
+            )
+        )
+
+        self.assertIs(
+            result.result.outcome,
+            ActionOutcome.SUCCEEDED,
+        )
+
+        # calc.exe must NOT be used anymore.
+        self.assertEqual(
+            executable_calls,
+            [],
+        )
+
+        self.assertEqual(
+            packaged_calls,
+            [
+                "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            ],
+        )
+
+        self.assertEqual(
+            len(bind_calls),
+            1,
+        )
+
+        (
+            app_id,
+            process_names,
+            require_foreground,
+            expected_pid,
+        ) = bind_calls[0]
+
+        self.assertEqual(
+            app_id,
+            "calculator",
+        )
+
+        self.assertIn(
+            "calculatorapp.exe",
+            process_names,
+        )
+
+        self.assertFalse(
+            require_foreground
+        )
+
+        self.assertEqual(
+            expected_pid,
+            6728,
+        )
+
+        self.assertIs(
+            result.window_binding,
+            binding,
+        )
+
+        self.assertIn(
+            "pid=6728",
+            result.result.detail,
+        )
+
+        self.assertIn(
+            "hwnd=2468",
+            result.result.detail,
+        )
+
+        self.assertIn(
+            "exact-pid window binding succeeded",
+            result.result.detail,
+        )
+
+
     def test_packaged_app_launch_fails_when_exact_returned_pid_has_no_window(self) -> None:
         class FakeBinder:
             def bind(
@@ -383,6 +519,248 @@ class ComputerExecutorTests(unittest.TestCase):
                 },
             )],
         )
+
+
+    def test_packaged_app_waits_for_window_hosting_and_layout_to_settle(self) -> None:
+        from unittest.mock import patch
+
+        from core.window_binding import (
+            WindowRect,
+            WindowSnapshot,
+        )
+
+        def snap(
+            *,
+            client,
+            rect,
+        ):
+            return WindowSnapshot(
+                hwnd=9876,
+                pid=4321,
+                thread_id=55,
+                title="Paint",
+                process_path=r"C:\Windows\System32\mspaint.exe",
+                process_start_time_100ns=123456,
+                window_rect=rect,
+                client_rect=client,
+                dpi=96,
+                visible=True,
+                minimized=False,
+                foreground=False,
+            )
+
+        early = snap(
+            rect=WindowRect(
+                0,
+                0,
+                600,
+                600,
+            ),
+            client=WindowRect(
+                0,
+                1,
+                587,
+                585,
+            ),
+        )
+
+        hosted = snap(
+            rect=WindowRect(
+                1280,
+                140,
+                1880,
+                740,
+            ),
+            client=WindowRect(
+                1280,
+                142,
+                1867,
+                726,
+            ),
+        )
+
+        observations = [
+            early,
+            hosted,
+            hosted,
+            hosted,
+            hosted,
+        ]
+
+        roots = [
+            9876,
+            7000,
+            7000,
+            7000,
+            7000,
+        ]
+
+        class SettlingBinder:
+            def __init__(self):
+                self.bind_calls = []
+                self.bind_snapshot_calls = []
+                self.revalidate_calls = 0
+
+            def bind(
+                self,
+                target,
+                *,
+                require_foreground=False,
+                expected_pid=None,
+            ):
+                self.bind_calls.append(
+                    (
+                        target.app_id,
+                        expected_pid,
+                    )
+                )
+
+                return SimpleNamespace(
+                    hwnd=9876
+                )
+
+            def bind_snapshot(
+                self,
+                snapshot,
+                *,
+                app_id,
+                display_name,
+                require_foreground=False,
+            ):
+                self.bind_snapshot_calls.append(
+                    (
+                        snapshot.hwnd,
+                        snapshot.pid,
+                        app_id,
+                        display_name,
+                        require_foreground,
+                    )
+                )
+
+                return SimpleNamespace(
+                    hwnd=snapshot.hwnd
+                )
+
+            def revalidate(
+                self,
+                binding,
+                **kwargs,
+            ):
+                index = min(
+                    self.revalidate_calls,
+                    len(observations) - 1,
+                )
+
+                self.revalidate_calls += 1
+
+                return observations[
+                    index
+                ]
+
+        binder = SettlingBinder()
+
+        executor = ComputerExecutor(
+            audit=ActionAuditLog(
+                path=None
+            ),
+            journal=UndoJournal(
+                path=None
+            ),
+            evaluate_fn=evaluator_for(
+                PermissionDecision.ALLOW
+            ),
+            packaged_launcher=lambda aumid: 4321,
+            window_binder=binder,
+            sleep_fn=lambda seconds: None,
+            launch_binding_attempts=10,
+            launch_binding_poll_seconds=0,
+            launch_binding_settle_observations=3,
+            verification_delay_seconds=0,
+        )
+
+        root_values = iter(
+            roots
+        )
+
+        with patch(
+            "core.computer_executor._root_window_handle",
+            side_effect=lambda hwnd: next(
+                root_values,
+                7000,
+            ),
+        ):
+            result = executor.execute(
+                ComputerAction(
+                    ComputerOperation.OPEN_APP,
+                    app_id="paint",
+                )
+            )
+
+        self.assertIs(
+            result.result.outcome,
+            ActionOutcome.SUCCEEDED,
+        )
+
+        # Only the initial exact-PID acquisition may use top-level
+        # enumeration. The final settled capability must be issued directly
+        # from the retained content HWND snapshot.
+        self.assertEqual(
+            binder.bind_calls,
+            [
+                ("paint", 4321),
+            ],
+        )
+
+        self.assertEqual(
+            len(
+                binder.bind_snapshot_calls
+            ),
+            1,
+        )
+
+        (
+            final_hwnd,
+            final_pid,
+            final_app_id,
+            final_display_name,
+            final_foreground,
+        ) = binder.bind_snapshot_calls[0]
+
+        self.assertEqual(
+            final_hwnd,
+            9876,
+        )
+
+        self.assertEqual(
+            final_pid,
+            4321,
+        )
+
+        self.assertEqual(
+            final_app_id,
+            "paint",
+        )
+
+        self.assertEqual(
+            final_display_name,
+            "Paint",
+        )
+
+        self.assertFalse(
+            final_foreground
+        )
+
+        # The early unhosted layout must not be accepted as settled.
+        self.assertGreaterEqual(
+            binder.revalidate_calls,
+            5,
+        )
+
+        self.assertIn(
+            "exact-pid window binding succeeded",
+            result.result.detail,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

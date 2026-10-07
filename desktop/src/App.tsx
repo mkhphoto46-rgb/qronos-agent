@@ -208,6 +208,9 @@ function App() {
     null,
   );
 
+  const screenApprovalOpenRef =
+    useRef(false);
+
   const [
     fileApprovalSubmitting,
     setFileApprovalSubmitting,
@@ -226,6 +229,9 @@ function App() {
       () => 0,
     ),
   });
+
+  const audioFrameLastCommitRef =
+    useRef(0);
 
   const [
     uiScale,
@@ -1215,10 +1221,17 @@ function App() {
         await listen<RuntimeEvent>(
           "qronos://runtime-event",
           (event) => {
-            console.info(
-              "[Qronos Runtime]",
-              event.payload,
-            );
+            if (
+              event.payload.eventType !==
+                "voice_audio_spectrum" &&
+              event.payload.eventType !==
+                "microphone_input_level"
+            ) {
+              console.info(
+                "[Qronos Runtime]",
+                event.payload,
+              );
+            }
 
             switch (
               event.payload.eventType
@@ -1263,6 +1276,21 @@ function App() {
                   while (bands.length < 32) {
                     bands.push(0);
                   }
+
+                  const now =
+                    performance.now();
+
+                  if (
+                    level > 0.001 &&
+                    now -
+                      audioFrameLastCommitRef.current <
+                      120
+                  ) {
+                    break;
+                  }
+
+                  audioFrameLastCommitRef.current =
+                    now;
 
                   setAudioFrame({
                     level,
@@ -1485,6 +1513,69 @@ function App() {
                     error,
                   );
                 }
+                break;
+              }
+
+              case "voice_needs_screen": {
+                if (
+                  screenApprovalOpenRef.current
+                ) {
+                  break;
+                }
+
+                screenApprovalOpenRef.current =
+                  true;
+
+                setScenario(
+                  "thinking",
+                );
+
+                const question =
+                  event.payload.message.trim();
+
+                window.setTimeout(
+                  () => {
+                    const approved =
+                      window.confirm(
+                        "Qronos ???????? ???????? ?? ????? ????? ???? ??? ???? ?? ?????? ???. ????? ????????",
+                      );
+
+                    void invoke(
+                      "send_runtime_action",
+                      {
+                        actionId:
+                          "qronos.look_at_screen",
+
+                        data: {
+                          approved,
+                          question,
+                          windowOnly:
+                            true,
+                        },
+                      },
+                    )
+                      .catch(
+                        (error) => {
+                          console.error(
+                            "[Qronos Screen Approval] failed:",
+                            error,
+                          );
+
+                          setScenario(
+                            "idle",
+                          );
+                        },
+                      )
+                      .finally(
+                        () => {
+                          screenApprovalOpenRef.current =
+                            false;
+                        },
+                      );
+                  },
+                  0,
+                );
+
                 break;
               }
 

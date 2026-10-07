@@ -30,6 +30,7 @@ from core.window_binding import (
     WindowBindingUnavailable,
     WindowSnapshot,
     WindowTarget,
+    root_window_handle,
 )
 from security.gate import Verdict, evaluate
 from security.permissions import ActionCategory, PermissionDecision
@@ -70,6 +71,7 @@ KNOWN_APPS: dict[str, AppSpec] = {
         app_id="calculator",
         executable="calc.exe",
         display_name="Calculator",
+        aumid="Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
         aliases=("calculator", "calc", "ماشین حساب", "ماشین‌حساب"),
         process_names=("calculatorapp.exe", "calculator.exe", "calc.exe"),
     ),
@@ -469,6 +471,86 @@ GuiActionFn = Callable[[AppSpec, ComputerOperation], str]
 SleepFn = Callable[[float], None]
 
 
+
+
+def _root_window_handle(hwnd: int) -> int:
+    """
+    Return the current top-level/root HWND for one Windows window.
+
+    Packaged applications may initially expose a process-owned HWND and then
+    reparent that exact HWND beneath ApplicationFrameHost. Settlement must
+    observe that transition instead of issuing a layout-bound capability too
+    early.
+    """
+
+    handle = int(hwnd)
+
+    if handle <= 0:
+        return 0
+
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        # Unit-test/non-Windows fallback. Real packaged activation is Windows
+        # only, so production never relies on this branch.
+        return handle
+
+    try:
+        user32 = ctypes.windll.user32
+
+        user32.GetAncestor.argtypes = [
+            wintypes.HWND,
+            ctypes.c_uint,
+        ]
+        user32.GetAncestor.restype = wintypes.HWND
+
+        GA_ROOT = 2
+
+        return int(
+            user32.GetAncestor(
+                wintypes.HWND(handle),
+                GA_ROOT,
+            )
+            or 0
+        )
+
+    except Exception:
+        return 0
+
+
+def _packaged_window_settlement_signature(
+    snapshot: WindowSnapshot,
+) -> tuple[object, ...]:
+    """
+    Properties that must remain unchanged across consecutive observations
+    before a packaged-app WindowBinding is handed to downstream actions.
+
+    Foreground is intentionally excluded: semantic accessibility actions do
+    not require foreground, and focus can legitimately fluctuate.
+    """
+
+    window = snapshot.window_rect
+    client = snapshot.client_rect
+
+    return (
+        int(snapshot.hwnd),
+        int(snapshot.pid),
+        int(snapshot.thread_id),
+        str(snapshot.process_path).casefold(),
+        int(snapshot.process_start_time_100ns),
+        int(window.left),
+        int(window.top),
+        int(window.right),
+        int(window.bottom),
+        int(client.left),
+        int(client.top),
+        int(client.right),
+        int(client.bottom),
+        int(snapshot.dpi),
+        _root_window_handle(
+            snapshot.hwnd
+        ),
+    )
+
+
 class ComputerExecutor:
     """Execute typed, permission-gated Windows actions."""
 
@@ -489,6 +571,7 @@ class ComputerExecutor:
         launch_binding_attempts: int = 25,
         launch_binding_poll_seconds: float = 0.20,
         dynamic_apps: bool = False,
+        launch_binding_settle_observations: int = 4,
     ) -> None:
         self.audit = audit
         self.journal = journal
@@ -506,6 +589,10 @@ class ComputerExecutor:
         self._launch_binding_attempts = max(1, int(launch_binding_attempts))
         self._launch_binding_poll_seconds = max(0.0, float(launch_binding_poll_seconds))
         self.dynamic_apps = bool(dynamic_apps)
+        self._launch_binding_settle_observations = max(
+            1,
+            int(launch_binding_settle_observations),
+        )
 
     def resolve_app_id(self, query: str) -> str:
         return resolve_application_id(query, dynamic=self.dynamic_apps)
@@ -568,95 +655,220 @@ class ComputerExecutor:
         poll_seconds: float = 0.10,
     ) -> WindowSnapshot:
         """
-        Bring the exact already-bound HWND to the foreground without rediscovery.
+        Bring the exact bound application to foreground.
 
-        Windows may refuse a plain SetForegroundWindow call when the current
-        foreground thread owns the activation queue. Temporarily attaching the
-        current thread to the target/foreground input queues is the bounded
-        Win32 path validated by the Stage 4B.3 live tests. Identity is checked
-        again afterwards, but layout equality is intentionally not required:
-        restoring/focusing Paint may legitimately settle its chrome before the
-        caller creates a fresh layout-bound capability.
+        For ordinary windows, content HWND == foreground root.
+        For hosted packaged apps, Qronos keeps the exact content HWND for
+        identity/UIA while activating its GA_ROOT host.
         """
         if os.name != "nt":
-            raise RuntimeError("Foreground acquisition supports Windows only.")
-        timeout = float(timeout_seconds)
-        poll = float(poll_seconds)
-        if timeout <= 0.0 or poll <= 0.0:
-            raise ValueError("Foreground acquisition timing must be positive.")
+            raise RuntimeError(
+                "Foreground acquisition supports Windows only."
+            )
+
+        timeout = float(
+            timeout_seconds
+        )
+
+        poll = float(
+            poll_seconds
+        )
+
+        if (
+            timeout <= 0.0
+            or poll <= 0.0
+        ):
+            raise ValueError(
+                "Foreground acquisition timing must be positive."
+            )
 
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
         user32.GetForegroundWindow.argtypes = []
-        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetForegroundWindow.restype = (
+            wintypes.HWND
+        )
+
         user32.GetWindowThreadProcessId.argtypes = [
             wintypes.HWND,
-            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(
+                wintypes.DWORD
+            ),
         ]
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+        user32.GetWindowThreadProcessId.restype = (
+            wintypes.DWORD
+        )
+
         user32.AttachThreadInput.argtypes = [
             wintypes.DWORD,
             wintypes.DWORD,
             wintypes.BOOL,
         ]
-        user32.AttachThreadInput.restype = wintypes.BOOL
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.ShowWindow.restype = wintypes.BOOL
-        user32.BringWindowToTop.argtypes = [wintypes.HWND]
-        user32.BringWindowToTop.restype = wintypes.BOOL
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.restype = wintypes.BOOL
-        user32.SetActiveWindow.argtypes = [wintypes.HWND]
-        user32.SetActiveWindow.restype = wintypes.HWND
+
+        user32.AttachThreadInput.restype = (
+            wintypes.BOOL
+        )
+
+        user32.ShowWindow.argtypes = [
+            wintypes.HWND,
+            ctypes.c_int,
+        ]
+
+        user32.ShowWindow.restype = (
+            wintypes.BOOL
+        )
+
+        user32.BringWindowToTop.argtypes = [
+            wintypes.HWND
+        ]
+
+        user32.BringWindowToTop.restype = (
+            wintypes.BOOL
+        )
+
+        user32.SetForegroundWindow.argtypes = [
+            wintypes.HWND
+        ]
+
+        user32.SetForegroundWindow.restype = (
+            wintypes.BOOL
+        )
+
+        user32.SetActiveWindow.argtypes = [
+            wintypes.HWND
+        ]
+
+        user32.SetActiveWindow.restype = (
+            wintypes.HWND
+        )
+
         kernel32.GetCurrentThreadId.argtypes = []
-        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        kernel32.GetCurrentThreadId.restype = (
+            wintypes.DWORD
+        )
 
-        target_hwnd = wintypes.HWND(binding.hwnd)
-        user32.ShowWindow(target_hwnd, 9)  # SW_RESTORE
+        content_hwnd_value = int(
+            binding.hwnd
+        )
 
-        foreground_before = int(user32.GetForegroundWindow() or 0)
-        target_pid = wintypes.DWORD()
-        target_thread = int(
+        content_hwnd = wintypes.HWND(
+            content_hwnd_value
+        )
+
+        content_pid = wintypes.DWORD()
+
+        content_thread = int(
             user32.GetWindowThreadProcessId(
-                target_hwnd,
-                ctypes.byref(target_pid),
+                content_hwnd,
+                ctypes.byref(
+                    content_pid
+                ),
             )
             or 0
         )
-        if target_pid.value != binding.snapshot.pid:
-            raise WindowBindingStale(
-                "The bound Paint HWND no longer belongs to the launched PID."
+
+        if (
+            content_thread <= 0
+            or int(
+                content_pid.value
             )
+            != int(
+                binding.snapshot.pid
+            )
+        ):
+            raise WindowBindingStale(
+                "The bound content HWND no longer belongs to the exact process."
+            )
+
+        activation_hwnd_value = int(
+            root_window_handle(
+                content_hwnd_value
+            )
+        )
+
+        if activation_hwnd_value <= 0:
+            raise WindowBindingStale(
+                "The bound application has no usable foreground root."
+            )
+
+        activation_hwnd = wintypes.HWND(
+            activation_hwnd_value
+        )
+
+        activation_pid = wintypes.DWORD()
+
+        activation_thread = int(
+            user32.GetWindowThreadProcessId(
+                activation_hwnd,
+                ctypes.byref(
+                    activation_pid
+                ),
+            )
+            or 0
+        )
+
+        if activation_thread <= 0:
+            raise WindowBindingStale(
+                "The foreground root no longer has a valid Windows thread."
+            )
+
+        user32.ShowWindow(
+            activation_hwnd,
+            9,
+        )
+
+        foreground_before = int(
+            user32.GetForegroundWindow()
+            or 0
+        )
 
         foreground_pid = wintypes.DWORD()
         foreground_thread = 0
+
         if foreground_before:
             foreground_thread = int(
                 user32.GetWindowThreadProcessId(
-                    wintypes.HWND(foreground_before),
-                    ctypes.byref(foreground_pid),
+                    wintypes.HWND(
+                        foreground_before
+                    ),
+                    ctypes.byref(
+                        foreground_pid
+                    ),
                 )
                 or 0
             )
 
-        current_thread = int(kernel32.GetCurrentThreadId() or 0)
+        current_thread = int(
+            kernel32.GetCurrentThreadId()
+            or 0
+        )
+
         attached_target = False
         attached_foreground = False
 
         try:
-            if target_thread and target_thread != current_thread:
+
+            if (
+                activation_thread
+                and activation_thread
+                != current_thread
+            ):
                 attached_target = bool(
                     user32.AttachThreadInput(
                         current_thread,
-                        target_thread,
+                        activation_thread,
                         True,
                     )
                 )
+
             if (
                 foreground_thread
-                and foreground_thread != current_thread
-                and foreground_thread != target_thread
+                and foreground_thread
+                != current_thread
+                and foreground_thread
+                != activation_thread
             ):
                 attached_foreground = bool(
                     user32.AttachThreadInput(
@@ -666,30 +878,71 @@ class ComputerExecutor:
                     )
                 )
 
-            deadline = time.monotonic() + timeout
+            deadline = (
+                time.monotonic()
+                + timeout
+            )
+
             while True:
-                user32.BringWindowToTop(target_hwnd)
-                user32.SetActiveWindow(target_hwnd)
-                user32.SetForegroundWindow(target_hwnd)
-                foreground = int(user32.GetForegroundWindow() or 0)
-                if foreground == binding.hwnd:
-                    break
-                if time.monotonic() >= deadline:
-                    raise WindowBindingUnavailable(
-                        "Windows did not grant foreground to the exact bound window."
+
+                user32.BringWindowToTop(
+                    activation_hwnd
+                )
+
+                user32.SetActiveWindow(
+                    activation_hwnd
+                )
+
+                user32.SetForegroundWindow(
+                    activation_hwnd
+                )
+
+                foreground = int(
+                    user32.GetForegroundWindow()
+                    or 0
+                )
+
+                foreground_root = (
+                    root_window_handle(
+                        foreground
                     )
-                self._sleep(poll)
+                    if foreground
+                    else 0
+                )
+
+                if (
+                    foreground
+                    == activation_hwnd_value
+                    or foreground_root
+                    == activation_hwnd_value
+                ):
+                    break
+
+                if (
+                    time.monotonic()
+                    >= deadline
+                ):
+                    raise WindowBindingUnavailable(
+                        "Windows did not grant foreground to the exact bound application root."
+                    )
+
+                self._sleep(
+                    poll
+                )
+
         finally:
+
             if attached_foreground:
                 user32.AttachThreadInput(
                     current_thread,
                     foreground_thread,
                     False,
                 )
+
             if attached_target:
                 user32.AttachThreadInput(
                     current_thread,
-                    target_thread,
+                    activation_thread,
                     False,
                 )
 
@@ -704,28 +957,287 @@ class ComputerExecutor:
         spec: AppSpec,
         pid: int,
     ) -> WindowBinding:
-        """Wait briefly for the exact process Qronos launched to expose a window."""
+        """
+        Bind an exact packaged-app PID only after its content HWND settles.
+
+        A packaged application can initially expose its process-owned HWND as
+        a top-level window, then reparent that SAME content HWND underneath a
+        hosting frame such as ApplicationFrameHost.
+
+        Important consequence:
+        after hosting completes, top-level enumeration may no longer contain
+        the activated process HWND even though that exact HWND remains alive
+        and is the correct UIA content root.
+
+        Therefore:
+          1. acquire the first trustworthy exact-PID content HWND;
+          2. retain that exact capability while hosting/layout settles;
+          3. once stable, issue a fresh binding DIRECTLY from its verified
+             snapshot rather than performing another top-level enumeration.
+        """
+
         last_error: Exception | None = None
-        for attempt in range(self._launch_binding_attempts):
+        binding: WindowBinding | None = None
+
+
+        # ----------------------------------------------------
+        # Stage 1:
+        # acquire the early exact-PID content HWND while it is
+        # still discoverable from top-level enumeration.
+        # ----------------------------------------------------
+
+        for attempt in range(
+            self._launch_binding_attempts
+        ):
+
             try:
-                return self.bind_app_window(
+
+                binding = self.bind_app_window(
                     spec.app_id,
                     require_foreground=False,
                     expected_pid=pid,
                 )
+
+                break
+
+
             except (
                 WindowBindingUnavailable,
                 WindowBindingAmbiguous,
                 WindowBindingStale,
             ) as exc:
-                last_error = exc
-                if attempt + 1 < self._launch_binding_attempts:
-                    self._sleep(self._launch_binding_poll_seconds)
 
-        detail = str(last_error) if last_error is not None else "no window was observed"
+                last_error = exc
+
+                if (
+                    attempt + 1
+                    < self._launch_binding_attempts
+                ):
+                    self._sleep(
+                        self._launch_binding_poll_seconds
+                    )
+
+
+        if binding is None:
+
+            detail = (
+                str(last_error)
+                if last_error is not None
+                else "no window was observed"
+            )
+
+            raise RuntimeError(
+                f"{spec.display_name} activated as pid={pid}, "
+                "but Qronos could not acquire a trustworthy "
+                f"content window for that exact process: {detail}"
+            )
+
+
+        required = (
+            self._launch_binding_settle_observations
+        )
+
+        previous_signature = None
+        stable_count = 0
+
+
+        # ----------------------------------------------------
+        # Stage 2:
+        # retain/revalidate SAME HWND through host reparenting.
+        # ----------------------------------------------------
+
+        for attempt in range(
+            self._launch_binding_attempts
+        ):
+
+            try:
+
+                snapshot = (
+                    self._window_binder.revalidate(
+                        binding,
+                        require_foreground=False,
+                        require_same_layout=False,
+                    )
+                )
+
+
+                # Compatibility with narrow historical test doubles which
+                # return opaque sentinel objects instead of WindowSnapshot.
+                if not isinstance(
+                    snapshot,
+                    WindowSnapshot,
+                ):
+                    return binding
+
+
+                # Exact activated process must remain the content owner.
+                if int(snapshot.pid) != int(pid):
+                    raise WindowBindingStale(
+                        "Packaged content HWND no longer belongs to "
+                        "the exact activated PID."
+                    )
+
+
+                signature = (
+                    _packaged_window_settlement_signature(
+                        snapshot
+                    )
+                )
+
+
+                if signature == previous_signature:
+
+                    stable_count += 1
+
+                else:
+
+                    previous_signature = (
+                        signature
+                    )
+
+                    stable_count = 1
+
+
+                if stable_count >= required:
+
+                    # ----------------------------------------
+                    # CRITICAL:
+                    # DO NOT call bind_app_window() here.
+                    #
+                    # Once ApplicationFrameHost has adopted
+                    # the content HWND it may no longer appear
+                    # in top-level enumeration.
+                    #
+                    # Bind directly from the exact snapshot we
+                    # have continuously revalidated.
+                    # ----------------------------------------
+
+                    final_binding = (
+                        self._window_binder.bind_snapshot(
+                            snapshot,
+                            app_id=spec.app_id,
+                            display_name=spec.display_name,
+                            require_foreground=False,
+                        )
+                    )
+
+
+                    final_snapshot = (
+                        self._window_binder.revalidate(
+                            final_binding,
+                            require_foreground=False,
+                            require_same_layout=True,
+                        )
+                    )
+
+
+                    if not isinstance(
+                        final_snapshot,
+                        WindowSnapshot,
+                    ):
+                        return final_binding
+
+
+                    if int(
+                        final_snapshot.pid
+                    ) != int(pid):
+
+                        raise WindowBindingStale(
+                            "Final packaged binding no longer belongs "
+                            "to the exact activated PID."
+                        )
+
+
+                    final_signature = (
+                        _packaged_window_settlement_signature(
+                            final_snapshot
+                        )
+                    )
+
+
+                    if (
+                        final_signature
+                        == signature
+                    ):
+                        return final_binding
+
+
+                    # Hosting/layout changed during final capability issue.
+                    # Continue from the newly verified exact HWND instead of
+                    # guessing or searching another window.
+                    binding = (
+                        final_binding
+                    )
+
+                    previous_signature = (
+                        final_signature
+                    )
+
+                    stable_count = 1
+
+
+            except (
+                WindowBindingUnavailable,
+                WindowBindingAmbiguous,
+                WindowBindingStale,
+            ) as exc:
+
+                last_error = exc
+                previous_signature = None
+                stable_count = 0
+
+
+                # Only attempt top-level exact-PID reacquisition if the
+                # original capability itself became stale/disappeared.
+                #
+                # If reparenting merely removed it from top-level enumeration,
+                # the normal revalidate path above continues to work and this
+                # branch is never reached.
+                try:
+
+                    binding = (
+                        self.bind_app_window(
+                            spec.app_id,
+                            require_foreground=False,
+                            expected_pid=pid,
+                        )
+                    )
+
+                except (
+                    WindowBindingUnavailable,
+                    WindowBindingAmbiguous,
+                    WindowBindingStale,
+                ) as reacquire_exc:
+
+                    last_error = (
+                        reacquire_exc
+                    )
+
+
+            if (
+                attempt + 1
+                < self._launch_binding_attempts
+            ):
+
+                self._sleep(
+                    self._launch_binding_poll_seconds
+                )
+
+
+        detail = (
+            str(last_error)
+            if last_error is not None
+            else (
+                "the exact content HWND did not remain stable for "
+                f"{required} consecutive observations"
+            )
+        )
+
+
         raise RuntimeError(
-            f"{spec.display_name} activated as pid={pid}, but Qronos could not bind "
-            f"a trustworthy window for that exact process: {detail}"
+            f"{spec.display_name} activated as pid={pid}, "
+            "but its exact content window did not settle safely "
+            f"before timeout: {detail}"
         )
 
     def prepare(self, action: ComputerAction) -> PreparedComputerAction:

@@ -53,6 +53,7 @@ MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_VIRTUALDESK = 0x4000
 MOUSEEVENTF_ABSOLUTE = 0x8000
 
@@ -100,6 +101,12 @@ def _user32():
     user32.SendInput.restype = wintypes.UINT
     user32.GetSystemMetrics.argtypes = [ctypes.c_int]
     user32.GetSystemMetrics.restype = ctypes.c_int
+    user32.GetCursorPos.argtypes = [
+        ctypes.POINTER(
+            wintypes.POINT
+        )
+    ]
+    user32.GetCursorPos.restype = wintypes.BOOL
     return user32
 
 
@@ -120,6 +127,30 @@ def virtual_desktop_bounds() -> tuple[int, int, int, int]:
         raise NativeInputUnavailable("Windows reported an invalid virtual desktop size.")
     return left, top, width, height
 
+
+
+def get_cursor_position() -> tuple[int, int]:
+    user32 = _user32()
+
+    point = wintypes.POINT()
+
+    if not user32.GetCursorPos(
+        ctypes.byref(
+            point
+        )
+    ):
+        raise NativeInputUnavailable(
+            "Windows could not read the current cursor position."
+        )
+
+    return (
+        int(
+            point.x
+        ),
+        int(
+            point.y
+        ),
+    )
 
 def absolute_mouse_coordinates(
     x: int,
@@ -176,6 +207,57 @@ def send_mouse_button(button: str, down: bool) -> None:
     )
     _send_one(event)
 
+
+
+def send_mouse_wheel(
+    steps: int,
+) -> None:
+    if (
+        isinstance(
+            steps,
+            bool,
+        )
+        or not isinstance(
+            steps,
+            int,
+        )
+    ):
+        raise ValueError(
+            "Mouse wheel steps must be an integer."
+        )
+
+    if steps == 0:
+        raise ValueError(
+            "Mouse wheel steps cannot be zero."
+        )
+
+    if abs(steps) > 20:
+        raise ValueError(
+            "One mouse wheel primitive is limited to 20 steps."
+        )
+
+    delta = int(
+        120 * steps
+    )
+
+    event = _INPUT(
+        type=INPUT_MOUSE,
+        mi=_MOUSEINPUT(
+            dx=0,
+            dy=0,
+            mouseData=(
+                delta
+                & 0xFFFFFFFF
+            ),
+            dwFlags=MOUSEEVENTF_WHEEL,
+            time=0,
+            dwExtraInfo=0,
+        ),
+    )
+
+    _send_one(
+        event
+    )
 
 def virtual_key_code(key: str) -> int:
     name = str(key or "").strip().lower()

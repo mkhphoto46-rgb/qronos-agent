@@ -122,12 +122,63 @@ function formatTimestamp(
   );
 }
 
+function friendlyRuntimeErrorText(
+  raw: string,
+) {
+  const value =
+    raw.trim();
+
+  const lowered =
+    value.toLowerCase();
+
+  if (
+    lowered.includes(
+      "local brain model is not installed",
+    ) ||
+    lowered.includes(
+      "model is not installed",
+    )
+  ) {
+    return "??? ???? ???????? Qronos ??? ??? ????? ??? ????.";
+  }
+
+  if (
+    lowered.includes(
+      "local brain is unavailable",
+    ) ||
+    lowered.includes(
+      "local brain request failed",
+    ) ||
+    lowered.includes(
+      "could not send request to model",
+    ) ||
+    lowered.includes(
+      "connectionerror",
+    ) ||
+    lowered.includes(
+      "httpconnectionpool",
+    ) ||
+    lowered.includes(
+      "127.0.0.1:11434",
+    ) ||
+    lowered.includes(
+      "winerror 10061",
+    )
+  ) {
+    return "??? ???? Qronos ?? ????? ????? ????? ??? ???? ???? ???.";
+  }
+
+  return value;
+}
+
 function runtimeErrorText(
   error: unknown,
 ) {
-  return error instanceof Error
-    ? error.message
-    : String(error);
+  return friendlyRuntimeErrorText(
+    error instanceof Error
+      ? error.message
+      : String(error),
+  );
 }
 
 function publish(
@@ -525,7 +576,9 @@ function handleRuntimeEvent(
         : "";
 
   const responseText =
-    rawResponse.trim();
+    friendlyRuntimeErrorText(
+      rawResponse,
+    );
 
   if (!responseText) {
     return;

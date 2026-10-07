@@ -315,6 +315,7 @@ def normalise_qronos_invocation(transcript: str) -> str:
 
 
 
+
 def _voice_action_transcript_quality(text: str) -> int:
     """Score action-command structure without trying to repair arbitrary prose."""
     n = re.sub(r"[\s\u200c]+", " ", (text or "").strip().lower())
@@ -398,6 +399,203 @@ def _windows_control_route_promotion(text: str) -> bool:
         return False
     return True
 
+
+
+def _calculator_action_candidate(
+    text: str,
+    last_app_id: str | None = None,
+) -> str:
+    value = str(
+        text
+        or ""
+    )
+
+    value = (
+        value
+        .replace("\u200c", " ")
+        .replace("\u064a", "\u06cc")
+        .replace("\u0643", "\u06a9")
+        .lower()
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    ).strip()
+
+    aliases = (
+        "\u06a9\u0644\u06a9\u0648\u0644\u06cc\u062a\u0631",
+        "\u06a9\u0627\u0644\u06a9\u0648\u0644\u06cc\u062a\u0631",
+        "\u06a9\u0644\u06a9\u06cc\u0648\u0644\u06cc\u062a\u0648\u0631",
+        "\u06a9\u0644\u06a9\u06cc\u0644\u06cc\u062a\u0648\u0631",
+        "\u06a9\u0644\u06a9\u0648\u0644\u0627\u062a\u0648\u0631",
+    )
+
+    for alias in aliases:
+        value = value.replace(
+            alias,
+            "\u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628",
+        )
+
+    replacements = (
+        (
+            "\u0628\u0647 \u0627\u0636\u0627\u0641\u0647",
+            "\u0628\u0647 \u0639\u0644\u0627\u0648\u0647",
+        ),
+        (
+            "\u0632\u0628\u062f\u0627\u0631",
+            "\u0636\u0631\u0628\u062f\u0631",
+        ),
+        (
+            "\u0632\u0628\u062f\u0631\u0647",
+            "\u0636\u0631\u0628\u062f\u0631",
+        ),
+        (
+            "\u0632\u0628\u062f\u0631",
+            "\u0636\u0631\u0628\u062f\u0631",
+        ),
+        (
+            "\u0632\u0628 \u062f\u0631",
+            "\u0636\u0631\u0628\u062f\u0631",
+        ),
+        (
+            "\u0632 \u0628 \u062f\u0631",
+            "\u0636\u0631\u0628\u062f\u0631",
+        ),
+        (
+            "\u0630\u0631 \u0628\u0647 \u062f\u0631",
+            "\u0636\u0631\u0628\u062f\u0631",
+        ),
+        (
+            "\u0636\u0631\u0628 \u062f\u0631",
+            "\u0636\u0631\u0628\u062f\u0631",
+        ),
+        (
+            "\u062f\u0648\u0631 \u0648",
+            "\u062f\u0648 \u0631\u0648",
+        ),
+    )
+
+    for source, target in replacements:
+        value = value.replace(
+            source,
+            target,
+        )
+
+    explicit = any(
+        marker in value
+        for marker in (
+            "\u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628",
+            "calculator",
+            "calc",
+        )
+    )
+
+    if (
+        not explicit
+        and last_app_id == "calculator"
+    ):
+        value = (
+            "\u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628 "
+            + value
+        )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        value,
+    ).strip()
+
+
+def _looks_like_calculator_semantic_action(
+    text: str,
+    last_app_id: str | None = None,
+) -> bool:
+    candidate = (
+        _calculator_action_candidate(
+            text,
+            last_app_id,
+        )
+    )
+
+    explicit = any(
+        marker in candidate
+        for marker in (
+            "\u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628",
+            "calculator",
+            "calc",
+        )
+    )
+
+    operators = (
+        "\u0628\u0647 \u0639\u0644\u0627\u0648\u0647",
+        "\u0628\u0639\u0644\u0627\u0648\u0647",
+        "\u062c\u0645\u0639",
+        "\u0645\u0646\u0647\u0627\u06cc",
+        "\u0636\u0631\u0628",
+        "\u0636\u0631\u0628\u062f\u0631",
+        "\u062a\u0642\u0633\u06cc\u0645",
+        "plus",
+        "minus",
+        "multiply",
+        "times",
+        "divide",
+        "\u00d7",
+    )
+
+    number_words = (
+        "\u0635\u0641\u0631",
+        "\u06cc\u06a9",
+        "\u062f\u0648",
+        "\u0633\u0647",
+        "\u0686\u0647\u0627\u0631",
+        "\u067e\u0646\u062c",
+        "\u0634\u0634",
+        "\u0647\u0641\u062a",
+        "\u0647\u0634\u062a",
+        "\u0646\u0647",
+    )
+
+    has_operator = any(
+        marker in candidate
+        for marker in operators
+    )
+
+    has_number = (
+        any(
+            char.isdigit()
+            for char in candidate
+        )
+        or any(
+            word in candidate
+            for word in number_words
+        )
+    )
+
+    imperative = any(
+        marker in candidate
+        for marker in (
+            " \u06a9\u0646",
+            " \u0628\u06a9\u0646",
+            " \u0628\u06a9\u0646\u06cc",
+            " \u0628\u06a9\u0646\u06cc\u0645",
+            " \u0628\u0632\u0646",
+            "\u0645\u0633\u0627\u0648\u06cc",
+            "\u062d\u0633\u0627\u0628 \u06a9\u0646",
+        )
+    )
+
+    if not has_operator or not has_number:
+        return False
+
+    if explicit:
+        return True
+
+    return (
+        last_app_id == "calculator"
+        and imperative
+    )
 
 def _computer_capability_response() -> str:
     return (
@@ -1057,6 +1255,7 @@ class QronosRuntime:
         self.file_executor: FileExecutor | None = None
         self.file_resolver: KnownFolderFileResolver | None = None
         self.computer_executor: ComputerExecutor | None = None
+        self._last_computer_app_id: str | None = None
         self.paint_reference_provider: PaintReferenceProvider = (
             paint_reference_provider
             if paint_reference_provider is not None
@@ -2925,6 +3124,252 @@ class QronosRuntime:
         report["voiceComputerDeferred"] = False
         return "نقاشی در Paint کامل یا تأیید نشد؛ هیچ retry خودکاری انجام نشد."
 
+    def _begin_text_calculator_semantic_action(
+        self,
+        text: str,
+        request_id: str,
+        started_at: float,
+    ) -> bool:
+        if not _looks_like_calculator_semantic_action(
+            text,
+            self._last_computer_app_id,
+        ):
+            return False
+
+        candidate = (
+            _calculator_action_candidate(
+                text,
+                self._last_computer_app_id,
+            )
+        )
+
+        try:
+            from core.calculator_semantic import (
+                CalculatorSemanticExecutor,
+                CalculatorSemanticParseError,
+                CalculatorSemanticPermissionRequired,
+                parse_calculator_semantic_command,
+            )
+        except Exception:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "????? ?????? ????? ???? ?? Runtime ???? ????? ????."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        try:
+            plan = (
+                parse_calculator_semantic_command(
+                    candidate
+                )
+            )
+
+        except CalculatorSemanticParseError:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "????? ????? ???? ?? ????? ????? "
+                    "??? ????? ?????? ???? ???? ????."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        self._ensure_computer_runtime()
+
+        if self.computer_executor is None:
+            raise RuntimeError(
+                "Qronos computer executor did not prepare correctly."
+            )
+
+        executor = CalculatorSemanticExecutor(
+            self.computer_executor
+        )
+
+        try:
+            run = executor.execute(
+                plan,
+                voice_confirmed=False,
+            )
+
+        except CalculatorSemanticPermissionRequired:
+            self._finish_text_file_action(
+                request_id=request_id,
+                response=(
+                    "??? ????? ????? ???? ??? ???? ???? "
+                    "?? ????? Voice ???? ????."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        except Exception:
+            self._fail_text_file_action(
+                request_id=request_id,
+                error=(
+                    "????? ????? ???? ???? ?? ????? ???."
+                ),
+                started_at=started_at,
+            )
+            return True
+
+        self._last_computer_app_id = (
+            "calculator"
+        )
+
+        self._finish_text_file_action(
+            request_id=request_id,
+            response=(
+                "????? ??. ????? "
+                f"{run.result_text} ??."
+            ),
+            started_at=started_at,
+        )
+
+        return True
+
+
+    def _execute_voice_calculator_semantic_action(
+        self,
+        transcript: str,
+        report: dict[str, Any],
+    ) -> str | None:
+        if not _looks_like_calculator_semantic_action(
+            transcript,
+            self._last_computer_app_id,
+        ):
+            return None
+
+        candidate = (
+            _calculator_action_candidate(
+                transcript,
+                self._last_computer_app_id,
+            )
+        )
+
+        try:
+            from core.calculator_semantic import (
+                CalculatorSemanticExecutor,
+                CalculatorSemanticParseError,
+                CalculatorSemanticPermissionRequired,
+                parse_calculator_semantic_command,
+            )
+        except Exception:
+            report[
+                "voiceComputerDeferred"
+            ] = False
+
+            return (
+                "????? ?????? ????? ???? ?? Runtime ???? ????? ????."
+            )
+
+        try:
+            plan = (
+                parse_calculator_semantic_command(
+                    candidate
+                )
+            )
+
+        except CalculatorSemanticParseError:
+            report[
+                "voiceComputerDeferred"
+            ] = False
+
+            return (
+                "????? ????? ???? ?? ????? ????? "
+                "??? ????? ?????? ???? ???? ????."
+            )
+
+        self._ensure_computer_runtime()
+
+        if self.computer_executor is None:
+            raise RuntimeError(
+                "Qronos computer executor did not prepare correctly."
+            )
+
+        executor = CalculatorSemanticExecutor(
+            self.computer_executor
+        )
+
+        try:
+            run = executor.execute(
+                plan,
+                voice_confirmed=True,
+            )
+
+        except CalculatorSemanticPermissionRequired:
+            report[
+                "voiceComputerNeedsOtherApproval"
+            ] = True
+
+            report[
+                "voiceComputerDeferred"
+            ] = False
+
+            return (
+                "???? ???? ????? ????? ??? ????? ????? ???? ?? ???????."
+            )
+
+        except Exception:
+            report[
+                "voiceComputerFailed"
+            ] = True
+
+            report[
+                "voiceComputerFailure"
+            ] = (
+                "Calculator semantic execution failed."
+            )
+
+            report[
+                "voiceComputerDeferred"
+            ] = False
+
+            return (
+                "????? ????? ???? ???? ?? ????? ???."
+            )
+
+        self._last_computer_app_id = (
+            "calculator"
+        )
+
+        report[
+            "voiceComputerExecuted"
+        ] = True
+
+        report[
+            "voiceComputerDeferred"
+        ] = False
+
+        report[
+            "computerOperation"
+        ] = "calculator_uia_sequence"
+
+        report[
+            "computerAppId"
+        ] = "calculator"
+
+        report[
+            "calculatorExpression"
+        ] = run.expression
+
+        report[
+            "calculatorResult"
+        ] = run.result_text
+
+        report[
+            "calculatorDisplay"
+        ] = run.display_name
+
+        return (
+            "????? ??. ????? "
+            f"{run.result_text} ??."
+        )
+
+
     def _begin_text_computer_action(
         self,
         text: str,
@@ -3071,6 +3516,16 @@ class QronosRuntime:
                 "Qronos computer executor did not prepare correctly."
             )
 
+        calculator_response = (
+            self._execute_voice_calculator_semantic_action(
+                transcript,
+                report,
+            )
+        )
+
+        if calculator_response is not None:
+            return calculator_response
+
         try:
             action = parse_computer_action(
                 transcript,
@@ -3151,7 +3606,6 @@ class QronosRuntime:
 
         report["voiceComputerExecuted"] = True
         report["voiceComputerDeferred"] = False
-
         app_name = self.computer_executor.display_name_for_app_id(
             action.app_id,
         )
@@ -3603,6 +4057,13 @@ class QronosRuntime:
                     text=cleaned_text,
                 ),
             )
+
+            if self._begin_text_calculator_semantic_action(
+                cleaned_text,
+                cleaned_request_id,
+                started,
+            ):
+                return
 
             route = self.task_router.route(
                 cleaned_text
@@ -4894,6 +5355,8 @@ class QronosRuntime:
             not self._wake_stop.is_set()
             and self.conversation_session is not None
             and self.conversation_session.is_active
+            and self.pending_look is None
+            and self.pending_paint_draw is None
         )
 
     def _wake_listener_loop(self) -> None:
@@ -6074,6 +6537,26 @@ class QronosRuntime:
                 routed_task_type,
                 routing_shadow,
             )
+
+            if _looks_like_calculator_semantic_action(
+                transcript,
+                self._last_computer_app_id,
+            ):
+                routed_task_type = (
+                    TaskType.COMPUTER
+                )
+
+                selected_task_type = (
+                    TaskType.COMPUTER
+                )
+
+                compute_promotion = dict(
+                    compute_promotion
+                )
+
+                compute_promotion[
+                    "calculatorLocalSemanticRoute"
+                ] = True
 
             report["route"] = (
                 routed_task_type.value
@@ -7381,11 +7864,49 @@ def handle_action(
         return
 
     if action_id == LOOK_AT_SCREEN_ACTION:
+        raw_data = payload.get(
+            "data",
+            {},
+        )
+
+        if raw_data is None:
+            raw_data = {}
+
+        if not isinstance(
+            raw_data,
+            dict,
+        ):
+            raise ValueError(
+                "Look-at-screen action data must be an object."
+            )
+
+        # Backward-compatible fallback for older direct bridge tests.
+        source = (
+            raw_data
+            if raw_data
+            else payload
+        )
+
         worker = threading.Thread(
             target=lambda: runtime.look_at_screen(
-                approved=bool(payload.get("approved", False)),
-                question=str(payload.get("question", "")),
-                window_only=bool(payload.get("windowOnly", False)),
+                approved=bool(
+                    source.get(
+                        "approved",
+                        False,
+                    )
+                ),
+                question=str(
+                    source.get(
+                        "question",
+                        "",
+                    )
+                ),
+                window_only=bool(
+                    source.get(
+                        "windowOnly",
+                        False,
+                    )
+                ),
             ),
             name="qronos-look-at-screen",
             daemon=True,

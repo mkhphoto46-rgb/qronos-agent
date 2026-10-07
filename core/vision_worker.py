@@ -42,8 +42,8 @@ from core.task_router import TaskType
 from core.screen_capture import Capture
 from core.vision_grounding import (
     DEFAULT_MIN_CONFIDENCE,
-    GROUNDING_RESPONSE_SCHEMA,
     GroundedTarget,
+    grounding_response_schema,
     ground_structured_response,
     grounding_prompt,
     validate_grounding_capture,
@@ -213,7 +213,10 @@ def brain_ground_fn(
                 num_predict=384,
                 num_ctx=context,
                 keep_alive="0",
-                response_format=GROUNDING_RESPONSE_SCHEMA,
+                response_format=grounding_response_schema(
+                    capture.image.width,
+                    capture.image.height,
+                ),
             )
         finally:
             runtime.stop_model(name)

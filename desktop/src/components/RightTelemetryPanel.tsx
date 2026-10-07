@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useMemo,
   useRef,
@@ -1733,6 +1734,10 @@ function RightTelemetryPanel() {
 
     const refresh =
       async () => {
+        if (document.hidden) {
+          return;
+        }
+
         if (busy) {
           return;
         }
@@ -1815,7 +1820,7 @@ function RightTelemetryPanel() {
         () => {
           void refresh();
         },
-        1000,
+        3000,
       );
 
     return () => {
@@ -2400,4 +2405,4 @@ function RightTelemetryPanel() {
   );
 }
 
-export default RightTelemetryPanel;
+export default memo(RightTelemetryPanel);

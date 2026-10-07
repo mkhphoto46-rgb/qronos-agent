@@ -8,6 +8,7 @@ window identity, layout, focus, or capture geometry changes.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 import math
@@ -95,6 +96,49 @@ GROUNDING_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["status", "image_width", "image_height", "candidates"],
     "additionalProperties": False,
 }
+
+
+def grounding_response_schema(
+    image_width: int,
+    image_height: int,
+) -> dict[str, Any]:
+    """Return a grounding schema locked to the exact model image dimensions."""
+
+    if isinstance(image_width, bool) or isinstance(image_height, bool):
+        raise ValueError("Grounding image dimensions must be integers.")
+
+    width = int(image_width)
+    height = int(image_height)
+
+    if width <= 0 or height <= 0:
+        raise ValueError("Grounding image dimensions must be positive.")
+
+    schema = deepcopy(GROUNDING_RESPONSE_SCHEMA)
+
+    properties = schema["properties"]
+
+    # Do not ask the vision model to remember/guess the image dimensions.
+    # Constrain them in the structured output grammar itself.
+    properties["image_width"] = {
+        "type": "integer",
+        "enum": [width],
+    }
+    properties["image_height"] = {
+        "type": "integer",
+        "enum": [height],
+    }
+
+    candidate = properties["candidates"]["items"]["properties"]
+
+    candidate["point"]["properties"]["x"]["maximum"] = width - 1
+    candidate["point"]["properties"]["y"]["maximum"] = height - 1
+
+    candidate["bbox"]["properties"]["x"]["maximum"] = width - 1
+    candidate["bbox"]["properties"]["y"]["maximum"] = height - 1
+    candidate["bbox"]["properties"]["width"]["maximum"] = width
+    candidate["bbox"]["properties"]["height"]["maximum"] = height
+
+    return schema
 
 
 @dataclass(frozen=True)
@@ -195,8 +239,10 @@ def grounding_prompt(target: str, *, image_width: int, image_height: int) -> str
         "target use status='found' and exactly one candidate. If it is not "
         "visible use status='not_found' with no candidates. If two or more "
         "targets are plausibly the requested target use status='ambiguous' and "
-        "include those candidates rather than guessing. bbox uses x,y,width,height "
-        "and the point must lie inside that bbox. Never infer off-screen UI or "
+        "include those candidates rather than guessing. bbox uses x,y,width,height. "
+        f"Every bbox must stay fully inside the exact image: x + width <= {image_width} "
+        f"and y + height <= {image_height}. x and y must be >= 0. "
+        "The point must lie inside that bbox. Never infer off-screen UI or "
         "invent coordinates.\n\n"
         f"Requested target: {wanted}"
     )

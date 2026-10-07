@@ -632,6 +632,31 @@ class TestStructuredGroundingModelSeam(unittest.TestCase):
         self.assertEqual(len(runtime.calls), 1)
         call = runtime.calls[0]
         self.assertIsNotNone(call["response_format"])
+
+        schema = call["response_format"]
+
+        self.assertEqual(
+            schema["properties"]["image_width"]["enum"],
+            [1280],
+        )
+        self.assertEqual(
+            schema["properties"]["image_height"]["enum"],
+            [720],
+        )
+
+        candidate = (
+            schema["properties"]["candidates"]["items"]["properties"]
+        )
+
+        self.assertEqual(
+            candidate["point"]["properties"]["x"]["maximum"],
+            1279,
+        )
+        self.assertEqual(
+            candidate["point"]["properties"]["y"]["maximum"],
+            719,
+        )
+
         self.assertFalse(call["think"])
         self.assertEqual(call["messages"][0].images, (capture.image,))
         self.assertIn("1280x720", call["messages"][0].content)

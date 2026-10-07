@@ -16,6 +16,7 @@ from core.keyboard_control import KeyboardController
 from core.mouse_button import MouseButton, MouseButtonController
 from core.mouse_click import MouseClickController
 from core.mouse_hover import MouseHoverController
+from core.mouse_wheel import MouseWheelController
 from core.window_binding import (
     WindowBinder,
     WindowBinding,
@@ -384,6 +385,245 @@ def test_pointer_stroke_can_resample_sparse_segments_and_settle(monkeypatch):
     ]
     assert buttons == [("left", True), ("left", False)]
     assert sleeps == [0.012, 0.015]
+
+
+def test_smooth_pointer_motion_is_bounded_and_ends_exactly_on_target():
+    binder = _Binder()
+    moves = []
+    sleeps = []
+
+    hover = MouseHoverController(
+        binder,
+        move_fn=lambda x, y: moves.append(
+            (
+                x,
+                y,
+            )
+        ),
+        cursor_fn=lambda: (
+            120,
+            120,
+        ),
+        sleep_fn=lambda seconds: sleeps.append(
+            seconds
+        ),
+    )
+
+    result = hover.smooth_hover(
+        _binding(),
+        420,
+        300,
+        authorization=_authorization(
+            _binding()
+        ),
+    )
+
+    assert len(
+        moves
+    ) > 2
+
+    assert moves[-1] == (
+        420,
+        300,
+    )
+
+    assert (
+        result.point.x,
+        result.point.y,
+    ) == (
+        420,
+        300,
+    )
+
+    assert all(
+        100 <= x < 500
+        and 100 <= y < 400
+        for x, y in moves
+    )
+
+    assert sleeps
+
+
+def test_smooth_motion_enters_authorized_region_before_animation():
+    binder = _Binder()
+    moves = []
+
+    hover = MouseHoverController(
+        binder,
+        move_fn=lambda x, y: moves.append(
+            (
+                x,
+                y,
+            )
+        ),
+        cursor_fn=lambda: (
+            900,
+            900,
+        ),
+        sleep_fn=lambda _seconds: None,
+    )
+
+    region = WindowRect(
+        150,
+        150,
+        350,
+        300,
+    )
+
+    hover.smooth_hover(
+        _binding(),
+        250,
+        220,
+        authorization=_authorization(
+            _binding(),
+            allowed_rect=region,
+        ),
+        allowed_rect=region,
+    )
+
+    assert moves
+
+    assert all(
+        region.left <= x < region.right
+        and region.top <= y < region.bottom
+        for x, y in moves
+    )
+
+    assert moves[-1] == (
+        250,
+        220,
+    )
+
+
+def test_keyboard_supports_paced_unicode_and_bounded_chords():
+    binder = _Binder()
+    typed = []
+    keys = []
+    sleeps = []
+
+    keyboard = KeyboardController(
+        binder,
+        text_fn=typed.append,
+        key_fn=lambda key, down: keys.append(
+            (
+                key,
+                down,
+            )
+        ),
+        sleep_fn=lambda seconds: sleeps.append(
+            seconds
+        ),
+    )
+
+    keyboard.type_text(
+        _binding(),
+        "abc",
+        authorization=_authorization(
+            _binding()
+        ),
+        interval_seconds=0.01,
+    )
+
+    keyboard.press_chord(
+        _binding(),
+        (
+            "ctrl",
+            "a",
+        ),
+        authorization=_authorization(
+            _binding()
+        ),
+    )
+
+    assert typed == [
+        "a",
+        "b",
+        "c",
+    ]
+
+    assert sleeps == [
+        0.01,
+        0.01,
+    ]
+
+    assert keys == [
+        (
+            "ctrl",
+            True,
+        ),
+        (
+            "a",
+            True,
+        ),
+        (
+            "a",
+            False,
+        ),
+        (
+            "ctrl",
+            False,
+        ),
+    ]
+
+
+def test_mouse_wheel_is_bounded_and_revalidated():
+    binder = _Binder()
+    moves = []
+    wheels = []
+
+    hover = MouseHoverController(
+        binder,
+        move_fn=lambda x, y: moves.append(
+            (
+                x,
+                y,
+            )
+        ),
+        cursor_fn=lambda: (
+            180,
+            180,
+        ),
+        sleep_fn=lambda _seconds: None,
+    )
+
+    wheel = MouseWheelController(
+        binder,
+        hover=hover,
+        wheel_fn=wheels.append,
+    )
+
+    result = wheel.scroll_at(
+        _binding(),
+        260,
+        220,
+        -3,
+        authorization=_authorization(
+            _binding()
+        ),
+    )
+
+    assert moves[-1] == (
+        260,
+        220,
+    )
+
+    assert wheels == [
+        -3,
+    ]
+
+    assert result.steps == -3
+
+
+def test_production_input_facade_enables_wheel_and_professional_motion():
+    capabilities = InputCapabilities.for_binder(
+        WindowBinder()
+    )
+
+    assert isinstance(
+        capabilities.wheel,
+        MouseWheelController,
+    )
+
 
 
 def test_pointer_stroke_rejects_invalid_fidelity_parameters():

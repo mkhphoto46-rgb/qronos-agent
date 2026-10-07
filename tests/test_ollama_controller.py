@@ -357,10 +357,7 @@ class TestOllamaController(unittest.TestCase):
 
         self.assertEqual(
             str(context.exception),
-            (
-                "Could not send request to model: qwen3:4b "
-                "(RequestException: connection refused)"
-            ),
+            "Qronos local Brain request failed.",
         )
 
     @patch("core.ollama_controller.requests.post")
@@ -383,10 +380,7 @@ class TestOllamaController(unittest.TestCase):
 
         self.assertEqual(
             str(context.exception),
-            (
-                "Could not send request to model: qwen3:4b "
-                "(Ollama HTTP 500: model runner process has terminated)"
-            ),
+            "Qronos local Brain request failed (HTTP 500).",
         )
 
 

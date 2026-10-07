@@ -69,6 +69,34 @@ class TaskRouter:
         "نقاشی کن",
     )
 
+    CALCULATOR_NAMES = _markers(
+        "calculator",
+        "calc",
+        "????? ????",
+        "??????????",
+        "?????????",
+        "????????",
+        "??????????",
+    )
+
+    CALCULATOR_ACTION_MARKERS = _markers(
+        "?? ?????",
+        "??????",
+        "???",
+        "plus",
+        "?????",
+        "minus",
+        "???",
+        "?????",
+        "?????",
+        "multiply",
+        "times",
+        "?????",
+        "divide",
+        "?????",
+        "equals",
+    )
+
     COMPUTER_KEYWORDS = _markers(
         "open",
         "close",
@@ -341,6 +369,12 @@ class TaskRouter:
                 reason="The request explicitly asks to draw in Microsoft Paint.",
             )
 
+        if self._looks_like_calculator_action(text):
+            return RouteDecision(
+                task_type=TaskType.COMPUTER,
+                reason="The request explicitly asks Calculator to perform an operation.",
+            )
+
         if self._contains_any(text, self.COMPUTER_KEYWORDS):
             return RouteDecision(
                 task_type=TaskType.COMPUTER,
@@ -362,6 +396,21 @@ class TaskRouter:
         return RouteDecision(
             task_type=TaskType.FAST,
             reason="The request appears suitable for fast handling.",
+        )
+
+    def _looks_like_calculator_action(
+        self,
+        text: str,
+    ) -> bool:
+        return (
+            self._contains_any(
+                text,
+                self.CALCULATOR_NAMES,
+            )
+            and self._contains_any(
+                text,
+                self.CALCULATOR_ACTION_MARKERS,
+            )
         )
 
     def _looks_like_paint_draw(self, text: str) -> bool:

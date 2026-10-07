@@ -28,6 +28,12 @@ class ComputerActionParserTests(unittest.TestCase):
             "notepad",
         )
 
+    def test_persian_natural_plural_open(self) -> None:
+        self.assert_open(
+            "\u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628 \u0631\u0648 \u0628\u0627\u0632 \u06a9\u0646\u06cc\u0645",
+            "calculator",
+        )
+
     def test_english_notepad(self) -> None:
         self.assert_open(
             "Open Notepad",

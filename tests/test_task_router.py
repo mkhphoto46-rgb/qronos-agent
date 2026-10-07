@@ -89,6 +89,14 @@ class TestPersianIsRouted(unittest.TestCase):
             TaskType.COMPUTER,
         )
 
+    def test_calculator_arithmetic_interaction_is_computer(self) -> None:
+        self.assertEqual(
+            self.router.route(
+                "??? ???????? ?? ?? ?? ????? ???? ??"
+            ).task_type,
+            TaskType.COMPUTER,
+        )
+
     def test_going_to_a_site_is_browser(self) -> None:
         self.assertEqual(
             self.router.route("برو به گوگل").task_type,

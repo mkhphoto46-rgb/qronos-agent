@@ -498,7 +498,7 @@ fn get_devices_cached(state: &TelemetryState) -> Vec<DeviceSnapshot> {
     let should_refresh = match cache.last_refresh {
         None => true,
 
-        Some(last) => last.elapsed() >= Duration::from_secs(8),
+        Some(last) => last.elapsed() >= Duration::from_secs(30),
     };
 
     if should_refresh {
@@ -647,6 +647,13 @@ fn open_device_properties(_instance_id: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(
+            tauri_plugin_single_instance::init(
+                |app, _args, _cwd| {
+                    show_main_window(app);
+                },
+            ),
+        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {

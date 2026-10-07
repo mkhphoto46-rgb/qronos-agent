@@ -1,5 +1,6 @@
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 from core.window_binding import (
     WindowBinder,
@@ -134,6 +135,63 @@ class WindowBindingTests(unittest.TestCase):
         with self.assertRaises(WindowBindingAmbiguous):
             binder.bind(paint_target())
 
+    def test_exact_snapshot_binding_avoids_same_process_window_ambiguity(self) -> None:
+        first = snapshot(
+            hwnd=101,
+            pid=501,
+            title="First Browser Window",
+        )
+        second = snapshot(
+            hwnd=102,
+            pid=501,
+            title="Second Browser Window",
+        )
+
+        windows = {
+            first.hwnd: first,
+            second.hwnd: second,
+        }
+
+        binder = WindowBinder(
+            enumerate_fn=lambda: (first, second),
+            snapshot_fn=lambda hwnd: windows.get(hwnd),
+        )
+
+        binding = binder.bind_snapshot(
+            second,
+            app_id="browser",
+            display_name=second.title,
+        )
+
+        self.assertEqual(binding.hwnd, 102)
+        self.assertEqual(binding.snapshot.pid, 501)
+        self.assertEqual(binding.app_id, "browser")
+
+
+    def test_exact_snapshot_binding_rejects_identity_change(self) -> None:
+        initial = snapshot(
+            hwnd=101,
+            pid=501,
+        )
+
+        changed = replace(
+            initial,
+            process_start_time_100ns=initial.process_start_time_100ns + 1,
+        )
+
+        binder = WindowBinder(
+            enumerate_fn=lambda: (initial,),
+            snapshot_fn=lambda hwnd: changed,
+        )
+
+        with self.assertRaises(WindowBindingStale):
+            binder.bind_snapshot(
+                initial,
+                app_id="example",
+                display_name="Example",
+            )
+
+
     def test_minimized_window_is_not_bindable(self) -> None:
         item = snapshot(minimized=True)
         binder = WindowBinder(
@@ -211,6 +269,54 @@ class WindowBindingTests(unittest.TestCase):
         current["value"] = background
         with self.assertRaisesRegex(WindowBindingStale, "foreground"):
             binder.revalidate(binding, require_foreground=True)
+
+    def test_hosted_content_window_accepts_matching_foreground_root(self) -> None:
+        initial = snapshot(
+            foreground=True
+        )
+
+        hosted = replace(
+            initial,
+            foreground=False,
+        )
+
+        current = {
+            "value":
+                initial
+        }
+
+        binder = WindowBinder(
+            enumerate_fn=lambda: (
+                initial,
+            ),
+            snapshot_fn=lambda hwnd:
+                current[
+                    "value"
+                ],
+        )
+
+        binding = binder.bind(
+            paint_target(),
+            require_foreground=True,
+        )
+
+        current[
+            "value"
+        ] = hosted
+
+        with patch(
+            "core.window_binding.window_is_foreground",
+            return_value=True,
+        ):
+            result = binder.revalidate(
+                binding,
+                require_foreground=True,
+            )
+
+        self.assertEqual(
+            result.hwnd,
+            hosted.hwnd,
+        )
 
     def test_missing_window_is_stale(self) -> None:
         initial = snapshot()

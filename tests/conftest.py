@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+import core.computer_executor as computer_executor
+
 
 @pytest.fixture(autouse=True)
 def isolate_qronos_permission_state(
@@ -23,7 +25,83 @@ def isolate_qronos_permission_state(
         "QRONOS_PERMISSION_POLICY_PATH",
         str(tmp_path / "permissions_v2.json"),
     )
+
     monkeypatch.setenv(
         "QRONOS_PERMISSION_AUDIT_PATH",
         str(tmp_path / "action_audit.jsonl"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def block_real_windows_computer_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Hard safety boundary for the automated test suite.
+
+    Normal unit/integration tests must never launch, close, focus, minimize,
+    maximize, or otherwise interact with applications installed on the real
+    developer machine.
+
+    Tests for computer-control behavior must inject fake launchers/openers/
+    window actions explicitly.
+
+    Without this boundary, Qronos dynamic application discovery can find a
+    real installed application such as Adobe Premiere Pro and a test can
+    accidentally launch it.
+    """
+
+    def blocked_side_effect(*args, **kwargs):
+        raise AssertionError(
+            "Pytest attempted a real Windows computer side effect. "
+            "This test must inject a fake launcher/opener/window/GUI boundary."
+        )
+
+    # Static executable launch, such as Notepad.
+    monkeypatch.setattr(
+        computer_executor,
+        "_default_launcher",
+        blocked_side_effect,
+    )
+
+    # Dynamically discovered executable launch, such as Premiere/Photoshop.
+    monkeypatch.setattr(
+        computer_executor,
+        "_launch_discovered_executable",
+        blocked_side_effect,
+    )
+
+    # Dynamically discovered Start Menu shortcut launch.
+    monkeypatch.setattr(
+        computer_executor,
+        "_launch_trusted_shortcut",
+        blocked_side_effect,
+    )
+
+    # Packaged application activation, such as Microsoft Paint.
+    monkeypatch.setattr(
+        computer_executor,
+        "activate_application",
+        blocked_side_effect,
+    )
+
+    # Opening real Windows Explorer locations.
+    monkeypatch.setattr(
+        computer_executor,
+        "_default_open_location",
+        blocked_side_effect,
+    )
+
+    # Real close/focus/minimize/maximize window operations.
+    monkeypatch.setattr(
+        computer_executor,
+        "_default_window_action",
+        blocked_side_effect,
+    )
+
+    # Real mouse/keyboard/GUI automation.
+    monkeypatch.setattr(
+        computer_executor,
+        "_default_gui_action",
+        blocked_side_effect,
     )

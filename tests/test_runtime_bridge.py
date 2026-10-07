@@ -634,6 +634,57 @@ class TestAudioSpectrum(unittest.TestCase):
         self.assertEqual(spectra[-1]["level"], 0.0)
 
 
+class TestPendingScreenApproval(unittest.TestCase):
+    def test_pending_screen_approval_suspends_followup_capture(self) -> None:
+        runtime = prepared_runtime()
+
+        runtime.conversation_session.start()
+        runtime.pending_look = (
+            "?? ??? ????? ???? ??"
+        )
+
+        self.assertFalse(
+            runtime._should_continue_followup_session()
+        )
+
+        runtime.pending_look = None
+
+        self.assertTrue(
+            runtime._should_continue_followup_session()
+        )
+
+
+class TestCalculatorCommandDetection(unittest.TestCase):
+    def test_real_persian_calculator_variants_are_local_actions(self) -> None:
+        self.assertTrue(
+            runtime_bridge._looks_like_calculator_semantic_action(
+                "\u062a\u0648\u06cc \u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628 \u062f\u0648 \u0631\u0648 \u0636\u0631\u0628\u062f\u0631 \u0686\u0647\u0627\u0631 \u0628\u06a9\u0646\u06cc"
+            )
+        )
+
+        self.assertTrue(
+            runtime_bridge._looks_like_calculator_semantic_action(
+                "\u062a\u0648\u06cc \u06a9\u0644\u06a9\u0648\u0644\u06cc\u062a\u0631 \u062f\u0648 \u0631\u0648 \u0632\u0628 \u062f\u0631 \u0686\u0647\u0627\u0631 \u0628\u06a9\u0646\u06cc\u0645"
+            )
+        )
+
+        candidate = (
+            runtime_bridge._calculator_action_candidate(
+                "\u062a\u0648\u06cc \u06a9\u0644\u06a9\u0648\u0644\u06cc\u062a\u0631 \u062f\u0648 \u0631\u0648 \u0628\u0647 \u0627\u0636\u0627\u0641\u0647 \u0686\u0647\u0627\u0631 \u0628\u06a9\u0646\u06cc\u0645"
+            )
+        )
+
+        self.assertIn(
+            "\u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628",
+            candidate,
+        )
+
+        self.assertIn(
+            "\u0628\u0647 \u0639\u0644\u0627\u0648\u0647",
+            candidate,
+        )
+
+
 class TestPushToTalkFailures(unittest.TestCase):
     def test_a_second_request_mid_turn_is_refused_not_queued(self) -> None:
         # Two overlapping turns would fight over one microphone. The refusal

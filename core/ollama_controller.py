@@ -452,70 +452,70 @@ class OllamaController(BrainRuntime):
         if response_format is not None:
             payload["format"] = response_format
 
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-                timeout=effective_timeout,
-            )
+        response = None
 
-            response.raise_for_status()
-
-        except requests.Timeout as exc:
-            raise TimeoutError(
-                (
-                    "Qronos Brain exceeded the "
-                    f"{effective_timeout:g}-second "
-                    f"safety deadline: {model_name}"
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/api/chat",
+                    json=payload,
+                    timeout=effective_timeout,
                 )
-            ) from exc
 
-        except requests.HTTPError as exc:
-            # A model that was never downloaded and a server that is not
-            # running produce the same sentence otherwise, and they send a
-            # person to two completely different places: one to `ollama pull`,
-            # the other to check whether anything is running at all.
-            if exc.response is not None and exc.response.status_code == 404:
+                response.raise_for_status()
+                break
+
+            except requests.ConnectionError as exc:
+                if (
+                    attempt == 0
+                    and self.ensure_ready(
+                        auto_start=True,
+                    )
+                ):
+                    continue
+
                 raise RuntimeError(
-                    f"The model {model_name} is not installed on this "
-                    "machine. Qronos downloads the models it needs; if this "
-                    "one is missing, that download has not happened yet."
+                    "Qronos local Brain is unavailable."
                 ) from exc
 
-            status = (
-                exc.response.status_code
-                if exc.response is not None
-                else "unknown"
-            )
-            detail = _safe_http_error_detail(
-                exc.response
-            )
-            suffix = (
-                f": {detail}"
-                if detail
-                else ""
-            )
+            except requests.Timeout as exc:
+                raise TimeoutError(
+                    (
+                        "Qronos Brain exceeded the "
+                        f"{effective_timeout:g}-second "
+                        "safety deadline."
+                    )
+                ) from exc
 
+            except requests.HTTPError as exc:
+                if (
+                    exc.response is not None
+                    and exc.response.status_code == 404
+                ):
+                    raise RuntimeError(
+                        "Qronos local Brain model is not installed."
+                    ) from exc
+
+                status = (
+                    exc.response.status_code
+                    if exc.response is not None
+                    else "unknown"
+                )
+
+                raise RuntimeError(
+                    "Qronos local Brain request failed "
+                    f"(HTTP {status})."
+                ) from exc
+
+            except requests.RequestException as exc:
+                raise RuntimeError(
+                    "Qronos local Brain request failed."
+                ) from exc
+
+        if response is None:
             raise RuntimeError(
-                "Could not send request to model: "
-                f"{model_name} (Ollama HTTP {status}{suffix})"
-            ) from exc
-
-        except requests.RequestException as exc:
-            detail = " ".join(
-                str(exc).split()
-            )[:600]
-            suffix = (
-                f": {detail}"
-                if detail
-                else ""
+                "Qronos local Brain is unavailable."
             )
-
-            raise RuntimeError(
-                "Could not send request to model: "
-                f"{model_name} "
-                f"({type(exc).__name__}{suffix})"
-            ) from exc
 
         data = response.json()
         message = data.get("message", {})

@@ -41,10 +41,22 @@ class MouseButtonController:
         *,
         hover: MouseHoverController | None = None,
         button_fn: ButtonFn = send_mouse_button,
+        smooth_motion: bool = False,
     ) -> None:
-        self._guard = BoundInputGuard(binder)
-        self._hover = hover if hover is not None else MouseHoverController(binder)
+        self._guard = BoundInputGuard(
+            binder
+        )
+        self._hover = (
+            hover
+            if hover is not None
+            else MouseHoverController(
+                binder
+            )
+        )
         self._button = button_fn
+        self._smooth_motion = bool(
+            smooth_motion
+        )
 
     def down_at(
         self,
@@ -110,7 +122,16 @@ class MouseButtonController:
     ) -> MouseButtonResult:
         if not isinstance(button, MouseButton):
             raise ValueError("button must be a MouseButton.")
-        hover_result = self._hover.hover(
+        move = (
+            self._hover.smooth_hover
+            if (
+                down
+                and self._smooth_motion
+            )
+            else self._hover.hover
+        )
+
+        hover_result = move(
             binding,
             x,
             y,

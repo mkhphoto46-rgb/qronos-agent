@@ -42,6 +42,7 @@ class ComputerRuntimeV1Tests(unittest.TestCase):
         )
 
         self.events = []
+
         self.runtime = QronosRuntime(
             notify=lambda event, status, message: self.events.append(
                 (event, status, message)
@@ -49,15 +50,25 @@ class ComputerRuntimeV1Tests(unittest.TestCase):
         )
 
         self.calls = []
+
         audit = ActionAuditLog(path=None)
         journal = UndoJournal(path=None)
+
         self.runtime.action_audit = audit
         self.runtime.undo_journal = journal
+
+        # Unit tests must never inspect or launch applications installed on
+        # the developer's real Windows machine.
+        #
+        # Without this isolation, a phrase such as "Premiere رو باز کن" may
+        # resolve the real Premiere installation through Start Menu / App Paths
+        # discovery and launch it during pytest.
         self.runtime.computer_executor = ComputerExecutor(
             audit=audit,
             journal=journal,
             launcher=self.launch,
             verification_delay_seconds=0,
+            dynamic_apps=False,
         )
 
     def launch(self, command):
@@ -92,6 +103,7 @@ class ComputerRuntimeV1Tests(unittest.TestCase):
 
     def test_explicit_voice_command_satisfies_voice_confirmation(self) -> None:
         report = {}
+
         response = self.runtime._execute_voice_computer_action(
             "نوت پد رو باز کن",
             report,
@@ -111,6 +123,7 @@ class ComputerRuntimeV1Tests(unittest.TestCase):
 
     def test_unsupported_app_stays_deferred_and_never_launches(self) -> None:
         report = {}
+
         response = self.runtime._execute_voice_computer_action(
             "Premiere رو باز کن",
             report,

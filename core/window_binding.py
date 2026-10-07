@@ -214,8 +214,22 @@ class WindowBinder:
             if expected_pid is not None and snapshot.pid != int(expected_pid):
                 continue
             score = _candidate_score(target, snapshot)
-            if score > 0 and (not require_foreground or snapshot.foreground):
-                candidates.append((score, snapshot))
+            foreground_ok = (
+                snapshot.foreground
+                or window_is_foreground(
+                    snapshot.hwnd
+                )
+            )
+            if score > 0 and (
+                not require_foreground
+                or foreground_ok
+            ):
+                candidates.append(
+                    (
+                        score,
+                        snapshot,
+                    )
+                )
 
         if not candidates:
             pid_detail = (
@@ -248,7 +262,15 @@ class WindowBinder:
             raise WindowBindingStale(
                 "The selected window stopped being usable while Qronos was binding to it."
             )
-        if require_foreground and not fresh.foreground:
+        if (
+            require_foreground
+            and not (
+                fresh.foreground
+                or window_is_foreground(
+                    fresh.hwnd
+                )
+            )
+        ):
             raise WindowBindingStale(
                 "The selected window lost focus while Qronos was binding to it."
             )
@@ -256,6 +278,80 @@ class WindowBinder:
         return WindowBinding(
             app_id=target.app_id,
             display_name=target.display_name,
+            snapshot=fresh,
+            identity_token=_identity_token(fresh),
+            layout_token=_layout_token(fresh),
+        )
+
+    def bind_snapshot(
+        self,
+        snapshot: WindowSnapshot,
+        *,
+        app_id: str,
+        display_name: str,
+        require_foreground: bool = False,
+    ) -> WindowBinding:
+        """
+        Bind the exact HWND represented by one previously enumerated snapshot.
+
+        This path is for cases where the caller already selected a concrete
+        visible window. It does not rediscover by process/title and therefore
+        cannot become ambiguous when one process owns multiple top-level
+        windows, as browsers commonly do.
+
+        The snapshot is never trusted blindly: HWND/process identity is read
+        again immediately before the binding capability is issued.
+        """
+        if not isinstance(snapshot, WindowSnapshot):
+            raise TypeError("snapshot must be a WindowSnapshot.")
+
+        clean_app_id = str(app_id or "").strip()
+        clean_display_name = str(display_name or "").strip()
+
+        if not clean_app_id:
+            raise ValueError("Exact window binding requires an app_id.")
+
+        if not clean_display_name:
+            raise ValueError("Exact window binding requires a display name.")
+
+        fresh = self._snapshot(snapshot.hwnd)
+
+        if fresh is None:
+            raise WindowBindingStale(
+                "The selected window no longer exists."
+            )
+
+        if _identity_tuple(fresh) != _identity_tuple(snapshot):
+            raise WindowBindingStale(
+                "The selected HWND/process identity changed before binding."
+            )
+
+        if (
+            not fresh.visible
+            or fresh.minimized
+            or not fresh.window_rect.usable
+            or not fresh.client_rect.usable
+        ):
+            raise WindowBindingStale(
+                "The selected window is no longer visible and usable."
+            )
+
+        if (
+            require_foreground
+            and not (
+                fresh.foreground
+                or window_is_foreground(
+                    fresh.hwnd
+                )
+            )
+        ):
+            raise WindowBindingStale(
+                "The selected window is not the foreground window."
+            )
+
+        return WindowBinding(
+            app_id=clean_app_id,
+            display_name=clean_display_name,
             snapshot=fresh,
             identity_token=_identity_token(fresh),
             layout_token=_layout_token(fresh),
@@ -277,7 +373,15 @@ class WindowBinder:
             )
         if not fresh.visible or fresh.minimized or not fresh.client_rect.usable:
             raise WindowBindingStale("The bound window is no longer visible and usable.")
-        if require_foreground and not fresh.foreground:
+        if (
+            require_foreground
+            and not (
+                fresh.foreground
+                or window_is_foreground(
+                    fresh.hwnd
+                )
+            )
+        ):
             raise WindowBindingStale("The bound window lost foreground focus.")
         if require_same_layout and _layout_token(fresh) != binding.layout_token:
             raise WindowBindingStale(
@@ -309,6 +413,11 @@ def _configure_user32(user32) -> None:
     user32.IsIconic.restype = wintypes.BOOL
     user32.GetForegroundWindow.argtypes = []
     user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+    ]
+    user32.GetAncestor.restype = wintypes.HWND
     user32.GetWindowThreadProcessId.argtypes = [
         wintypes.HWND,
         ctypes.POINTER(wintypes.DWORD),
@@ -330,6 +439,112 @@ def _configure_user32(user32) -> None:
     except AttributeError:
         pass
 
+
+
+def root_window_handle(
+    hwnd: int,
+) -> int:
+    """
+    Return the Win32 GA_ROOT owner for one content HWND.
+
+    Packaged Windows apps can keep their useful UI Automation tree on a child
+    process HWND while ApplicationFrameHost owns the visible foreground root.
+    """
+    value = int(hwnd)
+
+    if value <= 0:
+        return 0
+
+    if (
+        os.name != "nt"
+        or not hasattr(
+            ctypes,
+            "windll",
+        )
+    ):
+        return value
+
+    user32 = ctypes.windll.user32
+    _configure_user32(
+        user32
+    )
+
+    GA_ROOT = 2
+
+    root = int(
+        user32.GetAncestor(
+            wintypes.HWND(
+                value
+            ),
+            GA_ROOT,
+        )
+        or 0
+    )
+
+    return (
+        root
+        if root > 0
+        else value
+    )
+
+
+def window_is_foreground(
+    hwnd: int,
+) -> bool:
+    """
+    Treat a verified content HWND as foreground when its exact GA_ROOT is the
+    foreground root.
+
+    This does not weaken process/layout binding. It only models Windows hosted
+    app foreground ownership correctly.
+    """
+    value = int(hwnd)
+
+    if value <= 0:
+        return False
+
+    if (
+        os.name != "nt"
+        or not hasattr(
+            ctypes,
+            "windll",
+        )
+    ):
+        return False
+
+    user32 = ctypes.windll.user32
+    _configure_user32(
+        user32
+    )
+
+    foreground = int(
+        user32.GetForegroundWindow()
+        or 0
+    )
+
+    if foreground <= 0:
+        return False
+
+    if foreground == value:
+        return True
+
+    target_root = (
+        root_window_handle(
+            value
+        )
+    )
+
+    foreground_root = (
+        root_window_handle(
+            foreground
+        )
+    )
+
+    return (
+        target_root > 0
+        and target_root
+        == foreground_root
+    )
 
 def _configure_kernel32(kernel32) -> None:
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
