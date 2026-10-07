@@ -90,6 +90,21 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # ---------------------------------------------------------------- packaged routing
 
 
+def test_installed_permission_policy_uses_the_same_profile(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.permission_control import permission_store_path
+
+    app = Installed(env)
+    app.configure(monkeypatch)
+    monkeypatch.delenv("QRONOS_PERMISSION_POLICY_PATH", raising=False)
+    assert permission_store_path() == app.data / "permissions_v2.json"
+    assert not app.data.exists()
+
+    override = env / "explicit-policy.json"
+    monkeypatch.setenv("QRONOS_PERMISSION_POLICY_PATH", str(override))
+    assert permission_store_path() == override
+    assert not override.exists()
+
+
 def test_installed_state_uses_the_packaged_profile(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = Installed(env)
     app.configure(monkeypatch)

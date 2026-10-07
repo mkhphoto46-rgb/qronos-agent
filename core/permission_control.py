@@ -144,6 +144,11 @@ def permission_store_path() -> Path:
     if override:
         return Path(override).expanduser()
 
+    from core.config import CONFIG
+
+    if CONFIG.paths.packaged:
+        return CONFIG.paths.data / "permissions_v2.json"
+
     local = os.environ.get("LOCALAPPDATA", "").strip()
     if local:
         return Path(local) / "Qronos" / "permissions_v2.json"
