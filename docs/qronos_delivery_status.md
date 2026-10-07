@@ -1,63 +1,92 @@
 # Qronos Delivery Status
 
-Last updated: 2026-08-24
+Last updated: 2026-10-07
 
-This report separates product intent, prototypes, tested implementation, and
-production readiness. Percentages are engineering estimates, not a promise of a
-release date.
+The desktop now has an unsigned Windows review installer with a bundled backend.
+The August prototype estimate no longer describes this checkout. A percentage
+would mix implemented components with untested live workflows, so this report
+uses concrete verification and release gates instead.
 
-## Current Overall Estimate
+## Implemented and verified in development
 
-- Full requested product scope: approximately **20% implemented**.
-- Installable production-ready product: **not available yet**.
-- Current state: backend prototypes and tested components, without an end-to-end
-  application runtime or desktop UI.
+- A standalone backend serves the desktop, settings, permissions, Library,
+  memory and audio services without discovering a development Python install
+  or source checkout. Complete runtime manifests are verified before packaging.
+- Local setup diagnostics report missing configured models and voice assets.
+  They inspect local files and model names without starting, downloading or
+  loading models. Model weights and user data are provisioned separately.
+- Conversation work runs through a durable Smart Queue. Restart recovery,
+  pause/resume, cancellation, committed-answer deduplication and storage failure
+  handling have automated coverage.
+- Stop, Pause and shutdown cancel foreground and queued inference through their
+  own transport tokens. Native actions check cancellation at step boundaries.
+  Closing a model request does not promise immediate GPU release.
+- Screen, Paint and file approvals have scoped, expiring, single-use identities.
+  Stop/Pause/shutdown revoke pending approvals; late replies cannot authorize
+  another action. Paint undo is limited to a verified reversible Qronos action.
+- Library mutation approvals bind the exact operation and artifacts. The local
+  approval secret is stored as a salted scrypt verifier, with persisted attempt
+  limits. Changed or replaced artifacts are refused; edits require registration
+  again. Large legacy records without enough identity evidence fail closed.
+- Storage roots are validated against protected program/state paths. Invalid
+  defaults can relocate outside the source checkout, with diagnostics, without
+  moving existing user files or silently overwriting preferences.
+- Local sidecar communication has bounded loopback, ownership and lifecycle
+  checks. Model downloads and cloud forwarding are refused. Public web access
+  requires the approved visible browser workflow; saved links offer Copy Link
+  while a reviewed browser launcher is unavailable.
 
-The estimate is deliberately conservative. Unit-tested components count as
-progress, but they do not count as complete features until they are connected,
-tested end-to-end, packaged, secured, and validated on a clean Windows machine.
+## Evidence and its limits
 
-## Capability Status
+The combined Windows development suite passed **3,698 tests**, with **7 skips**
+and **1,197 passing subtests**. Six frontend behavior tests, strict TypeScript,
+the Vite production build, ten Rust library tests and locked native checks
+passed. The production npm dependency audit reported no vulnerabilities.
 
-| Capability | Product target | Prototype / component | Tested implementation | Production-ready |
-|---|---|---|---|---|
-| Wake word | Always-available local activation | Audio input, ONNX engine, trigger state machine | Component tests and real model load | No: poor model quality and no authorized live-mic test |
-| STT / TTS / Voice Session | Natural local voice conversation | Not end-to-end | No | No |
-| Fast Brain | Fast local conversation and routing | 4B integration and lifecycle policy | Component tests; real benchmark pending final model tag | No |
-| Heavy Brain | On-demand deeper reasoning | 14B integration and offload policy | Component tests; real hardware benchmark pending | No |
-| Resource protection | Always yield to user workload | CPU/RAM/GPU/VRAM/temperature checks, activity modes | Preflight and second fresh-check tests | No: process attribution and in-flight monitoring remain |
-| Permission Engine | Five levels with Level 5 hard denial | Explicit category-policy map | Unit tested | No: not connected to an Action Broker/runtime |
-| Intrusion response | Reject, contain, then safe shutdown | Architecture and policy defined | No gateway integration tests | No |
-| Application/file/browser control | Structured approved actions with undo | Early folders/interfaces only | No end-to-end execution | No |
-| Code prohibition | No runtime code generation/analysis/modification/execution | Level 5 categories and layered design | Policy-map tests | No: Content Gate and Action Broker enforcement remain |
-| Desktop UI / system tray | Polished standalone Windows UX | Architecture choice only | No | No |
-| Windows service / installer / updater | Signed installable application | Architecture choice only | No clean-machine test | No |
-| Remote mobile PTT | Secure optional gateway | Target only | No | No |
-| Printer / 3D printer / Device Hub | Later-stage device integrations | Target only | No | No |
+The actual frozen backend passed isolated settings, permissions, Library,
+memory, setup diagnostics and bridge startup/ping/shutdown checks outside the
+source checkout. The NSIS installer built locally. GitHub built the preceding
+combined desktop on Windows and Linux; the final source checks are being run
+after correcting the CI-discovered file identity and fixture issues.
 
-## Time Range
+These checks use temporary state and fake native action boundaries. They do
+not establish microphone quality, wake-word accuracy, model performance, native
+GUI behavior or acceptance on a clean Windows machine. The installer is
+unsigned and has not been approved for public release. Source review chunks
+remain open as pull requests rather than merged release code.
 
-Assuming one primary developer working consistently with AI assistance, fixed
-requirements, and no major hardware/vendor blockers:
+## Remaining desktop release gates
 
-- First installable local alpha (UI shell, Fast Brain, basic voice path,
-  resource panel, no broad computer control): roughly 2–4 months.
-- Security-reviewed local beta (voice session, permission-gated limited tools,
-  Action Broker, logging/undo, installer/update testing): roughly 5–9 months.
-- Full requested scope including hardened remote access, broad computer/browser
-  execution, recovery testing, and initial Device Hub: roughly 12–18+ months.
+1. Provision and verify the configured Fast and Vision models and all wake-word
+   assets. STT/TTS asset presence must be followed by live testing. The persistent
+   recognizer server is optional and requires its separate executable.
+2. Measure cold/warm model latency, memory/VRAM pressure, interruption, recovery
+   and Fast/Heavy switching on the target hardware. Test resource protection
+   while the user is working in other applications.
+3. Test voice, screen approval, focus changes, native actions, Paint drawing and
+   undo, recoverable file operations, queue recovery, pause and shutdown with
+   real applications and a disposable test profile.
+4. Install and uninstall on a clean Windows machine without development Python
+   or Node. Check user-data persistence, errors for missing assets and upgrade
+   behavior. Review redistribution licenses for every shipped binary and model.
+5. Review and merge the focused pull requests in dependency order after their
+   final checks pass. Establish installer signing and an authenticated update
+   and rollback process before public distribution.
 
-Part-time development, wake-word retraining, code-signing delays, extensive
-device support, or major UX changes can extend these ranges. Security-sensitive
-features must not be compressed merely to meet a date.
+## Broader product work still open
 
-## Next Completion Gate
+- Integrate and validate the user's permission-gated visible browser workflow.
+  Browser research and saved-link navigation are currently unavailable.
+- Implement and validate the Telegram exact-contact/latest-file and printer
+  workflows described in the computer-control roadmap.
+- Complete Device Link's internet transport, relay operations and native phone
+  application. The relay has not been deployed; local pairing components do
+  not establish completed remote mobile access.
+- Complete later Device Hub and additional application adapters, with explicit
+  capability limits and live acceptance for each supported workflow.
 
-The next milestone is not “all features.” It is a measurable local runtime gate:
-
-1. Verify the exact Fast and Heavy model artifacts on the development machine.
-2. Benchmark cold load, warm response, generation, unload, and Fast recovery.
-3. Implement process-aware continuous Resource Sentinel monitoring.
-4. Connect the immutable Permission Policy to a structured Action Contract.
-5. Build the first non-elevated desktop UI shell and system tray.
+These items are separate milestones, not capabilities demonstrated by the
+desktop review installer. See `standalone-runtime-packaging.md`,
+`qronos_computer_control_roadmap.md` and `QRONOS_DEVICE_LINK.md` for the relevant
+contracts and scope.
 
