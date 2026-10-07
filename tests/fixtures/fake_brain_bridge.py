@@ -17,6 +17,10 @@ Behaviour is chosen by environment variables, set only by the test:
 
     QRONOS_TEST_BRAIN_MODE     "answer" (default) or "hang"
     QRONOS_TEST_BRAIN_MARKER   a file created when the brain is first asked
+    QRONOS_TEST_CRASH_AFTER_ANSWER
+                               "1": the process dies the instant a queued
+                               answer reaches the conversation history,
+                               before the queue can record it as done
 """
 
 from __future__ import annotations
@@ -103,6 +107,17 @@ class FreeMachine:
 
 runtime_bridge.Orchestrator = ScriptedBrain  # type: ignore[misc]
 runtime_bridge.build_sustained_load_monitor = FreeMachine  # type: ignore
+
+
+if os.environ.get("QRONOS_TEST_CRASH_AFTER_ANSWER") == "1":
+    _record_answer = runtime_bridge.QronosRuntime._record_queued_answer
+
+    def _record_then_die(self, request, response):
+        _record_answer(self, request, response)
+        # No cleanup, no flush, no goodbye: exactly what a crash leaves.
+        os._exit(3)
+
+    runtime_bridge.QronosRuntime._record_queued_answer = _record_then_die
 
 
 if __name__ == "__main__":

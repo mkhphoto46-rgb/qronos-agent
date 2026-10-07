@@ -109,6 +109,7 @@ const REASON_LABELS: Record<string, string> = {
   paused: "صف متوقف شده است",
   safety_floor: "حد ایمنی اجازه نمی‌دهد",
   foreground_active: "Qronos در حال پاسخ به شماست",
+  storage_unavailable: "صف ذخیره نمی‌شود؛ اجرا تا رفع مشکل صبر می‌کند",
   activity_mode: "حالت بازی یا تولید محتوا فعال است",
 };
 

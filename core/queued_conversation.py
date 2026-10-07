@@ -209,16 +209,39 @@ class ConversationQueueExecutor:
         foreground_busy: Callable[[], bool],
         runtime_paused: Callable[[], bool],
         release_brains: Callable[[], None],
+        already_answered: Callable[[str], bool] = lambda request_id: False,
+        storage_blocks_start: Callable[[], str | None] = lambda: None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._orchestrator = orchestrator
         self._route = route
         self._record_answer = record_answer
-        self._notify = notify
+        self._notify_sink = notify
         self._foreground_busy = foreground_busy
         self._runtime_paused = runtime_paused
         self._release_brains = release_brains
+        self._already_answered = already_answered
+        self._storage_blocks_start = storage_blocks_start
         self._clock = clock
+
+    def _notify(
+        self,
+        work: QueuedConversationWork,
+        phase: ConversationPhase,
+        fields: dict,
+    ) -> None:
+        """
+        Publish progress, never for work the user has already cancelled.
+
+        A cancelled request's conversation was told "cancelled" when the
+        cancel was accepted. Anything this worker says afterwards - that it
+        is running, that it deferred - would be late output contradicting
+        that, and could land on a newer request reusing the same id.
+        """
+        if work.cancelled:
+            return
+
+        self._notify_sink(work, phase, fields)
 
     def execute(self, work: QueuedConversationWork) -> WorkResult:
         started = self._clock()
@@ -255,6 +278,21 @@ class ConversationQueueExecutor:
         if waiting is not None:
             return waiting
 
+        # One request, one answer. If the conversation already holds an
+        # answer for this request - its first run reached the history and
+        # then Qronos stopped before the queue could record it - running it
+        # again would answer twice.
+        if self._already_answered(request.request_id):
+            self._notify(
+                work,
+                ConversationPhase.ANSWERED,
+                {"alreadyAnswered": True},
+            )
+            return WorkResult(
+                WorkOutcome.DONE,
+                "This request already has an answer; it was not run again.",
+            )
+
         # Routing is deterministic, so this should agree with submission. It
         # is asked again anyway: the rule is that the queue never runs an
         # action, and a rule checked once at the door is a rule that can be
@@ -283,6 +321,11 @@ class ConversationQueueExecutor:
                 response = arithmetic.spoken_text
 
         if not response:
+            if work.cancelled:
+                # Cancelled while it was being routed: never start a model
+                # call whose output would only be thrown away.
+                return self._cancelled_while_running()
+
             plan = TaskPlan(goal=request.text)
             plan.add_step(
                 task_type=request.route,
@@ -391,6 +434,19 @@ class ConversationQueueExecutor:
 
         if self._foreground_is_busy():
             return self._deferred_for_foreground(work)
+
+        blocked = self._storage_blocks_start()
+
+        if blocked:
+            # Starting would leave the saved queue saying "queued" for work
+            # that ran. A crash would then replay it unasked. Waiting is the
+            # honest option; the check retries the save every time.
+            return self._deferred(
+                work,
+                HoldReason.STORAGE_UNAVAILABLE,
+                blocked,
+                count_attempt=False,
+            )
 
         return None
 

@@ -571,14 +571,11 @@ function applyQueueConversationUpdates(
       requestId: text(payload.requestId),
       phase: text(payload.phase),
       bubble: queueBubbleFor(payload),
+      // "Answered" with no text: the answer was already in the history
+      // before this run, so the queue's own bubble is simply retired.
+      retire: text(payload.phase) === "answered" && !text(payload.text),
     }))
-    .filter(
-      (item): item is {
-        requestId: string;
-        phase: string;
-        bubble: Partial<ConversationMessage>;
-      } => Boolean(item.requestId && item.bubble),
-    );
+    .filter((item) => Boolean(item.requestId && (item.bubble || item.retire)));
 
   if (updates.length === 0) {
     return;
@@ -588,7 +585,23 @@ function applyQueueConversationUpdates(
     let messages = current.messages;
     let pendingRequestId = current.pendingRequestId;
 
-    for (const { requestId, phase, bubble } of updates) {
+    for (const { requestId, phase, bubble: maybeBubble, retire } of updates) {
+      if (retire || !maybeBubble) {
+        messages = messages.filter(
+          (message) =>
+            message.requestId !== requestId ||
+            message.role !== "qronos" ||
+            !(message.pending || message.queuePhase),
+        );
+
+        if (pendingRequestId === requestId) {
+          pendingRequestId = null;
+        }
+
+        continue;
+      }
+
+      const bubble = maybeBubble;
       let found = false;
 
       messages = messages.map((message) => {
