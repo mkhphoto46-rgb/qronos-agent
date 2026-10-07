@@ -89,10 +89,13 @@ NATIVE_REVIEW_REQUIRED = frozenset({"sounddevice"})
 
 # The sounddevice wheel ships PortAudio for several platforms. The packaged
 # x64 backend keeps only the default-host-API x64 build (MME, DirectSound,
-# WDM/KS, WASAPI); the ASIO, 32-bit and ARM64 builds are removed.
+# WDM/KS, WASAPI) and the upstream README; the ASIO, 32-bit, ARM64 and macOS
+# builds are removed.
 PORTAUDIO_DIRECTORY = ("_sounddevice_data", "portaudio-binaries")
 PORTAUDIO_KEEP = "libportaudio64bit.dll"
-_PORTAUDIO_DLL = re.compile(r"^libportaudio[0-9a-z_-]*\.dll$", re.IGNORECASE)
+PORTAUDIO_README = "README.md"
+_PORTAUDIO_BINARY = re.compile(r"^libportaudio[0-9a-z_-]*\.(dll|dylib)$", re.IGNORECASE)
+
 
 PRODUCT_LICENSE_NOTE = (
     "Qronos's own source and configuration (core, security, the runtime entry point and "
@@ -326,10 +329,11 @@ def load_reviews(path: Path = REVIEWS_FILE) -> dict[tuple[str, str], dict]:
 
 
 def prune_portaudio(bundle: Path) -> tuple[str, ...]:
-    """Remove every bundled PortAudio DLL except the x64 non-ASIO build.
+    """Keep only the x64 non-ASIO PortAudio DLL and the upstream README.
 
-    Returns the removed paths relative to the bundle. Other files in the
-    directory (its README attribution, for example) are preserved.
+    Every other PortAudio library (32-bit, ARM64, ASIO and macOS builds) is
+    removed. Anything else in the folder is unexpected and stops the build
+    before a file is removed. Returns the removed paths relative to the bundle.
     """
     directory = bundle.joinpath("_internal", *PORTAUDIO_DIRECTORY)
     if not directory.is_dir():
@@ -338,11 +342,18 @@ def prune_portaudio(bundle: Path) -> tuple[str, ...]:
     entries = sorted(directory.iterdir(), key=lambda item: item.name)
     for entry in entries:
         _require_regular(entry)
-    if not any(entry.name == PORTAUDIO_KEEP and entry.is_file() for entry in entries):
-        raise NoticeError(f"The bundle is missing {PORTAUDIO_KEEP}.")
+    names = {entry.name for entry in entries if entry.is_file()}
+    if PORTAUDIO_KEEP not in names or PORTAUDIO_README not in names:
+        raise NoticeError(f"The bundle is missing {PORTAUDIO_KEEP} or the PortAudio {PORTAUDIO_README}.")
+    unexpected = sorted(
+        entry.name for entry in entries
+        if not entry.is_file() or not (entry.name in {PORTAUDIO_KEEP, PORTAUDIO_README} or _PORTAUDIO_BINARY.match(entry.name))
+    )
+    if unexpected:
+        raise NoticeError(f"Unexpected entries in the PortAudio folder: {unexpected}")
     removed: list[str] = []
     for entry in entries:
-        if entry.name != PORTAUDIO_KEEP and entry.is_file() and _PORTAUDIO_DLL.match(entry.name):
+        if entry.name not in {PORTAUDIO_KEEP, PORTAUDIO_README}:
             entry.unlink()
             removed.append(entry.relative_to(bundle).as_posix())
     return tuple(removed)

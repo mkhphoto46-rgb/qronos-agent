@@ -126,7 +126,7 @@ def test_build_prunes_and_collects_notices_before_writing_the_manifest(tmp_path,
 
 
 @pytest.mark.skipif(os.name != "nt", reason="The packaged backend is built for Windows.")
-def test_build_refuses_non_x64_windows_before_writing_a_manifest(tmp_path, monkeypatch):
+def test_build_refuses_non_x64_windows_before_pyinstaller_starts(tmp_path, monkeypatch):
     from build_support import build_runtime
     calls = []
     monkeypatch.setattr(build_runtime.subprocess, "run", lambda command, **_options: calls.append("pyinstaller"))
@@ -134,7 +134,8 @@ def test_build_refuses_non_x64_windows_before_writing_a_manifest(tmp_path, monke
     monkeypatch.setattr(build_runtime, "write_manifest", lambda bundle: calls.append("manifest"))
     with pytest.raises(ValueError, match="x64"):
         build_runtime.build(tmp_path / "out")
-    assert calls == ["pyinstaller"]
+    assert calls == []
+    assert not (tmp_path / "out").exists()
 
 
 def test_installed_storage_locator_uses_the_same_isolated_profile(tmp_path, monkeypatch):

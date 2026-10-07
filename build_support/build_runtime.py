@@ -121,6 +121,10 @@ def build(destination: Path) -> Path:
     bundle = destination / "qronos-runtime"
     if bundle.exists():
         raise ValueError("Runtime output already exists. Choose a new empty destination.")
+    # Only the x64 PortAudio build is shipped, so refuse other Windows targets
+    # before any PyInstaller work starts.
+    if os.name == "nt" and sysconfig.get_platform() != "win-amd64":
+        raise ValueError("The packaged Windows backend supports x64 builds only.")
     # Separate per-build analysis directories prevent stale spec/data reuse.
     destination.mkdir(parents=True, exist_ok=True)
     work = destination / "build-metadata"
@@ -161,8 +165,6 @@ def build(destination: Path) -> Path:
     # manifest is written, so the manifest describes exactly what ships.
     pruned: tuple[str, ...] = ()
     if os.name == "nt":
-        if sysconfig.get_platform() != "win-amd64":
-            raise ValueError("The packaged Windows backend supports x64 builds only.")
         pruned = prune_portaudio(bundle)
     collect_runtime_notices(bundle, pruned=pruned)
     write_manifest(bundle)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from email.message import Message
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
+import sysconfig
 
 import pytest
 
@@ -344,6 +347,20 @@ def test_committed_reviews_record_exact_versions_and_provenance():
         assert name and version and review["provenance"].strip()
 
 
+@pytest.mark.skipif(sysconfig.get_platform() != "win-amd64", reason="Checks the x64 Windows library choice.")
+def test_sounddevice_selects_the_retained_dll_on_x64_windows():
+    spec = importlib.util.find_spec("sounddevice")
+    if spec is None or spec.origin is None:
+        pytest.skip("sounddevice is not installed here.")
+    # Read the selection code without importing sounddevice, which would load
+    # PortAudio and enumerate audio devices.
+    source = Path(spec.origin).read_text(encoding="utf-8")
+    assert "_platform_suffix = _platform.architecture()[0]" in source
+    assert "if 'SD_ENABLE_ASIO' in _os.environ:" in source
+    assert "_libname = 'libportaudio' + _platform_suffix + '.dll'" in source
+    assert "libportaudio" + platform.architecture()[0] + ".dll" == runtime_notices.PORTAUDIO_KEEP
+
+
 def portaudio_bundle(tmp_path: Path) -> Path:
     bundle = tmp_path / "bundle"
     directory = bundle.joinpath("_internal", *runtime_notices.PORTAUDIO_DIRECTORY)
@@ -355,25 +372,42 @@ def portaudio_bundle(tmp_path: Path) -> Path:
     return bundle
 
 
-def test_prune_keeps_only_the_x64_non_asio_portaudio_dll(tmp_path):
+def test_prune_keeps_only_the_x64_non_asio_portaudio_dll_and_readme(tmp_path):
     bundle = portaudio_bundle(tmp_path)
     removed = prune_portaudio(bundle)
     assert removed == tuple(
         f"_internal/_sounddevice_data/portaudio-binaries/{name}"
-        for name in ("libportaudio32bit-asio.dll", "libportaudio32bit.dll", "libportaudio64bit-asio.dll",
-                     "libportaudioarm64-asio.dll", "libportaudioarm64.dll")
+        for name in ("libportaudio.dylib", "libportaudio32bit-asio.dll", "libportaudio32bit.dll",
+                     "libportaudio64bit-asio.dll", "libportaudioarm64-asio.dll", "libportaudioarm64.dll")
     )
-    remaining = sorted(item.name for item in bundle.joinpath("_internal", *runtime_notices.PORTAUDIO_DIRECTORY).iterdir())
-    assert remaining == ["README.md", "libportaudio.dylib", "libportaudio64bit.dll"]
+    directory = bundle.joinpath("_internal", *runtime_notices.PORTAUDIO_DIRECTORY)
+    assert sorted(item.name for item in directory.iterdir()) == ["README.md", "libportaudio64bit.dll"]
+    assert (directory / "libportaudio64bit.dll").read_bytes() == b"libportaudio64bit.dll"
+    assert (directory / "README.md").read_bytes() == b"README.md"
 
 
-def test_prune_refuses_a_bundle_without_the_supported_dll(tmp_path):
+@pytest.mark.parametrize("missing", ["libportaudio64bit.dll", "README.md"])
+def test_prune_refuses_a_bundle_without_the_supported_dll_or_readme(tmp_path, missing):
     bundle = portaudio_bundle(tmp_path)
     directory = bundle.joinpath("_internal", *runtime_notices.PORTAUDIO_DIRECTORY)
-    (directory / "libportaudio64bit.dll").unlink()
-    with pytest.raises(NoticeError, match="libportaudio64bit.dll"):
+    (directory / missing).unlink()
+    with pytest.raises(NoticeError, match="missing"):
         prune_portaudio(bundle)
     assert (directory / "libportaudio64bit-asio.dll").exists()
+
+
+@pytest.mark.parametrize("unexpected", ["portaudio_x64.dll", "notes.txt", "subfolder"])
+def test_prune_refuses_unexpected_entries_without_removing_anything(tmp_path, unexpected):
+    bundle = portaudio_bundle(tmp_path)
+    directory = bundle.joinpath("_internal", *runtime_notices.PORTAUDIO_DIRECTORY)
+    if unexpected == "subfolder":
+        (directory / unexpected).mkdir()
+    else:
+        (directory / unexpected).write_bytes(b"unexpected")
+    with pytest.raises(NoticeError, match="Unexpected"):
+        prune_portaudio(bundle)
+    assert (directory / "libportaudio64bit-asio.dll").exists()
+    assert (directory / "libportaudio.dylib").exists()
 
 
 def test_prune_refuses_links_without_removing_anything(tmp_path):
