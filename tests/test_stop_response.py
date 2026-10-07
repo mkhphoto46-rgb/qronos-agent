@@ -4,6 +4,7 @@ import threading
 import unittest
 
 from core.action_cancellation import ActiveActionRegistry
+from core.approval_ledger import ApprovalLedger
 from core.runtime_bridge import QronosRuntime
 
 
@@ -19,10 +20,7 @@ class StopResponseRuntimeTests(unittest.TestCase):
         runtime._voice_response_stop_requested = threading.Event()
         runtime._computer_actions = ActiveActionRegistry()
         runtime._approval_lock = threading.Lock()
-        runtime._discarded_approvals = {}
-        runtime.pending_paint_draw = None
-        runtime.pending_paint_undo = None
-        runtime.pending_look = None
+        runtime._approvals = ApprovalLedger()
         runtime.paint_draw_executor = None
         runtime._notify = lambda *args, **kwargs: None
         runtime._write_voice_playback_telemetry = (

@@ -762,6 +762,7 @@ pub fn run() {
             runtime::start_runtime,
             runtime::ping_runtime,
             runtime::send_runtime_action,
+            runtime::look_at_screen,
             runtime::library_command,
             runtime::memory_command,
             runtime::settings_command,

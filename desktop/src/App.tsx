@@ -25,6 +25,12 @@ import {
 } from "./conversationStore";
 import { useLibraryStore } from "./libraryStore";
 import {
+  ScreenPromptQueue,
+  parseDiscardedApprovalIds,
+  parseScreenPrompt,
+  screenPromptText,
+} from "./screenApproval";
+import {
   refreshSettings,
   useSettingsStore,
 } from "./settingsStore";
@@ -210,6 +216,51 @@ function App() {
 
   const screenApprovalOpenRef =
     useRef(false);
+
+  // Screen/Paint prompts waiting to be shown. Each is answered with its own
+  // single-use backend approvalId; revoked prompts are dropped unseen.
+  const screenPromptQueueRef =
+    useRef(new ScreenPromptQueue());
+
+  const pumpScreenPrompts =
+    useCallback(() => {
+      if (screenApprovalOpenRef.current) {
+        return;
+      }
+
+      const prompt =
+        screenPromptQueueRef.current.next();
+
+      if (!prompt) {
+        return;
+      }
+
+      screenApprovalOpenRef.current = true;
+      setScenario("thinking");
+
+      window.setTimeout(() => {
+        const approved = window.confirm(
+          screenPromptText(prompt),
+        );
+
+        void invoke("look_at_screen", {
+          approvalId: prompt.approvalId,
+          approved,
+          windowOnly: true,
+        })
+          .catch((error) => {
+            console.error(
+              "[Qronos Screen Approval] failed:",
+              error,
+            );
+            setScenario("idle");
+          })
+          .finally(() => {
+            screenApprovalOpenRef.current = false;
+            pumpScreenPrompts();
+          });
+      }, 0);
+    }, [setScenario]);
 
   const [
     fileApprovalSubmitting,
@@ -1517,65 +1568,48 @@ function App() {
               }
 
               case "voice_needs_screen": {
-                if (
-                  screenApprovalOpenRef.current
-                ) {
+                const prompt = parseScreenPrompt(
+                  event.payload.message,
+                );
+
+                if (!prompt) {
+                  // Never answer a prompt without its backend identity.
+                  console.error(
+                    "[Qronos Screen Approval] prompt without a valid approvalId ignored.",
+                  );
                   break;
                 }
 
-                screenApprovalOpenRef.current =
-                  true;
-
-                setScenario(
-                  "thinking",
+                screenPromptQueueRef.current.enqueue(
+                  prompt,
                 );
+                pumpScreenPrompts();
+                break;
+              }
 
-                const question =
-                  event.payload.message.trim();
-
-                window.setTimeout(
-                  () => {
-                    const approved =
-                      window.confirm(
-                        "Qronos ???????? ???????? ?? ????? ????? ???? ??? ???? ?? ?????? ???. ????? ????????",
-                      );
-
-                    void invoke(
-                      "send_runtime_action",
-                      {
-                        actionId:
-                          "qronos.look_at_screen",
-
-                        data: {
-                          approved,
-                          question,
-                          windowOnly:
-                            true,
-                        },
-                      },
-                    )
-                      .catch(
-                        (error) => {
-                          console.error(
-                            "[Qronos Screen Approval] failed:",
-                            error,
-                          );
-
-                          setScenario(
-                            "idle",
-                          );
-                        },
-                      )
-                      .finally(
-                        () => {
-                          screenApprovalOpenRef.current =
-                            false;
-                        },
-                      );
-                  },
-                  0,
+              case "computer_approval_discarded": {
+                // Stop/Pause/shutdown revoked these prompts; never show
+                // one that is still waiting. One already on screen is
+                // answered as stale by the runtime.
+                screenPromptQueueRef.current.discard(
+                  parseDiscardedApprovalIds(
+                    event.payload.message,
+                  ),
                 );
+                break;
+              }
 
+              case "screen_approval_stale": {
+                console.info(
+                  "[Qronos Screen Approval] answer refused as stale:",
+                  event.payload.message,
+                );
+                if (
+                  !voicePlayerRef.current
+                    ?.isActive()
+                ) {
+                  setScenario("idle");
+                }
                 break;
               }
 

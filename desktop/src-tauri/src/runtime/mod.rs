@@ -17,6 +17,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNTIME_EVENT_NAME: &str = "qronos://runtime-event";
 
 const MAX_TEXT_MESSAGE_CHARS: usize = 16_000;
+const SCREEN_ACTION_ID: &str = "qronos.look_at_screen";
+const APPROVAL_ID_MIN_CHARS: usize = 22;
+const APPROVAL_ID_MAX_CHARS: usize = 64;
 const MAX_TEXT_REQUEST_ID_CHARS: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,6 +380,8 @@ pub fn send_runtime_action(
         return Err("Runtime action id must not be empty.".to_string());
     }
 
+    reject_typed_only_action(cleaned)?;
+
     let mut payload = serde_json::json!({
         "command": "action",
         "actionId": cleaned
@@ -399,6 +404,105 @@ pub fn send_runtime_action(
         // command or actionId chosen by the trusted Tauri command.
         payload["data"] = data;
     }
+
+    send_to_runtime(&state, payload)
+}
+
+/// Screen/Paint decisions carry a single-use approval identity and are
+/// validated only by the typed `look_at_screen` command; the generic action
+/// path must not be able to send them with arbitrary data.
+fn reject_typed_only_action(action_id: &str) -> Result<(), String> {
+    if action_id.trim() == SCREEN_ACTION_ID {
+        return Err("Screen decisions must use the look_at_screen command.".to_string());
+    }
+    Ok(())
+}
+
+/// A backend approval identity: an opaque URL-safe token, never a path or text.
+fn is_valid_approval_id(value: &str) -> bool {
+    let length = value.chars().count();
+    (APPROVAL_ID_MIN_CHARS..=APPROVAL_ID_MAX_CHARS).contains(&length)
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Build the runtime payload for one screen/Paint decision.
+///
+/// Exactly one of two shapes is accepted:
+/// - a prompt answer: the prompt's approval identity plus yes/no. No question
+///   text is sent; the backend ticket decides what the answer applies to.
+/// - an explicit direct read: `direct = true` plus a non-empty question.
+///
+/// Anything else is refused here, before it reaches the runtime.
+pub(crate) fn screen_decision_payload(
+    approval_id: Option<&str>,
+    approved: bool,
+    question: Option<&str>,
+    window_only: bool,
+    direct: bool,
+) -> Result<serde_json::Value, String> {
+    let approval_id = approval_id.map(str::trim).unwrap_or("");
+
+    let data = if !approval_id.is_empty() {
+        if direct {
+            return Err(
+                "A screen decision is either a prompt answer or a direct read, not both."
+                    .to_string(),
+            );
+        }
+        if !is_valid_approval_id(approval_id) {
+            return Err("Screen approval id is malformed.".to_string());
+        }
+        serde_json::json!({
+            "approvalId": approval_id,
+            "approved": approved,
+            "windowOnly": window_only
+        })
+    } else if direct {
+        let question = question.map(str::trim).unwrap_or("");
+        if question.is_empty() {
+            return Err("A direct screen read must say what to look for.".to_string());
+        }
+        if question.chars().count() > MAX_TEXT_MESSAGE_CHARS {
+            return Err("Screen question is too long.".to_string());
+        }
+        serde_json::json!({
+            "direct": true,
+            "approved": approved,
+            "question": question,
+            "windowOnly": window_only
+        })
+    } else {
+        return Err(
+            "A screen decision must name its approval prompt or be an explicit direct read."
+                .to_string(),
+        );
+    };
+
+    Ok(serde_json::json!({
+        "command": "action",
+        "actionId": SCREEN_ACTION_ID,
+        "data": data
+    }))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn look_at_screen(
+    approval_id: Option<String>,
+    approved: bool,
+    question: Option<String>,
+    window_only: Option<bool>,
+    direct: Option<bool>,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let payload = screen_decision_payload(
+        approval_id.as_deref(),
+        approved,
+        question.as_deref(),
+        window_only.unwrap_or(false),
+        direct.unwrap_or(false),
+    )?;
 
     send_to_runtime(&state, payload)
 }
@@ -1121,4 +1225,61 @@ pub fn shutdown(app: &AppHandle) {
     // Shutdown is bounded: if Python does not exit within roughly one second,
     // force-stop only the runtime process owned by this manager.
     let _ = process.child.kill();
+}
+
+#[cfg(test)]
+mod screen_decision_tests {
+    use super::*;
+
+    const ID: &str = "AbCdEfGhIjKlMnOpQrStUv_-";
+
+    #[test]
+    fn prompt_answer_carries_only_the_identity_and_decision() {
+        let payload = screen_decision_payload(Some(ID), true, Some("ignored text"), true, false)
+            .expect("valid answer");
+        assert_eq!(payload["command"], "action");
+        assert_eq!(payload["actionId"], SCREEN_ACTION_ID);
+        assert_eq!(payload["data"]["approvalId"], ID);
+        assert_eq!(payload["data"]["approved"], true);
+        assert_eq!(payload["data"]["windowOnly"], true);
+        assert!(payload["data"].get("question").is_none());
+        assert!(payload["data"].get("direct").is_none());
+    }
+
+    #[test]
+    fn an_answer_without_identity_is_refused() {
+        assert!(screen_decision_payload(None, true, Some("look"), true, false).is_err());
+        assert!(screen_decision_payload(Some("   "), true, Some("look"), true, false).is_err());
+    }
+
+    #[test]
+    fn malformed_identities_are_refused() {
+        for bad in ["short", "../../etc/passwd/aaaaaaaaaaaaaaa", "has spaces in it aaaaaaaaaaa", &"a".repeat(65)] {
+            assert!(screen_decision_payload(Some(bad), true, None, false, false).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn direct_read_is_explicit_and_needs_a_question() {
+        let payload = screen_decision_payload(None, true, Some(" what is this? "), false, true)
+            .expect("valid direct read");
+        assert_eq!(payload["data"]["direct"], true);
+        assert_eq!(payload["data"]["question"], "what is this?");
+        assert!(payload["data"].get("approvalId").is_none());
+        assert!(screen_decision_payload(None, true, Some("  "), false, true).is_err());
+        assert!(screen_decision_payload(None, true, None, false, true).is_err());
+    }
+
+    #[test]
+    fn an_answer_cannot_also_be_a_direct_read() {
+        assert!(screen_decision_payload(Some(ID), true, Some("look"), false, true).is_err());
+    }
+
+    #[test]
+    fn generic_action_path_rejects_screen_decisions() {
+        assert!(reject_typed_only_action("qronos.look_at_screen").is_err());
+        assert!(reject_typed_only_action(" qronos.look_at_screen ").is_err());
+        assert!(reject_typed_only_action("qronos.stop_response").is_ok());
+        assert!(reject_typed_only_action("qronos.file_action_decision").is_ok());
+    }
 }
