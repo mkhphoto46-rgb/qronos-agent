@@ -78,9 +78,9 @@ def test_setup_ui_command_is_closed_and_registered():
     assert "runtime::runtime_setup_snapshot" in lib
     assert 'invoke<SetupSnapshot>("runtime_setup_snapshot")' in store
     command = runtime.split("pub async fn runtime_setup_snapshot", 1)[1].split("#[", 1)[0]
-    assert "command(Service::Doctor)" in command
-    assert "spawn_blocking" in command
-    assert 'command.arg("--models")' in runtime
+    assert "service_ipc::request" in command and "Service::Doctor" in command
+    ipc = (root / "desktop/src-tauri/src/runtime/service_ipc.rs").read_text(encoding="utf-8")
+    assert 'command.arg("--models")' in ipc
 
 
 def test_asset_groups_include_every_external_wake_dependency():

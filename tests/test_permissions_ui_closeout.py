@@ -80,8 +80,9 @@ def test_permissions_tauri_command_is_registered() -> None:
         ROOT / "desktop" / "src-tauri" / "src" / "lib.rs"
     ).read_text(encoding="utf-8")
 
-    assert "pub fn permissions_command(" in runtime
-    assert "command(Service::Permissions)?" in runtime
+    assert "pub async fn permissions_command(" in runtime
+    command = runtime.split("pub async fn permissions_command(", 1)[1].split("\n}", 1)[0]
+    assert "service_ipc::request" in command and "Service::Permissions" in command
     backend = (ROOT / "desktop/src-tauri/src/runtime/backend.rs").read_text(encoding="utf-8")
     assert '"core.permissions_cli"' in backend
     assert "runtime::permissions_command" in lib

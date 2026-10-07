@@ -2760,6 +2760,8 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3915,6 +3917,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "windows-sys 0.61.2",
 ]

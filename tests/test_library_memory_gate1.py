@@ -96,7 +96,9 @@ def test_memory_desktop_contract_is_real_and_not_background_polled() -> None:
     assert "REBUILD INDEX" in settings
     assert 'invoke<T>("memory_command"' in store
     assert "setInterval" not in store
-    assert "pub fn memory_command(" in runtime
+    assert "pub async fn memory_command(" in runtime
+    command = runtime.split("pub async fn memory_command(", 1)[1].split("\n}", 1)[0]
+    assert "service_ipc::request" in command and "Service::Memory" in command
     assert "runtime::memory_command" in lib
 
 def test_library_ui_closeout_is_on_demand_and_has_no_dead_ai_control() -> None:

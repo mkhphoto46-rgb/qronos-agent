@@ -95,6 +95,11 @@ class TestManifestMatchesTheRepository(unittest.TestCase):
     def test_the_test_suite_is_excluded(self) -> None:
         self.assertTrue(is_excluded("tests/test_release_hygiene.py", manifest_entries()))
 
+    def test_owned_rust_process_fixture_is_excluded(self) -> None:
+        self.assertTrue(is_excluded(
+            "desktop/src-tauri/tests/fixtures/service_ipc_child.py", manifest_entries()
+        ))
+
     def test_the_debug_directory_is_excluded(self) -> None:
         self.assertTrue(is_excluded(DEBUG_DIRECTORY, manifest_entries()))
 

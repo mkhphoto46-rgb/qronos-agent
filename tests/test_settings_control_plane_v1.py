@@ -228,21 +228,25 @@ class SettingsControlPlaneV1Tests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "pub fn settings_command(",
+            "pub async fn settings_command(",
             runtime_source,
         )
         self.assertIn(
-            "command(Service::Settings)?",
+            "Service::Settings",
             runtime_source,
         )
         self.assertIn(
-            "settings_command: Mutex<()>",
+            "settings_command: Arc<tokio::sync::Mutex<()>>",
             runtime_source,
         )
         self.assertIn(
             "runtime::settings_command,",
             lib_source,
         )
+        self.assertIn("Some(state.settings_command.clone())", runtime_source)
+        ipc_source = (ROOT / "desktop/src-tauri/src/runtime/service_ipc.rs").read_text(encoding="utf-8")
+        self.assertIn("gate.lock_owned()", ipc_source)
+        self.assertIn("let _guard = guard;", ipc_source)
 
     def test_frontend_store_is_backend_first_and_serialized(self) -> None:
         source = (

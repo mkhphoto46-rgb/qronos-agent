@@ -50,7 +50,7 @@ impl Service {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum Backend {
     Packaged {
         directory: PathBuf,
@@ -190,18 +190,43 @@ fn resolve_python(root: &Path) -> Result<PathBuf, String> {
             if candidate.is_file() {
                 return Ok(candidate);
             }
-        } else if Command::new(&candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
+        } else if python_version_works(&candidate) {
             return Ok(candidate);
         }
     }
     Err("No usable Python runtime was found for Qronos development mode.".to_string())
+}
+
+#[cfg(debug_assertions)]
+fn python_version_works(candidate: &Path) -> bool {
+    let mut command = Command::new(candidate);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(super::CREATE_NO_WINDOW);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

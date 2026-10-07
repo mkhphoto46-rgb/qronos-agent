@@ -2,10 +2,11 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod backend;
+mod service_ipc;
 use backend::{Backend, Service};
 
 #[cfg(target_os = "windows")]
@@ -59,7 +60,7 @@ pub struct RuntimeManagerState {
     // Settings mutations run through a short-lived Python CLI process. Serialize
     // them here so two UI requests cannot both read the same old file and then
     // race to overwrite each other.
-    settings_command: Mutex<()>,
+    settings_command: Arc<tokio::sync::Mutex<()>>,
 
     backend: Option<Backend>,
 }
@@ -72,7 +73,7 @@ impl RuntimeManagerState {
                 child: None,
                 stop_generation: 0,
             }),
-            settings_command: Mutex::new(()),
+            settings_command: Arc::new(tokio::sync::Mutex::new(())),
             backend,
         }
     }
@@ -87,44 +88,11 @@ fn emit_runtime_event(app: &AppHandle, event: RuntimeEvent) {
     let _ = app.emit(RUNTIME_EVENT_NAME, event);
 }
 
-fn setup_snapshot_output(mut command: std::process::Command) -> Result<serde_json::Value, String> {
-    command.arg("--models").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let mut child = command.spawn().map_err(|_| "Could not inspect local Qronos setup.".to_string())?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Local setup inspection timed out or became unavailable.".to_string());
-            }
-        }
-    }
-    let output = child.wait_with_output().map_err(|_| "Local setup inspection failed.".to_string())?;
-    if !output.status.success() || output.stdout.len() > 64 * 1024 {
-        return Err("Local setup inspection returned no usable report.".to_string());
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "Local setup inspection returned an invalid report.".to_string())?;
-    if value.get("schemaVersion").and_then(|v| v.as_u64()) != Some(1)
-        || !value.get("features").is_some_and(|v| v.is_object())
-        || !value.get("modelServer").is_some_and(|v| v.is_object()) {
-        return Err("Local setup report uses an unsupported format.".to_string());
-    }
-    Ok(value)
-}
-
 #[tauri::command]
-pub async fn runtime_setup_snapshot(state: State<'_, RuntimeManagerState>) -> Result<serde_json::Value, String> {
-    let command = state.require_backend()?.command(Service::Doctor)?;
-    tauri::async_runtime::spawn_blocking(move || setup_snapshot_output(command))
-        .await.map_err(|_| "Local setup inspection could not finish.".to_string())?
+pub async fn runtime_setup_snapshot(
+    state: State<'_, RuntimeManagerState>,
+) -> Result<serde_json::Value, String> {
+    service_ipc::request(state.require_backend()?, Service::Doctor, "", None, None).await
 }
 
 fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
@@ -548,95 +516,35 @@ pub fn look_at_screen(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn library_command(
+pub async fn library_command(
     operation: String,
     payload: Option<serde_json::Value>,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<serde_json::Value, String> {
-    let cleaned = operation.trim();
-    if cleaned.is_empty() {
-        return Err("Library operation must not be empty.".to_string());
-    }
-    let mut command = state.require_backend()?.command(Service::Library)?;
-    command
-        .arg(cleaned)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let mut child = command.spawn().map_err(|error| format!("Could not start Qronos Library backend: {error}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let body = payload.unwrap_or_else(|| serde_json::json!({}));
-        write!(stdin, "{}", body).map_err(|error| format!("Could not send Library payload: {error}"))?;
-    }
-    let output = child.wait_with_output().map_err(|error| format!("Library backend failed to finish: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stdout.is_empty() {
-        return Err(if stderr.is_empty() { "Library backend returned no data.".to_string() } else { stderr });
-    }
-    let value: serde_json::Value = serde_json::from_str(&stdout)
-        .map_err(|error| format!("Invalid Library backend response: {error}; output={stdout}"))?;
-    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        let message = value.get("error").and_then(|v| v.as_str()).unwrap_or(&stderr);
-        return Err(if message.is_empty() { "Library operation failed.".to_string() } else { message.to_string() });
-    }
-    Ok(value)
+    service_ipc::request(
+        state.require_backend()?,
+        Service::Library,
+        &operation,
+        payload,
+        None,
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn memory_command(
+pub async fn memory_command(
     operation: String,
     payload: Option<serde_json::Value>,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<serde_json::Value, String> {
-    let cleaned = operation.trim();
-    if cleaned.is_empty() {
-        return Err("Memory operation must not be empty.".to_string());
-    }
-    let mut command = state.require_backend()?.command(Service::Memory)?;
-    command
-        .arg(cleaned)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start Qronos Memory backend: {error}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let body = payload.unwrap_or_else(|| serde_json::json!({}));
-        write!(stdin, "{}", body)
-            .map_err(|error| format!("Could not send Memory payload: {error}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("Memory backend failed to finish: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stdout.is_empty() {
-        return Err(if stderr.is_empty() {
-            "Memory backend returned no data.".to_string()
-        } else {
-            stderr
-        });
-    }
-    let value: serde_json::Value = serde_json::from_str(&stdout)
-        .map_err(|error| format!("Invalid Memory backend response: {error}; output={stdout}"))?;
-    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        let message = value
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&stderr);
-        return Err(if message.is_empty() {
-            "Memory operation failed.".to_string()
-        } else {
-            message.to_string()
-        });
-    }
-    Ok(value)
+    service_ipc::request(
+        state.require_backend()?,
+        Service::Memory,
+        &operation,
+        payload,
+        None,
+    )
+    .await
 }
 
 fn native_audio_output_play_blocking(
@@ -920,142 +828,35 @@ pub fn native_audio_output_stop(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn settings_command(
+pub async fn settings_command(
     operation: String,
     payload: Option<serde_json::Value>,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<serde_json::Value, String> {
-    let cleaned = operation.trim();
-
-    if cleaned.is_empty() {
-        return Err("Settings operation must not be empty.".to_string());
-    }
-
-    let _settings_guard = state
-        .settings_command
-        .lock()
-        .map_err(|_| "Settings command lock failed.".to_string())?;
-
-    let mut command = state.require_backend()?.command(Service::Settings)?;
-    command
-        .arg(cleaned)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start Qronos Settings backend: {error}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let body = payload.unwrap_or_else(|| serde_json::json!({}));
-
-        write!(stdin, "{}", body)
-            .map_err(|error| format!("Could not send Settings payload: {error}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("Settings backend failed to finish: {error}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-    if stdout.is_empty() {
-        return Err(if stderr.is_empty() {
-            "Settings backend returned no data.".to_string()
-        } else {
-            stderr
-        });
-    }
-
-    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
-        format!("Invalid Settings backend response: {error}; output={stdout}")
-    })?;
-
-    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        let message = value
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&stderr);
-
-        return Err(if message.is_empty() {
-            "Settings operation failed.".to_string()
-        } else {
-            message.to_string()
-        });
-    }
-
-    Ok(value)
+    service_ipc::request(
+        state.require_backend()?,
+        Service::Settings,
+        &operation,
+        payload,
+        Some(state.settings_command.clone()),
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn permissions_command(
+pub async fn permissions_command(
     operation: String,
     payload: Option<serde_json::Value>,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<serde_json::Value, String> {
-    let cleaned = operation.trim();
-    if cleaned.is_empty() {
-        return Err("Permissions operation must not be empty.".to_string());
-    }
-
-    let mut command = state.require_backend()?.command(Service::Permissions)?;
-    command
-        .arg(cleaned)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start Qronos Permissions backend: {error}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let body = payload.unwrap_or_else(|| serde_json::json!({}));
-        write!(stdin, "{}", body)
-            .map_err(|error| format!("Could not send Permissions payload: {error}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("Permissions backend failed to finish: {error}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-    if stdout.is_empty() {
-        return Err(if stderr.is_empty() {
-            "Permissions backend returned no data.".to_string()
-        } else {
-            stderr
-        });
-    }
-
-    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
-        format!("Invalid Permissions backend response: {error}; output={stdout}")
-    })?;
-
-    if !output.status.success() || value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        let message = value
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&stderr);
-
-        return Err(if message.is_empty() {
-            "Permissions operation failed.".to_string()
-        } else {
-            message.to_string()
-        });
-    }
-
-    Ok(value)
+    service_ipc::request(
+        state.require_backend()?,
+        Service::Permissions,
+        &operation,
+        payload,
+        None,
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
