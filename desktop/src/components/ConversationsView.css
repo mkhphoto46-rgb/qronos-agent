@@ -2510,6 +2510,54 @@
     infinite;
 }
 
+/* Cancel for a request waiting in, or running from, the Smart Queue. */
+.conversation-queue-cancel {
+  margin-top:
+    8px;
+  padding:
+    4px 10px;
+
+  border:
+    1px solid
+    rgba(
+      235,
+      247,
+      252,
+      0.24
+    );
+  border-radius:
+    999px;
+
+  background:
+    transparent;
+  color:
+    rgba(
+      235,
+      247,
+      252,
+      0.86
+    );
+
+  font:
+    inherit;
+  font-size:
+    11px;
+
+  cursor:
+    pointer;
+}
+
+.conversation-queue-cancel:hover,
+.conversation-queue-cancel:focus-visible {
+  border-color:
+    rgba(
+      255,
+      142,
+      142,
+      0.5
+    );
+}
+
 .conversation-message-error {
   border-color:
     rgba(

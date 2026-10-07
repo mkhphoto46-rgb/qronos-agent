@@ -41,6 +41,9 @@ export type ConversationMessage = {
   requestId?: string;
   pending?: boolean;
   error?: boolean;
+  // Set while the request waits in, or runs from, the Smart Queue. The
+  // bubble offers Cancel only while this is present.
+  queueTaskId?: string;
 };
 
 type RuntimeEvent = {
@@ -74,9 +77,36 @@ type TextRuntimePayload = {
   error?: unknown;
 };
 
+type QueueConversationPayload = {
+  taskId?: unknown;
+  requestId?: unknown;
+  phase?: unknown;
+  text?: unknown;
+  error?: unknown;
+};
+
 type ConversationSnapshot = {
   messages: ConversationMessage[];
   pendingRequestId: string | null;
+};
+
+// What a queued request's bubble says while it has no answer yet, and what
+// it says when it will never get one. The answer itself always arrives as a
+// canonical conversation_message_added for the same requestId.
+const QUEUE_WAITING_TEXT: Record<string, string> = {
+  queued:
+    "در صف Qronos — وقتی دستگاه آزاد شد پاسخ می‌دهم.",
+  deferred:
+    "هنوز در صف — دستگاه مشغول است؛ بعداً دوباره تلاش می‌کنم.",
+  running:
+    "در حال پردازش از صف...",
+};
+
+const QUEUE_ENDED_TEXT: Record<string, string> = {
+  cancelled:
+    "لغو شد — پاسخی ثبت نشد.",
+  interrupted:
+    "Qronos پیش از پاسخ بسته شد و این درخواست دوباره اجرا نمی‌شود؛ لطفاً دوباره بپرسید.",
 };
 
 type Subscriber = () => void;
@@ -411,6 +441,149 @@ function replacePendingFallback(
   );
 }
 
+/**
+ * Move a queued request's bubble to where the queue says it is.
+ *
+ * Correlated only by requestId, and independent of pendingRequestId: a
+ * queued request deliberately stops blocking the composer, so the user can
+ * keep talking while it waits. Never invents an answer — "answered" only
+ * resolves the bubble when the canonical message did not already.
+ */
+function applyQueueConversationUpdate(
+  payload: QueueConversationPayload,
+) {
+  const requestId =
+    typeof payload.requestId === "string"
+      ? payload.requestId.trim()
+      : "";
+  const taskId =
+    typeof payload.taskId === "string"
+      ? payload.taskId.trim()
+      : "";
+  const phase =
+    typeof payload.phase === "string"
+      ? payload.phase
+      : "";
+
+  if (!requestId || !phase) {
+    return;
+  }
+
+  let replacement: Partial<ConversationMessage> | null = null;
+
+  if (phase in QUEUE_WAITING_TEXT) {
+    replacement = {
+      text: QUEUE_WAITING_TEXT[phase],
+      pending: true,
+      error: false,
+      queueTaskId: taskId || undefined,
+    };
+  } else if (phase === "failed") {
+    replacement = {
+      text: `درخواست اجرا نشد: ${friendlyRuntimeErrorText(
+        typeof payload.error === "string"
+          ? payload.error
+          : "Qronos نتوانست این درخواست را اجرا کند.",
+      )}`,
+      pending: false,
+      error: true,
+      queueTaskId: undefined,
+    };
+  } else if (phase in QUEUE_ENDED_TEXT) {
+    replacement = {
+      text: QUEUE_ENDED_TEXT[phase],
+      pending: false,
+      error: phase === "interrupted",
+      queueTaskId: undefined,
+    };
+  } else if (
+    phase === "answered" &&
+    typeof payload.text === "string" &&
+    payload.text.trim()
+  ) {
+    // Normally already resolved by the canonical message. This covers an
+    // answer whose history write failed, so it is still shown.
+    replacement = {
+      text: payload.text.trim(),
+      pending: false,
+      error: false,
+      queueTaskId: undefined,
+    };
+  }
+
+  if (!replacement) {
+    return;
+  }
+
+  const update = replacement;
+
+  updateSnapshot((current) => {
+    let found = false;
+
+    const nextMessages = current.messages.map((message) => {
+      if (
+        message.requestId !== requestId ||
+        message.role !== "qronos" ||
+        !message.pending
+      ) {
+        return message;
+      }
+
+      found = true;
+      return { ...message, ...update };
+    });
+
+    if (!found && update.pending !== false) {
+      // A request queued without a pending bubble of its own, such as one
+      // submitted to the queue directly.
+      const now = new Date();
+
+      nextMessages.push({
+        id: `queued-${requestId}`,
+        role: "qronos",
+        time: formatMessageTime(now),
+        timestamp: now.getTime() / 1000,
+        source: "text",
+        text: update.text ?? "",
+        requestId,
+        pending: true,
+        queueTaskId: update.queueTaskId,
+      });
+    } else if (
+      !found &&
+      phase !== "answered" &&
+      !current.messages.some(
+        (message) =>
+          message.requestId === requestId &&
+          message.role === "qronos",
+      )
+    ) {
+      // The bubble is gone (the history was reloaded), but the request
+      // still deserves to say why it has no answer.
+      const now = new Date();
+
+      nextMessages.push({
+        id: `queued-${phase}-${requestId}`,
+        role: "qronos",
+        time: formatMessageTime(now),
+        timestamp: now.getTime() / 1000,
+        source: "text",
+        text: update.text ?? "",
+        requestId,
+        error: update.error,
+      });
+    }
+
+    return {
+      messages: sortMessages(nextMessages),
+      pendingRequestId:
+        current.pendingRequestId === requestId
+          ? null
+          : current.pendingRequestId,
+    };
+  });
+}
+
 function applyHistorySnapshot(
   payload: ConversationSnapshotPayload,
 ) {
@@ -532,6 +705,30 @@ function handleRuntimeEvent(
   }
 
   if (
+    event.eventType ===
+      "queue_conversation_update" ||
+    event.eventType ===
+      "text_deferred"
+  ) {
+    let payload: QueueConversationPayload;
+
+    try {
+      payload = JSON.parse(
+        event.message,
+      ) as QueueConversationPayload;
+    } catch {
+      return;
+    }
+
+    applyQueueConversationUpdate(
+      event.eventType === "text_deferred"
+        ? { ...payload, phase: "queued" }
+        : payload,
+    );
+    return;
+  }
+
+  if (
     event.eventType !==
       "text_response" &&
     event.eventType !==
@@ -646,6 +843,31 @@ export function useConversationStore() {
   }, []);
 
   return current;
+}
+
+/**
+ * Cancel a queued request. The outcome arrives as a queue event: either
+ * "cancelled", or a refusal when the answer was already delivered.
+ */
+export async function cancelQueuedConversation(
+  taskId: string,
+) {
+  const cleaned = taskId.trim();
+
+  if (!cleaned) {
+    return;
+  }
+
+  try {
+    await invoke("queue_cancel", {
+      taskId: cleaned,
+    });
+  } catch (error) {
+    console.error(
+      "[Qronos Conversation Store] queue cancel failed:",
+      runtimeErrorText(error),
+    );
+  }
 }
 
 export async function sendConversationMessage(

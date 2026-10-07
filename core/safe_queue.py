@@ -247,15 +247,30 @@ class SafeQueue:
     def resume(self, task_id: str) -> QueuedTask:
         return self.transition(task_id, TaskState.QUEUED)
 
-    def requeue(self, task_id: str) -> QueuedTask:
+    def requeue(
+        self,
+        task_id: str,
+        count_attempt: bool = True,
+    ) -> QueuedTask:
         """
         Put a running task back in the line.
 
         For when the machine was taken away, not when the task failed. It keeps
         its place: re-queuing to the back would let a busy machine starve the
         one task that keeps getting interrupted.
+
+        ``count_attempt=False`` is for an interruption that was nobody's fault
+        but the user's own priority — the user started talking to Qronos — so
+        it does not count towards the limit that pauses a task which keeps
+        failing to complete.
         """
-        return self.transition(task_id, TaskState.QUEUED)
+        with self._lock:
+            task = self.transition(task_id, TaskState.QUEUED)
+
+            if not count_attempt and task.attempts > 0:
+                task.attempts -= 1
+
+            return task
 
     def cancel(self, task_id: str) -> QueuedTask:
         """
@@ -300,19 +315,23 @@ class SafeQueue:
                 )
             )
 
-    def forget_finished(self) -> int:
+    def forget_finished(self, keep: frozenset[str] = frozenset()) -> int:
         """
         Drop terminal tasks. Returns how many went.
 
         The queue is not a history — :mod:`core.action_audit` is. Keeping
         finished tasks here forever would turn an in-memory structure into an
         unbounded one.
+
+        ``keep`` names terminal tasks that must stay visible anyway: a task
+        cancelled while its work is still in flight has not let go of the
+        machine yet, and must not vanish from the queue before it has.
         """
         with self._lock:
             done = [
                 task_id
                 for task_id, task in self._tasks.items()
-                if task.finished
+                if task.finished and task_id not in keep
             ]
 
             for task_id in done:

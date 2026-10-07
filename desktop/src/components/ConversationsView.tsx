@@ -6,6 +6,7 @@ import {
 } from "react";
 
 import {
+  cancelQueuedConversation,
   sendConversationMessage,
   useConversationStore,
 } from "../conversationStore";
@@ -1278,6 +1279,21 @@ function ConversationsView({
                     message.text
                   }
                 </p>
+
+                {message.pending &&
+                  message.queueTaskId && (
+                    <button
+                      type="button"
+                      className="conversation-queue-cancel"
+                      onClick={() => {
+                        void cancelQueuedConversation(
+                          message.queueTaskId ?? "",
+                        );
+                      }}
+                    >
+                      لغو درخواست در صف
+                    </button>
+                  )}
 
                 {message.attachments &&
                   message.attachments.length >

@@ -33,6 +33,15 @@ export type QueueTask = {
   detail: string;
   overridable: boolean;
   override: boolean;
+  startedAt?: number | null;
+  // Cancelled, but its local model call has not returned yet.
+  inFlight?: boolean;
+  cancellable?: boolean;
+  // Queued conversation requests carry the request they answer; the answer
+  // itself is shown in that conversation, not here.
+  kind?: "conversation";
+  requestId?: string;
+  route?: "fast" | "heavy";
 };
 
 export type QueueSnapshot = {
@@ -72,6 +81,8 @@ const REASON_LABELS: Record<string, string> = {
   heavy_task_in_progress: "یک کار سنگین در حال اجراست",
   paused: "صف متوقف شده است",
   safety_floor: "حد ایمنی اجازه نمی‌دهد",
+  foreground_active: "Qronos در حال پاسخ به شماست",
+  activity_mode: "حالت بازی یا تولید محتوا فعال است",
 };
 
 const STATE_LABELS: Record<QueueTaskState, string> = {
@@ -189,7 +200,11 @@ export function SmartQueuePanel({
                 <dl className="smart-queue-row-meta">
                   <div>
                     <dt>STATE</dt>
-                    <dd>{STATE_LABELS[task.state]}</dd>
+                    <dd>
+                      {task.inFlight
+                        ? "در حال توقف"
+                        : STATE_LABELS[task.state]}
+                    </dd>
                   </div>
                   <div>
                     <dt>WEIGHT</dt>
@@ -221,7 +236,8 @@ export function SmartQueuePanel({
                   </button>
                 )}
 
-                {(task.state === "queued" || task.state === "paused") && (
+                {(task.cancellable ??
+                  (task.state === "queued" || task.state === "paused")) && (
                   <button
                     type="button"
                     className="smart-queue-cancel"

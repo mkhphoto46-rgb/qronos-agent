@@ -119,6 +119,11 @@ class StepResult:
     # capability from a failed one without reading the error text.
     unavailable: Unavailable | None = None
 
+    # Set when resource policy, not the brain, refused the step. A caller
+    # that can wait — the queue — defers on this instead of failing, without
+    # having to recognise the refusal by its wording.
+    resource_blocked: bool = False
+
 
 class Orchestrator:
     """
@@ -310,6 +315,7 @@ class Orchestrator:
                         selection.decision,
                         resource_pressure,
                     ),
+                    resource_blocked=True,
                 )
 
             # The earlier resource snapshot may already be stale after
@@ -343,6 +349,7 @@ class Orchestrator:
                         selection.decision,
                         live_state.resource_pressure,
                     ),
+                    resource_blocked=True,
                 )
 
             memory_context = ""
