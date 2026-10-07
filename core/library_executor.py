@@ -84,7 +84,8 @@ from core.artifact_registry import (
     is_link_or_reparse_point,
     same_path,
 )
-from core.storage_locations import load_storage_locations
+from core.path_safety import drive_status
+from core.storage_locations import load_storage_locations, program_roots
 from security.gate import ActionGrantUnavailable, Verdict, evaluate, issue_grant
 from security.permissions import ActionCategory, PermissionDecision
 
@@ -207,7 +208,9 @@ def default_protected_roots(
             "LOCALAPPDATA",
         )
     ]
+    # The source tree and, when installed, the whole application folder.
     raw.append(str(ROOT))
+    raw.extend(str(root) for root in program_roots())
 
     try:
         locations = load_storage_locations(create=False)
@@ -841,6 +844,13 @@ class LibraryExecutor:
             )
         if os.name == "nt" and not re.match(r"^[A-Za-z]:\\", str(resolved)):
             raise _ItemRefused("The destination must be on a local drive.")
+        # Copying or moving Library files to a mapped network drive sends them
+        # off this PC; a drive Windows cannot classify is not assumed local.
+        drive = drive_status(str(resolved))
+        if drive == "remote":
+            raise _ItemRefused("The destination is on a network drive.")
+        if drive == "unknown":
+            raise _ItemRefused("Windows could not confirm the destination is on a local drive.")
         for root in self._protected():
             if resolved == root or resolved.is_relative_to(root):
                 raise _ItemRefused(

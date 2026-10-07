@@ -80,6 +80,10 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Library rename/copy/move/delete goes through core.library_executor, "
         "which reaches the gate."
     ),
+    "core.path_safety": (
+        "Calls GetDriveTypeW through ctypes only to read whether a drive is "
+        "local or a mapped network drive; it changes nothing."
+    ),
     "core.memory_runtime": (
         "Starts, supervises, and stops only Qronos's dedicated local CPU-only "
         "Memory embedding sidecar and its ownership metadata."

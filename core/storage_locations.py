@@ -35,20 +35,21 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import time
 from typing import Iterator
 import uuid
 
+from core.config import CONFIG
 from core.path_safety import (
+    drive_status,
     has_control_characters,
     is_absolute_local,
     is_network_or_device_path,
     is_within,
 )
-
-from core.config import CONFIG
 
 _LOCK = threading.RLock()
 
@@ -57,7 +58,40 @@ MAX_SHOWN_VALUE_CHARS = 260
 LOCK_TIMEOUT_SECONDS = 10.0
 STALE_LOCK_SECONDS = 30.0
 
+# The source tree (development) or PyInstaller's _internal folder (installed).
 PROGRAM_ROOT = Path(__file__).resolve().parent.parent
+
+# Files the installer leaves in the application folder. Their presence next to
+# the bundled runtime folder proves that folder is the installation, so the
+# whole installation is protected, not only the runtime bundle.
+INSTALL_MARKERS: tuple[str, ...] = ("uninstall.exe", "qronos-desktop.exe")
+
+
+def installed_bundle_roots(executable: Path) -> tuple[Path, ...]:
+    """
+    Folders of an installed runtime: the bundle folder holding the closed
+    ``qronos-runtime.exe`` and, when an installer marker proves it, the
+    application folder that contains the bundle. A drive root is never taken
+    as an installation folder.
+    """
+    bundle = executable.resolve(strict=False).parent
+    roots = [bundle]
+    install = bundle.parent
+    if install != Path(install.anchor) and any((install / m).is_file() for m in INSTALL_MARKERS):
+        roots.append(install)
+    return tuple(roots)
+
+
+def program_roots() -> tuple[Path, ...]:
+    """Every folder that holds Qronos code or resources; no user data goes there."""
+    roots: list[Path] = [PROGRAM_ROOT, Path(CONFIG.paths.root)]
+    if CONFIG.paths.packaged or getattr(sys, "frozen", False):
+        roots.extend(installed_bundle_roots(Path(sys.executable)))
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return tuple(unique)
 
 LOCATION_KEYS: tuple[str, ...] = (
     "dataRoot",
@@ -99,6 +133,8 @@ _REASONS: dict[str, str] = {
     "protected": "the path is inside a system, program or Qronos program folder",
     "overlaps_state": "the Library files folder must not contain or sit inside Qronos data folders",
     "contains_program": "the folder contains the Qronos program folder",
+    "network_drive": "the folder is on a network drive; Qronos keeps personal data on local drives",
+    "drive_unknown": "Windows could not confirm that the folder is on a local drive",
 }
 
 # Ordered default folders inside Documents. The first is the established
@@ -206,14 +242,33 @@ def _documents() -> Path:
     return _home() / "Documents"
 
 
+def _state_root() -> Path:
+    """
+    The folder for Qronos's own state (locator, default data roots).
+
+    Installed builds use the per-user data folder chosen by the packaged
+    configuration (``CONFIG.paths.data``), never the bundle or the cwd;
+    development uses ``%LOCALAPPDATA%\\Qronos``. Either way the folder must
+    pass the same policy as any data root, or nothing is written.
+    """
+    candidate = CONFIG.paths.data if CONFIG.paths.packaged else _local_app_data() / "Qronos"
+    try:
+        return validate_location("dataRoot", str(candidate))
+    except StorageLocationError as exc:
+        where = "installed Qronos data folder" if CONFIG.paths.packaged else "Qronos profile folder"
+        raise StorageLocationError(
+            "profile_unavailable",
+            f"The {where} is not usable: {_REASONS.get(exc.code, exc.code)}. "
+            "Qronos will not write state there.",
+        ) from None
+
+
 def locator_path() -> Path:
-    if CONFIG.paths.packaged:
-        return CONFIG.paths.data / "storage_locations.json"
-    return _local_app_data() / "Qronos" / "storage_locations.json"
+    return _state_root() / "storage_locations.json"
 
 
 def _default_candidates() -> dict[str, tuple[Path, ...]]:
-    local = CONFIG.paths.data if CONFIG.paths.packaged else _local_app_data() / "Qronos"
+    local = _state_root()
     documents = _documents()
     return {
         "dataRoot": (local,),
@@ -300,7 +355,7 @@ def _protected_roots(key: str) -> tuple[Path, ...]:
         # Library files are acted on by Library operations; they must never
         # sit among application state or the Startup folder.
         names += ["APPDATA", "LOCALAPPDATA"]
-    roots = [PROGRAM_ROOT]
+    roots = list(program_roots())
     for name in names:
         raw = os.environ.get(name, "").strip()
         if raw and is_absolute_local(raw) and not is_network_or_device_path(raw):
@@ -334,6 +389,11 @@ def validate_location(key: str, value: object) -> Path:
         raise StorageLocationError("network_or_device", _REASONS["network_or_device"])
     if not is_absolute_local(text):
         raise StorageLocationError("relative", _REASONS["relative"])
+    drive = drive_status(text)
+    if drive == "remote":
+        raise StorageLocationError("network_drive", _REASONS["network_drive"])
+    if drive == "unknown":
+        raise StorageLocationError("drive_unknown", _REASONS["drive_unknown"])
 
     path = Path(os.path.normpath(text))
     # The folder, or the nearest part of its path that already exists, must be
