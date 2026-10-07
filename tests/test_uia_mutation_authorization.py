@@ -232,7 +232,9 @@ def test_generated_native_scripts_parse_without_executing_uia(operation, context
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", parser],
-        capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
+        # This bounds a cold PowerShell process and AST parser startup, not a
+        # production mutation deadline. Loaded Windows CI hosts can need >5s.
+        capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     assert result.returncode == 0, result.stdout
 
