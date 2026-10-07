@@ -42,6 +42,11 @@ def isolate_qronos_permission_state(
         str(tmp_path / "action_audit.jsonl"),
     )
 
+    monkeypatch.setenv(
+        "QRONOS_APPROVAL_SECRET_PATH",
+        str(tmp_path / "approval_secret.sqlite3"),
+    )
+
 
 @pytest.fixture(autouse=True)
 def block_real_windows_computer_side_effects(

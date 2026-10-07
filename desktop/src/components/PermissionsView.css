@@ -5718,3 +5718,30 @@
   position: relative !important;
   z-index: 3 !important;
 }
+
+.permissions-approval-secret-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.permissions-approval-secret-form input {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(78, 183, 227, 0.16);
+  border-radius: 6px;
+  background: rgba(3, 16, 22, 0.6);
+  color: rgba(222, 241, 248, 0.92);
+  font-size: 10.5px;
+}
+
+.permissions-approval-secret-form small {
+  color: rgba(255, 168, 120, 0.8);
+  font-size: 9.5px;
+}
+
+.permissions-approval-secret-actions {
+  display: flex;
+  gap: 6px;
+}

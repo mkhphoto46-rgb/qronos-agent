@@ -47,8 +47,19 @@ export type PermissionAuditRecord = {
   decision?: string;
 };
 
+// Whether an approval secret is set and whether verification is locked.
+// Never the secret, its hash, or anything typed by the user.
+export type ApprovalSecretStatus = {
+  configured: boolean;
+  available: boolean;
+  lockedUntil: number;
+  remainingAttempts: number;
+  error?: string;
+};
+
 type PermissionBackendSnapshot = {
   ok: boolean;
+  approvalSecret?: ApprovalSecretStatus;
   mutable: boolean;
   policySource: string;
   policyStoreSource: string;
@@ -60,6 +71,7 @@ type PermissionBackendSnapshot = {
 };
 
 type Snapshot = {
+  approvalSecret: ApprovalSecretStatus | null;
   policies: PermissionPolicyRecord[];
   userPermissions: UserPermissionRecord[];
   audit: PermissionAuditRecord[];
@@ -73,6 +85,7 @@ type Snapshot = {
 };
 
 let snapshot: Snapshot = {
+  approvalSecret: null,
   policies: [],
   userPermissions: [],
   audit: [],
@@ -130,6 +143,7 @@ export async function refreshPermissions() {
     }
 
     publish({
+      approvalSecret: result.approvalSecret ?? null,
       policies: result.policies,
       userPermissions: result.userPermissions,
       audit: result.audit,
@@ -188,6 +202,19 @@ export async function setPermissionCustomRule(
 
 export async function resetPermission(permissionId: string) {
   await mutate("reset_permission", { permissionId });
+}
+
+// Explicit user operation from the Permissions view. The values are sent once
+// to the local backend and are not kept anywhere in this store.
+export async function setApprovalSecret(
+  newSecret: string,
+  currentSecret?: string,
+) {
+  await command<{ ok: boolean; error?: string }>(
+    "approval_secret_set",
+    currentSecret === undefined ? { newSecret } : { newSecret, currentSecret },
+  );
+  await refreshPermissions();
 }
 
 export function usePermissionStore() {

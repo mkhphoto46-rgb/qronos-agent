@@ -19,6 +19,7 @@ import type {
   UserPermissionRecord,
 } from "../permissionStore";
 
+import ApprovalSecretPanel from "./ApprovalSecretPanel";
 import "./PermissionsView.css";
 
 type ViewPhase =
@@ -1242,6 +1243,7 @@ function PermissionsView({
   onClose,
 }: PermissionsViewProps) {
   const {
+    approvalSecret,
     policies,
     userPermissions,
     audit,
@@ -1717,6 +1719,12 @@ function PermissionsView({
                     ? "RESETTING..."
                     : "RESET TO DEFAULT"}
                 </button>
+
+                <ApprovalSecretPanel
+                  status={approvalSecret}
+                  visible={phase === "permissions"}
+                  disabled={!mutable}
+                />
               </>
             )}
           </aside>

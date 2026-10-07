@@ -77,7 +77,7 @@ def run(
             if op=="commit":
                 return {"ok":True,"status":"committed",**executor.commit(
                     payload.get("token",""),operation=payload.get("action",""),
-                    typed_confirmation=payload.get("typedConfirmation",""),
+                    secret=payload.pop("secret",""),
                 )}
             if op=="cancel": return {"ok":True,**executor.cancel(payload.get("token",""))}
             if op=="delete_forever":

@@ -19,6 +19,7 @@ import pytest
 from core import library_cli
 from core import library_executor as executor_module
 from core.action_audit import ActionAuditLog, AuditEvent
+from core.approval_secret import ApprovalSecretStore
 from core.actions import ActionOutcome
 from core.artifact_registry import ArtifactRegistry
 from core.artifact_service import ArtifactProducerRegistry
@@ -32,6 +33,9 @@ from security.permissions import PermissionDecision
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# A synthetic test secret, provisioned into an isolated temporary store.
+SECRET = "correct horse battery"
 
 
 class FakeRecycleBin:
@@ -57,6 +61,8 @@ class Sandbox:
         self.audit = ActionAuditLog(tmp_path / "audit" / "library_audit.jsonl")
         self.bin = FakeRecycleBin(tmp_path / "RecycleBin")
         self.now = [1_000.0]
+        self.secrets = ApprovalSecretStore(tmp_path / "secret" / "approval_secret.sqlite3", clock=lambda: self.now[0])
+        self.secrets.set_secret(SECRET)
         self.executor = self.make_executor()
         self.outside = tmp_path / "UserFolder"
         self.outside.mkdir()
@@ -66,6 +72,7 @@ class Sandbox:
             audit=self.audit,
             recycler=self.bin,
             clock=lambda: self.now[0],
+            approval_secrets=self.secrets,
         )
         options.update(overrides)
         return LibraryExecutor(self.registry, **options)
@@ -182,20 +189,21 @@ def test_library_ui_no_longer_offers_permanent_delete() -> None:
 # ---------------------------------------------------------------- recoverable delete
 
 
-def test_recoverable_delete_needs_the_typed_phrase_and_lands_in_the_recycle_bin(box: Sandbox) -> None:
+def test_recoverable_delete_needs_the_secret_and_lands_in_the_recycle_bin(box: Sandbox) -> None:
     item = box.artifact(content="keep me")
     path = Path(item.path_or_url)
 
     approval = box.executor.prepare("delete", [item.id])
     assert approval["decision"] == PermissionDecision.REQUIRE_TYPED_SECRET.value
-    assert approval["confirmation"] == "typed"
-    assert approval["typedPhrase"] == "DELETE 1"
+    assert approval["confirmation"] == "secret"
+    assert "typedPhrase" not in approval
 
-    with pytest.raises(LibraryActionRefused, match="DELETE 1"):
-        box.executor.commit(approval["token"], operation="delete", typed_confirmation="yes")
-    assert path.is_file(), "a wrong phrase must not delete anything"
+    for public_phrase in ("DELETE 1", "delete 1", ""):
+        with pytest.raises(LibraryActionRefused):
+            box.executor.commit(approval["token"], operation="delete", secret=public_phrase)
+    assert path.is_file(), "a public phrase must not delete anything"
 
-    result = box.executor.commit(approval["token"], operation="delete", typed_confirmation="delete 1")
+    result = box.executor.commit(approval["token"], operation="delete", secret=SECRET)
 
     assert result["complete"] is True
     assert not path.exists()
@@ -215,7 +223,7 @@ def test_recycle_failure_keeps_the_file_and_the_library_entry(box: Sandbox) -> N
 
     executor = box.make_executor(recycler=broken_bin)
     approval = executor.prepare("delete", [item.id])
-    result = executor.commit(approval["token"], operation="delete", typed_confirmation="DELETE 1")
+    result = executor.commit(approval["token"], operation="delete", secret=SECRET)
 
     assert result["failed"] == 1 and result["complete"] is False
     assert result["results"][0]["ok"] is False
@@ -229,7 +237,7 @@ def test_recycler_that_silently_leaves_the_file_is_reported_as_failure(box: Sand
     executor = box.make_executor(recycler=lambda path: None)
 
     approval = executor.prepare("delete", [item.id])
-    result = executor.commit(approval["token"], operation="delete", typed_confirmation="DELETE 1")
+    result = executor.commit(approval["token"], operation="delete", secret=SECRET)
 
     assert result["results"][0]["outcome"] == "failed"
     assert "Recycle Bin did not take" in str(result["results"][0]["error"])
@@ -239,7 +247,7 @@ def test_recycler_that_silently_leaves_the_file_is_reported_as_failure(box: Sand
 def test_deleting_a_saved_link_removes_only_the_record(box: Sandbox) -> None:
     link = box.producer.register_link("https://example.org/a", name="Example")
     approval = box.executor.prepare("delete", [link.id])
-    box.executor.commit(approval["token"], operation="delete", typed_confirmation="DELETE 1")
+    box.executor.commit(approval["token"], operation="delete", secret=SECRET)
 
     with pytest.raises(KeyError):
         box.registry.get(link.id)
@@ -276,7 +284,7 @@ def test_approval_cannot_be_reused_for_another_operation(box: Sandbox) -> None:
     approval = box.executor.prepare("rename", [item.id], new_name="renamed.md")
 
     with pytest.raises(LibraryActionRefused, match="different operation"):
-        box.executor.commit(approval["token"], operation="delete", typed_confirmation="DELETE 1")
+        box.executor.commit(approval["token"], operation="delete", secret=SECRET)
 
     # The mismatched attempt burned the token: it cannot be replayed either.
     with pytest.raises(LibraryActionRefused, match="unknown, expired or already used"):
@@ -343,7 +351,7 @@ def test_cancel_records_the_decline_and_voids_the_approval(box: Sandbox) -> None
     assert box.executor.cancel(approval["token"]) == {"cancelled": True}
     assert box.events(AuditEvent.DENIED_BY_USER)
     with pytest.raises(LibraryActionRefused):
-        box.executor.commit(approval["token"], operation="delete", typed_confirmation="DELETE 1")
+        box.executor.commit(approval["token"], operation="delete", secret=SECRET)
     assert Path(item.path_or_url).is_file()
 
 
@@ -388,7 +396,7 @@ def test_file_substituted_after_approval_is_not_touched(box: Sandbox) -> None:
 
     path.unlink()
     path.write_text("an unrelated user file", encoding="utf-8")
-    result = box.executor.commit(approval["token"], operation="delete", typed_confirmation="DELETE 1")
+    result = box.executor.commit(approval["token"], operation="delete", secret=SECRET)
 
     assert result["refused"] == 1
     assert path.read_text(encoding="utf-8") == "an unrelated user file"
@@ -690,7 +698,7 @@ def test_audit_covers_allow_deny_and_failure_without_names_or_paths(box: Sandbox
 
     broken = box.make_executor(recycler=lambda p: (_ for _ in ()).throw(OSError("nope")))
     approval = broken.prepare("delete", [fail_item.id])
-    broken.commit(approval["token"], operation="delete", typed_confirmation="DELETE 1")
+    broken.commit(approval["token"], operation="delete", secret=SECRET)
 
     decisions = {r.decision for r in box.events(AuditEvent.DECIDED)}
     assert {"require_ui_confirmation", "deny", "require_typed_secret"} <= decisions
