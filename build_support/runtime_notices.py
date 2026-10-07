@@ -24,7 +24,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import sys
 from typing import Iterable, Mapping, Sequence
 
@@ -101,6 +100,23 @@ PORTAUDIO_KEEP = "libportaudio64bit.dll"
 PORTAUDIO_README = "README.md"
 _PORTAUDIO_BINARY = re.compile(r"^libportaudio[0-9a-z_-]*\.(dll|dylib)$", re.IGNORECASE)
 
+_DIST_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")
+_DIST_VERSION = re.compile(r"^(?:[0-9]{1,9}!)?[A-Za-z0-9]{1,40}(?:[._-][A-Za-z0-9]{1,40}){0,20}(?:\+[A-Za-z0-9]{1,40}(?:[._-][A-Za-z0-9]{1,40}){0,20})?$")
+# Files whose content can be the license text itself. AUTHORS, NOTICE,
+# COPYRIGHT and README files are kept as auxiliary notices but never count
+# as license text.
+_LICENSE_TEXT_NAME = re.compile(r"^(licen[cs]es?|copying|unlicense)([._-][^/\\]*)?$", re.IGNORECASE)
+# Attribution files stay auxiliary even when metadata declares them as a
+# License-File.
+_AUXILIARY_NAME = re.compile(
+    r"^(authors?|notices?|copyright|readme|thirdpartynotices|third[-_]party[-_]notices)([._-][^/\\]*)?$",
+    re.IGNORECASE,
+)
+# A file that only names a license (an SPDX identifier or expression) is not
+# its text.
+_LICENSE_LABEL_ONLY = re.compile(
+    r"^(spdx-license-identifier:\s*)?[A-Za-z0-9.+()\- ]{1,120}$", re.IGNORECASE
+)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _REVIEW_KEYS = {"name", "version", "provenance", "supplementalNotices", "vendoredNotices",
@@ -152,6 +168,12 @@ class _Distribution:
 class NoticeCopy:
     source: Path
     destination: str  # relative to the bundle, POSIX form
+    sha256: str
+    size: int
+    kind: str  # "license-text" or "auxiliary"
+
+    def record(self) -> dict:
+        return {"path": self.destination, "size": self.size, "sha256": self.sha256, "kind": self.kind}
 
 
 @dataclass(frozen=True)
@@ -226,16 +248,25 @@ def _installed_distributions(distributions: Iterable[object]) -> list[_Distribut
     result: dict[str, _Distribution] = {}
     for dist in distributions:
         metadata = dist.metadata
-        name = (metadata.get("Name") or "").strip()
-        if not name:
+        name = metadata.get("Name") or ""
+        if not name.strip():
             continue
+        version = str(dist.version or "")
+        # Identities become directory names, so they are validated before any
+        # destination is built: PEP 508 names and PEP 440-shaped versions only
+        # (epoch "!", local "+", pre/post/dev segments), never separators,
+        # drive colons, controls or traversal.
+        if not _DIST_NAME.fullmatch(name) or not _DIST_VERSION.fullmatch(version):
+            raise NoticeError("An installed distribution has an unsafe name or version in its metadata.")
         canonical = _canonical(name)
         if canonical in result:
             raise NoticeError(f"Distribution {name} is installed more than once in the build environment.")
         entries = list(dist.files or ())
         files = tuple(PurePosixPath(str(item).replace("\\", "/")) for item in entries)
-        base = Path(dist.locate_file("")).resolve()
-        record = _Distribution(canonical, str(dist.version), base, files, metadata)
+        raw_base = Path(dist.locate_file(""))
+        _require_regular(raw_base)
+        base = raw_base.resolve()
+        record = _Distribution(canonical, version, base, files, metadata)
         for item, path in zip(entries, files):
             digest = getattr(item, "hash", None)
             if digest is not None:
@@ -293,11 +324,21 @@ def _notice_files(dist: _Distribution) -> list[PurePosixPath]:
     return sorted(set(found))
 
 
+def _require_regular_chain(base: Path, relative: str) -> Path:
+    """Refuse a link or reparse point at the base or any component below it,
+    even one that resolves back inside the base."""
+    current = base
+    _require_regular(current)
+    for part in relative.split("/"):
+        current = current / part
+        if not current.exists() and not current.is_symlink():
+            raise NoticeError(f"Notice file is missing: {relative}")
+        _require_regular(current)
+    return current
+
+
 def _source_inside(base: Path, relative: str) -> Path:
-    candidate = base.joinpath(*relative.split("/"))
-    if not candidate.exists() and not candidate.is_symlink():
-        raise NoticeError(f"Notice file is missing: {relative}")
-    _require_regular(candidate)
+    candidate = _require_regular_chain(base, _safe_relative(PurePosixPath(relative)))
     resolved = candidate.resolve()
     if base != resolved and base not in resolved.parents:
         raise NoticeError(f"Notice source escapes its distribution: {relative}")
@@ -306,6 +347,54 @@ def _source_inside(base: Path, relative: str) -> Path:
     if resolved.stat().st_size > MAX_NOTICE_BYTES:
         raise NoticeError(f"Notice file is unexpectedly large: {relative}")
     return resolved
+
+
+def _is_license_text(data: bytes) -> bool:
+    """Non-empty text that is more than a license label."""
+    text = data.decode("utf-8", errors="replace").strip()
+    if not text:
+        return False
+    return not (len(text.splitlines()) == 1 and _LICENSE_LABEL_ONLY.match(text))
+
+
+def default_private_roots() -> tuple[str, ...]:
+    """Builder-specific absolute locations that must never reach generated output."""
+    candidates = [str(Path.home()), sys.prefix, sys.base_prefix, str(Path(__file__).resolve().parent.parent)]
+    for variable in ("USERPROFILE", "HOME", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "PIP_CACHE_DIR"):
+        if os.environ.get(variable):
+            candidates.append(os.environ[variable])
+    return tuple(sorted({item for item in candidates if len(item.strip("\\/")) >= 6}))
+
+
+def _private_markers(roots: Iterable[str]) -> list[str]:
+    markers: set[str] = set()
+    for root in roots:
+        text = root.rstrip("\\/").casefold()
+        markers.update({text, text.replace("\\", "/"), text.replace("/", "\\"), text.replace("\\", "\\\\")})
+    return sorted(markers)
+
+
+# Absolute builder-looking paths in generated (not upstream) text.
+_GENERIC_PRIVATE_PATH = re.compile(r"(?i)(?<![a-z])[a-z]:[\\/]|\\\\[^\\]|(^|[\s\"'(=])/(home|users|root|tmp)/")
+
+
+def _contains_private(text: str, markers: Sequence[str]) -> bool:
+    folded = text.casefold()
+    return any(marker in folded for marker in markers)
+
+
+def _check_generated(value: object, markers: Sequence[str], where: str = "inventory") -> None:
+    """Reject private paths in every decoded scalar of generated output, without echoing them."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _check_generated(key, markers, where)
+            _check_generated(item, markers, f"{where}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _check_generated(item, markers, f"{where}[{index}]")
+    elif isinstance(value, str):
+        if _contains_private(value, markers) or (_GENERIC_PRIVATE_PATH.search(value) and "://" not in value):
+            raise NoticeError(f"Generated notice output contains a builder path at {where}; nothing was written.")
 
 
 def _sha256(path: Path) -> str:
@@ -362,14 +451,14 @@ def _validate_vendored_record(item: object) -> None:
     for key in ("component", "version", "sourceRepository", "sourceUrl", "file"):
         if not isinstance(item[key], str) or not item[key].strip():
             raise NoticeError(f"A vendored notice is missing {key}.")
-    if not isinstance(item["sourceCommit"], str) or not _GIT_COMMIT.match(item["sourceCommit"]):
+    if not isinstance(item["sourceCommit"], str) or not _GIT_COMMIT.fullmatch(item["sourceCommit"]):
         raise NoticeError("A vendored notice must pin a full 40-character source commit.")
     if not item["sourceRepository"].startswith("https://"):
         raise NoticeError("A vendored notice source repository must be an https URL.")
     if not (item["sourceUrl"].startswith(item["sourceRepository"].rstrip("/") + "/")
             and item["sourceCommit"] in item["sourceUrl"]):
         raise NoticeError("A vendored notice URL must point into its repository at the pinned commit.")
-    if not isinstance(item["sha256"], str) or not _SHA256.match(item["sha256"]):
+    if not isinstance(item["sha256"], str) or not _SHA256.fullmatch(item["sha256"]):
         raise NoticeError("A vendored notice must record its lowercase SHA-256.")
     _safe_relative(PurePosixPath(item["file"]))
     covers = item["covers"]
@@ -378,7 +467,7 @@ def _validate_vendored_record(item: object) -> None:
     for cover in covers:
         if (not isinstance(cover, dict) or set(cover) != {"path", "sha256"}
                 or not isinstance(cover["path"], str) or not isinstance(cover["sha256"], str)
-                or not _SHA256.match(cover["sha256"])):
+                or not _SHA256.fullmatch(cover["sha256"])):
             raise NoticeError("A covered file must record exactly its path and lowercase SHA-256.")
         _safe_relative(PurePosixPath(cover["path"]))
 
@@ -396,11 +485,11 @@ def _record_sha256(value: str | None) -> str | None:
 
 def _vendored_source(root: Path, relative: str, expected_sha256: str) -> Path:
     """A pinned upstream text inside ``root``: regular, contained and unchanged."""
-    root = root.resolve()
-    candidate = root.joinpath(*_safe_relative(PurePosixPath(relative)).split("/"))
-    if not candidate.exists() and not candidate.is_symlink():
+    safe = _safe_relative(PurePosixPath(relative))
+    if not root.joinpath(*safe.split("/")).exists():
         raise NoticeError(f"Vendored notice is missing: {relative}")
-    _require_regular(candidate)
+    candidate = _require_regular_chain(root, safe)
+    root = root.resolve()
     resolved = candidate.resolve()
     if root not in resolved.parents or not resolved.is_file():
         raise NoticeError(f"Vendored notice escapes its folder: {relative}")
@@ -423,7 +512,7 @@ def _check_covered_binary(dist: _Distribution, cover: dict, bundle_internal: Pat
     installed = dist.base.joinpath(*cover["path"].split("/"))
     if not installed.is_file():
         raise NoticeError(f"Installed file is missing for {label}.")
-    _require_regular(installed)
+    _require_regular_chain(dist.base, cover["path"])
     resolved = installed.resolve()
     if dist.base not in resolved.parents:
         raise NoticeError(f"Installed file escapes its distribution for {label}.")
@@ -433,7 +522,7 @@ def _check_covered_binary(dist: _Distribution, cover: dict, bundle_internal: Pat
         bundled = bundle_internal.joinpath(*cover["path"].split("/"))
         if not bundled.is_file():
             raise NoticeError(f"Reviewed binary is not in the bundle for {label}.")
-        _require_regular(bundled)
+        _require_regular_chain(bundle_internal, cover["path"])
         if _sha256(bundled) != expected:
             raise NoticeError(f"Bundled file differs from the reviewed binary for {label}.")
 
@@ -486,6 +575,7 @@ def plan_runtime_notices(
     pruned: Sequence[str] = (),
     bundle_internal: Path | None = None,
     vendored_root: Path = VENDORED_TEXTS,
+    private_roots: Sequence[str] | None = None,
 ) -> NoticePlan:
     """Attribute every frozen piece and choose the notice texts to copy (read-only)."""
     reviews = dict(reviews or {})
@@ -588,18 +678,27 @@ def plan_runtime_notices(
                 )
         supplemental = [PurePosixPath(item) for item in (review or {}).get("supplementalNotices", [])]
         vendored = list((review or {}).get("vendoredNotices", []))
-        if not notices and not supplemental and not vendored and review is None:
-            missing.append(f"{dist.name} {dist.version}")
-            continue
+        declared = {
+            PurePosixPath(item.replace("\\", "/")).name.casefold()
+            for item in (dist.metadata.get_all("License-File") or [])
+        }
         destination_root = PurePosixPath(NOTICE_DIRECTORY, "python", f"{dist.name}-{dist.version}")
         copied: list[str] = []
+        notice_files: list[dict] = []
         for notice in sorted(set(notices) | set(supplemental)):
             relative = _safe_relative(notice)
             if notice in supplemental and notice not in dist.files:
                 raise NoticeError(f"Reviewed notice {relative} is not part of {dist.name} {dist.version}.")
             destination = (destination_root / relative).as_posix()
-            copies.append(NoticeCopy(_source_inside(dist.base, relative), destination))
+            source = _source_inside(dist.base, relative)
+            license_named = bool(_LICENSE_TEXT_NAME.match(notice.name)) or (
+                notice.parts[0].endswith(".dist-info") and notice.name.casefold() in declared
+                and not _AUXILIARY_NAME.match(notice.name)
+            )
+            copy = _planned_copy(source, destination, license_named)
+            copies.append(copy)
             copied.append(destination)
+            notice_files.append(copy.record())
         vendored_entries: list[dict] = []
         for item in vendored:
             _validate_vendored_record(item)
@@ -607,8 +706,10 @@ def plan_runtime_notices(
                 _check_covered_binary(dist, cover, bundle_internal)
             source = _vendored_source(vendored_root, item["file"], item["sha256"])
             destination = (destination_root / "upstream" / _safe_relative(PurePosixPath(item["file"]))).as_posix()
-            copies.append(NoticeCopy(source, destination))
+            copy = _planned_copy(source, destination, bool(_LICENSE_TEXT_NAME.match(PurePosixPath(item["file"]).name)))
+            copies.append(copy)
             copied.append(destination)
+            notice_files.append(copy.record())
             vendored_entries.append({
                 "component": item["component"],
                 "version": item["version"],
@@ -626,8 +727,14 @@ def plan_runtime_notices(
             "frozenRoots": sorted(represented[name]),
             "nativeLibraries": native,
             "notices": sorted(copied),
+            "noticeFiles": sorted(notice_files, key=lambda item: item["path"]),
+            "licenseTextPresent": any(item["kind"] == "license-text" for item in notice_files),
             "review": None,
         }
+        if not entry["licenseTextPresent"]:
+            # AUTHORS, NOTICE, COPYRIGHT, README or a label-only/empty LICENSE
+            # are attribution, not license text. No review record waives this.
+            missing.append(f"{dist.name} {dist.version} (no non-empty license text)")
         if review is not None:
             entry["review"] = {
                 key: review[key]
@@ -654,9 +761,14 @@ def plan_runtime_notices(
     license_text = python_base / "LICENSE.txt"
     if not license_text.is_file():
         raise NoticeError("The CPython LICENSE.txt of the build interpreter was not found.")
+    if not re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", python_version):
+        raise NoticeError("The build interpreter version is not a plain X.Y.Z version.")
     _require_regular(license_text)
     cpython_destination = f"{NOTICE_DIRECTORY}/python/cpython-{python_version}/LICENSE.txt"
-    copies.append(NoticeCopy(license_text.resolve(), cpython_destination))
+    cpython_copy = _planned_copy(license_text.resolve(), cpython_destination, True)
+    if cpython_copy.kind != "license-text":
+        raise NoticeError("The CPython LICENSE.txt of the build interpreter is empty.")
+    copies.append(cpython_copy)
     text = license_text.read_text(encoding="utf-8", errors="replace")
     components = []
     for component, files, named in _CPYTHON_COMPONENTS:
@@ -678,6 +790,7 @@ def plan_runtime_notices(
         "cpython": {
             "version": python_version,
             "notices": [cpython_destination],
+            "noticeFiles": [cpython_copy.record()],
             "frozenRoots": sorted(cpython_roots),
             "bundledComponents": components,
             "note": CPYTHON_NOTE,
@@ -694,10 +807,42 @@ def plan_runtime_notices(
         },
         "prunedBinaries": sorted(pruned),
     }
-    destinations = [copy.destination for copy in copies]
-    if len(destinations) != len(set(destinations)):
-        raise NoticeError("Two notices would be copied to the same destination.")
+    _check_destinations([copy.destination for copy in copies])
+    markers = _private_markers(default_private_roots() if private_roots is None else private_roots)
+    _check_generated(inventory, markers)
+    for index, line in enumerate(_readme(inventory).splitlines()):
+        _check_generated(line, markers, f"README line {index + 1}")
+    for copy in copies:
+        # Upstream text is never rewritten; a builder path in it stops the build.
+        if _contains_private(copy.source.read_bytes().decode("utf-8", errors="replace"), markers):
+            raise NoticeError(f"Notice {copy.destination} contains a builder path; nothing was written.")
     return NoticePlan(inventory=inventory, copies=tuple(sorted(copies, key=lambda c: c.destination)))
+
+
+def _planned_copy(source: Path, destination: str, license_named: bool) -> "NoticeCopy":
+    data = source.read_bytes()
+    kind = "license-text" if license_named and _is_license_text(data) else "auxiliary"
+    return NoticeCopy(source, destination, hashlib.sha256(data).hexdigest(), len(data), kind)
+
+
+def _check_destinations(destinations: Sequence[str]) -> None:
+    """Every destination is canonical, unique ignoring case, and never also a folder of another."""
+    folded: dict[str, str] = {}
+    for destination in destinations:
+        relative = _safe_relative(PurePosixPath(destination))
+        if not relative.startswith(f"{NOTICE_DIRECTORY}/") or any(
+            ord(character) < 32 for character in relative
+        ):
+            raise NoticeError("A notice destination is outside the notice folder or not printable.")
+        key = relative.casefold()
+        if key in folded:
+            raise NoticeError(f"Two notices would share a destination ignoring case: {relative}")
+        folded[key] = relative
+    for key in folded:
+        parts = key.split("/")
+        for depth in range(1, len(parts)):
+            if "/".join(parts[:depth]) in folded:
+                raise NoticeError(f"A notice destination is also used as a folder: {folded[key]}")
 
 
 def _matches_cpython_file(bundled: Path, python_base: Path) -> bool:
@@ -724,17 +869,23 @@ def write_runtime_notices(plan: NoticePlan, root: Path) -> Path:
     target = root / NOTICE_DIRECTORY
     if target.exists() or target.is_symlink():
         raise NoticeError("Third-party notices already exist in this destination.")
+    # Preflight everything before the first folder is created: destinations,
+    # the output root and its ancestors, and every source against its planned
+    # hash.
+    _check_destinations([copy.destination for copy in plan.copies])
+    if root.exists() or root.is_symlink():
+        _require_regular(root)
     for copy in plan.copies:
-        relative = _safe_relative(PurePosixPath(copy.destination))
-        if not relative.startswith(f"{NOTICE_DIRECTORY}/"):
-            raise NoticeError(f"Notice destination outside the notice directory: {relative}")
-        destination = root.joinpath(*relative.split("/"))
-        if destination.exists():
-            raise NoticeError(f"Duplicate notice destination: {relative}")
+        _verified_bytes(copy)
+    target.mkdir(parents=True)
+    for copy in plan.copies:
+        destination = root.joinpath(*copy.destination.split("/"))
         destination.parent.mkdir(parents=True, exist_ok=True)
-        _require_regular(copy.source)
-        shutil.copyfile(copy.source, destination)
-    target.mkdir(parents=True, exist_ok=True)
+        _require_regular_chain(root, copy.destination.rsplit("/", 1)[0])
+        if destination.exists() or destination.is_symlink():
+            raise NoticeError(f"Duplicate notice destination: {copy.destination}")
+        with destination.open("xb") as stream:
+            stream.write(_verified_bytes(copy))
     (target / INVENTORY_NAME).write_text(
         json.dumps(plan.inventory, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -742,6 +893,15 @@ def write_runtime_notices(plan: NoticePlan, root: Path) -> Path:
     )
     (target / README_NAME).write_text(_readme(plan.inventory), encoding="utf-8", newline="\n")
     return target
+
+
+def _verified_bytes(copy: NoticeCopy) -> bytes:
+    """The source bytes, refused if the file changed since planning."""
+    _require_regular(copy.source)
+    data = copy.source.read_bytes()
+    if len(data) != copy.size or hashlib.sha256(data).hexdigest() != copy.sha256:
+        raise NoticeError(f"Notice source changed after planning: {copy.destination}")
+    return data
 
 
 def _readme(inventory: dict) -> str:

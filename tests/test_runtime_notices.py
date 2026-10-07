@@ -46,7 +46,7 @@ class FakeDistribution:
         for relative, text in files.items():
             path = site / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            path.write_bytes(text.encode("utf-8"))
 
     def locate_file(self, path):
         return self._site / path
@@ -94,11 +94,11 @@ class Fixture:
                 "examplepkg/native.dll": "native",
                 "examplepkg/NOTICE": "Example NOTICE text",
                 "examplepkg-1.0.dist-info/METADATA": "metadata",
-                "examplepkg-1.0.dist-info/licenses/LICENSE.txt": "Example license text",
+                "examplepkg-1.0.dist-info/licenses/LICENSE.txt": "Example license text\n\nPermission is granted for this synthetic fixture only.\n",
             }, {"License-Expression": "MIT", "License-File": "LICENSE.txt"}),
             self.install("pyinstaller", "6.0", {
                 "PyInstaller/__init__.py": "code",
-                "pyinstaller-6.0.dist-info/licenses/COPYING.txt": "PyInstaller license text",
+                "pyinstaller-6.0.dist-info/licenses/COPYING.txt": "PyInstaller license text\n\nPermission is granted for this synthetic fixture only.\n",
             }, {"License": "GPLv2-or-later with a special exception"}),
             self.install("unrelated", "2.0", {
                 "unrelated/__init__.py": "code",
@@ -218,9 +218,10 @@ def test_reviewed_exception_must_match_the_exact_version(fixture):
     reviews = {("examplepkg", "0.9"): {"provenance": "older release", "noNoticeReason": "reviewed"}}
     with pytest.raises(NoticeError, match="examplepkg 1.0"):
         fixture.plan(reviews=reviews)
+    # Even an exact-identity review cannot stand in for absent license text.
     reviews = {("examplepkg", "1.0"): {"provenance": "Wheel from the package index", "noNoticeReason": "Reviewed by the owner"}}
-    review = entry(fixture.plan(reviews=reviews), "examplepkg")["review"]
-    assert review == {"provenance": "Wheel from the package index", "noNoticeReason": "Reviewed by the owner"}
+    with pytest.raises(NoticeError, match="examplepkg 1.0 \\(no non-empty license text\\)"):
+        fixture.plan(reviews=reviews)
 
 
 def test_unattributed_frozen_file_fails_the_build(fixture):
@@ -270,8 +271,175 @@ def test_notice_reached_through_a_link_outside_the_distribution_is_refused(fixtu
     fixture.distributions.append(FakeDistribution(fixture.site, "linkedpkg", "1.0", {}, {}))
     fixture.distributions[-1].files = [PurePosixPath("linkedpkg/__init__.py"), PurePosixPath("linkedpkg/LICENSE")]
     fixture.archive.append("linkedpkg")
-    with pytest.raises(NoticeError, match="escapes"):
+    with pytest.raises(NoticeError, match="link or reparse"):
         fixture.plan()
+
+
+def test_notice_behind_a_junction_that_stays_inside_the_distribution_is_refused(fixture):
+    real = fixture.site / "examplepkg" / "legal"
+    real.mkdir()
+    (real / "LICENSE").write_text("Inside license\n\nStill inside the distribution.\n", encoding="utf-8")
+    link_directory(fixture.site / "examplepkg" / "alias", real)
+    fixture.distributions[0].files.append(PurePosixPath("examplepkg/alias/LICENSE"))
+    with pytest.raises(NoticeError, match="link or reparse"):
+        fixture.plan()
+
+
+@pytest.mark.parametrize("name", ["AUTHORS", "NOTICE", "COPYRIGHT", "AUTHORS.rst"])
+def test_auxiliary_notice_alone_is_not_license_text(fixture, name):
+    # Even when metadata declares the attribution file as its License-File.
+    fixture.distributions[0] = fixture.install("examplepkg", "1.0", {
+        "examplepkg/__init__.py": "code",
+        "examplepkg/_speedups.pyd": "compiled",
+        "examplepkg/native.dll": "native",
+        f"examplepkg-1.0.dist-info/{name}": "Jane Example and contributors\nSee upstream for terms.\n",
+    }, {"License-Expression": "MIT", "License-File": name})
+    with pytest.raises(NoticeError, match="examplepkg 1.0 \\(no non-empty license text\\)"):
+        fixture.plan()
+
+
+@pytest.mark.parametrize("text", ["", "   \n\t\n", "MIT", "SPDX-License-Identifier: Apache-2.0 OR MIT\n"])
+def test_empty_or_label_only_license_is_not_license_text(fixture, text):
+    fixture.distributions[0] = fixture.install("examplepkg", "1.0", {
+        "examplepkg/__init__.py": "code",
+        "examplepkg/_speedups.pyd": "compiled",
+        "examplepkg/native.dll": "native",
+        "examplepkg-1.0.dist-info/licenses/LICENSE": text,
+    }, {"License-Expression": "MIT"})
+    with pytest.raises(NoticeError, match="no non-empty license text"):
+        fixture.plan()
+
+
+def test_declared_unusual_license_file_counts_and_auxiliary_notices_are_kept(fixture):
+    fixture.distributions[0] = fixture.install("examplepkg", "1.0", {
+        "examplepkg/__init__.py": "code",
+        "examplepkg/_speedups.pyd": "compiled",
+        "examplepkg/native.dll": "native",
+        "examplepkg-1.0.dist-info/licenses/TERMS.md": "Example terms\n\nRedistribution is permitted.\n",
+        "examplepkg-1.0.dist-info/NOTICE": "Example NOTICE\n",
+    }, {"License-File": "TERMS.md"})
+    plan = fixture.plan()
+    files = {item["path"].rsplit("/", 1)[1]: item for item in entry(plan, "examplepkg")["noticeFiles"]}
+    assert files["TERMS.md"]["kind"] == "license-text"
+    assert files["NOTICE"]["kind"] == "auxiliary"
+    assert files["NOTICE"]["sha256"] == hashlib.sha256(b"Example NOTICE\n").hexdigest()
+    assert files["NOTICE"]["size"] == len(b"Example NOTICE\n")
+    write_runtime_notices(plan, fixture.root / "out")
+    for item in files.values():
+        assert hashlib.sha256((fixture.root / "out" / item["path"]).read_bytes()).hexdigest() == item["sha256"]
+
+
+def test_loaded_sounddevice_review_with_only_auxiliary_text_fails(fixture, tmp_path):
+    fixture.distributions.append(fixture.install("sounddevice", "0.5.6", {
+        "sounddevice.py": "code",
+        "_sounddevice_data/portaudio-binaries/README.md": "PortAudio attribution, MIT License\n",
+        PORTAUDIO_DLL: "native x64 build",
+        "sounddevice-0.5.6.dist-info/AUTHORS": "Sound authors\n",
+    }, {"License-Expression": "MIT"}))
+    fixture.add_bundle_file(PORTAUDIO_DLL, b"native x64 build")
+    fixture.archive.append("sounddevice")
+    texts = tmp_path / "texts"
+    (texts / "portaudio").mkdir(parents=True)
+    (texts / "portaudio/README-COPY.md").write_text("PortAudio attribution only\n", encoding="utf-8", newline="")
+    path = tmp_path / "reviews.json"
+    path.write_text(json.dumps({"reviews": [{
+        "name": "sounddevice", "version": "0.5.6", "provenance": "wheel",
+        "supplementalNotices": ["_sounddevice_data/portaudio-binaries/README.md"],
+        "vendoredNotices": [vendored_record(
+            file="portaudio/README-COPY.md",
+            sha256=sha256_text("PortAudio attribution only\n"),
+            covers=[{"path": PORTAUDIO_DLL, "sha256": sha256_text("native x64 build")}],
+        )],
+    }]}), encoding="utf-8")
+    reviews = load_reviews(path)
+    with pytest.raises(NoticeError, match="sounddevice 0.5.6 \\(no non-empty license text\\)"):
+        fixture.plan(reviews=reviews, vendored_root=texts)
+
+
+def test_case_alias_notices_collide_before_any_output(fixture):
+    fixture.distributions[0].files.append(PackagePath("examplepkg/notice"))
+    alias = fixture.site / "examplepkg/notice"
+    if not alias.exists():
+        # Case-sensitive file systems hold a second, distinct file; on Windows
+        # the same file is simply listed under two names.
+        alias.write_text("lower-case alias\n", encoding="utf-8")
+    with pytest.raises(NoticeError, match="ignoring case"):
+        fixture.plan()
+    assert not (fixture.root / "out").exists()
+
+
+def test_file_and_folder_destination_collision_is_refused():
+    with pytest.raises(NoticeError, match="also used as a folder"):
+        runtime_notices._check_destinations([
+            "third-party-notices/python/a-1.0/LICENSE",
+            "third-party-notices/python/a-1.0/license/COPYING",
+        ])
+
+
+@pytest.mark.parametrize("name, version", [
+    ("/examplepkg", "1.0"), ("example/pkg", "1.0"), ("C:pkg", "1.0"), ("pkg\\x", "1.0"),
+    ("examplepkg", "1.0/../../escape"), ("examplepkg", "..\\1.0"), ("examplepkg", "C:1.0"),
+    ("examplepkg", "1.0\x00"), ("examplepkg", "1.0\n"), ("examplepkg", ".."),
+])
+def test_malicious_metadata_after_a_valid_record_fails_before_output(fixture, name, version):
+    # "aaa" sorts before the malicious record, and its notices must not be written.
+    fixture.distributions.insert(0, fixture.install("aaa", "1.0", {
+        "aaa/__init__.py": "code", "aaa-1.0.dist-info/LICENSE": "A license\n\nText.\n",
+    }, {}))
+    fixture.archive.append("aaa")
+    fixture.distributions.append(FakeDistribution(fixture.site, "placeholder", "1.0", {}, {}))
+    fixture.distributions[-1].metadata.replace_header("Name", name)
+    fixture.distributions[-1].version = version
+    out = fixture.root / "out"
+    with pytest.raises(NoticeError, match="unsafe name or version"):
+        write_runtime_notices(fixture.plan(), out)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("version", ["1!2.0", "2.0rc1", "2.0.post3", "2.0.dev4", "2.0+local.7", "1!2.0a1.post2+abc"])
+def test_valid_pep440_versions_are_accepted_safely(fixture, version):
+    fixture.distributions[0] = fixture.install("examplepkg", version, {
+        "examplepkg/__init__.py": "code",
+        "examplepkg/_speedups.pyd": "compiled",
+        "examplepkg/native.dll": "native",
+        "examplepkg/LICENSE": "Example License\n\nPermission granted.\n",
+    }, {})
+    plan = fixture.plan()
+    assert entry(plan, "examplepkg")["notices"] == [f"third-party-notices/python/examplepkg-{version}/examplepkg/LICENSE"]
+    write_runtime_notices(plan, fixture.root / "out")
+    assert (fixture.root / "out" / f"third-party-notices/python/examplepkg-{version}/examplepkg/LICENSE").is_file()
+
+
+@pytest.mark.parametrize("private", ["D:\\BuildAgent\\work", "D:/BuildAgent/work", "/srv/buildagent/work"])
+def test_private_builder_path_in_metadata_fails_without_echoing_it(fixture, private):
+    fixture.distributions[0].metadata["License"] = f"See {private}\\LICENSE for terms"
+    with pytest.raises(NoticeError) as raised:
+        fixture.plan(private_roots=[private])
+    assert "builder path" in str(raised.value)
+    assert "builder\\work" not in str(raised.value) and "builder/work" not in str(raised.value)
+
+
+def test_private_builder_path_in_notice_text_fails_and_normal_urls_pass(fixture):
+    (fixture.site / "examplepkg/NOTICE").write_text("Built in D:\\BuildAgent\\work\\pkg\n", encoding="utf-8")
+    with pytest.raises(NoticeError, match="examplepkg/NOTICE contains a builder path"):
+        fixture.plan(private_roots=["D:\\BuildAgent\\work"])
+    (fixture.site / "examplepkg/NOTICE").write_text("Upstream: https://example.invalid/project\n", encoding="utf-8")
+    fixture.distributions[0] = FakeDistribution(fixture.site, "examplepkg", "1.0", {
+        "examplepkg/__init__.py": "code",
+        "examplepkg/_speedups.pyd": "compiled",
+        "examplepkg/native.dll": "native",
+        "examplepkg/NOTICE": "Upstream: https://example.invalid/project\n",
+        "examplepkg-1.0.dist-info/licenses/LICENSE.txt": "Example License\n\nGranted.\n",
+    }, {"License": "https://example.invalid/license"})
+    fixture.plan(private_roots=["D:\\BuildAgent\\work"])
+
+
+def test_source_changed_after_planning_is_refused_before_output(fixture):
+    plan = fixture.plan()
+    (fixture.site / "examplepkg/NOTICE").write_text("Changed after planning\n", encoding="utf-8")
+    with pytest.raises(NoticeError, match="changed after planning"):
+        write_runtime_notices(plan, fixture.root / "out")
+    assert not (fixture.root / "out" / "third-party-notices").exists()
 
 
 def test_link_inside_the_frozen_bundle_is_refused(fixture):
@@ -292,11 +460,11 @@ def test_paths_outside_the_distribution_are_never_read(fixture):
 
 
 def test_existing_bundle_notices_are_preserved_and_never_overwritten(fixture):
-    fixture.add_bundle_file("examplepkg-1.0.dist-info/licenses/LICENSE.txt", b"Example license text")
+    fixture.add_bundle_file("examplepkg-1.0.dist-info/licenses/LICENSE.txt", b"Example license text\n\nPermission is granted for this synthetic fixture only.\n")
     plan = fixture.plan()
     assert "examplepkg-1.0.dist-info" in entry(plan, "examplepkg")["frozenRoots"]
     write_runtime_notices(plan, fixture.bundle)
-    assert (fixture.internal / "examplepkg-1.0.dist-info/licenses/LICENSE.txt").read_bytes() == b"Example license text"
+    assert (fixture.internal / "examplepkg-1.0.dist-info/licenses/LICENSE.txt").read_bytes() == b"Example license text\n\nPermission is granted for this synthetic fixture only.\n"
     with pytest.raises(NoticeError, match="already exist"):
         write_runtime_notices(plan, fixture.bundle)
 
@@ -315,13 +483,13 @@ def add_sounddevice(fixture: Fixture, *, dll: str = "native x64 build") -> tuple
         "sounddevice.py": "code",
         "_sounddevice_data/portaudio-binaries/README.md": "PortAudio attribution",
         PORTAUDIO_DLL: dll,
-        "sounddevice-0.5.6.dist-info/licenses/LICENSE": "sounddevice license",
+        "sounddevice-0.5.6.dist-info/licenses/LICENSE": "sounddevice license\n\nPermission is granted for this synthetic fixture only.\n",
     }, {"License-Expression": "MIT"}))
     fixture.add_bundle_file(PORTAUDIO_DLL, dll.encode("utf-8"))
     fixture.archive.append("sounddevice")
     texts = fixture.root / "vendored"
     (texts / "portaudio").mkdir(parents=True)
-    (texts / "portaudio/LICENSE.txt").write_text("PortAudio upstream license text", encoding="utf-8")
+    (texts / "portaudio/LICENSE.txt").write_text("PortAudio upstream license text\n\nPermission is granted for this synthetic fixture only.\n", encoding="utf-8", newline="")
     review = {
         "provenance": "Shipped inside the sounddevice wheel.",
         "supplementalNotices": ["_sounddevice_data/portaudio-binaries/README.md"],
@@ -332,7 +500,7 @@ def add_sounddevice(fixture: Fixture, *, dll: str = "native x64 build") -> tuple
             "sourceCommit": COMMIT,
             "sourceUrl": f"https://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt",
             "file": "portaudio/LICENSE.txt",
-            "sha256": sha256_text("PortAudio upstream license text"),
+            "sha256": sha256_text("PortAudio upstream license text\n\nPermission is granted for this synthetic fixture only.\n"),
             "covers": [{"path": PORTAUDIO_DLL, "sha256": sha256_text(dll)}],
         }],
         "binaryProvenance": {"wheelSha256": "f" * 64},
@@ -360,13 +528,13 @@ def test_native_package_copies_its_pinned_upstream_notice(fixture):
         "sourceCommit": COMMIT,
         "sourceUrl": f"https://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt",
         "notice": upstream,
-        "sha256": sha256_text("PortAudio upstream license text"),
+        "sha256": sha256_text("PortAudio upstream license text\n\nPermission is granted for this synthetic fixture only.\n"),
         "covers": [{"path": PORTAUDIO_DLL, "sha256": sha256_text("native x64 build")}],
     }]
     assert sounddevice["review"]["binaryProvenance"] == {"wheelSha256": "f" * 64}
     write_runtime_notices(plan, fixture.root / "out")
     out = fixture.root / "out"
-    assert (out / upstream).read_text(encoding="utf-8") == "PortAudio upstream license text"
+    assert (out / upstream).read_text(encoding="utf-8") == "PortAudio upstream license text\n\nPermission is granted for this synthetic fixture only.\n"
     readme = (out / "third-party-notices/README.txt").read_text(encoding="utf-8")
     assert f"https://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt" in readme
     assert "Statically linked runtime terms need review." in readme
@@ -385,7 +553,7 @@ def test_native_package_without_a_pinned_upstream_notice_fails(fixture):
 
 def test_changed_vendored_text_fails(fixture):
     review, texts = add_sounddevice(fixture)
-    (texts / "portaudio/LICENSE.txt").write_text("PortAudio upstream license text, edited", encoding="utf-8")
+    (texts / "portaudio/LICENSE.txt").write_text("PortAudio upstream license text, edited\n", encoding="utf-8")
     with pytest.raises(NoticeError, match="pinned SHA-256"):
         plan_sounddevice(fixture, review, texts)
 
@@ -409,10 +577,10 @@ def test_vendored_text_reached_through_a_link_is_refused(fixture):
     review, texts = add_sounddevice(fixture)
     outside = fixture.root / "outside"
     outside.mkdir()
-    (outside / "LICENSE.txt").write_text("PortAudio upstream license text", encoding="utf-8")
+    (outside / "LICENSE.txt").write_text("PortAudio upstream license text\n\nPermission is granted for this synthetic fixture only.\n", encoding="utf-8")
     link_directory(texts / "linked", outside)
     review["vendoredNotices"][0]["file"] = "linked/LICENSE.txt"
-    with pytest.raises(NoticeError, match="escapes"):
+    with pytest.raises(NoticeError, match="link or reparse"):
         plan_sounddevice(fixture, review, texts)
 
 
