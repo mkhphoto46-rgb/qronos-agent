@@ -12,7 +12,7 @@ export type LibraryArtifact = {
 export type StorageLocations = { dataRoot:string; historyRoot:string; memoryRoot:string; libraryDbRoot:string; artifactRoot:string; cacheRoot:string; backupRoot:string };
 // Read-only storage diagnostics from the backend: invalid stored locations are
 // reported (the default folder is used meanwhile) and never rewritten silently.
-export type StorageProblem = { key:string; label:string; code:string; message:string; stored:string };
+export type StorageProblem = { key:string; label:string; code:string; message:string; stored:string; severity?:"warning"|"info" };
 export type StorageDiagnostics = { locatorStatus:"missing"|"ok"|"corrupt"|"newer"; locatorPath:string; writable:boolean; problems:StorageProblem[] };
 type Snapshot = { artifacts: LibraryArtifact[]; locations: StorageLocations | null; storage: StorageDiagnostics | null; loading:boolean; error:string | null; revision:number };
 let snapshot: Snapshot = { artifacts:[], locations:null, storage:null, loading:true, error:null, revision:0 };
