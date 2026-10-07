@@ -134,7 +134,11 @@ export type ScreenApprovalView = {
   prompt: ScreenPrompt;
   text: string;
   submitting: boolean;
-  failed: boolean;
+  /**
+   * The last decision could not be confirmed (the command rejected). It may
+   * or may not have reached the runtime, so state may already have changed.
+   */
+  unconfirmed: boolean;
 };
 
 /** Sends one decision for one identity (the typed look_at_screen command). */
@@ -155,7 +159,8 @@ export type ScreenDecisionSender = (
  * generation and can neither close nor alter the prompt now displayed, even
  * when the newer prompt has identical wording. Decisions are sent only for
  * the displayed identity, once (duplicates are ignored while one is in
- * flight), and never automatically retried.
+ * flight), and never automatically replayed: a rejected send does not prove
+ * the decision was undelivered, so the outcome is reported as unconfirmed.
  */
 export class ScreenApprovalController {
   private readonly queue = new ScreenPromptQueue();
@@ -163,7 +168,7 @@ export class ScreenApprovalController {
   private active: ScreenPrompt | null = null;
   private generation = 0;
   private submitting = false;
-  private failed = false;
+  private unconfirmed = false;
   private view: ScreenApprovalView | null = null;
   private readonly send: ScreenDecisionSender;
   private readonly onSendError: (error: unknown) => void;
@@ -188,6 +193,15 @@ export class ScreenApprovalController {
 
   get waiting(): number {
     return this.queue.size;
+  }
+
+  /**
+   * Changes whenever the displayed prompt changes or everything is cleared
+   * (runtime end, unmount). Async work captures it and drops its result if
+   * it no longer matches.
+   */
+  get generationToken(): number {
+    return this.generation;
   }
 
   /** A new prompt from the runtime; shown now if nothing is displayed. */
@@ -227,17 +241,20 @@ export class ScreenApprovalController {
     }
     const generation = this.generation;
     this.submitting = true;
-    this.failed = false;
+    this.unconfirmed = false;
     this.publish();
     try {
       await this.send(prompt, approved);
     } catch (error) {
       this.onSendError(error);
       if (this.generation === generation) {
-        // Not delivered: keep the same prompt up so the person can decide
-        // again or decline. Nothing is retried on their behalf.
+        // Unconfirmed, not "undelivered": a flush/connection failure can
+        // follow delivery. Keep the same identity on screen with an honest
+        // warning; nothing is replayed on the person's behalf. A deliberate
+        // second answer reuses the single-use identity, which the runtime
+        // refuses if the first one already arrived.
         this.submitting = false;
-        this.failed = true;
+        this.unconfirmed = true;
         this.publish();
       }
       return;
@@ -258,7 +275,7 @@ export class ScreenApprovalController {
   private close(): void {
     this.active = null;
     this.submitting = false;
-    this.failed = false;
+    this.unconfirmed = false;
     this.generation += 1;
   }
 
@@ -269,7 +286,7 @@ export class ScreenApprovalController {
         this.active = next;
         this.generation += 1;
         this.submitting = false;
-        this.failed = false;
+        this.unconfirmed = false;
       }
     }
     this.publish();
@@ -284,7 +301,7 @@ export class ScreenApprovalController {
             prompt,
             text: screenPromptText(prompt),
             submitting: this.submitting,
-            failed: this.failed,
+            unconfirmed: this.unconfirmed,
           };
     for (const listener of [...this.listeners]) {
       listener();
@@ -347,4 +364,166 @@ export function screenPromptTitle(kind: ScreenPromptKind): string {
     case "screen_read":
       return "اجازهٔ دیدن پنجره";
   }
+}
+
+/** The Tauri invoke shape the approval flow needs (tests pass a fake). */
+export type InvokeFn = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+/**
+ * The controller App uses: decisions go only through the typed
+ * look_at_screen command, carrying only the prompt's approval identity.
+ */
+export function createScreenApprovalController(
+  invoke: InvokeFn,
+  onSendError: (error: unknown) => void = () => {},
+): ScreenApprovalController {
+  return new ScreenApprovalController(
+    (prompt, approved) =>
+      invoke("look_at_screen", {
+        approvalId: prompt.approvalId,
+        approved,
+        windowOnly: true,
+      }),
+    onSendError,
+  );
+}
+
+export type TimerApi = {
+  setTimeout: (callback: () => void, ms: number) => unknown;
+  clearTimeout: (handle: unknown) => void;
+};
+
+const browserTimers: TimerApi = {
+  setTimeout: (callback, ms) => globalThis.setTimeout(callback, ms),
+  clearTimeout: (handle) =>
+    globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/** Interval between read-only runtime status checks while a prompt is up. */
+export const SCREEN_APPROVAL_STATUS_INTERVAL_MS = 2000;
+
+/** Only an explicit `running: false` counts; errors and unknown shapes do not. */
+export function isStoppedRuntimeStatus(status: unknown): boolean {
+  return (
+    typeof status === "object" &&
+    status !== null &&
+    (status as { running?: unknown }).running === false
+  );
+}
+
+/**
+ * Detects a runtime that ended without saying so (killed or crashed: the
+ * desktop reader just sees EOF, so no runtime_stopping event arrives).
+ *
+ * Only while a prompt is visible, it reads the existing get_runtime_status
+ * command (read-only; it never starts or restarts the runtime) at a fixed
+ * interval, with at most one check in flight. Each check captures the
+ * controller's generation; if the prompt or runtime changed meanwhile (a
+ * newer prompt, runtime_ready, a clear), the result is dropped. A failed or
+ * unrecognised status read is "unknown", never "stopped", and ordinary
+ * runtime_error diagnostics are not consulted at all. dispose() cancels the
+ * timer and suppresses any late result.
+ */
+export class ScreenApprovalRuntimeWatch {
+  private readonly controller: ScreenApprovalController;
+  private readonly readStatus: () => Promise<unknown>;
+  private readonly timers: TimerApi;
+  private readonly intervalMs: number;
+  private timer: unknown = null;
+  private inFlight = false;
+  private disposed = false;
+  private unsubscribe: (() => void) | null = null;
+
+  constructor(
+    controller: ScreenApprovalController,
+    readStatus: () => Promise<unknown>,
+    timers: TimerApi = browserTimers,
+    intervalMs: number = SCREEN_APPROVAL_STATUS_INTERVAL_MS,
+  ) {
+    this.controller = controller;
+    this.readStatus = readStatus;
+    this.timers = timers;
+    this.intervalMs = intervalMs;
+  }
+
+  start(): void {
+    if (this.disposed || this.unsubscribe !== null) {
+      return;
+    }
+    this.unsubscribe = this.controller.subscribe(() => this.sync());
+    this.sync();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.cancel();
+  }
+
+  private sync(): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.controller.getSnapshot() === null) {
+      this.cancel();
+      return;
+    }
+    if (this.timer === null && !this.inFlight) {
+      this.timer = this.timers.setTimeout(() => {
+        void this.check();
+      }, this.intervalMs);
+    }
+  }
+
+  private cancel(): void {
+    if (this.timer !== null) {
+      this.timers.clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private async check(): Promise<void> {
+    this.timer = null;
+    if (this.disposed || this.controller.getSnapshot() === null) {
+      return;
+    }
+    const generation = this.controller.generationToken;
+    this.inFlight = true;
+    let stopped = false;
+    try {
+      stopped = isStoppedRuntimeStatus(await this.readStatus());
+    } catch {
+      stopped = false;
+    } finally {
+      this.inFlight = false;
+    }
+    if (this.disposed) {
+      return;
+    }
+    if (stopped && this.controller.generationToken === generation) {
+      // The runtime that asked is gone: drop its prompts, answer nothing.
+      this.controller.clear();
+      return;
+    }
+    this.sync();
+  }
+}
+
+/** App wiring: watch the runtime through the read-only status command. */
+export function startScreenApprovalRuntimeWatch(
+  controller: ScreenApprovalController,
+  invoke: InvokeFn,
+  timers?: TimerApi,
+): ScreenApprovalRuntimeWatch {
+  const watch = new ScreenApprovalRuntimeWatch(
+    controller,
+    () => invoke("get_runtime_status"),
+    timers,
+  );
+  watch.start();
+  return watch;
 }

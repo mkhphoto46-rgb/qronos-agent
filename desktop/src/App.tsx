@@ -28,6 +28,8 @@ import { useLibraryStore } from "./libraryStore";
 import {
   ScreenApprovalController,
   applyScreenApprovalEvent,
+  createScreenApprovalController,
+  startScreenApprovalRuntimeWatch,
 } from "./screenApproval";
 import {
   refreshSettings,
@@ -226,16 +228,11 @@ function App() {
     useRef<ScreenApprovalController | null>(null);
 
   if (screenApprovalRef.current === null) {
-    screenApprovalRef.current = new ScreenApprovalController(
-      (prompt, approved) =>
-        invoke("look_at_screen", {
-          approvalId: prompt.approvalId,
-          approved,
-          windowOnly: true,
-        }),
+    screenApprovalRef.current = createScreenApprovalController(
+      invoke,
       (error) => {
         console.error(
-          "[Qronos Screen Approval] failed:",
+          "[Qronos Screen Approval] decision not confirmed:",
           error,
         );
       },
@@ -249,13 +246,21 @@ function App() {
     screenApproval.getSnapshot,
   );
 
-  useEffect(
-    () => () => {
-      // Unmount: drop every displayed/waiting prompt without answering.
+  useEffect(() => {
+    // While a prompt is visible, notice a runtime that ended without an
+    // event (read-only status checks; never starts the runtime).
+    const watch = startScreenApprovalRuntimeWatch(
+      screenApproval,
+      invoke,
+    );
+
+    return () => {
+      // Unmount: stop checking, ignore late results, and drop every
+      // displayed/waiting prompt without answering.
+      watch.dispose();
       screenApproval.clear();
-    },
-    [screenApproval],
-  );
+    };
+  }, [screenApproval]);
 
   const answerScreenApproval = useCallback(
     (approvalId: string, approved: boolean) => {

@@ -170,7 +170,7 @@ test("a delayed result for a revoked prompt cannot close a newer prompt with the
   assert.deepEqual(app.sent, [{ approvalId: id("a"), approved: true }]);
 });
 
-test("a delayed rejection for a revoked prompt does not mark the newer one failed", async () => {
+test("a delayed rejection for a revoked prompt does not mark the newer one unconfirmed", async () => {
   const app = harness();
   app.emit("voice_needs_screen", promptEvent(id("a")));
   const oldAnswer = app.controller.answer(id("a"), false);
@@ -181,7 +181,7 @@ test("a delayed rejection for a revoked prompt does not mark the newer one faile
   await oldAnswer;
 
   assert.equal(app.shown(), id("b"));
-  assert.equal(app.controller.getSnapshot().failed, false);
+  assert.equal(app.controller.getSnapshot().unconfirmed, false);
 });
 
 test("duplicate submissions while one is in flight send exactly one decision", async () => {
@@ -200,7 +200,7 @@ test("duplicate submissions while one is in flight send exactly one decision", a
   assert.equal(app.controller.getSnapshot(), null);
 });
 
-test("an undelivered decision keeps the prompt up, is not retried, and can be re-decided", async () => {
+test("an unconfirmed decision keeps the prompt up, is not replayed, and can be re-decided", async () => {
   const app = harness();
   app.emit("voice_needs_screen", promptEvent(id("a")));
 
@@ -212,7 +212,7 @@ test("an undelivered decision keeps the prompt up, is not retried, and can be re
   const view = app.controller.getSnapshot();
   assert.equal(view.prompt.approvalId, id("a"));
   assert.equal(view.submitting, false);
-  assert.equal(view.failed, true);
+  assert.equal(view.unconfirmed, true);
   assert.equal(app.sent.length, 1);
   assert.equal(app.sendErrors.length, 1);
 
@@ -383,15 +383,20 @@ test("Escape declines; it is ignored while a decision is being sent", () => {
   assert.equal(busyDialog.props["aria-busy"], true);
 });
 
-test("buttons are disabled while sending and a failure is announced", () => {
+test("buttons are disabled while sending and an unconfirmed outcome is announced honestly", () => {
   const sending = render(viewFor(id("a"), { submitting: true }), () => {}).tree;
   const buttons = findAll(sending, (n) => n.type === "button");
   assert.ok(buttons.every((b) => b.props.disabled === true));
   assert.equal(text(buttons[1]), "در حال ارسال...");
 
-  const failed = render(viewFor(id("a"), { failed: true }), () => {}).tree;
-  const [status] = findAll(failed, (n) => n.props?.role === "status");
-  assert.match(text(status), /[؀-ۿ]/u);
+  const unconfirmed = render(viewFor(id("a"), { unconfirmed: true }), () => {}).tree;
+  const [status] = findAll(unconfirmed, (n) => n.props?.role === "status");
+  const copy = text(status);
+  assert.match(copy, /[؀-ۿ]/u);
+  // Honest: it may have arrived; check or Stop. Never "did not reach".
+  assert.match(copy, /ممکن است/u);
+  assert.match(copy, /Stop/);
+  assert.ok(!copy.includes("نرسید"));
 });
 
 test("focus starts on the safe decline choice", () => {
@@ -408,4 +413,204 @@ test("the approval flow never uses the blocking window.confirm", () => {
     const source = readFileSync(new URL(file, import.meta.url), "utf8");
     assert.ok(!/\bconfirm\s*\(/.test(source), file);
   }
+});
+
+// ------------------------------------------- App wiring: typed commands
+
+/** Fake Tauri invoke: records every command, answers from a script. */
+function fakeInvoke(script = {}) {
+  const calls = [];
+  const pending = [];
+  const invoke = (command, args) => {
+    calls.push({ command, args });
+    const reply = script[command];
+    if (reply === "defer") {
+      const call = deferred();
+      pending.push(call);
+      return call.promise;
+    }
+    if (reply instanceof Error) return Promise.reject(reply);
+    return Promise.resolve(typeof reply === "function" ? reply(args) : reply);
+  };
+  return {
+    invoke,
+    calls,
+    pending,
+    count: (command) => calls.filter((call) => call.command === command).length,
+  };
+}
+
+function fakeTimers() {
+  let next = 1;
+  const scheduled = new Map();
+  return {
+    setTimeout(callback, ms) { const handle = next++; scheduled.set(handle, { callback, ms }); return handle; },
+    clearTimeout(handle) { scheduled.delete(handle); },
+    get pending() { return scheduled.size; },
+    delays() { return [...scheduled.values()].map((item) => item.ms); },
+    async fire() {
+      const due = [...scheduled.values()];
+      scheduled.clear();
+      due.forEach((item) => item.callback());
+      await settle();
+    },
+  };
+}
+
+/** The pieces App.tsx builds, wired exactly as App wires them. */
+function wired(script) {
+  const tauri = fakeInvoke(script);
+  const errors = [];
+  const controller = approval.createScreenApprovalController(tauri.invoke, (error) => errors.push(error));
+  const timers = fakeTimers();
+  const watch = approval.startScreenApprovalRuntimeWatch(controller, tauri.invoke, timers);
+  const emit = (eventType, message = "") => approval.applyScreenApprovalEvent(controller, eventType, message);
+  const shown = () => controller.getSnapshot()?.prompt.approvalId ?? null;
+  return { tauri, errors, controller, timers, watch, emit, shown };
+}
+
+test("decisions use only the typed look_at_screen command with the exact identity", async () => {
+  const app = wired({ look_at_screen: undefined, get_runtime_status: { running: true } });
+  app.emit("voice_needs_screen", promptEvent(id("a"), "same words"));
+  await app.controller.answer(id("a"), true);
+
+  const sent = app.tauri.calls.filter((call) => call.command === "look_at_screen");
+  assert.equal(sent.length, 1);
+  assert.equal(JSON.stringify(sent[0].args), JSON.stringify({ approvalId: id("a"), approved: true, windowOnly: true }));
+  assert.equal(app.tauri.count("start_runtime"), 0);
+  app.watch.dispose();
+});
+
+test("a rejected decision is reported unconfirmed and is never invoked again automatically", async () => {
+  const app = wired({ look_at_screen: new Error("flush failed after write"), get_runtime_status: { running: true } });
+  app.emit("voice_needs_screen", promptEvent(id("a")));
+
+  await app.controller.answer(id("a"), true);
+  // Let every pending timer/status check run a few times.
+  for (let round = 0; round < 3; round += 1) await app.timers.fire();
+
+  const view = app.controller.getSnapshot();
+  assert.equal(view.prompt.approvalId, id("a")); // same exact identity kept
+  assert.equal(view.unconfirmed, true);
+  assert.equal(view.submitting, false);
+  assert.equal(app.tauri.count("look_at_screen"), 1);
+  assert.equal(app.errors.length, 1);
+  app.watch.dispose();
+});
+
+test("no runtime status polling happens without a visible prompt", async () => {
+  const app = wired({ get_runtime_status: { running: true } });
+  assert.equal(app.timers.pending, 0);
+  app.emit("runtime_error", "Traceback: ordinary diagnostic");
+  app.emit("voice_audio_spectrum", "{}");
+  app.emit("computer_approval_discarded", discardEvent(id("q")));
+  await app.timers.fire();
+  assert.equal(app.timers.pending, 0);
+  assert.equal(app.tauri.count("get_runtime_status"), 0);
+
+  app.emit("voice_needs_screen", promptEvent(id("a")));
+  assert.equal(app.timers.pending, 1);
+  assert.deepEqual(app.timers.delays(), [approval.SCREEN_APPROVAL_STATUS_INTERVAL_MS]);
+  app.emit("computer_approval_discarded", discardEvent(id("a")));
+  assert.equal(app.timers.pending, 0); // stops as soon as nothing is visible
+  await app.timers.fire();
+  assert.equal(app.tauri.count("get_runtime_status"), 0);
+  app.watch.dispose();
+});
+
+test("an unexpectedly stopped runtime clears the visible and waiting prompts without answering", async () => {
+  const app = wired({ get_runtime_status: { running: false, status: "stopped" } });
+  app.emit("voice_needs_screen", promptEvent(id("a")));
+  app.emit("voice_needs_screen", promptEvent(id("b")));
+
+  await app.timers.fire();
+
+  assert.equal(app.tauri.count("get_runtime_status"), 1);
+  assert.equal(app.controller.getSnapshot(), null);
+  assert.equal(app.controller.waiting, 0);
+  assert.equal(app.tauri.count("look_at_screen"), 0);
+  assert.equal(app.tauri.count("start_runtime"), 0);
+  assert.equal(app.timers.pending, 0); // nothing visible: polling stops
+  app.watch.dispose();
+});
+
+test("a running runtime keeps the prompt and checks again, one check at a time", async () => {
+  const app = wired({ get_runtime_status: "defer" });
+  app.emit("voice_needs_screen", promptEvent(id("a")));
+  await app.timers.fire();
+  assert.equal(app.tauri.count("get_runtime_status"), 1);
+  // While that check is in flight, new events never start a second one.
+  app.emit("voice_needs_screen", promptEvent(id("b")));
+  assert.equal(app.timers.pending, 0);
+
+  app.tauri.pending[0].resolve({ running: true });
+  await settle();
+  assert.equal(app.shown(), id("a"));
+  assert.equal(app.timers.pending, 1);
+  app.watch.dispose();
+});
+
+test("ordinary diagnostics and unreadable status never count as a stopped runtime", async () => {
+  const app = wired({ get_runtime_status: new Error("Could not inspect Qronos runtime process") });
+  app.emit("voice_needs_screen", promptEvent(id("a")));
+  app.emit("runtime_error", "Traceback (most recent call last): diagnostic");
+  await app.timers.fire();
+  assert.equal(app.shown(), id("a"));
+  assert.equal(app.timers.pending, 1); // keeps checking at the same bounded rate
+
+  for (const reply of [{}, { running: "false" }, null, "stopped"]) {
+    assert.equal(approval.isStoppedRuntimeStatus(reply), false);
+  }
+  assert.equal(approval.isStoppedRuntimeStatus({ running: false }), true);
+  app.watch.dispose();
+});
+
+test("a late stopped reply cannot clear a prompt from a newer runtime", async () => {
+  const app = wired({ get_runtime_status: "defer" });
+  app.emit("voice_needs_screen", promptEvent(id("a")));
+  await app.timers.fire(); // check for runtime 1 is now in flight
+
+  app.emit("runtime_ready"); // a new runtime replaced the old one
+  app.emit("voice_needs_screen", promptEvent(id("b"), "به این پنجره نگاه کن"));
+  app.tauri.pending[0].resolve({ running: false }); // the old runtime's answer
+  await settle();
+
+  assert.equal(app.shown(), id("b"));
+  assert.equal(app.timers.pending, 1); // b gets its own fresh check
+  app.watch.dispose();
+});
+
+test("a late stopped reply cannot clear a newer prompt with the same text", async () => {
+  const app = wired({ get_runtime_status: "defer", look_at_screen: undefined });
+  app.emit("voice_needs_screen", promptEvent(id("a"), "same words"));
+  app.emit("voice_needs_screen", promptEvent(id("b"), "same words"));
+  await app.timers.fire();
+  await app.controller.answer(id("a"), false); // a decided; b now visible
+
+  app.tauri.pending[0].resolve({ running: false });
+  await settle();
+
+  assert.equal(app.shown(), id("b"));
+  app.watch.dispose();
+});
+
+test("unmount cancels the scheduled check and suppresses an in-flight result", async () => {
+  const scheduled = wired({ get_runtime_status: { running: false } });
+  scheduled.emit("voice_needs_screen", promptEvent(id("a")));
+  assert.equal(scheduled.timers.pending, 1);
+  scheduled.watch.dispose();
+  assert.equal(scheduled.timers.pending, 0);
+  await scheduled.timers.fire();
+  assert.equal(scheduled.tauri.count("get_runtime_status"), 0);
+
+  const inFlight = wired({ get_runtime_status: "defer" });
+  inFlight.emit("voice_needs_screen", promptEvent(id("a")));
+  await inFlight.timers.fire();
+  inFlight.watch.dispose(); // App's unmount cleanup runs before clear()
+  inFlight.tauri.pending[0].resolve({ running: false });
+  await settle();
+  assert.equal(inFlight.shown(), id("a")); // late result ignored
+  inFlight.emit("voice_needs_screen", promptEvent(id("b")));
+  assert.equal(inFlight.timers.pending, 0); // nothing rescheduled after unmount
+  assert.equal(inFlight.tauri.count("look_at_screen"), 0);
 });

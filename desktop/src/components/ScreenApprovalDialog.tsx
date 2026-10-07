@@ -20,7 +20,8 @@ type Props = {
  * Replaces window.confirm so runtime events (including revocation) keep
  * being processed while a prompt is shown. Focus lands on the safe choice
  * (decline); Escape declines; both buttons are disabled while a decision is
- * in flight. Each prompt identity renders a fresh dialog instance.
+ * in flight. An unconfirmed decision is reported honestly and never
+ * replayed. Each prompt identity renders a fresh dialog instance.
  */
 export default function ScreenApprovalDialog({ view, onAnswer }: Props) {
   if (view === null) {
@@ -43,7 +44,7 @@ function ScreenApprovalPanel({
   onAnswer: Props["onAnswer"];
 }) {
   const declineRef = useRef<HTMLButtonElement | null>(null);
-  const { prompt, text, submitting, failed } = view;
+  const { prompt, text, submitting, unconfirmed } = view;
   const titleId = `screen-approval-title-${prompt.approvalId}`;
   const bodyId = `screen-approval-body-${prompt.approvalId}`;
 
@@ -106,9 +107,10 @@ function ScreenApprovalPanel({
           {text}
         </p>
 
-        {failed && (
+        {unconfirmed && (
           <div className="file-approval-warning" role="status">
-            پاسخ به Qronos نرسید؛ می‌توانی دوباره تصمیم بگیری یا رد کنی.
+            رسیدن پاسخ تأیید نشد؛ ممکن است به Qronos رسیده و وضعیت تغییر
+            کرده باشد. پیش از هر کار دیگری وضعیت را بررسی کن یا Stop بزن.
           </div>
         )}
 

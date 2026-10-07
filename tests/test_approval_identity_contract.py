@@ -262,10 +262,17 @@ def test_app_answers_prompts_only_by_identity_through_the_typed_command():
     helper = SCREEN_TS.read_text(encoding="utf-8")
 
     assert '"qronos.look_at_screen"' not in app
-    assert 'invoke("look_at_screen", {' in app
-    assert "approvalId: prompt.approvalId" in app
+    assert '"qronos.look_at_screen"' not in helper
+    # App builds the controller and runtime watch from the real Tauri invoke;
+    # the factories own the typed commands (behaviour: desktop/tests/*.mjs).
+    assert "createScreenApprovalController(\n      invoke," in app
+    assert "startScreenApprovalRuntimeWatch(\n      screenApproval,\n      invoke," in app
+    assert 'invoke("look_at_screen", {' in helper
+    assert "approvalId: prompt.approvalId" in helper
+    assert 'invoke("get_runtime_status")' in helper
+    assert "start_runtime" not in helper
     # Every runtime event goes through the shared router, which parses
-    # prompts and applies revocations (behaviour: desktop/tests/*.test.mjs).
+    # prompts and applies revocations.
     assert "applyScreenApprovalEvent(" in app
     assert "<ScreenApprovalDialog" in app
     assert "parseScreenPrompt(message)" in helper
@@ -273,7 +280,7 @@ def test_app_answers_prompts_only_by_identity_through_the_typed_command():
     assert 'case "screen_approval_stale"' in app
     assert not re.search(r"\bconfirm\s*\(", app)
     # The question text is never sent back as the key of an answer.
-    block = app[app.index('invoke("look_at_screen", {') :][:200]
+    block = helper[helper.index('invoke("look_at_screen", {') :][:200]
     assert "question" not in block
 
 
