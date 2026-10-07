@@ -2510,10 +2510,18 @@
     infinite;
 }
 
-/* Cancel for a request waiting in, or running from, the Smart Queue. */
-.conversation-queue-cancel {
+/* Resume and Cancel for a request waiting in, or running from, the Smart
+   Queue. */
+.conversation-queue-actions {
+  display:
+    flex;
+  gap:
+    6px;
   margin-top:
     8px;
+}
+
+.conversation-queue-cancel {
   padding:
     4px 10px;
 

@@ -44,6 +44,9 @@ export type ConversationMessage = {
   // Set while the request waits in, or runs from, the Smart Queue. The
   // bubble offers Cancel only while this is present.
   queueTaskId?: string;
+  // Where the queue says this request is. Present only on bubbles the queue
+  // manages, never on a canonical answer.
+  queuePhase?: string;
 };
 
 type RuntimeEvent = {
@@ -83,6 +86,23 @@ type QueueConversationPayload = {
   phase?: unknown;
   text?: unknown;
   error?: unknown;
+  resumable?: unknown;
+};
+
+type QueueSnapshotTask = {
+  taskId?: unknown;
+  requestId?: unknown;
+  kind?: unknown;
+  state?: unknown;
+  heldReason?: unknown;
+  detail?: unknown;
+  resumable?: unknown;
+  inFlight?: unknown;
+};
+
+type QueueSnapshotPayload = {
+  tasks?: unknown;
+  recent?: unknown;
 };
 
 type ConversationSnapshot = {
@@ -102,12 +122,28 @@ const QUEUE_WAITING_TEXT: Record<string, string> = {
     "در حال پردازش از صف...",
 };
 
+// Waiting for the user, not for the machine: no pulse, and the bubble offers
+// Resume.
+const QUEUE_HELD_TEXT: Record<string, string> = {
+  paused:
+    "در صف متوقف شده — برای ادامه «ادامه» را بزنید.",
+  interrupted:
+    "Qronos هنگام پردازش این درخواست بسته شد. خودکار دوباره اجرا نمی‌شود؛ برای تلاش دوباره «ادامه» را بزنید.",
+};
+
 const QUEUE_ENDED_TEXT: Record<string, string> = {
   cancelled:
     "لغو شد — پاسخی ثبت نشد.",
   interrupted:
     "Qronos پیش از پاسخ بسته شد و این درخواست دوباره اجرا نمی‌شود؛ لطفاً دوباره بپرسید.",
 };
+
+// Holds that mean "the machine said not yet", as opposed to waiting its turn.
+const DEFERRED_HOLDS = new Set([
+  "sustained_load",
+  "safety_floor",
+  "activity_mode",
+]);
 
 type Subscriber = () => void;
 
@@ -441,147 +477,247 @@ function replacePendingFallback(
   );
 }
 
+function text(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 /**
- * Move a queued request's bubble to where the queue says it is.
- *
- * Correlated only by requestId, and independent of pendingRequestId: a
- * queued request deliberately stops blocking the composer, so the user can
- * keep talking while it waits. Never invents an answer — "answered" only
- * resolves the bubble when the canonical message did not already.
+ * What a queued request's bubble should say for one queue phase, or null
+ * when the phase changes nothing it shows.
  */
-function applyQueueConversationUpdate(
+function queueBubbleFor(
   payload: QueueConversationPayload,
-) {
-  const requestId =
-    typeof payload.requestId === "string"
-      ? payload.requestId.trim()
-      : "";
-  const taskId =
-    typeof payload.taskId === "string"
-      ? payload.taskId.trim()
-      : "";
-  const phase =
-    typeof payload.phase === "string"
-      ? payload.phase
-      : "";
-
-  if (!requestId || !phase) {
-    return;
-  }
-
-  let replacement: Partial<ConversationMessage> | null = null;
+): Partial<ConversationMessage> | null {
+  const phase = text(payload.phase);
+  const taskId = text(payload.taskId) || undefined;
 
   if (phase in QUEUE_WAITING_TEXT) {
-    replacement = {
+    return {
       text: QUEUE_WAITING_TEXT[phase],
       pending: true,
       error: false,
-      queueTaskId: taskId || undefined,
+      queueTaskId: taskId,
+      queuePhase: phase,
     };
-  } else if (phase === "failed") {
-    replacement = {
+  }
+
+  if (
+    phase === "paused" ||
+    (phase === "interrupted" && payload.resumable !== false)
+  ) {
+    return {
+      text: QUEUE_HELD_TEXT[phase],
+      pending: false,
+      error: phase === "interrupted",
+      queueTaskId: taskId,
+      queuePhase: phase,
+    };
+  }
+
+  if (phase === "failed") {
+    return {
       text: `درخواست اجرا نشد: ${friendlyRuntimeErrorText(
-        typeof payload.error === "string"
-          ? payload.error
-          : "Qronos نتوانست این درخواست را اجرا کند.",
+        text(payload.error) ||
+          "Qronos نتوانست این درخواست را اجرا کند.",
       )}`,
       pending: false,
       error: true,
       queueTaskId: undefined,
+      queuePhase: "ended",
     };
-  } else if (phase in QUEUE_ENDED_TEXT) {
-    replacement = {
+  }
+
+  if (phase in QUEUE_ENDED_TEXT) {
+    return {
       text: QUEUE_ENDED_TEXT[phase],
       pending: false,
       error: phase === "interrupted",
       queueTaskId: undefined,
+      queuePhase: "ended",
     };
-  } else if (
-    phase === "answered" &&
-    typeof payload.text === "string" &&
-    payload.text.trim()
-  ) {
+  }
+
+  if (phase === "answered" && text(payload.text)) {
     // Normally already resolved by the canonical message. This covers an
     // answer whose history write failed, so it is still shown.
-    replacement = {
-      text: payload.text.trim(),
+    return {
+      text: text(payload.text),
       pending: false,
       error: false,
       queueTaskId: undefined,
+      queuePhase: undefined,
     };
   }
 
-  if (!replacement) {
+  return null;
+}
+
+/**
+ * Move queued requests' bubbles to where the queue says they are.
+ *
+ * Correlated only by requestId, and independent of pendingRequestId: a
+ * queued request deliberately stops blocking the composer, so the user can
+ * keep talking while it waits. Never invents an answer, and never touches a
+ * canonical answer: only a pending bubble or one the queue manages moves.
+ * A request with no bubble at all — after a restart, say — gets one placed
+ * right after the user's own message, so the outcome reads where it was
+ * asked.
+ */
+function applyQueueConversationUpdates(
+  payloads: QueueConversationPayload[],
+) {
+  const updates = payloads
+    .map((payload) => ({
+      requestId: text(payload.requestId),
+      phase: text(payload.phase),
+      bubble: queueBubbleFor(payload),
+    }))
+    .filter(
+      (item): item is {
+        requestId: string;
+        phase: string;
+        bubble: Partial<ConversationMessage>;
+      } => Boolean(item.requestId && item.bubble),
+    );
+
+  if (updates.length === 0) {
     return;
   }
 
-  const update = replacement;
-
   updateSnapshot((current) => {
-    let found = false;
+    let messages = current.messages;
+    let pendingRequestId = current.pendingRequestId;
 
-    const nextMessages = current.messages.map((message) => {
-      if (
-        message.requestId !== requestId ||
-        message.role !== "qronos" ||
-        !message.pending
-      ) {
-        return message;
-      }
+    for (const { requestId, phase, bubble } of updates) {
+      let found = false;
 
-      found = true;
-      return { ...message, ...update };
-    });
+      messages = messages.map((message) => {
+        if (
+          message.requestId !== requestId ||
+          message.role !== "qronos" ||
+          !(message.pending || message.queuePhase)
+        ) {
+          return message;
+        }
 
-    if (!found && update.pending !== false) {
-      // A request queued without a pending bubble of its own, such as one
-      // submitted to the queue directly.
-      const now = new Date();
-
-      nextMessages.push({
-        id: `queued-${requestId}`,
-        role: "qronos",
-        time: formatMessageTime(now),
-        timestamp: now.getTime() / 1000,
-        source: "text",
-        text: update.text ?? "",
-        requestId,
-        pending: true,
-        queueTaskId: update.queueTaskId,
+        found = true;
+        return { ...message, ...bubble };
       });
-    } else if (
-      !found &&
-      phase !== "answered" &&
-      !current.messages.some(
+
+      const answered = messages.some(
         (message) =>
           message.requestId === requestId &&
-          message.role === "qronos",
-      )
-    ) {
-      // The bubble is gone (the history was reloaded), but the request
-      // still deserves to say why it has no answer.
-      const now = new Date();
+          message.role === "qronos" &&
+          !message.pending &&
+          !message.queuePhase,
+      );
 
-      nextMessages.push({
-        id: `queued-${phase}-${requestId}`,
-        role: "qronos",
-        time: formatMessageTime(now),
-        timestamp: now.getTime() / 1000,
-        source: "text",
-        text: update.text ?? "",
-        requestId,
-        error: update.error,
-      });
+      if (!found && !answered && phase !== "answered") {
+        const asked = messages.find(
+          (message) =>
+            message.requestId === requestId && message.role === "user",
+        );
+        const now = new Date();
+        const timestamp =
+          asked?.timestamp !== undefined
+            ? asked.timestamp + 0.000001
+            : now.getTime() / 1000;
+
+        messages = [
+          ...messages,
+          {
+            id: `queued-${requestId}`,
+            role: "qronos",
+            time: formatTimestamp(timestamp),
+            timestamp,
+            source: "text",
+            text: bubble.text ?? "",
+            requestId,
+            pending: bubble.pending,
+            error: bubble.error,
+            queueTaskId: bubble.queueTaskId,
+            queuePhase: bubble.queuePhase,
+          },
+        ];
+      }
+
+      if (pendingRequestId === requestId) {
+        pendingRequestId = null;
+      }
     }
 
     return {
-      messages: sortMessages(nextMessages),
-      pendingRequestId:
-        current.pendingRequestId === requestId
-          ? null
-          : current.pendingRequestId,
+      messages: sortMessages(messages),
+      pendingRequestId,
     };
   });
+}
+
+function applyQueueConversationUpdate(
+  payload: QueueConversationPayload,
+) {
+  applyQueueConversationUpdates([payload]);
+}
+
+/**
+ * Bring every queued request's bubble in line with a whole-queue snapshot.
+ *
+ * The snapshot is whole state, so this repairs anything a missed event left
+ * behind — and it is how outcomes reappear on their requests after the
+ * desktop or the runtime has restarted.
+ */
+function applyQueueSnapshot(
+  payload: QueueSnapshotPayload,
+) {
+  const tasks = Array.isArray(payload.tasks)
+    ? (payload.tasks as QueueSnapshotTask[])
+    : [];
+  const recent = Array.isArray(payload.recent)
+    ? (payload.recent as QueueSnapshotTask[])
+    : [];
+  const updates: QueueConversationPayload[] = [];
+
+  for (const task of [...recent, ...tasks]) {
+    if (!task || typeof task !== "object" || !text(task.requestId)) {
+      continue;
+    }
+
+    if (task.kind !== undefined && task.kind !== "conversation") {
+      continue;
+    }
+
+    const state = text(task.state);
+    let phase = "";
+
+    if (state === "queued") {
+      phase = DEFERRED_HOLDS.has(text(task.heldReason))
+        ? "deferred"
+        : "queued";
+    } else if (state === "running" && task.inFlight !== true) {
+      phase = "running";
+    } else if (
+      state === "paused" ||
+      state === "interrupted" ||
+      state === "failed" ||
+      state === "cancelled"
+    ) {
+      phase = state;
+    }
+
+    if (!phase) {
+      continue;
+    }
+
+    updates.push({
+      taskId: task.taskId,
+      requestId: task.requestId,
+      phase,
+      error: task.detail,
+      resumable: task.resumable,
+    });
+  }
+
+  applyQueueConversationUpdates(updates);
 }
 
 function applyHistorySnapshot(
@@ -620,9 +756,28 @@ function applyHistorySnapshot(
           message !== null,
       );
 
+  // A history snapshot holds only canonical messages. Bubbles the queue
+  // manages for requests that have no answer yet are kept, or a reload
+  // would make an interrupted request look as if it had never been asked.
+  const answered = new Set(
+    messages
+      .filter(
+        (message) =>
+          message.role === "qronos" && message.requestId,
+      )
+      .map((message) => message.requestId),
+  );
+  const queueBubbles = snapshot.messages.filter(
+    (message) =>
+      message.role === "qronos" &&
+      message.queuePhase &&
+      message.requestId &&
+      !answered.has(message.requestId),
+  );
+
   publish({
     messages: sortMessages(
-      messages,
+      [...messages, ...queueBubbles],
     ),
     pendingRequestId: null,
   });
@@ -697,6 +852,23 @@ function handleRuntimeEvent(
           canonical,
         );
       }
+    } catch {
+      return;
+    }
+
+    return;
+  }
+
+  if (
+    event.eventType ===
+    "queue_changed"
+  ) {
+    try {
+      applyQueueSnapshot(
+        JSON.parse(
+          event.message,
+        ) as QueueSnapshotPayload,
+      );
     } catch {
       return;
     }
@@ -865,6 +1037,31 @@ export async function cancelQueuedConversation(
   } catch (error) {
     console.error(
       "[Qronos Conversation Store] queue cancel failed:",
+      runtimeErrorText(error),
+    );
+  }
+}
+
+/**
+ * Resume a paused or interrupted queued request. Runs it again only through
+ * the queue, with every check made afresh.
+ */
+export async function resumeQueuedConversation(
+  taskId: string,
+) {
+  const cleaned = taskId.trim();
+
+  if (!cleaned) {
+    return;
+  }
+
+  try {
+    await invoke("queue_resume_task", {
+      taskId: cleaned,
+    });
+  } catch (error) {
+    console.error(
+      "[Qronos Conversation Store] queue resume failed:",
       runtimeErrorText(error),
     );
   }

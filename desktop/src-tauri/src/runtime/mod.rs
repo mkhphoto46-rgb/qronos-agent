@@ -966,26 +966,54 @@ pub fn queue_list(state: State<'_, RuntimeManagerState>) -> Result<(), String> {
     send_to_runtime(&state, serde_json::json!({ "command": "queue_list" }))
 }
 
+/// Queue a reasoning request. `text` + `request_id` tie the eventual answer
+/// to the conversation request it belongs to; a bare `summary` is still
+/// accepted and becomes the request text. The runtime validates everything
+/// again and refuses anything that is not plain Fast/Heavy reasoning.
 #[tauri::command(rename_all = "camelCase")]
 pub fn queue_submit(
-    summary: String,
+    text: Option<String>,
+    request_id: Option<String>,
+    summary: Option<String>,
     weight: Option<String>,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<(), String> {
-    let cleaned = summary.trim();
+    let weight = weight.unwrap_or_else(|| "light".to_string());
 
-    if cleaned.is_empty() {
-        return Err("A queued task must say what it is.".to_string());
-    }
+    let payload = match text.as_deref().map(str::trim) {
+        Some(cleaned) if !cleaned.is_empty() => {
+            let mut payload = serde_json::json!({
+                "command": "queue_submit",
+                "text": cleaned,
+                "weight": weight
+            });
 
-    send_to_runtime(
-        &state,
-        serde_json::json!({
-            "command": "queue_submit",
-            "summary": cleaned,
-            "weight": weight.unwrap_or_else(|| "light".to_string())
-        }),
-    )
+            if let Some(request_id) = request_id.as_deref().map(str::trim) {
+                if request_id.is_empty() {
+                    return Err("A queued request id must not be empty.".to_string());
+                }
+
+                payload["requestId"] = serde_json::Value::from(request_id);
+            }
+
+            payload
+        }
+        _ => {
+            let cleaned = summary.as_deref().map(str::trim).unwrap_or("");
+
+            if cleaned.is_empty() {
+                return Err("A queued task must say what it is.".to_string());
+            }
+
+            serde_json::json!({
+                "command": "queue_submit",
+                "summary": cleaned,
+                "weight": weight
+            })
+        }
+    };
+
+    send_to_runtime(&state, payload)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1012,6 +1040,41 @@ pub fn queue_override(
         &state,
         serde_json::json!({
             "command": "queue_override",
+            "taskId": cleaned
+        }),
+    )
+}
+
+/// Hold one waiting request until it is resumed.
+#[tauri::command(rename_all = "camelCase")]
+pub fn queue_pause_task(
+    task_id: String,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let cleaned = require_task_id(&task_id)?;
+
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "queue_pause_task",
+            "taskId": cleaned
+        }),
+    )
+}
+
+/// Explicitly run a paused or interrupted request again. The only way an
+/// interrupted request ever runs again.
+#[tauri::command(rename_all = "camelCase")]
+pub fn queue_resume_task(
+    task_id: String,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let cleaned = require_task_id(&task_id)?;
+
+    send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "queue_resume_task",
             "taskId": cleaned
         }),
     )

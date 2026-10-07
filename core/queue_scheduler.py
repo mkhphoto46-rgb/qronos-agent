@@ -275,6 +275,12 @@ class QueueView:
     holding_since: Optional[float]
     tasks: tuple[dict, ...]
 
+    #: Qronos as a whole is paused. Separate from ``paused``, which is the
+    #: user's hold on the queue itself: resuming Qronos must not quietly lift
+    #: a hold the user put on the queue, and only that hold is remembered
+    #: across restarts.
+    runtime_paused: bool = False
+
 
 class QueueScheduler:
     """
@@ -317,6 +323,7 @@ class QueueScheduler:
         # returns, and nothing else may start until it has.
         self._inflight: set[str] = set()
         self._paused = False
+        self._runtime_paused = False
         self._revision = itertools.count(1)
         self._current_revision = 0
 
@@ -368,6 +375,146 @@ class QueueScheduler:
         self._wake.set()
 
         return task
+
+    def restore(
+        self,
+        work: Runnable,
+        weight: Weight,
+        summary: str,
+        required_vram_mb: int,
+        task_id: str,
+        state: TaskState,
+        queued_at: float,
+        attempts: int = 0,
+        detail: str = "",
+    ) -> QueuedTask:
+        """
+        Put back work an earlier run of Qronos accepted.
+
+        Restored work is admitted exactly like new work - every check runs
+        again when it comes to start - except that an interrupted task waits
+        for the user's explicit resume.
+        """
+        if not summary.strip():
+            raise ValueError("A queued task must say what it is.")
+
+        with self._lock:
+            task = self.queue.restore(
+                task_id=task_id,
+                weight=weight,
+                summary=summary.strip(),
+                state=state,
+                queued_at=queued_at,
+                attempts=attempts,
+            )
+            self._entries[task_id] = _Entry(
+                task_id=task_id,
+                work=work,
+                required_vram_mb=required_vram_mb,
+                hold=(
+                    HoldReason.WARMING_UP
+                    if state is TaskState.QUEUED
+                    else HoldReason.PAUSED
+                ),
+                detail=detail
+                or "Qronos is still working out how busy the machine is.",
+            )
+            self._bump()
+
+        self._emit(QueueEventType.CHANGED)
+        self._wake.set()
+
+        return task
+
+    def pause_task(self, task_id: str) -> bool:
+        """Hold one waiting task until the user resumes it."""
+        with self._lock:
+            entry = self._entries.get(task_id)
+            task = self.queue.get(task_id)
+
+            if task.state is not TaskState.QUEUED:
+                return False
+
+            self.queue.pause(task_id)
+
+            if entry is not None:
+                entry.hold = HoldReason.PAUSED
+                entry.detail = "Paused by you. It waits until you resume it."
+                entry.override = False
+
+            self._bump()
+
+        self._emit(QueueEventType.CHANGED)
+
+        return True
+
+    def resume_task(self, task_id: str) -> bool:
+        """
+        Put a paused or interrupted task back in line, at the user's word.
+
+        Its attempt count starts again: the user has looked at it and asked
+        for another go, so the limit that paused it does not pause it again
+        before it has run once. Every admission check still applies.
+        """
+        with self._lock:
+            entry = self._entries.get(task_id)
+            task = self.queue.get(task_id)
+
+            if task.state not in (TaskState.PAUSED, TaskState.INTERRUPTED):
+                return False
+
+            self.queue.resume(task_id, reset_attempts=True)
+
+            if entry is not None:
+                entry.hold = HoldReason.WARMING_UP
+                entry.detail = "Resumed. Qronos will check the machine first."
+                entry.not_before = None
+                entry.finished_at = None
+
+            self._bump()
+
+        self._emit(QueueEventType.CHANGED)
+        self._wake.set()
+
+        return True
+
+    def interrupt_running(self) -> tuple[str, ...]:
+        """
+        Mark everything running as interrupted. For when Qronos is closing.
+
+        Returns the tasks that were interrupted. Their work is told to stop
+        first where it can be, so a model call still under way cannot attach
+        an answer after this; work that has already committed its answer is
+        left to finish, since it did finish.
+        """
+        interrupted: list[str] = []
+
+        with self._lock:
+            for task in self.queue.running():
+                entry = self._entries.get(task.task_id)
+                ask = None if entry is None else getattr(
+                    entry.work,
+                    "cancel",
+                    None,
+                )
+
+                if callable(ask) and ask() is False:
+                    continue
+
+                self.queue.interrupt(task.task_id)
+
+                if entry is not None:
+                    entry.detail = (
+                        "Qronos closed while this was running. It will not "
+                        "run again unless you resume it."
+                    )
+
+                interrupted.append(task.task_id)
+
+            if interrupted:
+                self._bump()
+
+        return tuple(interrupted)
 
     def override(self, task_id: str) -> OverrideResult:
         """
@@ -478,12 +625,26 @@ class QueueScheduler:
         return True
 
     def set_paused(self, paused: bool) -> None:
+        """The user's hold on the queue."""
         with self._lock:
             self._paused = paused
             self._bump()
 
         if not paused:
             self._wake.set()
+
+    def set_runtime_paused(self, paused: bool) -> None:
+        """Qronos as a whole paused or resumed. Never lifts the user's hold."""
+        with self._lock:
+            self._runtime_paused = paused
+            self._bump()
+
+        if not paused:
+            self._wake.set()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def wake(self) -> None:
         """Look again now rather than at the next tick."""
@@ -514,6 +675,7 @@ class QueueScheduler:
             return QueueView(
                 revision=self._current_revision,
                 paused=self._paused,
+                runtime_paused=self._runtime_paused,
                 level=snapshot.level,
                 holding_since=snapshot.since,
                 tasks=tuple(
@@ -559,6 +721,8 @@ class QueueScheduler:
             # says "stopping" rather than pretending the GPU is already free.
             "inFlight": task.task_id in self._inflight,
             "cancellable": not task.finished,
+            "resumable": task.state
+            in (TaskState.PAUSED, TaskState.INTERRUPTED),
         }
 
     # ------------------------------------------------------------- the pass
@@ -580,8 +744,13 @@ class QueueScheduler:
         self._forget_old_entries()
         self._renew_inflight_leases()
 
-        if self._paused:
-            self._hold_everything(HoldReason.PAUSED, "The queue is paused.")
+        if self._paused or self._runtime_paused:
+            self._hold_everything(
+                HoldReason.PAUSED,
+                "The queue is paused."
+                if self._paused
+                else "Qronos is paused.",
+            )
         elif self._foreground_is_busy():
             # The user's own turn owns the model phase. Not overridable: two
             # model phases at once on one card is a correctness problem, not

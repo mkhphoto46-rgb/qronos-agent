@@ -38,24 +38,35 @@ REPLY_TIMEOUT = 30.0
 class BridgeProcess:
     """A running bridge, with the plumbing to talk to it."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        module: str = "core.runtime_bridge",
+        state_dir: Path | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
         # Queued requests are real conversation work now: submitting one
-        # records the request in conversation history. The child gets its own
-        # throwaway history so the suite never writes into the user's, and it
-        # may not start a local model server on its own.
+        # records the request in conversation history and the queue's own
+        # saved state. The child gets throwaway copies of both, so the suite
+        # never writes into the user's, and it may not start a local model
+        # server on its own. ``state_dir`` lets two bridges in a row share
+        # them, which is what a restart is.
         # Windows can hold a killed child's SQLite handle for a moment after
         # it exits; a leftover temp file is not a test failure.
         self._scratch = tempfile.TemporaryDirectory(
             ignore_cleanup_errors=True,
         )
+        state = state_dir if state_dir is not None else Path(self._scratch.name)
         env = dict(os.environ)
         env["QRONOS_CONVERSATION_HISTORY_PATH"] = str(
-            Path(self._scratch.name) / "conversation_history.sqlite3"
+            state / "conversation_history.sqlite3"
         )
+        env["QRONOS_QUEUE_STATE_PATH"] = str(state / "queue_state.json")
+        env["QRONOS_SETTINGS_PATH"] = str(state / "settings.json")
         env["QRONOS_OLLAMA_AUTO_START"] = "0"
+        env.update(env_overrides or {})
 
         self.process = subprocess.Popen(
-            [sys.executable, "-u", "-m", "core.runtime_bridge"],
+            [sys.executable, "-u", "-m", module],
             cwd=str(ROOT),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

@@ -212,9 +212,15 @@ class Orchestrator:
         conversation_messages: (
             Sequence[BrainMessage] | None
         ) = None,
+        priority: WorkloadPriority | None = None,
     ) -> list[StepResult]:
         """
         Execute plan steps in order.
+
+        ``priority`` is how the brain reservation is attributed in the
+        resource ledger. Queued background work passes BACKGROUND; a direct
+        user turn leaves it unset. It changes the record, not the admission:
+        every resource and activity check below applies the same either way.
 
         conversation_messages contains conversation turns that happened
         before the current plan request.
@@ -248,6 +254,7 @@ class Orchestrator:
                 conversation_messages=(
                     conversation_messages
                 ),
+                priority=priority,
             )
 
             results.append(
@@ -268,6 +275,7 @@ class Orchestrator:
         conversation_messages: (
             Sequence[BrainMessage] | None
         ),
+        priority: WorkloadPriority | None = None,
     ) -> StepResult:
         task_class = self._get_task_class(
             step
@@ -404,6 +412,7 @@ class Orchestrator:
             reservation = self._reserve_brain_resources(
                 selection.model.name,
                 selection.model.estimated_vram_gb,
+                priority=priority,
             )
 
             try:
@@ -719,6 +728,7 @@ class Orchestrator:
         self,
         model_name: str,
         estimated_vram_gb: float,
+        priority: WorkloadPriority | None = None,
     ):
         """Reserve or reuse ownership for one Fast/Heavy brain."""
 
@@ -735,7 +745,11 @@ class Orchestrator:
         reservation = GLOBAL_RESOURCE_LEDGER.reserve(
             owner=ResourceOwner.QRONOS,
             workload=f"brain:{model_name}",
-            priority=WorkloadPriority.ACTIVE_QRONOS_REQUEST,
+            priority=(
+                priority
+                if priority is not None
+                else WorkloadPriority.ACTIVE_QRONOS_REQUEST
+            ),
             budget=ResourceBudget(
                 vram_mb=max(
                     0,

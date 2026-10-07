@@ -7,6 +7,7 @@ import {
 
 import {
   cancelQueuedConversation,
+  resumeQueuedConversation,
   sendConversationMessage,
   useConversationStore,
 } from "../conversationStore";
@@ -1280,8 +1281,23 @@ function ConversationsView({
                   }
                 </p>
 
-                {message.pending &&
-                  message.queueTaskId && (
+                {message.queueTaskId && (
+                  <div className="conversation-queue-actions">
+                    {(message.queuePhase === "paused" ||
+                      message.queuePhase === "interrupted") && (
+                      <button
+                        type="button"
+                        className="conversation-queue-cancel"
+                        onClick={() => {
+                          void resumeQueuedConversation(
+                            message.queueTaskId ?? "",
+                          );
+                        }}
+                      >
+                        ادامه
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       className="conversation-queue-cancel"
@@ -1293,7 +1309,8 @@ function ConversationsView({
                     >
                       لغو درخواست در صف
                     </button>
-                  )}
+                  </div>
+                )}
 
                 {message.attachments &&
                   message.attachments.length >

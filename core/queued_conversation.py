@@ -45,6 +45,7 @@ from typing import Any, Callable, Sequence
 from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.brain_runtime import BrainMessage
 from core.queue_scheduler import HoldReason, WorkOutcome, WorkResult
+from core.resource_ownership import WorkloadPriority
 from core.task_plan import TaskPlan
 from core.task_router import TaskType
 
@@ -67,9 +68,12 @@ class ConversationPhase(Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
-    #: The runtime closed before the request was answered. The queue is not
-    #: replayed after a restart, so this is final; the user asks again.
+    #: The runtime closed while the request was running, so how far it got
+    #: is unknown. It is never run again automatically; the user resumes it.
     INTERRUPTED = "interrupted"
+
+    #: Held by the user; runs again only when resumed.
+    PAUSED = "paused"
 
 
 @dataclass(frozen=True)
@@ -292,6 +296,10 @@ class ConversationQueueExecutor:
                 results = orchestrator.execute_plan(
                     plan,
                     conversation_messages=request.context,
+                    # Attributed as background work in the resource ledger.
+                    # Admission is unchanged: the Orchestrator's resource and
+                    # activity checks apply exactly as to a direct turn.
+                    priority=WorkloadPriority.BACKGROUND,
                 )
             except Exception as exc:
                 if work.preempted and not work.cancelled:

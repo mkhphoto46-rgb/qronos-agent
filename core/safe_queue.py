@@ -62,6 +62,11 @@ class TaskState(Enum):
     # nothing went wrong and nothing should be retried.
     CANCELLED = "cancelled"
 
+    # Was running when Qronos stopped, so nobody knows how far it got. Not
+    # terminal and not waiting: it runs again only when the user says so,
+    # because running it again unasked is exactly the replay to avoid.
+    INTERRUPTED = "interrupted"
+
 
 #: What may follow what. Total by construction: a state missing from this table
 #: allows nothing, which is the safe direction.
@@ -70,6 +75,9 @@ _ALLOWED: dict[TaskState, frozenset[TaskState]] = {
         {TaskState.RUNNING, TaskState.PAUSED, TaskState.CANCELLED}
     ),
     TaskState.PAUSED: frozenset(
+        {TaskState.QUEUED, TaskState.CANCELLED}
+    ),
+    TaskState.INTERRUPTED: frozenset(
         {TaskState.QUEUED, TaskState.CANCELLED}
     ),
     TaskState.RUNNING: frozenset(
@@ -81,6 +89,8 @@ _ALLOWED: dict[TaskState, frozenset[TaskState]] = {
             # the user paused mid-run. The task goes back to waiting rather
             # than failing, because nothing was wrong with the task.
             TaskState.QUEUED,
+            # Qronos is closing under it.
+            TaskState.INTERRUPTED,
         }
     ),
     TaskState.DONE: frozenset(),
@@ -177,6 +187,52 @@ class SafeQueue:
 
             return task
 
+    #: The states a task may be restored into from durable storage. A task is
+    #: never restored as RUNNING: whatever was running when Qronos stopped is
+    #: INTERRUPTED by the time it is read back.
+    RESTORABLE = frozenset(
+        {TaskState.QUEUED, TaskState.PAUSED, TaskState.INTERRUPTED}
+    )
+
+    def restore(
+        self,
+        task_id: str,
+        weight: Weight,
+        summary: str,
+        state: TaskState,
+        queued_at: float,
+        attempts: int = 0,
+    ) -> QueuedTask:
+        """
+        Put back a task that an earlier run of Qronos accepted.
+
+        Keeps its original arrival time and attempts, and takes its place in
+        line by arrival order among everything else restored with it.
+        """
+        if not task_id.strip():
+            raise ValueError("A queued task must have an id.")
+
+        if state not in self.RESTORABLE:
+            raise ValueError(f"A task cannot be restored as {state.value}.")
+
+        with self._lock:
+            if task_id in self._tasks:
+                raise ValueError(f"{task_id} is already queued.")
+
+            task = QueuedTask(
+                task_id=task_id,
+                weight=weight,
+                summary=summary,
+                state=state,
+                queued_at=queued_at,
+                attempts=max(0, int(attempts)),
+                sequence=next(self._sequence),
+            )
+
+            self._tasks[task_id] = task
+
+            return task
+
     def next_ready(self, heavy_allowed: bool = True) -> QueuedTask | None:
         """
         The task that should run next, or None.
@@ -244,8 +300,24 @@ class SafeQueue:
     def pause(self, task_id: str) -> QueuedTask:
         return self.transition(task_id, TaskState.PAUSED)
 
-    def resume(self, task_id: str) -> QueuedTask:
-        return self.transition(task_id, TaskState.QUEUED)
+    def resume(self, task_id: str, reset_attempts: bool = False) -> QueuedTask:
+        """
+        Back into line from PAUSED or INTERRUPTED.
+
+        ``reset_attempts`` is for the user's explicit say-so: a task paused
+        for having been tried too often would otherwise be paused again the
+        moment it was offered.
+        """
+        with self._lock:
+            task = self.transition(task_id, TaskState.QUEUED)
+
+            if reset_attempts:
+                task.attempts = 0
+
+            return task
+
+    def interrupt(self, task_id: str) -> QueuedTask:
+        return self.transition(task_id, TaskState.INTERRUPTED)
 
     def requeue(
         self,

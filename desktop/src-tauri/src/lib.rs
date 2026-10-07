@@ -773,6 +773,8 @@ pub fn run() {
             runtime::queue_submit,
             runtime::queue_cancel,
             runtime::queue_override,
+            runtime::queue_pause_task,
+            runtime::queue_resume_task,
             runtime::queue_set_paused,
             runtime::runtime_set_paused,
             runtime::stop_runtime

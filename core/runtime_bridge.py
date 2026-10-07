@@ -101,6 +101,16 @@ from core.queued_conversation import (
     QueuedConversationWork,
     build_request as build_queued_conversation_request,
 )
+from core.queue_journal import (
+    QueueJournal,
+    QueueRecord,
+    RecordState,
+    StorageProblem,
+    StorageStatus,
+    default_queue_state_path,
+)
+from core.safe_queue import TaskState
+from core.brain_runtime import BrainMessage, BrainMessageRole
 from core.resource_governor import ResourceGovernor, Weight
 from core.resource_policy import ResourceDecision
 from core.safe_queue import SafeQueue
@@ -1194,6 +1204,12 @@ class QronosRuntime:
         self._scheduler = scheduler
         self._conversation_executor: ConversationQueueExecutor | None = None
 
+        # The queue's durable record. Opened with the scheduler, not before:
+        # a bridge nobody has asked about the queue touches no queue file.
+        self._queue_journal: QueueJournal | None = None
+        self._queue_setup_lock = threading.RLock()
+        self._last_storage_status: StorageStatus | None = None
+
         self.settings = (
             settings
             if settings is not None
@@ -1335,14 +1351,17 @@ class QronosRuntime:
         soon as it sees ``runtime_ready``, so in practice the delay is
         imperceptible.
         """
-        with self._lock:
-            if self._scheduler is not None:
-                return self._scheduler
+        with self._queue_setup_lock:
+            with self._lock:
+                existing = self._scheduler
+
+            if existing is not None:
+                return existing
 
             monitor = build_sustained_load_monitor()
             monitor.prime()
 
-            self._scheduler = QueueScheduler(
+            scheduler = QueueScheduler(
                 queue=SafeQueue(),
                 governor=ResourceGovernor(),
                 monitor=monitor,
@@ -1354,9 +1373,257 @@ class QronosRuntime:
                 # thread asks this on every tick.
                 foreground_busy=lambda: self.is_busy,
             )
-            self._scheduler.start()
 
-            return self._scheduler
+            with self._lock:
+                self._scheduler = scheduler
+                runtime_paused = self._runtime_paused
+
+            if runtime_paused:
+                scheduler.set_runtime_paused(True)
+
+            # Before the pump starts, so nothing restored can be admitted
+            # until all of it is back and every interrupted mark is on disk.
+            try:
+                self._recover_queue(scheduler)
+            except Exception as exc:
+                self._notify(
+                    "queue_storage_problem",
+                    "warning",
+                    _compact(
+                        {
+                            "durable": False,
+                            "problem": StorageProblem.UNAVAILABLE.value,
+                            "detail": f"Queue recovery failed: {exc}",
+                        }
+                    ),
+                )
+
+            scheduler.start()
+
+            return scheduler
+
+    # ------------------------------------------------------ durable queue
+
+    def _ensure_queue_journal(self) -> QueueJournal:
+        if self._queue_journal is None:
+            try:
+                path = default_queue_state_path()
+            except Exception:
+                # No writable per-user location at all. The journal runs in
+                # memory and says so; it never pretends to be durable.
+                path = None
+
+            self._queue_journal = QueueJournal(path)
+
+        return self._queue_journal
+
+    def _recover_queue(self, scheduler: QueueScheduler) -> None:
+        """
+        Put back what an earlier run of Qronos accepted, safely.
+
+        Queued and paused requests come back as they were; each is validated
+        afresh — route, resources, policy — when it comes to run, exactly as
+        new work is. Anything that was running comes back interrupted (or
+        done, if its answer had already reached the conversation) and waits
+        for the user's explicit resume.
+        """
+        journal = self._ensure_queue_journal()
+        recovered = journal.open(
+            answered=self.conversation_history.has_assistant_reply,
+        )
+
+        if recovered.paused:
+            scheduler.set_paused(True)
+
+        states = {
+            RecordState.QUEUED: TaskState.QUEUED,
+            RecordState.PAUSED: TaskState.PAUSED,
+            RecordState.INTERRUPTED: TaskState.INTERRUPTED,
+        }
+
+        for record in recovered.records:
+            state = states.get(record.state)
+
+            if state is None:
+                continue
+
+            try:
+                work = self._work_from_record(record)
+                weight = Weight(record.weight)
+            except ValueError as exc:
+                journal.update(
+                    record.task_id,
+                    RecordState.FAILED,
+                    detail=(
+                        "This saved request can no longer be queued: "
+                        f"{exc}"
+                    ),
+                )
+                continue
+
+            scheduler.restore(
+                work=work,
+                weight=weight,
+                summary=record.summary,
+                required_vram_mb=record.required_vram_mb,
+                task_id=record.task_id,
+                state=state,
+                queued_at=record.submitted_at,
+                attempts=record.attempts,
+                detail=record.detail,
+            )
+
+            if state is TaskState.INTERRUPTED:
+                self._notify_queued_conversation(
+                    work,
+                    ConversationPhase.INTERRUPTED,
+                    {"resumable": True, "detail": record.detail},
+                )
+
+        for task_id in recovered.answered:
+            record = journal.get(task_id)
+
+            if record is not None:
+                self._notify(
+                    "queue_conversation_update",
+                    "ready",
+                    json.dumps(
+                        {
+                            "taskId": record.task_id,
+                            "requestId": record.request_id,
+                            "route": record.route,
+                            "phase": ConversationPhase.ANSWERED.value,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )
+
+        self._report_storage_status(force=True)
+
+    def _work_from_record(self, record: QueueRecord) -> QueuedConversationWork:
+        request = build_queued_conversation_request(
+            request_id=record.request_id,
+            text=record.text,
+            route=TaskType(record.route),
+            context=tuple(
+                BrainMessage(
+                    role=BrainMessageRole(role),
+                    content=content,
+                )
+                for role, content in record.context
+                if content.strip()
+            ),
+        )
+        work = QueuedConversationWork(
+            request,
+            self._conversation_queue_executor(),
+        )
+        work.task_id = record.task_id
+
+        return work
+
+    def _sync_queue_journal(self, tasks) -> None:
+        """
+        Make the durable record agree with the queue as it now stands.
+
+        Called on every queue event, so every path that moves a task — start,
+        finish, failure, deferral, cancel, the scheduler's own pause after
+        too many attempts — reaches the disk without each one having to
+        remember to. A start is written before the work is handed out, so a
+        crash mid-run reads back as interrupted rather than queued.
+        """
+        journal = self._queue_journal
+
+        if journal is None:
+            return
+
+        for task in tasks:
+            if task.get("kind") != "conversation":
+                continue
+
+            try:
+                state = RecordState(task.get("state"))
+            except ValueError:
+                continue
+
+            # A waiting task's hold detail changes with every reading of the
+            # machine. Only the detail of an outcome is worth a write.
+            keep_detail = state.finished or state in (
+                RecordState.PAUSED,
+                RecordState.INTERRUPTED,
+            )
+
+            journal.update(
+                str(task.get("taskId", "")),
+                state,
+                attempts=int(task.get("attempts", 0)),
+                detail=str(task.get("detail", "")) if keep_detail else None,
+            )
+
+        self._report_storage_status()
+
+    def _report_storage_status(self, force: bool = False) -> None:
+        journal = self._queue_journal
+
+        if journal is None:
+            return
+
+        status = journal.status()
+
+        if not force and status == self._last_storage_status:
+            return
+
+        self._last_storage_status = status
+
+        # Said once per change, loudly when it is a problem: a queue that is
+        # not being saved must never look like one that is.
+        self._notify(
+            "queue_storage_status" if status.durable else "queue_storage_problem",
+            "ready" if status.durable else "warning",
+            _compact(status.to_public_dict()),
+        )
+
+    def _queue_view_payload(self, view) -> dict[str, Any]:
+        journal = self._queue_journal
+        payload = _queue_view_dict(view)
+        live = {task.get("taskId") for task in view.tasks}
+
+        if journal is None:
+            payload["storage"] = None
+            payload["recent"] = []
+            return payload
+
+        payload["storage"] = journal.status().to_public_dict()
+        payload["recent"] = [
+            {
+                "taskId": record.task_id,
+                "requestId": record.request_id,
+                "summary": record.summary,
+                "route": record.route,
+                "state": record.state.value,
+                "detail": record.detail,
+                "finishedAt": record.updated_at,
+            }
+            for record in sorted(
+                journal.records(),
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )
+            if record.state.finished and record.task_id not in live
+        ][:20]
+
+        return payload
+
+    def emit_queue_view(self) -> None:
+        scheduler = self._scheduler
+
+        if scheduler is not None:
+            self._notify(
+                "queue_changed",
+                "ready",
+                _compact(self._queue_view_payload(scheduler.view())),
+            )
 
     def _run_queue_work_in_thread(self, entry) -> None:
         """
@@ -1516,7 +1783,8 @@ class QronosRuntime:
             task
             for task in scheduler.view().tasks
             if task.get("kind") == "conversation"
-            and task.get("state") in ("queued", "paused", "running")
+            and task.get("state")
+            in ("queued", "paused", "running", "interrupted")
         ]
 
         if len(waiting) >= MAX_QUEUED_CONVERSATIONS:
@@ -1525,7 +1793,11 @@ class QronosRuntime:
                 f"{MAX_QUEUED_CONVERSATIONS} waiting requests."
             )
 
-        if any(task.get("requestId") == request_id for task in waiting):
+        journal = self._ensure_queue_journal()
+
+        if any(
+            task.get("requestId") == request_id for task in waiting
+        ) or journal.holds_request(request_id):
             raise ValueError(f"{request_id} is already queued.")
 
         heavy = selected is TaskType.HEAVY or heavy_requested
@@ -1552,11 +1824,42 @@ class QronosRuntime:
         # must never arrive ahead of the news that it was queued.
         work.task_id = f"q-{uuid.uuid4().hex[:8]}"
 
+        # On disk before it is announced or admitted. If the disk refuses,
+        # the request is still accepted for this session, and says plainly
+        # that it would not survive a restart.
+        now = time.time()
+        durable = journal.add(
+            QueueRecord(
+                task_id=work.task_id,
+                request_id=request_id,
+                summary=request.summary(),
+                route=selected.value,
+                weight=weight.value,
+                required_vram_mb=int(required_mb),
+                state=RecordState.QUEUED,
+                submitted_at=now,
+                updated_at=now,
+                text=text,
+                context=tuple(
+                    (message.role.value, message.content)
+                    for message in request.context
+                    if message.role
+                    in (BrainMessageRole.USER, BrainMessageRole.ASSISTANT)
+                ),
+            )
+        )
+
+        fields: dict[str, Any] = {"durable": durable}
+
+        if reason:
+            fields["reason"] = reason
+
         self._notify_queued_conversation(
             work,
             ConversationPhase.QUEUED,
-            {"reason": reason} if reason else {},
+            fields,
         )
+        self._report_storage_status()
 
         scheduler.submit(
             work=work,
@@ -1590,10 +1893,19 @@ class QronosRuntime:
         scheduler = self._scheduler
 
         if scheduler is not None:
+            view = scheduler.view()
+
+            try:
+                self._sync_queue_journal(view.tasks)
+            except Exception:
+                # The journal reports its own failures as storage status; an
+                # exception here must not cost the user their queue view.
+                pass
+
             self._notify(
                 "queue_changed",
                 "ready",
-                _queue_view_message(scheduler.view()),
+                _compact(self._queue_view_payload(view)),
             )
 
     @property
@@ -1985,9 +2297,15 @@ class QronosRuntime:
                 self._resume_wake_after_pause = False
 
         # The queue follows the global runtime state, but this command never
-        # creates the queue merely to pause it.
+        # creates the queue merely to pause it — and it never touches the
+        # user's own hold on the queue, which is separate and remembered.
         if scheduler is not None:
-            scheduler.set_paused(paused)
+            set_runtime_paused = getattr(scheduler, "set_runtime_paused", None)
+
+            if callable(set_runtime_paused):
+                set_runtime_paused(paused)
+            else:
+                scheduler.set_paused(paused)
 
         if paused:
             self._clear_file_write_approval_lease("runtime_paused")
@@ -7772,45 +8090,82 @@ class QronosRuntime:
 
     def _interrupt_queued_conversations(self) -> None:
         """
-        Say plainly which queued requests this runtime will never answer.
+        Leave the queue honest as this runtime closes.
 
-        The queue is in memory and is not replayed after a restart, so every
-        request still waiting or running is lost with this process. Each is
-        cancelled first — a model call still under way on a worker thread
-        must not attach an answer after the runtime has closed — and then
-        reported to its conversation as interrupted, rather than left looking
-        as if an answer might still come.
+        Running requests are interrupted: their work is told to stop, so a
+        model call still under way cannot attach an answer after the runtime
+        has closed, and they are recorded as interrupted, to run again only
+        when the user resumes them. Waiting requests stay in the durable
+        record and come back on the next start.
+
+        If the queue could not be saved, waiting requests will not come
+        back, and their conversations are told so now rather than left
+        looking as if an answer might still come.
         """
         scheduler = self._scheduler
 
         if scheduler is None:
             return
 
+        journal = self._queue_journal
+        durable = journal is not None and journal.status().durable
+        interrupted = set(scheduler.interrupt_running())
+        detail = (
+            "Qronos closed while this was running. It will not run again "
+            "unless you resume it."
+        )
+
         for task in scheduler.view().tasks:
             if task.get("kind") != "conversation":
                 continue
 
-            if task.get("state") not in ("queued", "paused", "running"):
-                continue
-
-            work = scheduler.work_for(str(task.get("taskId", "")))
+            task_id = str(task.get("taskId", ""))
+            work = scheduler.work_for(task_id)
 
             if not isinstance(work, QueuedConversationWork):
                 continue
 
+            if task_id in interrupted:
+                if journal is not None:
+                    journal.update(
+                        task_id,
+                        RecordState.INTERRUPTED,
+                        detail=detail,
+                    )
+
+                self._notify_queued_conversation(
+                    work,
+                    ConversationPhase.INTERRUPTED,
+                    {
+                        "whileRunning": True,
+                        "resumable": durable,
+                        "detail": (
+                            detail
+                            if durable
+                            else "Qronos closed while this was running, and "
+                            "the queue could not be saved. Ask again when "
+                            "you are ready."
+                        ),
+                    },
+                )
+                continue
+
+            if durable or task.get("state") not in ("queued", "paused"):
+                continue
+
             if not work.cancel():
-                # Already committed: its answer was delivered.
                 continue
 
             self._notify_queued_conversation(
                 work,
                 ConversationPhase.INTERRUPTED,
                 {
-                    "whileRunning": task.get("state") == "running",
+                    "whileRunning": False,
+                    "resumable": False,
                     "detail": (
-                        "Qronos closed before this request was answered. "
-                        "It was not run again automatically; ask again "
-                        "when you are ready."
+                        "Qronos closed and the queue could not be saved, so "
+                        "this request will not come back. Ask again when "
+                        "you are ready."
                     ),
                 },
             )
@@ -7935,16 +8290,19 @@ def _queue_event_message(event: QueueEvent) -> str:
     return _compact(payload)
 
 
+def _queue_view_dict(view) -> dict[str, Any]:
+    return {
+        "revision": view.revision,
+        "paused": view.paused,
+        "runtimePaused": getattr(view, "runtime_paused", False),
+        "level": view.level.value,
+        "holdingSince": view.holding_since,
+        "tasks": list(view.tasks),
+    }
+
+
 def _queue_view_message(view) -> str:
-    return _compact(
-        {
-            "revision": view.revision,
-            "paused": view.paused,
-            "level": view.level.value,
-            "holdingSince": view.holding_since,
-            "tasks": list(view.tasks),
-        }
-    )
+    return _compact(_queue_view_dict(view))
 
 
 def emit(
@@ -8407,13 +8765,8 @@ def handle_queue_list(
     payload: dict[str, Any],
 ) -> None:
     """Send the queue as it stands. Also what first starts the scheduler."""
-    scheduler = runtime.ensure_scheduler()
-
-    emit(
-        "queue_changed",
-        "ready",
-        _queue_view_message(scheduler.view()),
-    )
+    runtime.ensure_scheduler()
+    runtime.emit_queue_view()
 
 
 def handle_queue_submit(
@@ -8594,6 +8947,88 @@ def handle_queue_set_paused(
 
     runtime.ensure_scheduler().set_paused(paused)
 
+    # The user's hold is remembered across restarts; Qronos's own pause is
+    # not, and never reaches this record.
+    runtime._ensure_queue_journal().set_paused(paused)
+    runtime._report_storage_status()
+    runtime.emit_queue_view()
+
+
+def handle_queue_pause_task(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    """Hold one waiting request until the user resumes it."""
+    task_id = _task_id_from(payload)
+    scheduler = runtime.ensure_scheduler()
+
+    if not scheduler.pause_task(task_id):
+        runtime._notify(
+            "queue_task_refused",
+            "warning",
+            _compact(
+                {
+                    "taskId": task_id,
+                    "action": "pause",
+                    "detail": "Only a waiting request can be paused.",
+                }
+            ),
+        )
+        return
+
+    work = scheduler.work_for(task_id)
+
+    if isinstance(work, QueuedConversationWork):
+        runtime._notify_queued_conversation(
+            work,
+            ConversationPhase.PAUSED,
+            {"detail": "Paused by you. It waits until you resume it."},
+        )
+
+
+def handle_queue_resume_task(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    """
+    Explicitly run a paused or interrupted request again.
+
+    The only way an interrupted request ever runs again. It goes back in
+    line like new work: the route, the machine and the resource policy are
+    all checked afresh before it starts.
+    """
+    task_id = _task_id_from(payload)
+
+    if runtime._reject_if_runtime_paused("queue_resume_task"):
+        return
+
+    scheduler = runtime.ensure_scheduler()
+
+    if not scheduler.resume_task(task_id):
+        runtime._notify(
+            "queue_task_refused",
+            "warning",
+            _compact(
+                {
+                    "taskId": task_id,
+                    "action": "resume",
+                    "detail": (
+                        "Only a paused or interrupted request can be resumed."
+                    ),
+                }
+            ),
+        )
+        return
+
+    work = scheduler.work_for(task_id)
+
+    if isinstance(work, QueuedConversationWork):
+        runtime._notify_queued_conversation(
+            work,
+            ConversationPhase.QUEUED,
+            {"reason": "resumed"},
+        )
+
 
 def handle_runtime_set_paused(
     runtime: QronosRuntime,
@@ -8702,6 +9137,8 @@ QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
     "queue_cancel": handle_queue_cancel,
     "queue_override": handle_queue_override,
     "queue_set_paused": handle_queue_set_paused,
+    "queue_pause_task": handle_queue_pause_task,
+    "queue_resume_task": handle_queue_resume_task,
 }
 
 

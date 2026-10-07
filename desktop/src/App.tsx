@@ -38,6 +38,7 @@ import PermissionsView from "./components/PermissionsView";
 import SettingsView from "./components/SettingsView";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
+import QueueDrawer from "./components/QueueDrawer";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
 import type { OrbState } from "./components/OrbState";
@@ -2328,6 +2329,20 @@ function App() {
 
 
       <RightTelemetryPanel />
+
+      {/* The Smart Queue: queued requests, their progress and outcomes,
+          with hold/pause/resume/cancel. Its hold is the queue's own and is
+          separate from the runtime-wide Pause owned by PermissionsView. */}
+      <QueueDrawer
+        hidden={
+          viewPhase !== "home" &&
+          viewPhase !== "conversations"
+        }
+        onShowConversation={(messageId) => {
+          setConversationFocusMessageId(messageId);
+          openConversations();
+        }}
+      />
 
       <section className="core-zone">
         <div className="orb-shell">
