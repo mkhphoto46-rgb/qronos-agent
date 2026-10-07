@@ -63,6 +63,23 @@ function QueueDrawer({ hidden, onShowConversation }: QueueDrawerProps) {
     }
   };
 
+  const describeRequest = (requestId: string) => {
+    const asked = messages.find(
+      (message) =>
+        message.requestId === requestId && message.role === "user",
+    );
+
+    if (!asked) {
+      return null;
+    }
+
+    const flattened = asked.text.replace(/\s+/g, " ").trim();
+
+    return flattened.length > 120
+      ? `${flattened.slice(0, 119).trimEnd()}…`
+      : flattened;
+  };
+
   if (hidden) {
     return null;
   }
@@ -103,6 +120,7 @@ function QueueDrawer({ hidden, onShowConversation }: QueueDrawerProps) {
             onDismissRefusal={dismissQueueRefusal}
             onDismissNotice={dismissQueueNotice}
             onShowRequest={showRequest}
+            describeRequest={describeRequest}
           />
         </div>
       )}
