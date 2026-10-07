@@ -29,6 +29,9 @@ Successful smoke output has `"ok": true` and reports bridge
 startup/ping/shutdown as passed. The smoke test does not open a microphone,
 camera or application, and does not load a model. It isolates settings,
 history, permissions, storage and the user profile from the developer's data.
+The desktop's bounded service transport, and an optional test that exercises
+a trusted frozen bundle through it, are described in
+`bounded-desktop-service-ipc.md`.
 
 The installer is written under `desktop/src-tauri/target/release/bundle/nsis`
 unless `CARGO_TARGET_DIR` selects another build directory. Build logs and
@@ -65,12 +68,17 @@ To inspect missing assets, run the installed backend's `doctor` service.
 `doctor --models` also inspects names from the local Ollama server with a
 bounded read-only request. It never starts Ollama, pulls or loads models.
 Asset presence alone does not demonstrate model quality or hardware support.
+At run time, a new GPU model load is deferred when the free video memory
+cannot be confirmed to fit it.
 
 The desktop's local setup report lists each missing asset and configured model
 role, with a read-only refresh. Wake-word provisioning includes the Qronos
 head and its external data plus `models/openwakeword/melspectrogram.onnx`,
 `embedding_model.onnx`, and `silero_vad.onnx` in that same folder. The loader
-uses these explicit paths; it does not download package-default weights.
+uses these explicit paths; it does not download package-default weights. The
+three feature models are the official openWakeWord v0.5.1 release files that
+the pinned `openwakeword` 0.6.0 package declares; the Qronos head is
+project-specific and must be supplied separately.
 
 The source build remains useful without these assets for text/UI setup, but
 voice, wake-word and vision acceptance requires the corresponding approved
