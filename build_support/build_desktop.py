@@ -15,6 +15,10 @@ import shlex
 import subprocess
 
 from build_support.build_runtime import ROOT, verify_manifest
+from build_support.desktop_notices import NOTICE_RESOURCE_TARGET, collect_desktop_notices
+
+#: Generated desktop third-party notices, mapped into the installer below.
+DESKTOP_NOTICES = ROOT / "runtime" / "package" / "desktop-notices"
 
 
 def build(backend: Path, *, bundles: str = "nsis") -> None:
@@ -25,10 +29,15 @@ def build(backend: Path, *, bundles: str = "nsis") -> None:
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if npm is None:
         raise ValueError("Node.js/npm is required on the build machine.")
+    # Before anything is bundled: an incomplete notice set stops the build.
+    collect_desktop_notices(DESKTOP_NOTICES)
     configuration = ROOT / "runtime" / "package" / "tauri-runtime.json"
     configuration.parent.mkdir(parents=True, exist_ok=True)
     configuration.write_text(json.dumps({
-        "bundle": {"resources": {backend.as_posix() + "/": "qronos-runtime/"}},
+        "bundle": {"resources": {
+            backend.as_posix() + "/": "qronos-runtime/",
+            DESKTOP_NOTICES.resolve(strict=True).as_posix() + "/": NOTICE_RESOURCE_TARGET,
+        }},
     }, indent=2) + "\n", encoding="utf-8")
     environment = dict(os.environ)
     existing = environment.get("CARGO_ENCODED_RUSTFLAGS")
