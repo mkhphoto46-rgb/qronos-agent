@@ -202,10 +202,19 @@ pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>
 
 #[tauri::command]
 pub fn get_runtime_status(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStatus, String> {
+    inspect_runtime_status(&state)
+}
+
+fn inspect_runtime_status(state: &RuntimeManagerState) -> Result<RuntimeStatus, String> {
     let mut guard = state
         .process
-        .lock()
-        .map_err(|_| "Runtime manager lock failed.".to_string())?;
+        .try_lock()
+        .map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock =>
+                "Runtime status is temporarily unavailable because the manager is busy.".to_string(),
+            std::sync::TryLockError::Poisoned(_) =>
+                "Runtime status is unavailable because the manager lock failed.".to_string(),
+        })?;
 
     if let Some(process) = guard.as_mut() {
         match process.child.try_wait() {
@@ -236,6 +245,47 @@ pub fn get_runtime_status(state: State<'_, RuntimeManagerState>) -> Result<Runti
         status: "stopped".to_string(),
         message: "Qronos runtime is not running.".to_string(),
     })
+}
+
+#[cfg(test)]
+mod runtime_status_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn held_process_slot_returns_busy_without_claiming_stopped() {
+        let state = Arc::new(RuntimeManagerState::new(None));
+        let guard = state.process.lock().unwrap();
+        let peer = state.clone();
+        let (send, receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            send.send(inspect_runtime_status(&peer)).unwrap();
+        });
+        // Release the held slot even if the bounded observation fails, so a
+        // regression cannot strand a worker or hang the test process.
+        let observed = receive.recv_timeout(Duration::from_millis(250));
+        drop(guard);
+        worker.join().unwrap();
+        let error = observed.expect("Status must not wait behind a runtime writer")
+            .expect_err("Lock contention must not produce running=false");
+        assert!(error.contains("busy") && error.contains("unavailable"));
+        let actual = inspect_runtime_status(&state).unwrap();
+        assert!(!actual.running && actual.status == "stopped");
+    }
+
+    #[test]
+    fn poisoned_process_slot_is_unavailable_without_resetting_it() {
+        let state = Arc::new(RuntimeManagerState::new(None));
+        let peer = state.clone();
+        assert!(std::thread::spawn(move || {
+            let _held = peer.process.lock().unwrap();
+            panic!("Synthetic poisoned-slot fixture");
+        }).join().is_err());
+        let error = inspect_runtime_status(&state).expect_err("Poison is not evidence of a stopped runtime");
+        assert!(error.contains("unavailable") && error.contains("lock failed"));
+        assert!(state.process.is_poisoned());
+    }
 }
 
 #[tauri::command]

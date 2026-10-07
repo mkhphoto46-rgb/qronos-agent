@@ -7,6 +7,11 @@ arguments and successful JSON results are unchanged. Unsupported operations are
 rejected before spawning a child; no executable, module, shell command or pipe
 path can be supplied through this interface.
 
+The read-only `get_runtime_status` command also uses a nonblocking process-slot
+lock. A busy or poisoned slot returns an unavailable error, never a fabricated
+`running=false` result. Status inspection does not restart or kill a runtime on
+contention; an acquired slot still reports the actual child running/exited state.
+
 The request is compact JSON on stdin, followed by EOF. Each backend emits exactly
 one compact JSON line on stdout and exits. Doctor uses `--models` with no stdin
 request; its versioned snapshot does not have an `ok` field. The other services
