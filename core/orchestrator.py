@@ -126,27 +126,40 @@ class StepResult:
     resource_blocked: bool = False
 
 
+#: Upper bound on one installed-model listing read during admission.
+INSTALLED_LISTING_TIMEOUT_SECONDS = 2.0
+
+
 def _installed_size_reader(runtime) -> InstalledModelSizes | None:
     """
     Installed model sizes from the same local model runtime, for admission.
 
-    Only for a runtime that names a local base URL; the store listing goes
-    through the loopback-only local model client. Anything else gets no
-    installed-size evidence, and admission uses the configured estimate.
+    For a runtime with a local model store (one that names a base URL). The
+    raw /api/tags listing is read through the bounded loopback-only local
+    model client and validated by InstalledModelSizes before any value is
+    used. A base URL that is not a valid local address makes every read fail,
+    so new GPU loads are deferred rather than admitted on the estimate.
+
+    A runtime with no base URL at all - an injected or legacy backend - gets
+    no reader, and admission keeps the configured estimate for it.
     """
+    if not hasattr(runtime, "base_url"):
+        return None
+
     base_url = getattr(runtime, "base_url", None)
 
-    if not isinstance(base_url, str) or not base_url:
-        return None
+    def read_listing():
+        from core.local_ipc import local_model_base_url, requests_client
 
-    try:
-        from core.ollama_models import OllamaModelCatalog
+        url = local_model_base_url(str(base_url))
+        response = requests_client.get(
+            f"{url}/api/tags",
+            timeout=INSTALLED_LISTING_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.json()
 
-        catalog = OllamaModelCatalog(base_url)
-    except Exception:
-        return None
-
-    return InstalledModelSizes(catalog.list_installed_models)
+    return InstalledModelSizes(read_listing)
 
 
 class Orchestrator:
@@ -991,7 +1004,13 @@ class Orchestrator:
         needed = getattr(selection, "vram_needed_mb", None)
         free = getattr(selection, "vram_free_mb", None)
 
-        if isinstance(needed, int) and isinstance(free, int):
+        if getattr(selection, "capacity_evidence", None) == "unavailable":
+            message += (
+                " Qronos could not confirm how much video memory the model "
+                "needs, so it is not loading it onto a card other "
+                "applications are using."
+            )
+        elif isinstance(needed, int) and isinstance(free, int):
             # Said plainly, so a deferral for capacity is not mistaken for a
             # busy machine: the model would only fit by taking memory other
             # applications are using right now.

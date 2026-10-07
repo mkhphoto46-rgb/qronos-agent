@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 from core.activity_guard import (
     ActivityMode,
@@ -45,7 +45,10 @@ class ModelSelection:
 
     #: What the projected-fit check was based on: "observed" (the daemon's own
     #: resident size for this model at this context), "installed" (its size
-    #: in the local store), or "configured" (only the profile estimate).
+    #: in the local store), "configured" (only the profile estimate, for a
+    #: manager built without a store reader), or "unavailable" (a store
+    #: reader was supplied but gave no trustworthy size, so a new GPU load
+    #: was deferred).
     capacity_evidence: str = "configured"
 
     #: Set only when the projected-fit check refused the load: what the model
@@ -57,47 +60,133 @@ class ModelSelection:
 #: Bytes in one MiB, the unit the GPU telemetry reports.
 _MIB = 1024 * 1024
 
+#: No model this code could load is a petabyte. A larger "size" is not a
+#: measurement; it is treated as malformed rather than as a huge bound.
+_MAX_PLAUSIBLE_MODEL_BYTES = 1 << 50
+
+
+def _valid_model_name(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 256
+        and value == value.strip()
+        and not any(ord(character) < 32 for character in value)
+    )
+
+
+def _valid_byte_count(value: Any) -> bool:
+    """
+    A finite, positive, whole number of bytes, given as an integer.
+
+    Exactly ``int``: a bool, a float (including NaN or infinity), a numeric
+    string or anything negative is not a byte count, however it might be
+    coerced.
+    """
+    return (
+        type(value) is int
+        and 0 < value <= _MAX_PLAUSIBLE_MODEL_BYTES
+    )
+
+
+def parse_installed_listing(data: Any) -> dict[str, int] | None:
+    """
+    Validated installed sizes from a raw local store listing, or None.
+
+    None means the listing as a whole is unusable. Within a usable listing a
+    record that is not an object or has no valid name vouches for nothing
+    and is skipped; a model whose size is malformed in any of its records is
+    left out, so it reads as unknown rather than as a smaller number.
+    """
+    if not isinstance(data, dict):
+        return None
+
+    entries = data.get("models")
+
+    if not isinstance(entries, list):
+        return None
+
+    sizes: dict[str, int] = {}
+    malformed: set[str] = set()
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+
+        name = entry.get("name")
+
+        if not _valid_model_name(name):
+            continue
+
+        size = entry.get("size")
+
+        if not _valid_byte_count(size):
+            malformed.add(name)
+            continue
+
+        sizes[name] = max(size, sizes.get(name, 0))
+
+    for name in malformed:
+        sizes.pop(name, None)
+
+    return sizes
+
 
 class InstalledModelSizes:
     """
     Installed model sizes from the local model store, read briefly cached.
 
-    Local loopback metadata only (the store's own /api/tags listing): nothing
-    is downloaded or loaded. A failed read is not cached and reads as
-    unknown, never as zero.
+    ``read_listing`` returns the store's raw /api/tags document over the
+    bounded loopback client; it is validated here, before any value is used.
+    Nothing is downloaded or loaded.
+
+    A listing that cannot be read or parsed keeps the sizes already known:
+    a refresh failure never weakens a bound that was established. It is
+    retried only after a short pause, so a stalled store cannot add a full
+    read timeout to every admission check. A model the store does not list,
+    or lists with a malformed size, reads as unknown - never as zero.
     """
 
     def __init__(
         self,
-        list_installed: Callable[[], tuple],
+        read_listing: Callable[[], Any],
         ttl_seconds: float = 30.0,
+        retry_after_failure_seconds: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._list_installed = list_installed
+        self._read_listing = read_listing
         self._ttl = ttl_seconds
+        self._retry_after_failure = retry_after_failure_seconds
         self._clock = clock
         self._lock = threading.Lock()
         self._sizes: dict[str, int] = {}
         self._read_at: float | None = None
+        self._failed_at: float | None = None
 
     def __call__(self, model_name: str) -> int | None:
         with self._lock:
             now = self._clock()
+            due = self._read_at is None or now - self._read_at >= self._ttl
+            backing_off = (
+                self._failed_at is not None
+                and now - self._failed_at < self._retry_after_failure
+            )
 
-            if self._read_at is None or now - self._read_at >= self._ttl:
+            if due and not backing_off:
                 try:
-                    installed = self._list_installed()
+                    parsed = parse_installed_listing(self._read_listing())
                 except Exception:
-                    return None
+                    parsed = None
 
-                self._sizes = {
-                    model.name: int(model.size_bytes)
-                    for model in installed
-                    if int(getattr(model, "size_bytes", 0) or 0) > 0
-                }
-                self._read_at = now
+                if parsed is None:
+                    self._failed_at = now
+                else:
+                    self._sizes = parsed
+                    self._read_at = now
+                    self._failed_at = None
 
-            return self._sizes.get(model_name)
+            size = self._sizes.get(model_name)
+
+            return size if _valid_byte_count(size) else None
 
 
 class ModelManager:
@@ -178,20 +267,33 @@ class ModelManager:
         names = configured_model_names()
 
         for item in running:
-            if getattr(item, "name", "") not in names:
+            name = getattr(item, "name", "")
+
+            if name not in names:
                 continue
 
-            try:
-                size = int(str(getattr(item, "size", "") or "0"))
-                context = int(getattr(item, "context", 0) or 0)
-            except (TypeError, ValueError):
+            raw_size = getattr(item, "size", None)
+            context = getattr(item, "context", None)
+
+            # The runtime reports the size as decimal digits. Anything else -
+            # a sign, a fraction, an exponent, a bool - is not a measurement.
+            if isinstance(raw_size, str) and raw_size.isascii() and raw_size.isdigit():
+                size = int(raw_size)
+            elif type(raw_size) is int:
+                size = raw_size
+            else:
                 continue
 
-            if size > 0 and context > 0:
-                with self._observed_lock:
-                    self._observed_bytes[(item.name, context)] = size
+            if not _valid_byte_count(size):
+                continue
 
-    def footprint_mb(self, model: ModelProfile) -> tuple[int, str]:
+            if type(context) is not int or context <= 0:
+                continue
+
+            with self._observed_lock:
+                self._observed_bytes[(name, context)] = size
+
+    def footprint_mb(self, model: ModelProfile) -> tuple[int | None, str]:
         """
         The VRAM a fresh load of this profile is expected to need, and why.
 
@@ -199,8 +301,13 @@ class ModelManager:
         resident size at the profile's own context when one is known, or
         otherwise by the model's installed size: weights the store holds for
         it, which for the specified models at their specified contexts
-        bounded the measured resident size from above. Falls back to the
-        estimate alone when neither is available.
+        bounded the measured resident size from above.
+
+        With a store reader supplied and neither available, the need is
+        unknown (None, "unavailable"): the configured estimate is already
+        known to understate at least one specified model, so it is not
+        evidence of fit. Only a manager built without a store reader - an
+        injected or legacy backend - falls back to the estimate.
         """
         estimate_mb = required_vram_mb(model.estimated_vram_gb)
 
@@ -220,8 +327,11 @@ class ModelManager:
             except Exception:
                 installed = None
 
-        if installed:
+        if _valid_byte_count(installed):
             return max(estimate_mb, math.ceil(installed / _MIB)), "installed"
+
+        if self._installed_size_bytes is not None:
+            return None, "unavailable"
 
         return estimate_mb, "configured"
 
@@ -341,6 +451,12 @@ class ModelManager:
         )
         headroom_mb = int(DEFAULT_HARD_FLOOR.vram_headroom_mb)
         needed_mb, evidence = self.footprint_mb(model)
+
+        if needed_mb is None:
+            # A new GPU load of unknown size is not started on a card other
+            # applications are using. Waiting costs a retry; loading on the
+            # disproven estimate could displace their memory.
+            return False, evidence, None, free_vram_mb
 
         if free_vram_mb >= needed_mb + headroom_mb:
             return True, evidence, None, None
