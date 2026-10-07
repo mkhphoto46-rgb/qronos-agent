@@ -496,10 +496,11 @@ class QueueScheduler:
         with self._lock:
             for task in self.queue.running():
                 entry = self._entries.get(task.task_id)
-                ask = None if entry is None else getattr(
-                    entry.work,
-                    "cancel",
-                    None,
+                # Interrupt where the work can tell it apart from a user's
+                # cancel; either way its model request is closed.
+                ask = None if entry is None else (
+                    getattr(entry.work, "interrupt", None)
+                    or getattr(entry.work, "cancel", None)
                 )
 
                 if callable(ask) and ask() is False:
@@ -600,10 +601,13 @@ class QueueScheduler:
             task = self.queue.get(task_id)
             was_running = task.state is TaskState.RUNNING
 
-            if was_running and entry is not None:
+            if entry is not None:
                 ask = getattr(entry.work, "cancel", None)
 
-                if callable(ask) and ask() is False:
+                # Told whatever its state, so cancelled work can never start
+                # another run. Only a running task can have committed its
+                # answer, and only then is the cancel refused.
+                if callable(ask) and ask() is False and was_running:
                     return False
 
             self.queue.cancel(task_id)
@@ -638,10 +642,32 @@ class QueueScheduler:
             self._wake.set()
 
     def set_runtime_paused(self, paused: bool) -> None:
-        """Qronos as a whole paused or resumed. Never lifts the user's hold."""
+        """
+        Qronos as a whole paused or resumed. Never lifts the user's hold.
+
+        Pausing also stops work already running, through its own ``pause``
+        where it has one: that closes the run's model request, and the work
+        goes back in line to run again after Resume. Nothing else is stopped
+        or unloaded.
+        """
         with self._lock:
             self._runtime_paused = paused
             self._bump()
+            running = (
+                tuple(
+                    self._entries[task_id].work
+                    for task_id in self._inflight
+                    if task_id in self._entries
+                )
+                if paused
+                else ()
+            )
+
+        for work in running:
+            stop = getattr(work, "pause", None)
+
+            if callable(stop):
+                stop()
 
         if not paused:
             self._wake.set()
