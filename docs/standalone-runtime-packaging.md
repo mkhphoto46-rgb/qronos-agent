@@ -65,9 +65,10 @@ only. The manifest covers these files like any other bundled file.
 
 The build stops if a frozen module or file cannot be attributed to a package,
 CPython, PyInstaller, Microsoft's C/C++ runtime or Qronos. It also stops if a
-bundled package ships no license or notice text. An exception must be
-recorded for the exact package name and version, with its provenance, in
-`build_support/runtime_notice_reviews.json`.
+bundled package has no non-empty license text. AUTHORS, NOTICE, COPYRIGHT and
+README files are copied as auxiliary notices but do not count as license
+text, and neither does an empty or label-only LICENSE. No review record in
+`build_support/runtime_notice_reviews.json` can replace missing license text.
 
 Some wheels carry native binaries without the upstream license text. For
 these, the missing text is kept in `build_support/runtime_notice_texts/`. It

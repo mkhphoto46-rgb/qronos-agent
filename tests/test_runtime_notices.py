@@ -805,3 +805,13 @@ def test_prune_refuses_links_without_removing_anything(tmp_path):
     with pytest.raises(NoticeError, match="link or reparse"):
         prune_portaudio(bundle)
     assert (directory / "libportaudio64bit-asio.dll").exists()
+
+
+def test_output_below_a_parent_junction_fails_before_any_write(fixture):
+    real = fixture.root / "real-output"
+    real.mkdir()
+    link_directory(fixture.root / "linked-parent", real)
+    plan = fixture.plan()
+    with pytest.raises(NoticeError, match="link or reparse"):
+        write_runtime_notices(plan, fixture.root / "linked-parent" / "bundle")
+    assert list(real.iterdir()) == []

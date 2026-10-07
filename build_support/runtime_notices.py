@@ -873,8 +873,11 @@ def write_runtime_notices(plan: NoticePlan, root: Path) -> Path:
     # the output root and its ancestors, and every source against its planned
     # hash.
     _check_destinations([copy.destination for copy in plan.copies])
-    if root.exists() or root.is_symlink():
-        _require_regular(root)
+    # The output root and every existing ancestor must be real folders, so a
+    # parent junction cannot redirect any write.
+    for ancestor in (root, *root.parents):
+        if ancestor.exists() or ancestor.is_symlink():
+            _require_regular(ancestor)
     for copy in plan.copies:
         _verified_bytes(copy)
     target.mkdir(parents=True)
