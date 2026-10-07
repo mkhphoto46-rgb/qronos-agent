@@ -185,6 +185,19 @@ def _derive(secret: bytes, salt: bytes, params: KdfParams) -> bytes:
     )
 
 
+def _store_error(exc: sqlite3.Error) -> ApprovalSecretUnavailable:
+    """Busy is not corrupt: report contention as a retryable refusal."""
+    text = str(exc).lower()
+    if isinstance(exc, sqlite3.OperationalError) and ("locked" in text or "busy" in text):
+        return ApprovalSecretUnavailable(
+            "The approval secret store is busy; nothing was approved. Try again."
+        )
+    return ApprovalSecretUnavailable(
+        "The approval secret store is unreadable or corrupt; it was not used "
+        "or overwritten."
+    )
+
+
 def _lock_seconds(failures: int) -> float:
     extra = max(0, failures - MAX_FAILURES_BEFORE_LOCK)
     return min(MAX_LOCK_SECONDS, BASE_LOCK_SECONDS * (2 ** min(extra, 16)))
@@ -382,11 +395,8 @@ class ApprovalSecretStore:
                 self._ensure_schema(c, write=write)
             except ApprovalSecretError:
                 raise
-            except sqlite3.DatabaseError as exc:
-                raise ApprovalSecretUnavailable(
-                    "The approval secret store is unreadable or corrupt; it was "
-                    "not used or overwritten."
-                ) from exc
+            except sqlite3.Error as exc:
+                raise _store_error(exc) from None
 
             try:
                 yield c
@@ -397,8 +407,14 @@ class ApprovalSecretStore:
             else:
                 # A failed attempt must be counted even though the caller
                 # then raises or returns False, so commit before returning.
+                # If the commit itself fails, both a right and a wrong secret
+                # end in the same refusal, so nothing about the guess leaks
+                # and nothing is approved.
                 if c.in_transaction:
-                    c.execute("COMMIT")
+                    try:
+                        c.execute("COMMIT")
+                    except sqlite3.Error as exc:
+                        raise _store_error(exc) from None
         except BaseException:
             if c.in_transaction:
                 try:

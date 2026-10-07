@@ -66,12 +66,15 @@ from core.action_audit import (
     AuditEvent,
 )
 from core.actions import ActionOutcome, ActionRequest
+from core.config import CONFIG
+from core.permission_control import permission_store_path
 from core.approval_secret import (
     ApprovalSecretError,
     ApprovalSecretLocked,
     ApprovalSecretStore,
     InvalidApprovalSecret,
     SETUP_HINT,
+    approval_secret_path,
 )
 from core.artifact_registry import (
     Artifact,
@@ -185,7 +188,7 @@ def default_protected_roots(
     registry: ArtifactRegistry | None = None,
 ) -> tuple[Path, ...]:
     """
-    Folders a Library copy or move may never write into.
+    Folders a Library operation may never write into or act on.
 
     System and program folders, every AppData tree (Startup lives there, and
     writing into it is unauthorized persistence), Qronos's own code and
@@ -224,12 +227,49 @@ def default_protected_roots(
     if registry is not None:
         raw.append(str(Path(registry.path).parent))
 
+    # Qronos's own data and log folders (undo journal, ownership registry,
+    # action audit) wherever the installed configuration put them.
+    raw.extend([str(CONFIG.paths.data), str(CONFIG.paths.logs)])
+
     roots: list[Path] = []
     for value in raw:
         cleaned = str(value or "").strip()
         if cleaned:
             roots.append(Path(cleaned).expanduser().resolve(strict=False))
     return tuple(roots)
+
+
+_SQLITE_SIDECARS = ("", "-journal", "-wal", "-shm", ".lock")
+
+
+def qronos_state_files(registry: ArtifactRegistry | None = None) -> tuple[Path, ...]:
+    """
+    Individual Qronos state files the Library must never act on.
+
+    These can be relocated by environment overrides to arbitrary folders, so
+    they are matched as files (with their SQLite/lock sidecars) in addition to
+    the protected folders above. The approval secret store is the important
+    one: copying it out would allow offline guessing, and moving it away
+    would make TYPED_SECRET re-provisionable.
+    """
+    files: list[Path] = []
+    candidates: list[Path] = [approval_secret_path(), permission_store_path(), library_audit_path()]
+    for name in ("QRONOS_CONVERSATION_HISTORY_PATH", "QRONOS_SETTINGS_PATH"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            candidates.append(Path(value))
+    try:
+        from core.storage_locations import locator_path
+
+        candidates.append(locator_path())
+    except ValueError:
+        pass
+    if registry is not None:
+        candidates.append(Path(registry.path))
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve(strict=False)
+        files.extend(resolved.with_name(resolved.name + suffix) for suffix in _SQLITE_SIDECARS)
+    return tuple(files)
 
 
 def send_to_recycle_bin(path: Path) -> None:
@@ -809,6 +849,22 @@ class LibraryExecutor:
                 )
         return resolved
 
+    def _refuse_protected_source(self, path: Path) -> None:
+        """
+        A registered artifact is still refused if it lives among system files
+        or Qronos state. Registration is not proof of ownership when the
+        artifact root, or the file, ended up somewhere it should not be.
+        """
+        resolved = path.resolve(strict=False)
+        if any(same_path(resolved, state) for state in qronos_state_files(self.registry)):
+            raise _ItemRefused("Qronos state files cannot be changed from the Library.")
+        for root in self._protected():
+            if resolved == root or resolved.is_relative_to(root):
+                raise _ItemRefused(
+                    "The artifact is inside a protected system, application or "
+                    "Qronos folder; the Library will not change it."
+                )
+
     def _verified_file(self, artifact: Artifact) -> Path:
         path = Path(artifact.path_or_url)
         if not path.is_absolute():
@@ -849,6 +905,7 @@ class LibraryExecutor:
             return _Target(artifact=artifact, request=request, path=None)
 
         path = self._verified_file(artifact)
+        self._refuse_protected_source(path)
 
         if op is LibraryOperation.MOVE:
             assert dest is not None
@@ -992,7 +1049,9 @@ class LibraryExecutor:
 
         if artifact.category == "link":
             return artifact, None
-        return artifact, self._verified_file(artifact)
+        path = self._verified_file(artifact)
+        self._refuse_protected_source(path)
+        return artifact, path
 
     def _current_destination(self, payload: Mapping[str, Any]) -> Path:
         approved = str(payload.get("destination", ""))

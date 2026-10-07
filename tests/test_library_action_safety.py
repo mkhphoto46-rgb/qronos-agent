@@ -709,3 +709,48 @@ def test_audit_covers_allow_deny_and_failure_without_names_or_paths(box: Sandbox
     assert lines and all(line["target"].startswith("art-") for line in lines)
     for secret in ("private-name", "other-private", str(box.tmp), "UserFolder"):
         assert secret not in text
+
+
+# ---------------------------------------------------------------- state files and protected sources
+
+
+@pytest.mark.parametrize("suffix", ["", "-wal", "-journal"])
+@pytest.mark.parametrize("op", ["copy", "move", "rename", "delete"])
+def test_the_approval_secret_store_is_never_a_library_target(
+    box: Sandbox, monkeypatch: pytest.MonkeyPatch, op: str, suffix: str,
+) -> None:
+    # Even if the secret store ends up inside the artifact root and gets
+    # registered, the Library must not copy it out (offline guessing) or move
+    # or recycle it away (which would make TYPED_SECRET re-provisionable).
+    store = box.artifacts / "Documents" / "approval_secret.sqlite3"
+    monkeypatch.setenv("QRONOS_APPROVAL_SECRET_PATH", str(store))
+    item = box.artifact("approval_secret.sqlite3" + suffix, "credential state")
+
+    extra = {"copy": {"destination": str(box.outside)}, "move": {"destination": str(box.outside)},
+             "rename": {"new_name": "innocent.md"}, "delete": {}}[op]
+    with pytest.raises(LibraryActionRefused, match="state files"):
+        box.executor.prepare(op, [item.id], **extra)
+    assert Path(item.path_or_url).read_text(encoding="utf-8") == "credential state"
+    assert list(box.outside.iterdir()) == [] and box.bin.items == []
+
+
+def test_a_file_that_becomes_state_after_approval_is_refused_at_commit(
+    box: Sandbox, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = box.artifact("notes.md", "text")
+    approval = box.executor.prepare("copy", [item.id], destination=str(box.outside))
+    monkeypatch.setenv("QRONOS_SETTINGS_PATH", item.path_or_url)
+
+    result = box.executor.commit(approval["token"], operation="copy")
+
+    assert result["refused"] == 1 and list(box.outside.iterdir()) == []
+
+
+def test_artifacts_inside_protected_folders_are_refused(box: Sandbox) -> None:
+    item = box.artifact("report.md", "x")
+    executor = box.make_executor(protected_roots=(Path(item.path_or_url).parent,))
+
+    for op, extra in (("copy", {"destination": str(box.outside)}), ("delete", {})):
+        with pytest.raises(LibraryActionRefused, match="protected"):
+            executor.prepare(op, [item.id], **extra)
+    assert Path(item.path_or_url).is_file()

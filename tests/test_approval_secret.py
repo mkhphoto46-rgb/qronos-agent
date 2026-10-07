@@ -343,6 +343,9 @@ def test_permissions_snapshot_survives_a_corrupt_store() -> None:
 class Library:
     def __init__(self, tmp_path: Path, clock: Clock, *, configure: bool = True) -> None:
         self.clock = clock
+        # Explicit, so the result does not depend on where the OS puts tmp_path
+        # (under the real %LOCALAPPDATA%\Temp unless the profile is isolated).
+        self.protected = (tmp_path / "protected",)
         self.registry = ArtifactRegistry(tmp_path / "db" / "library.sqlite3", tmp_path / "Artifacts")
         self.producer = ArtifactProducerRegistry(self.registry)
         self.audit = ActionAuditLog(None)
@@ -364,6 +367,7 @@ class Library:
             recycler=self.recycle,
             clock=self.clock,
             approval_secrets=self.secrets,
+            protected_roots=self.protected,
         )
         options.update(overrides)
         return LibraryExecutor(self.registry, **options)
@@ -486,7 +490,7 @@ def test_secret_is_not_needed_or_consulted_for_ui_confirmation(tmp_path: Path, c
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    executor = lib.make(protected_roots=(tmp_path / "protected",))
+    executor = lib.make()
     approval = executor.prepare("copy", [item.id], destination=str(dest))
     assert approval["confirmation"] == "click"
     assert executor.commit(approval["token"], operation="copy")["complete"] is True
@@ -591,3 +595,51 @@ def test_frontend_keeps_secrets_transient() -> None:
     assert '"approval_secret_set"' in permissions
     assert "secret" in store and "typedConfirmation" not in store and "typedPhrase" not in library
     assert "secret" not in settings.lower()
+
+
+# ---------------------------------------------------------------- busy store
+
+
+def test_a_busy_store_is_reported_as_busy_and_counts_nothing(store: ApprovalSecretStore, clock: Clock, tmp_path: Path) -> None:
+    store.set_secret(SECRET)
+    impatient = ApprovalSecretStore(store.path, clock=clock, busy_timeout=0.2, audit_path=None)
+
+    holder = sqlite3.connect(store.path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(ApprovalSecretUnavailable, match="busy"):
+            impatient.verify(OTHER)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    assert store.status().remaining_attempts == MAX_FAILURES_BEFORE_LOCK
+    assert impatient.verify(SECRET) is True
+
+
+def test_a_commit_blocked_by_a_reader_gives_the_same_answer_for_right_and_wrong(
+    store: ApprovalSecretStore, clock: Clock,
+) -> None:
+    store.set_secret(SECRET)
+    impatient = ApprovalSecretStore(store.path, clock=clock, busy_timeout=0.2, audit_path=None)
+
+    reader = sqlite3.connect(store.path, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT failures FROM attempts").fetchone()
+    try:
+        messages = []
+        for candidate in (SECRET, OTHER):
+            with pytest.raises(ApprovalSecretUnavailable) as caught:
+                impatient.verify(candidate)
+            messages.append(str(caught.value))
+    finally:
+        reader.execute("ROLLBACK")
+        reader.close()
+
+    assert messages[0] == messages[1] and "busy" in messages[0]
+    assert store.status().remaining_attempts == MAX_FAILURES_BEFORE_LOCK
+
+
+def test_library_view_discards_the_secret_when_hidden() -> None:
+    view = (ROOT / "desktop" / "src" / "components" / "LibraryView.tsx").read_text(encoding="utf-8")
+    assert 'if(visible)return; setSecretInput(""); if(confirm){ void libraryCancel(confirm.approval)' in view
