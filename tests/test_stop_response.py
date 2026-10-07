@@ -18,6 +18,11 @@ class StopResponseRuntimeTests(unittest.TestCase):
         runtime._voice_playback_metrics = {}
         runtime._voice_response_stop_requested = threading.Event()
         runtime._computer_actions = ActiveActionRegistry()
+        runtime._approval_lock = threading.Lock()
+        runtime._discarded_approvals = {}
+        runtime.pending_paint_draw = None
+        runtime.pending_look = None
+        runtime.paint_draw_executor = None
         runtime._notify = lambda *args, **kwargs: None
         runtime._write_voice_playback_telemetry = (
             lambda *args, **kwargs: None

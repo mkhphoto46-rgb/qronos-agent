@@ -30,8 +30,11 @@
    currently unavailable through the removed worker.
 3. Implement fresh screenshot/window identity binding and validated Vision target
    coordinates; integrate mouse/keyboard actions with focus checks, permission
-   checks, audit and observed postconditions. Cancellation is wired for Paint
-   drawing and ComputerExecutor; calculator/accessibility actions are not yet.
+   checks, audit and observed postconditions. Stop/Pause/shutdown cancel Paint,
+   ComputerExecutor, Calculator, accessibility and visual actions at step
+   boundaries, discard pending screen/Paint approvals and refuse their late
+   answers. A single native call (one UIA Invoke, click or typed string) is
+   not interrupted mid-call; Stop takes effect at the next boundary.
 4. Live app/file/drive testing with memory and sidecar monitoring.
 5. Telegram exact-contact/latest-incoming-file workflow and printer workflow.
 6. Device Link internet transport and native phone app; no relay deployed yet.

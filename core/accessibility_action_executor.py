@@ -9,6 +9,7 @@ from core.accessibility_targeting import (
     AccessibilityTarget,
     AccessibilityTargetLocator,
 )
+from core.action_cancellation import CancellationToken, checkpoint
 from core.gui_authorization import BoundGuiAuthorization
 from core.input_capabilities import InputCapabilities
 from core.input_safety import BoundInputAuthorization
@@ -139,7 +140,14 @@ class AccessibilityActionExecutor:
         set_value_fn: SetValueFn = set_value_runtime_id,
         invoke_fn: InvokeFn = invoke_runtime_id,
         lookup_runtime_fn: LookupRuntimeFn = actionable_element_by_runtime_id,
+        cancel_token: CancellationToken | None = None,
     ) -> None:
+        # One executor serves one user-visible action. Its token is checked
+        # before every native mutation and between steps; it never relaxes
+        # any authorization check. A single native call (one Invoke, one
+        # focus, one click, one typed string) completes or fails as a unit:
+        # Stop takes effect at the next boundary after it returns.
+        self.cancel_token = cancel_token
         self.binder = binder
         self.computer_executor = computer_executor
         self.locator = locator
@@ -157,6 +165,20 @@ class AccessibilityActionExecutor:
         self.set_value_fn = set_value_fn
         self.invoke_fn = invoke_fn
         self.lookup_runtime_fn = lookup_runtime_fn
+
+    def _checkpoint(self) -> None:
+        checkpoint(self.cancel_token)
+
+    def _acquire_foreground(self, binding: WindowBinding) -> None:
+        self._checkpoint()
+        if self.cancel_token is None:
+            self.computer_executor.acquire_foreground(binding)
+        else:
+            self.computer_executor.acquire_foreground(
+                binding,
+                cancel_token=self.cancel_token,
+            )
+        self._checkpoint()
 
     def focus_target(
         self,
@@ -181,9 +203,7 @@ class AccessibilityActionExecutor:
 
         BoundInputAuthorization.bind(grant, binding)
 
-        self.computer_executor.acquire_foreground(
-            binding
-        )
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -202,6 +222,9 @@ class AccessibilityActionExecutor:
             binding.hwnd,
             role=role,
         )
+
+        # UIA enumeration can take time; honour Stop before focusing.
+        self._checkpoint()
 
         # Validate the same short-lived exact-app grant used by the native
         # mouse/keyboard capabilities. UIA focus is still an action.
@@ -350,6 +373,9 @@ class AccessibilityActionExecutor:
             binding,
         )
 
+        # Focus is done; Stop between focus and typing sends no text.
+        self._checkpoint()
+
         keyboard = self.inputs.keyboard.type_text(
             binding,
             value,
@@ -391,9 +417,7 @@ class AccessibilityActionExecutor:
 
         BoundInputAuthorization.bind(grant, binding)
 
-        self.computer_executor.acquire_foreground(
-            binding
-        )
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -448,6 +472,8 @@ class AccessibilityActionExecutor:
         )
 
         before = current.value
+
+        self._checkpoint()
 
         restored = self.set_value_fn(
             binding.hwnd,
@@ -504,6 +530,8 @@ class AccessibilityActionExecutor:
             raise ValueError(
                 "description is required."
             )
+
+        self._checkpoint()
 
         # Identity/visibility yes; foreground/layout no.
         self.binder.revalidate(
@@ -585,6 +613,8 @@ class AccessibilityActionExecutor:
             require_same_layout=False,
         )
 
+        self._checkpoint()
+
         receipt = self.invoke_fn(
             binding.hwnd,
             current.runtime_id,
@@ -651,9 +681,7 @@ class AccessibilityActionExecutor:
         # Exact foreground window before target discovery.
         BoundInputAuthorization.bind(grant, binding)
 
-        self.computer_executor.acquire_foreground(
-            binding
-        )
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -669,9 +697,7 @@ class AccessibilityActionExecutor:
 
         # UIA enumeration and optional semantic selection take time.
         # Never act until the exact bound HWND is foreground again.
-        self.computer_executor.acquire_foreground(
-            binding
-        )
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -703,6 +729,8 @@ class AccessibilityActionExecutor:
                 scope
             )
         )
+
+        self._checkpoint()
 
         click = self.inputs.click.click_at(
             binding,
@@ -768,9 +796,7 @@ class AccessibilityActionExecutor:
 
         # Focus has been proven on the intended control.
         # Reacquire/revalidate once more immediately before keyboard input.
-        self.computer_executor.acquire_foreground(
-            binding
-        )
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -784,6 +810,8 @@ class AccessibilityActionExecutor:
                 binding,
             )
         )
+
+        self._checkpoint()
 
         typed = self.inputs.keyboard.type_text(
             binding,
@@ -811,9 +839,7 @@ class AccessibilityActionExecutor:
         grant: ActionGrant,
     ) -> KeyboardResult:
 
-        self.computer_executor.acquire_foreground(
-            binding
-        )
+        self._acquire_foreground(binding)
 
         self.binder.revalidate(
             binding,
@@ -827,6 +853,8 @@ class AccessibilityActionExecutor:
                 binding,
             )
         )
+
+        self._checkpoint()
 
         result = self.inputs.keyboard.press(
             binding,
@@ -902,6 +930,8 @@ class AccessibilityActionExecutor:
 
         while time.monotonic() < deadline:
 
+            self._checkpoint()
+
             self.binder.revalidate(
                 binding,
                 require_foreground=True,
@@ -926,7 +956,10 @@ class AccessibilityActionExecutor:
             ):
                 return current
 
-            time.sleep(0.05)
+            if self.cancel_token is not None:
+                self.cancel_token.sleep(0.05)
+            else:
+                time.sleep(0.05)
 
         if last is None:
             detail = "no accessibility focus result"
