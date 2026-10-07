@@ -126,6 +126,13 @@ from core.intent_gate import IntentGate
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.undo_journal import Reversal, UndoJournal
+from core.approval_ledger import (
+    STALE_SUPERSEDED,
+    ApprovalKind,
+    ApprovalLedger,
+    ApprovalTicket,
+    StaleApproval,
+)
 from core.action_cancellation import (
     CANCEL_REASON_PAUSE,
     CANCEL_REASON_SHUTDOWN,
@@ -190,9 +197,6 @@ STOP_RESPONSE_ACTION = "qronos.stop_response"
 # How long shutdown waits for cancelled GUI actions to release input state.
 COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS = 2.0
 
-# How many discarded approval questions are remembered so their delayed
-# answers can be refused rather than acted on.
-MAX_DISCARDED_APPROVALS = 32
 
 WAKE_PLAYBACK_GUARD_SECONDS = 0.35
 FOLLOWUP_START_TIMEOUT_SECONDS = 12.0
@@ -1400,8 +1404,13 @@ class QronosRuntime:
             else EnvironmentPaintReferenceProvider()
         )
         self.paint_draw_executor: PaintDrawExecutor | None = None
-        self.pending_paint_draw: PendingPaintDrawAction | None = None
-        self.pending_paint_undo: PendingPaintUndoAction | None = None
+        # Every prompt that waits on a person (Paint draw/undo, screen read)
+        # is an open ticket here with a single-use backend identity. The
+        # desktop must answer with that identity; Stop/Pause/shutdown revoke
+        # it. pending_paint_draw/pending_paint_undo/pending_look are views.
+        self._approvals = ApprovalLedger()
+        # Makes "check nothing is pending, then issue" atomic.
+        self._approval_lock = threading.Lock()
         self.pending_file_actions: dict[str, PendingFileTextAction] = {}
         # One explicit UI approval grants a short, process-local lease for
         # ordinary reversible file-write actions. The window is fixed: auto-
@@ -1410,14 +1419,6 @@ class QronosRuntime:
         self._file_approval_clock = time.monotonic
         self.screen_capture: ScreenCapture | None = None
         self.last_foreground_window: int | None = None
-        self.pending_look: str | None = None
-        # Guards pending screen/Paint approvals, which are created by turn
-        # workers, answered by approval workers and discarded by Stop/Pause/
-        # shutdown on the command thread.
-        self._approval_lock = threading.Lock()
-        # Normalized questions whose approval prompts were discarded. A late
-        # answer naming one of them is stale and must never be acted on.
-        self._discarded_approvals: dict[str, str] = {}
         self.orchestrator: Orchestrator | None = None
         self.conversation_session: ConversationSession | None = None
         self.conversation_history = ConversationHistory()
@@ -3855,22 +3856,19 @@ class QronosRuntime:
                     self.paint_draw_executor.discard_pending(prepared, reason=stopped)
                     report["voiceComputerCancelled"] = True
                     return COMPUTER_ACTION_CANCELLED_RESPONSE
-                with self._approval_lock:
-                    if (
-                        self.pending_paint_draw is not None
-                        or self.pending_paint_undo is not None
-                    ):
-                        return PAINT_UNDO_RESPONSES["pending"]
-                    self.pending_paint_undo = PendingPaintUndoAction(
+                ticket = self._issue_paint_prompt(
+                    ApprovalKind.PAINT_UNDO,
+                    transcript,
+                    PendingPaintUndoAction(
                         prepared=prepared,
                         gui_approval=gui_approval,
                         transcript=transcript,
-                    )
-                    self._discarded_approvals.pop(
-                        self._approval_key(transcript),
-                        None,
-                    )
+                    ),
+                )
+                if ticket is None:
+                    return PAINT_UNDO_RESPONSES["pending"]
                 report["paintDrawScreenApprovalPending"] = True
+                report["screenApprovalId"] = ticket.approval_id
                 return ""
             else:
                 report["voiceComputerNeedsOtherApproval"] = screen.decision.value
@@ -4068,23 +4066,20 @@ class QronosRuntime:
                     report["voiceComputerCancelled"] = True
                     report["voiceComputerDeferred"] = False
                     return COMPUTER_ACTION_CANCELLED_RESPONSE
-                with self._approval_lock:
-                    if (
-                        self.pending_paint_draw is not None
-                        or self.pending_paint_undo is not None
-                    ):
-                        report["voiceComputerDeferred"] = False
-                        return "یک نقاشی دیگر هنوز منتظر تأیید صفحه است."
-                    self.pending_paint_draw = PendingPaintDrawAction(
+                ticket = self._issue_paint_prompt(
+                    ApprovalKind.PAINT_DRAW,
+                    transcript,
+                    PendingPaintDrawAction(
                         prepared=prepared,
                         gui_approval=gui_approval,
                         transcript=transcript,
-                    )
-                    self._discarded_approvals.pop(
-                        self._approval_key(transcript),
-                        None,
-                    )
+                    ),
+                )
+                if ticket is None:
+                    report["voiceComputerDeferred"] = False
+                    return "یک نقاشی دیگر هنوز منتظر تأیید صفحه است."
                 report["paintDrawScreenApprovalPending"] = True
+                report["screenApprovalId"] = ticket.approval_id
                 report["voiceComputerDeferred"] = False
                 return ""
             else:
@@ -6271,55 +6266,86 @@ class QronosRuntime:
         )
         return True
 
-    @staticmethod
-    def _approval_key(text: str | None) -> str:
-        return " ".join(str(text or "").split()).casefold()
+    @property
+    def pending_paint_draw(self) -> PendingPaintDrawAction | None:
+        ticket = self._approvals.open_ticket(ApprovalKind.PAINT_DRAW)
+        return ticket.payload if ticket is not None else None
 
-    def _forget_discarded_approval(self, text: str | None) -> None:
-        """A fresh prompt for the same question supersedes its tombstone."""
-        key = self._approval_key(text)
-        if key:
-            with self._approval_lock:
-                self._discarded_approvals.pop(key, None)
+    @property
+    def pending_paint_undo(self) -> PendingPaintUndoAction | None:
+        ticket = self._approvals.open_ticket(ApprovalKind.PAINT_UNDO)
+        return ticket.payload if ticket is not None else None
 
-    def _stale_approval_reason(self, question: str | None) -> str:
-        key = self._approval_key(question)
-        if not key:
-            return ""
+    @property
+    def pending_look(self) -> str | None:
+        ticket = self._approvals.open_ticket(ApprovalKind.SCREEN_READ)
+        return ticket.question if ticket is not None else None
+
+    @pending_look.setter
+    def pending_look(self, question: str | None) -> None:
+        """Replace the open screen-read prompt (a new identity every time)."""
         with self._approval_lock:
-            return self._discarded_approvals.get(key, "")
+            self._approvals.revoke_kinds(
+                (ApprovalKind.SCREEN_READ,),
+                STALE_SUPERSEDED,
+            )
+            if question:
+                self._approvals.issue(
+                    ApprovalKind.SCREEN_READ,
+                    question,
+                    window=self.last_foreground_window,
+                )
+
+    def _issue_paint_prompt(
+        self,
+        kind: ApprovalKind,
+        transcript: str,
+        payload: Any,
+    ) -> ApprovalTicket | None:
+        """Issue one Paint prompt identity, or None while another is open."""
+        with self._approval_lock:
+            if self._approvals.open_ticket(
+                ApprovalKind.PAINT_DRAW,
+                ApprovalKind.PAINT_UNDO,
+            ) is not None:
+                return None
+            return self._approvals.issue(kind, transcript, payload=payload)
+
+    def _notify_screen_prompt(self, ticket: ApprovalTicket) -> None:
+        """Ask the desktop for an on-screen answer bound to ``ticket``."""
+        self._notify(
+            "voice_needs_screen",
+            "ready",
+            json.dumps(
+                {
+                    "approvalId": ticket.approval_id,
+                    "kind": ticket.kind.value,
+                    "question": ticket.question,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
 
     def _discard_pending_approvals(self, reason: str) -> int:
         """
-        Drop every computer/Paint/screen approval still waiting for an answer.
+        Revoke every computer/Paint/screen prompt still waiting for an answer.
 
-        The prompt may already be on screen; its later answer finds nothing
-        to approve and is refused as stale. Nothing ran, and the discard is
-        audited for a prepared Paint drawing. Idempotent.
+        The prompt may already be on screen. Its identity is revoked, so its
+        later answer is refused even if an identical question is asked again
+        (that new prompt gets a new identity). Nothing ran, and the discard is
+        audited for a prepared Paint drawing/undo. Idempotent.
         """
-        with self._approval_lock:
-            paint = self.pending_paint_draw
-            undo = self.pending_paint_undo
-            look = self.pending_look
-            self.pending_paint_draw = None
-            self.pending_paint_undo = None
-            self.pending_look = None
-            for question in (
-                paint.transcript if paint is not None else None,
-                undo.transcript if undo is not None else None,
-                look,
-            ):
-                key = self._approval_key(question)
-                if key:
-                    self._discarded_approvals.pop(key, None)
-                    self._discarded_approvals[key] = reason
-            while len(self._discarded_approvals) > MAX_DISCARDED_APPROVALS:
-                self._discarded_approvals.pop(
-                    next(iter(self._discarded_approvals))
-                )
-
-        discarded = int(paint is not None) + int(undo is not None) + int(bool(look))
-        for pending in (paint, undo):
+        revoked = self._approvals.revoke_kinds(
+            (
+                ApprovalKind.PAINT_DRAW,
+                ApprovalKind.PAINT_UNDO,
+                ApprovalKind.SCREEN_READ,
+            ),
+            reason,
+        )
+        for ticket in revoked:
+            pending = ticket.payload
             if pending is not None and self.paint_draw_executor is not None:
                 try:
                     self.paint_draw_executor.discard_pending(
@@ -6328,17 +6354,21 @@ class QronosRuntime:
                     )
                 except Exception:
                     pass
-        if discarded:
+        if revoked:
             self._notify(
                 "computer_approval_discarded",
                 "ready",
                 json.dumps(
-                    {"reason": reason, "discarded": discarded},
+                    {
+                        "reason": reason,
+                        "discarded": len(revoked),
+                        "approvalIds": [t.approval_id for t in revoked],
+                    },
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ),
             )
-        return discarded
+        return len(revoked)
 
     def request_stop_response(
         self,
@@ -7817,18 +7847,20 @@ class QronosRuntime:
                     self._write_latency_report(report)
                     return 0.0
                 with self._approval_lock:
-                    self.pending_look = transcript
-                    self._discarded_approvals.pop(
-                        self._approval_key(transcript),
-                        None,
+                    # A newer spoken question replaces an unanswered one; the
+                    # old prompt's identity is revoked, never reassigned.
+                    self._approvals.revoke_kinds(
+                        (ApprovalKind.SCREEN_READ,),
+                        STALE_SUPERSEDED,
+                    )
+                    ticket = self._approvals.issue(
+                        ApprovalKind.SCREEN_READ,
+                        transcript,
+                        window=self.last_foreground_window,
                     )
                 self.conversation_session.begin_listening()
 
-                self._notify(
-                    "voice_needs_screen",
-                    "ready",
-                    transcript,
-                )
+                self._notify_screen_prompt(ticket)
 
                 report["route"] = route.task_type.value
                 report["visionApprovalPending"] = True
@@ -7856,11 +7888,16 @@ class QronosRuntime:
                     False,
                 ):
                     self.conversation_session.begin_listening()
-                    self._notify(
-                        "voice_needs_screen",
-                        "ready",
-                        transcript,
+                    pending_ticket = self._approvals.open_ticket(
+                        ApprovalKind.PAINT_DRAW,
+                        ApprovalKind.PAINT_UNDO,
                     )
+                    if (
+                        pending_ticket is not None
+                        and pending_ticket.approval_id
+                        == report.get("screenApprovalId")
+                    ):
+                        self._notify_screen_prompt(pending_ticket)
                     report["visionApprovalPending"] = True
                     self._write_latency_report(report)
                     return 0.0
@@ -8433,17 +8470,12 @@ class QronosRuntime:
                 self._start_standalone_input_meter()
 
 
-    def _resolve_pending_paint_undo_screen_decision(
+    def _resolve_paint_undo_decision(
         self,
+        pending: PendingPaintUndoAction,
         *,
         approved: bool,
     ) -> bool:
-        with self._approval_lock:
-            pending = self.pending_paint_undo
-            if pending is None:
-                return False
-            self.pending_paint_undo = None
-
         self._ensure_computer_runtime()
         if self.paint_draw_executor is None:
             raise RuntimeError("Qronos Paint draw executor is not available.")
@@ -8478,17 +8510,12 @@ class QronosRuntime:
         )
         return True
 
-    def _resolve_pending_paint_draw_screen_decision(
+    def _resolve_paint_draw_decision(
         self,
+        pending: PendingPaintDrawAction,
         *,
         approved: bool,
     ) -> bool:
-        with self._approval_lock:
-            pending = self.pending_paint_draw
-            if pending is None:
-                return False
-            self.pending_paint_draw = None
-
         self._ensure_computer_runtime()
         if self.paint_draw_executor is None:
             raise RuntimeError("Qronos Paint draw executor is not available.")
@@ -8608,37 +8635,46 @@ class QronosRuntime:
         )
         return True
 
-    def _screen_decision_refusal(self, question: str | None) -> str:
-        """
-        Why a screen/Paint approval answer must not be acted on, or "".
-
-        - shutdown has begun;
-        - the answer names a prompt that Stop/Pause/shutdown discarded;
-        - a Paint drawing is pending and the answer names a different
-          request (an old prompt's answer must not approve a newer one).
-        """
-        if self._computer_actions.closed:
-            return CANCEL_REASON_SHUTDOWN
-        stale = self._stale_approval_reason(question)
-        if stale:
-            return stale
-        key = self._approval_key(question)
-        with self._approval_lock:
-            pending = self.pending_paint_draw or self.pending_paint_undo
-            if (
-                pending is not None
-                and key
-                and key != self._approval_key(pending.transcript)
-            ):
-                return "approval_does_not_match_pending_request"
-        return ""
+    def _notify_stale_screen_answer(
+        self,
+        reason: str,
+        *,
+        approval_id: str,
+        approved: bool,
+    ) -> None:
+        self._notify(
+            "screen_approval_stale",
+            "ready",
+            json.dumps(
+                {
+                    "reason": reason,
+                    "approvalId": approval_id,
+                    "approved": bool(approved),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
 
     def look_at_screen(
         self,
         approved: bool = False,
         question: str = "",
         window_only: bool = False,
+        approval_id: str = "",
+        direct: bool = False,
     ) -> None:
+        """
+        Answer one screen/Paint prompt, or perform one explicit direct read.
+
+        A prompt answer must carry the prompt's single-use ``approval_id``;
+        the ticket, not the answer, decides what runs (the exact prepared
+        Paint action, or the question and window recorded when it was
+        asked). A revoked, used, expired or unknown identity is refused and
+        never falls back to a direct read. ``direct=True`` is the explicit
+        "look now at this question" request; an answer with neither is
+        refused.
+        """
         if self._reject_if_runtime_paused("screen"):
             return
 
@@ -8654,32 +8690,50 @@ class QronosRuntime:
         self._computer_actions.mark_turn_start()
 
         try:
-            refusal = self._screen_decision_refusal(question)
-            if refusal:
-                self._notify(
-                    "screen_approval_stale",
-                    "ready",
-                    json.dumps(
-                        {"reason": refusal, "approved": bool(approved)},
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                    ),
+            window = self.last_foreground_window
+            if approval_id:
+                try:
+                    ticket = self._approvals.take(approval_id)
+                except StaleApproval as exc:
+                    self._notify_stale_screen_answer(
+                        exc.reason,
+                        approval_id=approval_id,
+                        approved=approved,
+                    )
+                    return
+                if ticket.kind is ApprovalKind.PAINT_DRAW:
+                    self._resolve_paint_draw_decision(ticket.payload, approved=approved)
+                    return
+                if ticket.kind is ApprovalKind.PAINT_UNDO:
+                    self._resolve_paint_undo_decision(ticket.payload, approved=approved)
+                    return
+                if ticket.kind is not ApprovalKind.SCREEN_READ:
+                    self._notify_stale_screen_answer(
+                        "wrong_kind",
+                        approval_id=approval_id,
+                        approved=approved,
+                    )
+                    return
+                # Bound at prompt time: the question asked and the window
+                # that was in front then, not whatever is in front now.
+                asked = ticket.question.strip()
+                window = ticket.window
+            elif direct:
+                if self._computer_actions.closed:
+                    self._notify_stale_screen_answer(
+                        CANCEL_REASON_SHUTDOWN,
+                        approval_id="",
+                        approved=approved,
+                    )
+                    return
+                asked = str(question or "").strip()
+            else:
+                self._notify_stale_screen_answer(
+                    "approval_id_required",
+                    approval_id="",
+                    approved=approved,
                 )
                 return
-
-            if self._resolve_pending_paint_draw_screen_decision(
-                approved=approved,
-            ):
-                return
-
-            if self._resolve_pending_paint_undo_screen_decision(
-                approved=approved,
-            ):
-                return
-
-            with self._approval_lock:
-                asked = (question or self.pending_look or "").strip()
-                self.pending_look = None
 
             if not asked:
                 raise RuntimeError(
@@ -8704,7 +8758,7 @@ class QronosRuntime:
                 asked,
             )
 
-            capture = self._capture_for(window_only)
+            capture = self._capture_for(window_only, window=window)
 
             self._notify(
                 "voice_captured_screen",
@@ -8788,13 +8842,18 @@ class QronosRuntime:
         finally:
             self._set_busy(False)
 
-    def _capture_for(self, window_only: bool) -> Capture:
+    def _capture_for(
+        self,
+        window_only: bool,
+        *,
+        window: int | None = None,
+    ) -> Capture:
         if self.screen_capture is None:
             raise RuntimeError(
                 "Qronos screen capture runtime is not prepared."
             )
 
-        window = self.last_foreground_window if window_only else None
+        window = window if window_only else None
 
         return self.screen_capture.capture(
             approved=True,
@@ -8905,6 +8964,7 @@ class QronosRuntime:
         # pending approvals are discarded so a late answer finds nothing.
         self._computer_actions.close()
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
+        self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
 
         self._input_meter_enabled = False
@@ -9339,6 +9399,19 @@ def handle_action(
             else payload
         )
 
+        approval_id = source.get("approvalId", "")
+        if approval_id is None:
+            approval_id = ""
+        if not isinstance(approval_id, str):
+            raise ValueError("Look-at-screen approvalId must be a string.")
+        direct = source.get("direct", False)
+        if not isinstance(direct, bool):
+            raise ValueError("Look-at-screen direct must be true or false.")
+        if approval_id and direct:
+            raise ValueError(
+                "Look-at-screen is either a prompt answer or a direct read, not both."
+            )
+
         worker = threading.Thread(
             target=lambda: runtime.look_at_screen(
                 approved=bool(
@@ -9359,6 +9432,8 @@ def handle_action(
                         False,
                     )
                 ),
+                approval_id=approval_id.strip(),
+                direct=direct,
             ),
             name="qronos-look-at-screen",
             daemon=True,

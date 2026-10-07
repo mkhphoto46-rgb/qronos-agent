@@ -292,6 +292,13 @@ def event_types(events: list[dict[str, Any]]) -> list[str]:
     return [event["eventType"] for event in events]
 
 
+def screen_prompt_id(events: list[dict[str, Any]]) -> str:
+    """The single-use identity a voice_needs_screen prompt must be answered with."""
+    prompts = [e for e in events if e["eventType"] == "voice_needs_screen"]
+    assert prompts, "no screen prompt was issued"
+    return json.loads(prompts[-1]["message"])["approvalId"]
+
+
 class TestEmit(unittest.TestCase):
     def test_one_event_is_one_line_of_json(self) -> None:
         stream = io.StringIO()
@@ -1196,7 +1203,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         events = captured_events(
             lambda: runtime.look_at_screen(
-                approved=False, question="What is this?"
+                approved=False, question="What is this?", direct=True
             )
         )
         kinds = [event["eventType"] for event in events]
@@ -1209,7 +1216,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         runtime = prepared_runtime()
 
         events = captured_events(
-            lambda: runtime.look_at_screen(question="What is this?")
+            lambda: runtime.look_at_screen(question="What is this?", direct=True)
         )
 
         self.assertIn(
@@ -1222,7 +1229,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         events = captured_events(
             lambda: runtime.look_at_screen(
-                approved=True, question="What is on my screen?"
+                approved=True, question="What is on my screen?", direct=True
             )
         )
         kinds = [event["eventType"] for event in events]
@@ -1237,7 +1244,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         captured_events(
             lambda: runtime.look_at_screen(
-                approved=True, question="What is on my screen?"
+                approved=True, question="What is on my screen?", direct=True
             )
         )
 
@@ -1260,7 +1267,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         )
 
         events = captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
         kinds = [event["eventType"] for event in events]
 
@@ -1272,7 +1279,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         runtime = prepared_runtime(orchestrator=orchestrator)
 
         captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
 
         self.assertIsNone(orchestrator.plans[0].steps[0].images[0].source)
@@ -1284,8 +1291,10 @@ class TestLookingAtTheScreen(unittest.TestCase):
             orchestrator=orchestrator,
         )
 
-        captured_events(runtime.push_to_talk)
-        captured_events(lambda: runtime.look_at_screen(approved=True))
+        approval_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+        captured_events(
+            lambda: runtime.look_at_screen(approved=True, approval_id=approval_id)
+        )
 
         self.assertEqual(orchestrator.plans[0].goal, "به این پنجره نگاه کن")
 
@@ -1298,8 +1307,10 @@ class TestLookingAtTheScreen(unittest.TestCase):
             speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن")
         )
 
-        captured_events(runtime.push_to_talk)
-        captured_events(lambda: runtime.look_at_screen(approved=True))
+        approval_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+        captured_events(
+            lambda: runtime.look_at_screen(approved=True, approval_id=approval_id)
+        )
 
         self.assertIsNone(runtime.pending_look)
 
@@ -1308,15 +1319,19 @@ class TestLookingAtTheScreen(unittest.TestCase):
             speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن")
         )
 
-        captured_events(runtime.push_to_talk)
-        captured_events(lambda: runtime.look_at_screen(approved=False))
+        approval_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+        captured_events(
+            lambda: runtime.look_at_screen(approved=False, approval_id=approval_id)
+        )
 
         self.assertIsNone(runtime.pending_look)
 
     def test_looking_with_nothing_asked_is_an_error(self) -> None:
         runtime = prepared_runtime()
 
-        events = captured_events(lambda: runtime.look_at_screen(approved=True))
+        events = captured_events(
+            lambda: runtime.look_at_screen(approved=True, direct=True)
+        )
 
         self.assertIn(
             "runtime_error",
@@ -1341,7 +1356,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         )
 
         events = captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
         kinds = [event["eventType"] for event in events]
 
@@ -1363,7 +1378,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         )
 
         events = captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
         message = next(
             event["message"]
@@ -1385,7 +1400,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         captured_events(
             lambda: runtime.look_at_screen(
-                approved=True, question="What?", window_only=True
+                approved=True, question="What?", window_only=True, direct=True
             )
         )
 
@@ -1398,7 +1413,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         runtime.last_foreground_window = 4242
 
         captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
 
         self.assertEqual(asked, [None])
@@ -1423,6 +1438,7 @@ class TestTheLookActionIsDispatched(unittest.TestCase):
                     "approved": True,
                     "question": "What is this?",
                     "windowOnly": True,
+                    "direct": True,
                 },
             )
         )
@@ -1437,6 +1453,8 @@ class TestTheLookActionIsDispatched(unittest.TestCase):
                     "approved": True,
                     "question": "What is this?",
                     "window_only": True,
+                    "approval_id": "",
+                    "direct": True,
                 }
             ],
         )

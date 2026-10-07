@@ -11,12 +11,14 @@ Calculator actions. Every native boundary is a fake; nothing real runs.
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import threading
 from types import SimpleNamespace
 
 import pytest
 
 import core.calculator_semantic as calculator_semantic
+import core.runtime_bridge as runtime_bridge
 from core.accessibility_action_executor import AccessibilityActionExecutor
 from core.accessibility_targeting import AccessibilityTargetLocator
 from core.action_audit import ActionAuditLog
@@ -29,6 +31,7 @@ from core.action_cancellation import (
     CancellationToken,
 )
 from core.actions import ActionOutcome, ActionResult
+from core.approval_ledger import ApprovalLedger
 from core.calculator_semantic import (
     CalculatorSemanticCancelled,
     CalculatorSemanticExecutor,
@@ -57,6 +60,7 @@ from test_runtime_bridge import (
     captured_events,
     event_types,
     prepared_runtime,
+    screen_prompt_id,
     screenless_capture,
 )
 from test_visual_action_executor import FakeCapture as VisualCapture
@@ -191,37 +195,49 @@ def _runtime(paint=None, **kwargs):
 
 
 def _await_approval(runtime, transcript=DRAW):
+    """Open one Paint prompt and return its single-use identity."""
     report: dict = {}
     response = runtime._prepare_voice_paint_draw_action(transcript, report)
     assert response == ""
     assert runtime.pending_paint_draw is not None
-    return report
+    return report["screenApprovalId"]
 
 
-def _answer(runtime, *, approved=True, question=DRAW):
-    return event_types(
-        captured_events(
-            lambda: runtime.look_at_screen(approved=approved, question=question)
+def _answer(runtime, approval_id="", *, approved=True, question="", direct=False, window_only=False):
+    return captured_events(
+        lambda: runtime.look_at_screen(
+            approved=approved,
+            question=question,
+            window_only=window_only,
+            approval_id=approval_id,
+            direct=direct,
         )
     )
 
 
+def _stale_reason(events):
+    stale = [e for e in events if e["eventType"] == "screen_approval_stale"]
+    assert stale, f"expected a stale refusal, got {event_types(events)}"
+    return json.loads(stale[-1]["message"])["reason"]
+
+
 def test_stop_while_awaiting_approval_discards_it_and_late_yes_does_nothing():
     runtime = _runtime()
-    _await_approval(runtime)
+    approval_id = _await_approval(runtime)
 
     events = captured_events(runtime.request_stop_response)
     assert runtime.pending_paint_draw is None
     assert runtime.paint_draw_executor.discarded == [
         ("a simple cat", CANCEL_REASON_USER_STOP)
     ]
-    assert "computer_approval_discarded" in event_types(events)
+    discarded = [e for e in events if e["eventType"] == "computer_approval_discarded"]
+    assert json.loads(discarded[0]["message"])["approvalIds"] == [approval_id]
 
-    kinds = _answer(runtime, approved=True, question=DRAW)
-
-    assert "screen_approval_stale" in kinds
+    assert _stale_reason(_answer(runtime, approval_id, question=DRAW)) == CANCEL_REASON_USER_STOP
+    # An answer without its identity is never treated as a prompt answer
+    # and never becomes a direct read.
+    assert _stale_reason(_answer(runtime, question=DRAW)) == "approval_id_required"
     assert runtime.paint_draw_executor.executed == []
-    # The late "yes" must not fall through to a generic screen read either.
     assert runtime.screen_grabs == []
     assert runtime.orchestrator.plans == []
 
@@ -236,62 +252,110 @@ def test_stop_result_reports_discarded_approvals():
     assert runtime.request_stop_response()["pendingApprovalsDiscarded"] == 0
 
 
-def test_late_answer_for_a_stopped_prompt_cannot_approve_a_newer_one():
+def test_delayed_answer_cannot_approve_a_new_prompt_with_identical_text():
     runtime = _runtime()
-    _await_approval(runtime, DRAW)
+    first = _await_approval(runtime, DRAW)
     runtime.request_stop_response()
-    _await_approval(runtime, OTHER_DRAW)
+    second = _await_approval(runtime, DRAW)  # same words, new prompt
+    assert first != second
 
-    kinds = _answer(runtime, approved=True, question=DRAW)
-
-    assert "screen_approval_stale" in kinds
+    assert _stale_reason(_answer(runtime, first, question=DRAW)) == CANCEL_REASON_USER_STOP
     assert runtime.paint_draw_executor.executed == []
     assert runtime.pending_paint_draw is not None
 
-    # The answer to the current prompt still works, exactly once.
-    _answer(runtime, approved=True, question=OTHER_DRAW)
-    assert runtime.paint_draw_executor.executed == [("a simple house", False)]
-    assert runtime.pending_paint_draw is None
+    _answer(runtime, second, question=DRAW)
+    assert runtime.paint_draw_executor.executed == [("a simple cat", False)]
+    # Single use: replaying the accepted identity is refused.
+    assert _stale_reason(_answer(runtime, second, question=DRAW)) == "already_answered"
+    assert runtime.paint_draw_executor.executed == [("a simple cat", False)]
 
 
-def test_unrelated_answer_cannot_consume_a_pending_drawing():
+def test_cancelled_identity_stays_dead_after_the_same_question_is_answered():
+    runtime = _runtime()
+    first = _await_approval(runtime, DRAW)
+    runtime.request_stop_response()
+    second = _await_approval(runtime, DRAW)
+    _answer(runtime, second)
+
+    assert _stale_reason(_answer(runtime, first)) == CANCEL_REASON_USER_STOP
+    assert len(runtime.paint_draw_executor.executed) == 1
+
+
+def test_explicit_direct_read_while_a_drawing_waits_does_not_consume_it():
     runtime = _runtime()
     _await_approval(runtime, DRAW)
 
-    kinds = _answer(runtime, approved=True, question="what is on my screen?")
+    kinds = event_types(_answer(runtime, question="what is on my screen?", direct=True))
 
-    assert "screen_approval_stale" in kinds
+    assert "voice_turn_complete" in kinds
+    assert runtime.screen_grabs == [None]
     assert runtime.pending_paint_draw is not None
+    assert runtime.paint_draw_executor.executed == []
+
+
+def test_overlapping_screen_and_paint_prompts_each_need_their_own_identity(monkeypatch):
+    monkeypatch.setattr(runtime_bridge, "foreground_window", lambda: 4242)
+    runtime = _runtime(speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن"))
+    paint_id = _await_approval(runtime, DRAW)
+    screen_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+    assert paint_id != screen_id
+
+    _answer(runtime, screen_id, window_only=True)
+    assert runtime.screen_grabs == [4242]
+    assert runtime.paint_draw_executor.executed == []
+    assert runtime.pending_paint_draw is not None
+
+    _answer(runtime, paint_id)
+    assert runtime.paint_draw_executor.executed == [("a simple cat", False)]
+    assert runtime.screen_grabs == [4242]
+
+
+def test_screen_prompt_is_bound_to_the_window_in_front_when_asked(monkeypatch):
+    monkeypatch.setattr(runtime_bridge, "foreground_window", lambda: 4242)
+    runtime = _runtime(speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن"))
+    screen_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+    runtime.last_foreground_window = 9999  # something else came to the front
+
+    _answer(runtime, screen_id, window_only=True)
+
+    assert runtime.screen_grabs == [4242]
+
+
+def test_forged_or_unknown_identities_never_run_anything():
+    runtime = _runtime()
+    _await_approval(runtime)
+
+    assert _stale_reason(_answer(runtime, "../../not-an-id")) == "malformed"
+    assert _stale_reason(_answer(runtime, "A" * 24, question=DRAW)) == "unknown"
     assert runtime.paint_draw_executor.executed == []
     assert runtime.screen_grabs == []
+    assert runtime.pending_paint_draw is not None
 
 
-def test_asking_again_after_stop_creates_a_fresh_usable_prompt():
+def test_an_expired_prompt_cannot_be_approved():
+    now = {"t": 1000.0}
     runtime = _runtime()
-    _await_approval(runtime, DRAW)
-    runtime.request_stop_response()
-    _await_approval(runtime, DRAW)
+    runtime._approvals = ApprovalLedger(clock=lambda: now["t"], ttl_seconds=60.0)
+    approval_id = _await_approval(runtime)
+    now["t"] += 61.0
 
-    _answer(runtime, approved=True, question=DRAW)
-
-    assert runtime.paint_draw_executor.executed == [("a simple cat", False)]
+    assert _stale_reason(_answer(runtime, approval_id)) == "expired"
+    assert runtime.paint_draw_executor.executed == []
 
 
 def test_pause_discards_pending_approval_and_resume_does_not_revive_it():
     runtime = _runtime()
-    _await_approval(runtime)
+    approval_id = _await_approval(runtime)
 
     captured_events(lambda: runtime.set_runtime_paused(True))
     assert runtime.pending_paint_draw is None
     assert runtime.paint_draw_executor.discarded[0][1] == CANCEL_REASON_PAUSE
 
-    # Answered while paused: rejected by the pause gate.
-    _answer(runtime, approved=True, question=DRAW)
+    paused = event_types(_answer(runtime, approval_id))
+    assert "runtime_paused_rejected" in paused
     captured_events(lambda: runtime.set_runtime_paused(False))
-    # Answered after Resume: stale.
-    kinds = _answer(runtime, approved=True, question=DRAW)
 
-    assert "screen_approval_stale" in kinds
+    assert _stale_reason(_answer(runtime, approval_id)) == CANCEL_REASON_PAUSE
     assert runtime.paint_draw_executor.executed == []
     assert runtime.screen_grabs == []
 
@@ -299,14 +363,14 @@ def test_pause_discards_pending_approval_and_resume_does_not_revive_it():
 def test_close_discards_approvals_and_nothing_can_run_afterwards():
     paint = ApprovalPaintExecutor()
     runtime = _runtime(paint)
-    _await_approval(runtime)
+    approval_id = _await_approval(runtime)
 
     runtime.close()
     runtime.close()
 
     assert paint.discarded == [("a simple cat", CANCEL_REASON_SHUTDOWN)]
-    kinds = _answer(runtime, approved=True, question="")
-    assert "screen_approval_stale" in kinds
+    assert _stale_reason(_answer(runtime, approval_id)) == CANCEL_REASON_SHUTDOWN
+    assert _stale_reason(_answer(runtime, question="What?", direct=True)) == CANCEL_REASON_SHUTDOWN
     assert paint.executed == [] and runtime.screen_grabs == []
 
     # A worker that reaches dispatch after close cannot open a new prompt.
@@ -328,6 +392,7 @@ def test_stop_during_routing_prevents_the_prompt_from_ever_opening():
 
     assert runtime.pending_paint_draw is None
     assert report["voiceComputerCancelled"] is True
+    assert "screenApprovalId" not in report
     assert paint.discarded == [("a simple cat", CANCEL_REASON_USER_STOP)]
 
 
@@ -371,26 +436,40 @@ def test_stop_during_transcription_never_opens_a_screen_prompt():
 
     assert "voice_needs_screen" not in kinds
     assert runtime.pending_look is None
-    _answer(runtime, approved=True, question="")
+    _answer(runtime, question="به این پنجره نگاه کن")
     assert runtime.screen_grabs == []
 
 
 def test_stop_while_screen_read_prompt_is_open_refuses_the_late_yes():
     runtime = _runtime(speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن"))
-    captured_events(runtime.push_to_talk)
+    old_id = screen_prompt_id(captured_events(runtime.push_to_talk))
     assert runtime.pending_look == "به این پنجره نگاه کن"
 
     runtime.request_stop_response()
-    kinds = _answer(runtime, approved=True, question="به این پنجره نگاه کن")
-
     assert runtime.pending_look is None
-    assert "screen_approval_stale" in kinds
+
+    # The same words are spoken again: a new prompt with a new identity.
+    new_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+    assert new_id != old_id
+
+    assert _stale_reason(_answer(runtime, old_id, question="به این پنجره نگاه کن")) == CANCEL_REASON_USER_STOP
+    assert runtime.screen_grabs == []
+    _answer(runtime, new_id)
+    assert len(runtime.screen_grabs) == 1
+
+
+def test_a_newer_spoken_question_supersedes_the_unanswered_one():
+    runtime = _runtime(speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن"))
+    old_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+    screen_prompt_id(captured_events(runtime.push_to_talk))
+
+    assert _stale_reason(_answer(runtime, old_id)) == "superseded"
     assert runtime.screen_grabs == []
 
 
 def test_direct_screen_request_without_any_prompt_still_works():
     runtime = _runtime()
-    kinds = _answer(runtime, approved=True, question="What is on my screen?")
+    kinds = event_types(_answer(runtime, question="What is on my screen?", direct=True))
     assert "voice_turn_complete" in kinds
     assert runtime.screen_grabs == [None]
 

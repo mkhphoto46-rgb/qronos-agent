@@ -72,6 +72,9 @@ def setup():
     return runtime, rig, drawing
 
 
+_LAST_PROMPT: dict = {}
+
+
 def _voice(runtime, text=UNDO):
     report: dict = {}
     events = captured_events(
@@ -79,12 +82,17 @@ def _voice(runtime, text=UNDO):
             "response", runtime._prepare_voice_paint_undo_action(text, report)
         )
     )
+    if report.get("screenApprovalId"):
+        _LAST_PROMPT[id(runtime)] = report["screenApprovalId"]
     return report, events
 
 
-def _answer(runtime, approved=True, question=UNDO):
+def _answer(runtime, approved=True, approval_id=None):
+    """Answer the most recent undo prompt with its own single-use identity."""
+    if approval_id is None:
+        approval_id = _LAST_PROMPT[id(runtime)]
     return captured_events(
-        lambda: runtime.look_at_screen(approved=approved, question=question)
+        lambda: runtime.look_at_screen(approved=approved, approval_id=approval_id)
     )
 
 
@@ -316,12 +324,29 @@ def test_stop_while_undo_turn_is_routing_never_opens_a_prompt(setup):
     assert rig.journal.next_undoable().action_id == drawing.request.action_id
 
 
-def test_unrelated_answer_cannot_consume_a_pending_undo(setup):
+def test_direct_read_or_bare_answer_cannot_consume_a_pending_undo(setup):
     runtime, rig, _ = setup
     _voice(runtime)
 
-    events = _answer(runtime, approved=True, question="what is on my screen?")
+    bare = captured_events(lambda: runtime.look_at_screen(approved=True, question=UNDO))
+    direct = captured_events(
+        lambda: runtime.look_at_screen(approved=True, question="what is on my screen?", direct=True)
+    )
 
-    assert "screen_approval_stale" in event_types(events)
+    assert "screen_approval_stale" in event_types(bare)
+    assert "voice_turn_complete" in event_types(direct)
     assert runtime.pending_paint_undo is not None
     assert rig.keyboard.chords == []
+
+
+def test_undo_identity_is_single_use(setup):
+    runtime, rig, _ = setup
+    report, _ = _voice(runtime)
+    approval_id = report["screenApprovalId"]
+
+    _answer(runtime, approval_id=approval_id)
+    chords = len(rig.keyboard.chords)
+    replay = _answer(runtime, approval_id=approval_id)
+
+    assert "screen_approval_stale" in event_types(replay)
+    assert len(rig.keyboard.chords) == chords

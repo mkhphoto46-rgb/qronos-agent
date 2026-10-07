@@ -167,9 +167,11 @@ class TestLookingAtTheScreenThroughTheProcess(BridgeProcessTestCase):
     """
 
     def look(self, **fields) -> dict:
+        """An explicit direct screen request (not an answer to a prompt)."""
         payload = {
             "command": "action",
             "actionId": "qronos.look_at_screen",
+            "direct": True,
         }
         payload.update(fields)
 
@@ -217,6 +219,15 @@ class TestLookingAtTheScreenThroughTheProcess(BridgeProcessTestCase):
 
         self.assertIsNotNone(failed)
         self.assertIn("what to look for", failed["message"])
+
+    def test_an_answer_without_its_prompt_identity_is_refused(self) -> None:
+        """A stale or forged "yes" never turns into a direct screen read."""
+        self.look(approved=True, question="What is on my screen?", direct=False)
+
+        stale = self.bridge.read_until("screen_approval_stale")
+
+        self.assertIsNotNone(stale)
+        self.assertEqual(json.loads(stale["message"])["reason"], "approval_id_required")
 
     def test_declining_starts_nothing(self) -> None:
         """
