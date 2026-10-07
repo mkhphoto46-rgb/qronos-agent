@@ -79,31 +79,31 @@ class TaskRouter:
         "آندو",
     )
 
+    # Mirrors core/calculator_semantic.py, which decides what actually runs.
     CALCULATOR_NAMES = _markers(
         "calculator",
         "calc",
-        "????? ????",
-        "??????????",
-        "?????????",
-        "????????",
-        "??????????",
+        "ماشین حساب",
+        "ماشین‌حساب",
+        "ماشینحساب",
     )
 
     CALCULATOR_ACTION_MARKERS = _markers(
-        "?? ?????",
-        "??????",
-        "???",
+        "به علاوه",
+        "بعلاوه",
+        "جمع",
         "plus",
-        "?????",
+        "منهای",
+        "منها",
+        "تفریق",
         "minus",
-        "???",
-        "?????",
-        "?????",
+        "ضربدر",
+        "ضرب",
         "multiply",
         "times",
-        "?????",
+        "تقسیم",
         "divide",
-        "?????",
+        "مساوی",
         "equals",
     )
 
