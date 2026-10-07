@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import core.computer_executor as computer_executor
+import core.windows_accessibility_mutation as accessibility_mutation
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +57,10 @@ def block_real_windows_computer_side_effects(
             "Pytest attempted a real Windows computer side effect. "
             "This test must inject a fake launcher/opener/window/GUI boundary."
         )
+
+    # UIA mutations are native side effects too; reader/actuator tests must
+    # replace this subprocess boundary explicitly before exercising success.
+    monkeypatch.setattr(accessibility_mutation, "_run_uia_script", blocked_side_effect)
 
     # Static executable launch, such as Notepad.
     monkeypatch.setattr(

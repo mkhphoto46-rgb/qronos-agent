@@ -59,6 +59,8 @@ class TestOllamaController(unittest.TestCase):
         mock_get.assert_called_once_with(
             "http://127.0.0.1:11434/api/version",
             timeout=3,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.get")
@@ -94,6 +96,8 @@ class TestOllamaController(unittest.TestCase):
         mock_get.assert_called_once_with(
             "http://127.0.0.1:11434/api/ps",
             timeout=3,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.get")
@@ -191,6 +195,8 @@ class TestOllamaController(unittest.TestCase):
                 "stream": False,
             },
             timeout=10,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.post")
@@ -306,6 +312,8 @@ class TestOllamaController(unittest.TestCase):
                 },
             },
             timeout=90,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.post")
@@ -357,11 +365,12 @@ class TestOllamaController(unittest.TestCase):
 
         self.assertEqual(
             str(context.exception),
-            "Qronos local Brain request failed.",
+            "Could not send request to Qronos local Brain "
+            "(model=qwen3:4b; endpoint=/api/chat; timeout=90s; messages=1; images=0).",
         )
 
     @patch("core.ollama_controller.requests.post")
-    def test_chat_http_error_preserves_bounded_ollama_detail(
+    def test_chat_http_error_preserves_safe_request_metadata(
         self,
         mock_post: Mock,
     ) -> None:
@@ -380,7 +389,8 @@ class TestOllamaController(unittest.TestCase):
 
         self.assertEqual(
             str(context.exception),
-            "Qronos local Brain request failed (HTTP 500).",
+            "Could not send request to Qronos local Brain "
+            "(model=qwen3:4b; endpoint=/api/chat; timeout=90s; messages=1; images=0; HTTP 500).",
         )
 
 

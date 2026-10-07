@@ -12,11 +12,13 @@ from core.accessibility_targeting import (
     AccessibilityTargetLocator,
 )
 from core.input_safety import BoundInputAuthorization
+from unittest.mock import Mock
 from core.window_binding import (
     WindowBinder,
     WindowRect,
     WindowSnapshot,
 )
+from core.windows_accessibility_mutation import UiInvokeReceipt
 from core.windows_accessibility import (
     ActionableUiElement,
     FocusedUiElement,
@@ -203,6 +205,25 @@ def grant(binding):
         verdict,
         approval=approval,
     )
+
+
+@pytest.mark.parametrize("operation", ("focus", "restore", "click"))
+def test_missing_grant_blocks_even_foreground_acquisition(operation):
+    snap = snapshot()
+    binder = WindowBinder(enumerate_fn=lambda: (snap,), snapshot_fn=lambda hwnd: snap)
+    binding = binder.bind_snapshot(snap, app_id="example", display_name="Example")
+    computer = Mock()
+    locator = Mock()
+    executor = AccessibilityActionExecutor(binder, computer, locator, inputs=FakeInputs())
+    with pytest.raises(PermissionError):
+        if operation == "focus":
+            executor.focus_target(binding, "Address Bar", role="text_input", grant=None)
+        elif operation == "restore":
+            executor.restore_text_value(binding, Mock(), "previous", grant=None)
+        else:
+            executor.click_target(binding, "Address Bar", role="text_input", grant=None)
+    computer.acquire_foreground.assert_not_called()
+    locator.locate.assert_not_called()
 
 
 def context(focus):
@@ -433,7 +454,7 @@ def test_native_uia_focus_uses_exact_runtime_id_without_mouse():
 
     calls = []
 
-    def focus_target_fn(hwnd, runtime_id):
+    def focus_target_fn(hwnd, runtime_id, **kwargs):
         calls.append(
             (
                 hwnd,
@@ -506,7 +527,7 @@ def test_focus_and_type_never_uses_mouse():
         locator,
         inputs=inputs,
         focus_fn=good_focus,
-        focus_target_fn=lambda hwnd, runtime_id: good_focus(),
+        focus_target_fn=lambda hwnd, runtime_id, **kwargs: good_focus(),
     )
 
     run = executor.focus_and_type_target(
@@ -571,7 +592,7 @@ def test_focus_change_between_setfocus_and_typing_blocks_keyboard():
         locator,
         inputs=inputs,
         focus_fn=lambda: wrong,
-        focus_target_fn=lambda hwnd, runtime_id: good_focus(),
+        focus_target_fn=lambda hwnd, runtime_id, **kwargs: good_focus(),
     )
 
     with pytest.raises(
@@ -628,6 +649,7 @@ def test_restore_text_value_uses_exact_runtime_id_and_no_mouse():
         hwnd,
         runtime_id,
         value,
+        **kwargs,
     ):
         calls.append(
             (
@@ -648,7 +670,7 @@ def test_restore_text_value_uses_exact_runtime_id_and_no_mouse():
         locator,
         inputs=inputs,
         focus_fn=good_focus,
-        focus_target_fn=lambda hwnd, runtime_id: good_focus(),
+        focus_target_fn=lambda hwnd, runtime_id, **kwargs: good_focus(),
         set_value_fn=set_value_fn,
         lookup_runtime_fn=lambda hwnd, runtime_id: current,
     )
@@ -733,6 +755,7 @@ def test_restore_runtime_lookup_is_dependency_injected():
         hwnd,
         runtime_id,
         value,
+        **kwargs,
     ):
         return replace(
             current,
@@ -745,7 +768,7 @@ def test_restore_runtime_lookup_is_dependency_injected():
         locator,
         inputs=FakeInputs(),
         focus_fn=good_focus,
-        focus_target_fn=lambda hwnd, runtime_id: good_focus(),
+        focus_target_fn=lambda hwnd, runtime_id, **kwargs: good_focus(),
         set_value_fn=set_value_fn,
         lookup_runtime_fn=lookup_runtime_fn,
     )
@@ -824,6 +847,7 @@ def test_invoke_target_uses_exact_runtime_id_without_mouse_or_keyboard():
     def invoke_fn(
         hwnd,
         runtime_id,
+        **kwargs,
     ):
         calls.append(
             (
@@ -840,7 +864,7 @@ def test_invoke_target_uses_exact_runtime_id_without_mouse_or_keyboard():
         locator,
         inputs=inputs,
         focus_fn=good_focus,
-        focus_target_fn=lambda hwnd, runtime_id: good_focus(),
+        focus_target_fn=lambda hwnd, runtime_id, **kwargs: good_focus(),
         invoke_fn=invoke_fn,
         lookup_runtime_fn=lambda hwnd, runtime_id: item,
     )
@@ -922,6 +946,7 @@ def test_invoke_target_does_not_require_foreground():
     def invoke_fn(
         hwnd,
         runtime_id,
+        **kwargs,
     ):
         calls.append(
             (
@@ -938,7 +963,7 @@ def test_invoke_target_does_not_require_foreground():
         locator,
         inputs=inputs,
         focus_fn=good_focus,
-        focus_target_fn=lambda hwnd, runtime_id: good_focus(),
+        focus_target_fn=lambda hwnd, runtime_id, **kwargs: good_focus(),
         invoke_fn=invoke_fn,
         lookup_runtime_fn=lambda hwnd, runtime_id: item,
     )
@@ -970,7 +995,7 @@ def test_invoke_target_does_not_require_foreground():
 
 def test_semantic_invoke_survives_foreground_and_layout_change():
     from dataclasses import replace
-    from core.windows_accessibility import UiInvokeReceipt
+    from core.windows_accessibility_mutation import UiInvokeReceipt
 
     original = snapshot()
 
@@ -1042,6 +1067,7 @@ def test_semantic_invoke_survives_foreground_and_layout_change():
     def invoke_fn(
         hwnd,
         runtime_id,
+        **kwargs,
     ):
         calls.append(
             (
@@ -1060,7 +1086,7 @@ def test_semantic_invoke_survives_foreground_and_layout_change():
         locator,
         inputs=FakeInputs(),
         focus_fn=good_focus,
-        focus_target_fn=lambda hwnd, runtime_id: good_focus(),
+        focus_target_fn=lambda hwnd, runtime_id, **kwargs: good_focus(),
         invoke_fn=invoke_fn,
         lookup_runtime_fn=lambda hwnd, runtime_id: item,
     )

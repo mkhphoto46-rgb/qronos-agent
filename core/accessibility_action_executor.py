@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 from core.accessibility_targeting import (
     AccessibilityTarget,
@@ -20,11 +20,13 @@ from core.window_binding import (
     WindowRect,
 )
 from core.windows_accessibility import (
-    UiInvokeReceipt,
     ActionableUiElement,
     FocusedUiElement,
     actionable_element_by_runtime_id,
     focused_element,
+)
+from core.windows_accessibility_mutation import (
+    UiInvokeReceipt,
     focus_runtime_id,
     invoke_runtime_id,
     set_value_runtime_id,
@@ -85,9 +87,31 @@ class AccessibilityClickTypeRun:
 
 
 FocusFn = Callable[[], FocusedUiElement]
-FocusTargetFn = Callable[[int, str], FocusedUiElement]
-SetValueFn = Callable[[int, str, str], ActionableUiElement]
-InvokeFn = Callable[[int, str], UiInvokeReceipt]
+
+
+class FocusTargetFn(Protocol):
+    def __call__(
+        self, hwnd: int, runtime_id: str, *, binding: WindowBinding,
+        authorization: BoundGuiAuthorization, input_authorization: BoundInputAuthorization,
+        binder: WindowBinder,
+    ) -> FocusedUiElement: ...
+
+
+class SetValueFn(Protocol):
+    def __call__(
+        self, hwnd: int, runtime_id: str, value: str, *, binding: WindowBinding,
+        authorization: BoundGuiAuthorization, input_authorization: BoundInputAuthorization,
+        binder: WindowBinder,
+    ) -> ActionableUiElement: ...
+
+
+class InvokeFn(Protocol):
+    def __call__(
+        self, hwnd: int, runtime_id: str, *, binding: WindowBinding,
+        authorization: BoundGuiAuthorization, binder: WindowBinder,
+    ) -> UiInvokeReceipt: ...
+
+
 LookupRuntimeFn = Callable[
     [int, str],
     ActionableUiElement | None,
@@ -155,6 +179,8 @@ class AccessibilityActionExecutor:
                 "description is required."
             )
 
+        BoundInputAuthorization.bind(grant, binding)
+
         self.computer_executor.acquire_foreground(
             binding
         )
@@ -191,6 +217,12 @@ class AccessibilityActionExecutor:
         result = self.focus_target_fn(
             binding.hwnd,
             element.runtime_id,
+            binding=binding,
+            authorization=BoundGuiAuthorization.bind(
+                grant, binding, allowed_runtime_ids=(element.runtime_id,),
+            ),
+            input_authorization=authorization,
+            binder=self.binder,
         )
 
         self.binder.revalidate(
@@ -357,6 +389,8 @@ class AccessibilityActionExecutor:
 
         desired = str(value)
 
+        BoundInputAuthorization.bind(grant, binding)
+
         self.computer_executor.acquire_foreground(
             binding
         )
@@ -419,6 +453,12 @@ class AccessibilityActionExecutor:
             binding.hwnd,
             expected.runtime_id,
             desired,
+            binding=binding,
+            authorization=BoundGuiAuthorization.bind(
+                grant, binding, allowed_runtime_ids=(expected.runtime_id,),
+            ),
+            input_authorization=authorization,
+            binder=self.binder,
         )
 
         self.binder.revalidate(
@@ -548,6 +588,9 @@ class AccessibilityActionExecutor:
         receipt = self.invoke_fn(
             binding.hwnd,
             current.runtime_id,
+            binding=binding,
+            authorization=authorization,
+            binder=self.binder,
         )
 
         if (
@@ -606,6 +649,8 @@ class AccessibilityActionExecutor:
             )
 
         # Exact foreground window before target discovery.
+        BoundInputAuthorization.bind(grant, binding)
+
         self.computer_executor.acquire_foreground(
             binding
         )

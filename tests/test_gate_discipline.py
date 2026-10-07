@@ -52,14 +52,23 @@ DANGEROUS_IMPORTS = frozenset({"subprocess", "shutil", "winreg", "ctypes"})
 NATIVE_BACKENDS = {
     "core.windows_app_activation": frozenset({"core.computer_executor"}),
     "core.windows_input_native": frozenset({
-        "core.keyboard_control", "core.mouse_button", "core.mouse_hover",
+        "core.keyboard_control", "core.mouse_button", "core.mouse_hover", "core.mouse_wheel",
     }),
+    "core.windows_accessibility_mutation": frozenset({"core.accessibility_action_executor"}),
 }
 
 # Modules that legitimately touch these without being action executors, with
 # the reason. Anything not listed has to be justified by adding it here, which
 # is the point: the list is short and someone has to look at it.
 KNOWN_SYSTEM_MODULES: dict[str, str] = {
+    "core.runtime_instance_guard": (
+        "Creates/closes only the local named Qronos runtime mutex; it does not "
+        "launch processes or manipulate user applications."
+    ),
+    "core.windows_accessibility": (
+        "Reads UI Automation focus, geometry, properties and RuntimeIds. "
+        "UIA mutations live in the separately reviewed, authorization-gated backend."
+    ),
     "core.window_binding": (
         "Reads HWND/process identity, foreground state and window geometry; "
         "does not send input, activate applications or change windows."
@@ -208,8 +217,32 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
             for backend, callers in NATIVE_BACKENDS.items():
                 if backend in imports:
                     self.assertIn(name, callers, f"{name} bypasses the reviewed {backend} callers")
-                    guard = "security.gate" if name == "core.computer_executor" else "core.input_safety"
+                    guard = "security.gate" if name in {
+                        "core.computer_executor", "core.accessibility_action_executor",
+                    } else "core.input_safety"
                     self.assertIn(guard, imports, f"{name} lost its action guard")
+
+    def test_uia_readers_cannot_mutate_or_reexport_the_mutation_backend(self) -> None:
+        path = ROOT / "core" / "windows_accessibility.py"
+        source = path.read_text(encoding="utf-8")
+        self.assertNotIn("core.windows_accessibility_mutation", imported_names(path))
+        for primitive in (".SetFocus(", ".SetValue(", ".Invoke("):
+            self.assertNotIn(primitive, source, f"UIA reader acquired mutation {primitive}")
+        public_functions = {
+            node.name for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+        }
+        self.assertEqual(public_functions, {
+            "available", "focused_element", "elements_in_window", "element_at_point",
+            "actionable_elements_in_window", "actionable_element_by_runtime_id",
+        })
+
+    def test_only_the_mutation_backend_imports_the_private_uia_runner(self) -> None:
+        for path in product_modules():
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.ImportFrom) and node.module == "core.windows_accessibility":
+                    if any(alias.name == "_run_uia_script" for alias in node.names):
+                        self.assertEqual(module_name(path), "core.windows_accessibility_mutation")
 
     def test_the_exception_list_has_no_stale_entries(self) -> None:
         # An exception that no longer applies is an exception nobody will

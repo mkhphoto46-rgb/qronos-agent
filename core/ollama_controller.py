@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 import os
+import math
+import re
 import shutil
 import subprocess
 import threading
@@ -43,41 +45,20 @@ _FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 OllamaModelStatus = BrainRuntimeModelStatus
 
 
-def _safe_http_error_detail(
-    response,
-    *,
-    limit: int = 600,
-) -> str:
-    """Return bounded local Ollama error detail for diagnostics."""
-    if response is None:
-        return ""
+def _model_diagnostic(model_name: str) -> str:
+    # Reject arbitrary strings rather than laundering secrets or multiline
+    # prompt material into an error under the label "model".
+    if isinstance(model_name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,119}", model_name):
+        return model_name
+    return "<invalid model identifier>"
 
-    detail = ""
 
-    try:
-        data = response.json()
-        if isinstance(data, dict):
-            detail = str(
-                data.get("error", "")
-                or ""
-            ).strip()
-    except Exception:
-        detail = ""
-
-    if not detail:
-        try:
-            detail = str(
-                response.text
-                or ""
-            ).strip()
-        except Exception:
-            detail = ""
-
-    detail = " ".join(
-        detail.split()
-    )
-
-    return detail[:limit]
+def _require_success(response) -> None:
+    response.raise_for_status()
+    # requests does not treat redirects as errors. Local IPC must never
+    # follow Location to a public endpoint, including for probes/unloads.
+    if 300 <= response.status_code < 400:
+        raise requests.HTTPError("Local Ollama redirect refused.", response=response)
 
 
 class OllamaController(BrainRuntime):
@@ -93,15 +74,44 @@ class OllamaController(BrainRuntime):
         self,
         base_url: str = OLLAMA_BASE_URL,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = base_url
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        try:
+            parsed = urlparse(value)
+            host = (parsed.hostname or "").lower()
+            port = parsed.port
+            valid = (
+                parsed.scheme == "http"
+                and host in {"127.0.0.1", "localhost", "::1"}
+                and (port is None or port > 0)
+                and parsed.username is None and parsed.password is None
+                and parsed.path in {"", "/"}
+                and not parsed.params and not parsed.query and not parsed.fragment
+            )
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise ValueError("Ollama IPC requires an explicit loopback HTTP endpoint.")
+        # Do not depend on environment DNS/hosts resolution for localhost.
+        host = "127.0.0.1" if host == "localhost" else host
+        authority = f"[{host}]" if host == "::1" else host
+        self._base_url = f"http://{authority}" + (f":{port}" if port is not None else "")
 
     def _probe(self, timeout_seconds: float = 3.0) -> bool:
         try:
             response = requests.get(
                 f"{self.base_url}/api/version",
                 timeout=max(0.1, float(timeout_seconds)),
+                allow_redirects=False,
+                proxies={"http": "", "https": ""},
             )
-            response.raise_for_status()
+            _require_success(response)
             return True
         except requests.RequestException:
             return False
@@ -222,14 +232,16 @@ class OllamaController(BrainRuntime):
             response = requests.get(
                 f"{self.base_url}/api/ps",
                 timeout=3,
+                allow_redirects=False,
+                proxies={"http": "", "https": ""},
             )
 
-            response.raise_for_status()
+            _require_success(response)
 
-        except requests.RequestException as exc:
+        except requests.RequestException:
             raise RuntimeError(
                 "Ollama API is unavailable."
-            ) from exc
+            ) from None
 
         data = response.json()
 
@@ -279,6 +291,41 @@ class OllamaController(BrainRuntime):
 
         return models
 
+    def installed_model_names(self) -> tuple[str, ...]:
+        """Inspect local installed-model metadata without starting or loading anything.
+
+        An empty tuple means the server answered with no installed models.
+        Transport/server failures raise instead of masquerading as missing models.
+        """
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/tags",
+                timeout=3,
+                allow_redirects=False,
+                proxies={"http": "", "https": ""},
+            )
+            _require_success(response)
+        except requests.RequestException:
+            raise RuntimeError("Local Ollama installed-model inspection is unavailable (endpoint=/api/tags; timeout=3s).") from None
+
+        try:
+            data = response.json()
+        except ValueError:
+            raise RuntimeError("Local Ollama installed-model inspection returned invalid JSON.") from None
+        if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+            raise RuntimeError("Local Ollama installed-model inspection returned invalid metadata.")
+
+        names: set[str] = set()
+        for model in data["models"]:
+            name = model.get("name") if isinstance(model, dict) else None
+            if (
+                not isinstance(name, str) or not name.strip() or len(name) > 256
+                or name != name.strip() or any(ord(character) < 32 for character in name)
+            ):
+                raise RuntimeError("Local Ollama installed-model inspection returned invalid model metadata.")
+            names.add(name)
+        return tuple(sorted(names))
+
     def stop_model(
         self,
         model_name: str,
@@ -297,14 +344,16 @@ class OllamaController(BrainRuntime):
                     "stream": False,
                 },
                 timeout=10,
+                allow_redirects=False,
+                proxies={"http": "", "https": ""},
             )
 
-            response.raise_for_status()
+            _require_success(response)
 
-        except requests.RequestException as exc:
+        except requests.RequestException:
             raise RuntimeError(
-                f"Could not stop model: {model_name}"
-            ) from exc
+                f"Could not stop model: {_model_diagnostic(model_name)}"
+            ) from None
 
     def unload_all(self) -> None:
         """
@@ -396,7 +445,7 @@ class OllamaController(BrainRuntime):
             else float(timeout_seconds)
         )
 
-        if effective_timeout <= 0:
+        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
             raise ValueError(
                 "timeout_seconds must be greater than zero."
             )
@@ -453,6 +502,11 @@ class OllamaController(BrainRuntime):
             payload["format"] = response_format
 
         response = None
+        diagnostic = (
+            f"model={_model_diagnostic(model_name)}; endpoint=/api/chat; "
+            f"timeout={effective_timeout:g}s; messages={len(ollama_messages)}; "
+            f"images={sum(len(message.get('images', ())) for message in ollama_messages)}"
+        )
 
         for attempt in range(2):
             try:
@@ -460,12 +514,14 @@ class OllamaController(BrainRuntime):
                     f"{self.base_url}/api/chat",
                     json=payload,
                     timeout=effective_timeout,
+                    allow_redirects=False,
+                    proxies={"http": "", "https": ""},
                 )
 
-                response.raise_for_status()
+                _require_success(response)
                 break
 
-            except requests.ConnectionError as exc:
+            except requests.ConnectionError:
                 if (
                     attempt == 0
                     and self.ensure_ready(
@@ -475,17 +531,17 @@ class OllamaController(BrainRuntime):
                     continue
 
                 raise RuntimeError(
-                    "Qronos local Brain is unavailable."
-                ) from exc
+                    f"Could not send request to Qronos local Brain: unavailable ({diagnostic})."
+                ) from None
 
-            except requests.Timeout as exc:
+            except requests.Timeout:
                 raise TimeoutError(
                     (
                         "Qronos Brain exceeded the "
                         f"{effective_timeout:g}-second "
-                        "safety deadline."
+                        f"safety deadline ({diagnostic})."
                     )
-                ) from exc
+                ) from None
 
             except requests.HTTPError as exc:
                 if (
@@ -493,8 +549,8 @@ class OllamaController(BrainRuntime):
                     and exc.response.status_code == 404
                 ):
                     raise RuntimeError(
-                        "Qronos local Brain model is not installed."
-                    ) from exc
+                        f"Qronos local Brain model is not installed ({diagnostic}; HTTP 404)."
+                    ) from None
 
                 status = (
                     exc.response.status_code
@@ -503,21 +559,25 @@ class OllamaController(BrainRuntime):
                 )
 
                 raise RuntimeError(
-                    "Qronos local Brain request failed "
-                    f"(HTTP {status})."
-                ) from exc
+                    f"Could not send request to Qronos local Brain ({diagnostic}; HTTP {status})."
+                ) from None
 
-            except requests.RequestException as exc:
+            except requests.RequestException:
                 raise RuntimeError(
-                    "Qronos local Brain request failed."
-                ) from exc
+                    f"Could not send request to Qronos local Brain ({diagnostic})."
+                ) from None
 
         if response is None:
             raise RuntimeError(
-                "Qronos local Brain is unavailable."
+                f"Could not send request to Qronos local Brain: unavailable ({diagnostic})."
             )
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            raise RuntimeError(f"Qronos local Brain returned invalid JSON ({diagnostic}).") from None
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Qronos local Brain returned an invalid response ({diagnostic}).")
         message = data.get("message", {})
 
         if not isinstance(message, dict):

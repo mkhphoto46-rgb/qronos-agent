@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from unittest.mock import Mock, patch
+import pytest
 
 from core.model_manager import ModelManager
 from core.ollama_controller import OllamaController
@@ -28,12 +29,13 @@ def test_ensure_ready_starts_local_server_and_waits_for_health():
         sleep.assert_called()
 
 
-def test_ensure_ready_never_autostarts_nonlocal_runtime():
-    runtime = OllamaController("http://192.0.2.10:11434")
-    with patch.object(runtime, "_probe", return_value=False), patch.object(
-        runtime, "_start_local_server"
+def test_nonlocal_runtime_is_rejected_before_probe_or_autostart():
+    with patch("core.ollama_controller.requests.get") as probe, patch.object(
+        OllamaController, "_start_local_server",
     ) as start:
-        assert runtime.ensure_ready(timeout_seconds=0.0) is False
+        with pytest.raises(ValueError, match="loopback"):
+            OllamaController("http://192.0.2.10:11434")
+        probe.assert_not_called()
         start.assert_not_called()
 
 
