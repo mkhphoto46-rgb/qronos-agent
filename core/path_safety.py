@@ -80,6 +80,59 @@ def is_within(path: Path, root: Path) -> bool:
     return path == root or path.is_relative_to(root)
 
 
+# GetDriveTypeW results.
+DRIVE_UNKNOWN = 0
+DRIVE_NO_ROOT_DIR = 1
+DRIVE_REMOVABLE = 2
+DRIVE_FIXED = 3
+DRIVE_REMOTE = 4
+DRIVE_CDROM = 5
+DRIVE_RAMDISK = 6
+
+_LOCAL_DRIVE_TYPES = frozenset({DRIVE_FIXED, DRIVE_REMOVABLE, DRIVE_RAMDISK})
+
+# The platform whose drive model applies. A module attribute so tests can
+# exercise the Windows policy on any OS and the non-Windows branch on Windows.
+PLATFORM = os.name
+
+
+def windows_drive_type(anchor: str) -> int:
+    """GetDriveTypeW for one drive root such as ``C:\\``."""
+    import ctypes
+
+    return int(ctypes.windll.kernel32.GetDriveTypeW(str(anchor)))
+
+
+def drive_status(value: str) -> str:
+    """
+    Where a path's drive lives, as far as Windows can prove it.
+
+    ``"local"``          fixed, removable or RAM disk
+    ``"remote"``         a mapped network drive (DRIVE_REMOTE)
+    ``"unknown"``        Windows could not classify it (no such drive,
+                         unknown type, optical media, or the query failed)
+    ``"not_applicable"`` not Windows: drive letters and GetDriveTypeW do not
+                         exist there, so nothing was inspected
+
+    Callers holding personal data refuse "remote" and "unknown": a drive
+    that cannot be shown to be local is not treated as local.
+    """
+    if PLATFORM != "nt":
+        return "not_applicable"
+    anchor = PureWindowsPath(str(value)).anchor
+    if len(anchor) != 3 or not anchor[0].isalpha() or anchor[1:] != ":\\":
+        return "unknown"
+    try:
+        kind = windows_drive_type(anchor)
+    except Exception:
+        return "unknown"
+    if kind == DRIVE_REMOTE:
+        return "remote"
+    if kind in _LOCAL_DRIVE_TYPES:
+        return "local"
+    return "unknown"
+
+
 def is_absolute_local(value: str) -> bool:
     """
     An absolute path on a local drive letter (Windows) or rooted path (POSIX).
@@ -87,7 +140,7 @@ def is_absolute_local(value: str) -> bool:
     ``C:folder`` (drive-relative) and ``\\folder`` (root-relative) are not
     absolute: both resolve against process state that changes between runs.
     """
-    if os.name == "nt":
+    if PLATFORM == "nt":
         pure = PureWindowsPath(value)
         return bool(pure.drive) and bool(pure.root) and len(pure.drive) == 2
     return Path(value).is_absolute()

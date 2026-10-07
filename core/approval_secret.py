@@ -144,6 +144,13 @@ def approval_secret_path() -> Path:
     if override:
         return Path(override).expanduser()
 
+    from core.config import CONFIG
+
+    if CONFIG.paths.packaged:
+        # Installed builds keep user state in the packaged per-user data
+        # folder, never next to the bundle.
+        return Path(CONFIG.paths.data) / "approval_secret.sqlite3"
+
     local = os.environ.get("LOCALAPPDATA", "").strip()
     if local:
         return Path(local) / "Qronos" / "approval_secret.sqlite3"
