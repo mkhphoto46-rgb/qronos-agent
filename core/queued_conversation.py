@@ -26,12 +26,22 @@ What it deliberately is not:
     starts mid-run marks the work preempted, and the work never unloads
     models while the user's turn may be using them.
 
-Cancellation is honest about what it can do. The local model call cannot be
-interrupted mid-generation through the current brain runtime, so a cancel
-while it runs means: the answer it produces is discarded rather than
-attached, and the task reports itself cancelled. A result already committed
-to the conversation cannot be un-sent, so a cancel arriving after that is
-refused rather than misreported.
+Cancellation is honest about what it can do. Every run of a request gets
+its own local inference cancellation token, bound around the model call, so
+the model requests made for that run - and only those - can be closed:
+
+    the user cancels it          -> the request is closed; terminal
+    Qronos closes                -> the request is closed; interrupted
+    the user's own turn starts   -> the request is closed; deferred
+    Qronos is paused             -> the request is closed; deferred
+
+Closing a request closes this run's own connections to the local model
+server. It does not unload a model, and it does not prove when the server
+has finished with the GPU. Whatever the closed request would have produced
+is never attached. A result already committed to the conversation cannot be
+un-sent, so a stop arriving after that is refused rather than misreported,
+and a later run gets a fresh token that nothing aimed at an earlier run can
+cancel.
 """
 
 from __future__ import annotations
@@ -44,6 +54,10 @@ from typing import Any, Callable, Sequence
 
 from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.brain_runtime import BrainMessage
+from core.inference_cancellation import (
+    LocalInferenceCancellation,
+    inference_cancellation_scope,
+)
 from core.queue_scheduler import HoldReason, WorkOutcome, WorkResult
 from core.resource_ownership import WorkloadPriority
 from core.task_plan import TaskPlan
@@ -105,10 +119,17 @@ class QueuedConversationWork:
     """
     The runnable the scheduler holds for one request.
 
-    Carries the two flags a running request can be told about from another
-    thread — cancelled, preempted — and the commit point that decides which
-    of "cancelled" and "answered" is true when both race.
+    Two kinds of stop reach it from other threads. Terminal ones - the user
+    cancels it, Qronos closes - end the request. Run-scoped ones - the user's
+    own turn starts, Qronos is paused - end only the current run, which then
+    goes back in line. Both close the current run's model request through its
+    cancellation token. The commit point decides, under one lock, whether a
+    stop or the answer came first.
     """
+
+    #: Run-scoped stops, by token reason.
+    PREEMPTED = "preempted"
+    PAUSED = "runtime_paused"
 
     def __init__(
         self,
@@ -122,7 +143,9 @@ class QueuedConversationWork:
         self._lock = threading.Lock()
         self._cancelled = False
         self._committed = False
-        self._preempted = threading.Event()
+
+        # The current run's token; None between runs.
+        self._run: LocalInferenceCancellation | None = None
 
     # ------------------------------------------------------ scheduler side
 
@@ -141,17 +164,49 @@ class QueuedConversationWork:
 
     def cancel(self) -> bool:
         """
-        Ask the work to stop. False once its answer has been committed.
+        The user cancels the request. False once its answer is committed.
 
         Cancelling queued work and cancelling running work are the same call:
-        either way nothing it produces from now on is attached anywhere.
+        either way nothing it produces from now on is attached anywhere, and
+        a run under way has its model request closed.
         """
+        return self._end("user_stop")
+
+    def interrupt(self) -> bool:
+        """Qronos is closing. Like cancel, but recorded as an interruption."""
+        return self._end("runtime_shutdown")
+
+    def preempt(self) -> bool:
+        """
+        The user's own turn started. Closes only the current run's request.
+
+        The request itself goes back in line. False when nothing is running
+        or the answer is already committed.
+        """
+        return self._stop_run(self.PREEMPTED)
+
+    def pause(self) -> bool:
+        """Qronos was paused. Closes only the current run's request."""
+        return self._stop_run(self.PAUSED)
+
+    def _end(self, reason: str) -> bool:
         with self._lock:
             if self._committed:
                 return False
 
             self._cancelled = True
+
+            if self._run is not None:
+                self._run.cancel(reason)
+
             return True
+
+    def _stop_run(self, reason: str) -> bool:
+        with self._lock:
+            if self._committed or self._run is None:
+                return False
+
+            return self._run.cancel(reason)
 
     # ------------------------------------------------------ worker side
 
@@ -160,28 +215,51 @@ class QueuedConversationWork:
         with self._lock:
             return self._cancelled
 
+    def begin_run(self) -> LocalInferenceCancellation | None:
+        """
+        A fresh token for one run, or None when the request has ended.
+
+        Never reused: a stop aimed at an earlier run - or still held by
+        anything that saw that run's token - cannot reach this one.
+        """
+        with self._lock:
+            if self._cancelled or self._committed:
+                return None
+
+            self._run = LocalInferenceCancellation()
+            return self._run
+
+    def end_run(self, token: LocalInferenceCancellation) -> None:
+        with self._lock:
+            if self._run is token:
+                self._run = None
+
     def commit(self) -> bool:
         """
-        Claim the right to deliver. False when cancelled first.
+        Claim the right to deliver. False when any stop came first.
 
-        The single point where cancel and delivery are ordered. Checking
-        ``cancelled`` and then delivering would leave a window in which a
-        cancel lands between the two and the answer is attached anyway.
+        The single point where stops and delivery are ordered. Checking for
+        a stop and then delivering would leave a window in which one lands
+        between the two and the answer is attached anyway.
         """
         with self._lock:
             if self._cancelled:
                 return False
 
+            if self._run is not None and self._run.cancelled:
+                return False
+
             self._committed = True
             return True
 
-    def preempt(self) -> None:
-        """The user started a turn of their own while this was running."""
-        self._preempted.set()
-
     @property
     def preempted(self) -> bool:
-        return self._preempted.is_set()
+        """Whether the current run was stopped for the user's own turn."""
+        with self._lock:
+            return (
+                self._run is not None
+                and self._run.reason == self.PREEMPTED
+            )
 
 
 ProgressNotifier = Callable[
@@ -249,32 +327,76 @@ class ConversationQueueExecutor:
         started = self._clock()
         # [called the brain, brains resident just before it (None: unknown)]
         loaded_model: list = [False, None]
+        token = work.begin_run()
+
+        if token is None:
+            return WorkResult(
+                WorkOutcome.CANCELLED,
+                "Cancelled before it ran.",
+            )
 
         try:
-            result = self._execute(work, started, loaded_model)
+            result = self._execute(work, token, started, loaded_model)
         except Exception as exc:
-            result = self._failed(work, started, f"{exc}")
+            # A stop surfaces from deep in the model call as an exception.
+            # It is reported as the stop it was, never as a failure, and its
+            # text - transport detail - is never shown.
+            result = self._stopped(work, token) or self._failed(
+                work,
+                started,
+                f"{exc}",
+            )
         finally:
+            work.end_run(token)
+
+            # Outside the run's cancellation scope, so giving back what this
+            # run loaded is never itself cut short by the run's stop.
             if loaded_model[0]:
                 self._release_after_run(loaded_model[1])
 
         return result
+
+    def _stopped(
+        self,
+        work: QueuedConversationWork,
+        token: LocalInferenceCancellation,
+    ) -> WorkResult | None:
+        """
+        What a stop means for this run, or None when it was not stopped.
+
+        Terminal stops end the request. A run stopped for the user's turn or
+        for Pause goes back in line without using an attempt: nothing was
+        wrong with it.
+        """
+        if work.cancelled:
+            return self._cancelled_while_running()
+
+        reason = token.reason
+
+        if reason is None:
+            return None
+
+        if reason == QueuedConversationWork.PREEMPTED:
+            return self._deferred_for_foreground(work)
+
+        return self._deferred(
+            work,
+            HoldReason.PAUSED,
+            "Qronos was paused while this ran. Its model request was "
+            "closed, and it will run again after Resume.",
+            count_attempt=False,
+        )
 
     # ------------------------------------------------------------ the run
 
     def _execute(
         self,
         work: QueuedConversationWork,
+        token: LocalInferenceCancellation,
         started: float,
         loaded_model: list[bool],
     ) -> WorkResult:
         request = work.request
-
-        if work.cancelled:
-            return WorkResult(
-                WorkOutcome.CANCELLED,
-                "Cancelled before it ran.",
-            )
 
         waiting = self._must_wait(work)
 
@@ -313,6 +435,11 @@ class ConversationQueueExecutor:
                 ),
             )
 
+        stopped = self._stopped(work, token)
+
+        if stopped is not None:
+            return stopped
+
         self._notify(work, ConversationPhase.RUNNING, {})
 
         response = ""
@@ -324,10 +451,12 @@ class ConversationQueueExecutor:
                 response = arithmetic.spoken_text
 
         if not response:
-            if work.cancelled:
-                # Cancelled while it was being routed: never start a model
+            stopped = self._stopped(work, token)
+
+            if stopped is not None:
+                # Stopped while it was being routed: never start a model
                 # call whose output would only be thrown away.
-                return self._cancelled_while_running()
+                return stopped
 
             plan = TaskPlan(goal=request.text)
             plan.add_step(
@@ -345,22 +474,32 @@ class ConversationQueueExecutor:
             loaded_model[0] = True
 
             try:
-                results = orchestrator.execute_plan(
-                    plan,
-                    conversation_messages=request.context,
-                    # Attributed as background work in the resource ledger.
-                    # Admission is unchanged: the Orchestrator's resource and
-                    # activity checks apply exactly as to a direct turn.
-                    priority=WorkloadPriority.BACKGROUND,
-                )
-            except Exception as exc:
-                if work.preempted and not work.cancelled:
-                    return self._deferred_for_foreground(work)
+                # Every model request this run makes, however deep in the
+                # Orchestrator, inherits this run's token from the scope.
+                with inference_cancellation_scope(token):
+                    results = orchestrator.execute_plan(
+                        plan,
+                        conversation_messages=request.context,
+                        # Attributed as background work in the resource
+                        # ledger. Admission is unchanged: the Orchestrator's
+                        # resource and activity checks apply as to a direct
+                        # turn.
+                        priority=WorkloadPriority.BACKGROUND,
+                    )
+            except Exception:
+                stopped = self._stopped(work, token)
 
-                raise exc
+                if stopped is not None:
+                    return stopped
 
-            if work.cancelled:
-                return self._cancelled_while_running()
+                raise
+
+            # The Orchestrator reports a closed request as a failed step. A
+            # stop is checked first so that is never shown as a failure.
+            stopped = self._stopped(work, token)
+
+            if stopped is not None:
+                return stopped
 
             if self._runtime_paused():
                 return self._deferred(
@@ -389,9 +528,6 @@ class ConversationQueueExecutor:
                         "run. It will try again when the machine is free.",
                     )
 
-                if work.preempted:
-                    return self._deferred_for_foreground(work)
-
                 return self._failed(
                     work,
                     started,
@@ -408,7 +544,7 @@ class ConversationQueueExecutor:
             )
 
         if not work.commit():
-            return self._cancelled_while_running()
+            return self._stopped(work, token) or self._cancelled_while_running()
 
         persisted = True
 
@@ -500,8 +636,8 @@ class ConversationQueueExecutor:
         return WorkResult(
             WorkOutcome.CANCELLED,
             (
-                "Cancelled while running. The local model call was allowed "
-                "to finish and its output was discarded."
+                "Cancelled while running. Its local model request was closed "
+                "and nothing it produced was attached."
             ),
         )
 
