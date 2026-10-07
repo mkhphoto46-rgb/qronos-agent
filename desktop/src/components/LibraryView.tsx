@@ -310,6 +310,8 @@ function LibraryView({ phase,onClose,onShowConversation }:LibraryViewProps){
   const showToast=(message:string)=>{setToast(message); if(toastTimer.current!==null)window.clearTimeout(toastTimer.current); toastTimer.current=window.setTimeout(()=>{setToast(null);toastTimer.current=null;},2400);};
   useEffect(()=>()=>{if(toastTimer.current!==null)window.clearTimeout(toastTimer.current);},[]);
   useEffect(()=>{ if(phase==="library"){ void refreshLibrary(); } },[phase]);
+  // Leaving the Library discards a typed approval secret and voids any approval still waiting.
+  useEffect(()=>{ if(visible)return; setSecretInput(""); if(confirm){ void libraryCancel(confirm.approval); setConfirm(null); } },[visible]);
   useEffect(()=>{if(renamingId&&renameRef.current){renameRef.current.focus();const dot=renameRef.current.value.lastIndexOf('.');renameRef.current.setSelectionRange(0,dot>0?dot:renameRef.current.value.length);}},[renamingId]);
   useEffect(()=>{const close=()=>setMenu(null);window.addEventListener("click",close);window.addEventListener("blur",close);return()=>{window.removeEventListener("click",close);window.removeEventListener("blur",close);};},[]);
   const filtered=useMemo(()=>{const q=search.trim().toLowerCase(); return [...artifacts].filter(a=>filter==="all"||a.category===filter).filter(a=>!q||a.name.toLowerCase().includes(q)||a.extension.toLowerCase().includes(q)||a.origin.toLowerCase().includes(q)||a.pathOrUrl.toLowerCase().includes(q)).sort((a,b)=>sort==="newest"?b.createdAt-a.createdAt:sort==="oldest"?a.createdAt-b.createdAt:sort==="az"?a.name.localeCompare(b.name,"fa"):sort==="za"?b.name.localeCompare(a.name,"fa"):sort==="type"?a.category.localeCompare(b.category):b.sizeBytes-a.sizeBytes);},[artifacts,filter,search,sort]);
