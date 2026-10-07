@@ -3,8 +3,10 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -83,6 +85,26 @@ def test_dispatch_preserves_cli_errors_in_frozen_mode():
         imported.return_value.main.side_effect = RuntimeError("Backend unavailable.")
         assert main(["library", "snapshot"]) == 1
     assert json.loads(output.getvalue()) == {"ok": False, "error": "Backend unavailable.", "errorType": "RuntimeError"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The packaged backend is built for Windows.")
+def test_build_collects_notices_before_writing_the_manifest(tmp_path, monkeypatch):
+    from build_support import build_runtime
+    calls = []
+
+    def run(command, **_options):
+        if command[1:3] == ["-m", "PyInstaller"]:
+            calls.append("pyinstaller")
+            return None
+        calls.append("self-check")
+        return SimpleNamespace(stdout=json.dumps({"ok": True, "packaged": True}))
+
+    monkeypatch.setattr(build_runtime.subprocess, "run", run)
+    monkeypatch.setattr(build_runtime, "collect_runtime_notices", lambda bundle: calls.append("notices"))
+    monkeypatch.setattr(build_runtime, "write_manifest", lambda bundle: calls.append("manifest"))
+    monkeypatch.setattr(build_runtime, "verify_manifest", lambda bundle: calls.append("verify"))
+    build_runtime.build(tmp_path / "out")
+    assert calls == ["pyinstaller", "notices", "manifest", "verify", "self-check"]
 
 
 def test_installed_storage_locator_uses_the_same_isolated_profile(tmp_path, monkeypatch):

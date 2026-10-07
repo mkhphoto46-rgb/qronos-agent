@@ -17,6 +17,8 @@ import re
 import subprocess
 import sys
 
+from build_support.runtime_notices import collect_runtime_notices
+
 
 ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_VERSION = 1
@@ -154,6 +156,9 @@ def build(destination: Path) -> Path:
     for override in ("QRONOS_PACKAGED_RUNTIME", "QRONOS_DATA_ROOT", "QRONOS_ASSET_ROOT", "QRONOS_BRAIN_CONFIG"):
         environment.pop(override, None)
     subprocess.run(command, cwd=ROOT, env=environment, check=True)
+    # Notices are added before the manifest is written, so the manifest
+    # describes exactly what ships.
+    collect_runtime_notices(bundle)
     write_manifest(bundle)
     verify_manifest(bundle)
     # Use a separate disposable profile; never import the developer's user data.

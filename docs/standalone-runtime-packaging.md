@@ -47,6 +47,46 @@ the directory into `qronos-runtime/` using a generated Tauri resource overlay.
 This detects stale, missing and accidentally modified build files. It does
 not replace code signing or authenticate a maliciously rewritten manifest.
 
+## Third-party notices in the backend
+
+After PyInstaller finishes, and before the runtime manifest is written, the
+builder adds a `third-party-notices/` folder to the bundle. It reads the
+frozen executable's module archive and the `_internal` files, and maps each
+one to the installed package that provides it. It then copies the license,
+NOTICE and similar files that each of those packages ships. This includes
+texts that package metadata does not declare, such as ONNX Runtime's
+`ThirdPartyNotices.txt` and SciPy's license for its bundled libraries. The
+build interpreter's CPython `LICENSE.txt` and PyInstaller's license are
+copied as well. Packages that are installed in the build environment but not
+bundled are not collected, and nothing is downloaded. `inventory.json` lists
+each bundled distribution with its version, declared license, frozen
+modules/files, native libraries and copied texts, using bundle-relative paths
+only. The manifest covers these files like any other bundled file.
+
+The build stops if a frozen module or file cannot be attributed to a package,
+CPython, PyInstaller, Microsoft's C/C++ runtime or Qronos. It also stops if a
+bundled package ships no license or notice text. An exception must be
+recorded for the exact package name and version, with its provenance, in
+`build_support/runtime_notice_reviews.json`. The same applies to native
+binaries whose wheel lacks the upstream license text. The file currently holds
+one record: the PortAudio DLL in sounddevice 0.5.6, whose wheel names the MIT
+License but does not include its text.
+
+Some items are recorded rather than resolved:
+
+- Microsoft runtime files (`vcruntime140*.dll`, `msvcp140*.dll`,
+  `vcomp140.dll`, `ucrtbase.dll`, `api-ms-win-*.dll`) are listed with the
+  package that delivered them and marked `review-required`. Microsoft's
+  distributable-code terms are not reproduced.
+- CPython's `LICENSE.txt` is copied unchanged. For each bundled CPython
+  component (such as OpenSSL, SQLite, Tcl/Tk, zlib, XZ, Expat and mpdecimal)
+  the inventory records whether that text names it. Components it does not
+  name need review.
+- Qronos's own modules and configuration are listed as project-owned, with an
+  unspecified license. Choosing that license is an owner decision.
+
+This is technical notice packaging, not a legal clearance.
+
 ## Installed data and optional local assets
 
 Writable settings, logs, memory, cache and temporary audio use the operating
