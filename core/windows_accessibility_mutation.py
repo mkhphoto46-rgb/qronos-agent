@@ -58,17 +58,107 @@ def _powershell_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+_WINDOW_STATE_READER_SCRIPT = r"""
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class QronosBoundWindowReader {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point { public int X, Y; }
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsIconic(IntPtr hwnd);
+}
+'@
+"""
+
+
+def _native_layout_guard_script(binding: WindowBinding) -> str:
+    """Read the same HWND/root, rectangles and DPI used by WindowBinder."""
+    outer = binding.snapshot.window_rect
+    client = binding.snapshot.client_rect
+    return f"""
+$qronosHwnd = [IntPtr]::new({binding.hwnd})
+$qronosForeground = [QronosBoundWindowReader]::GetForegroundWindow()
+$qronosTargetRoot = [QronosBoundWindowReader]::GetAncestor($qronosHwnd, 2)
+$qronosForegroundRoot = [QronosBoundWindowReader]::GetAncestor($qronosForeground, 2)
+if ($qronosTargetRoot -eq [IntPtr]::Zero) {{ $qronosTargetRoot = $qronosHwnd }}
+if ($qronosForegroundRoot -eq [IntPtr]::Zero) {{ $qronosForegroundRoot = $qronosForeground }}
+if (
+    $qronosForeground -eq [IntPtr]::Zero -or
+    $qronosTargetRoot -ne $qronosForegroundRoot -or
+    -not [QronosBoundWindowReader]::IsWindowVisible($qronosHwnd) -or
+    [QronosBoundWindowReader]::IsIconic($qronosHwnd)
+) {{
+    throw 'The bound UI Automation window lost foreground or visibility.'
+}}
+$qronosOuter = New-Object QronosBoundWindowReader+Rect
+$qronosClient = New-Object QronosBoundWindowReader+Rect
+if (
+    -not [QronosBoundWindowReader]::GetWindowRect($qronosHwnd, [ref]$qronosOuter) -or
+    -not [QronosBoundWindowReader]::GetClientRect($qronosHwnd, [ref]$qronosClient)
+) {{
+    throw 'The bound UI Automation window geometry could not be read.'
+}}
+$qronosTopLeft = New-Object QronosBoundWindowReader+Point
+$qronosTopLeft.X = $qronosClient.Left
+$qronosTopLeft.Y = $qronosClient.Top
+$qronosBottomRight = New-Object QronosBoundWindowReader+Point
+$qronosBottomRight.X = $qronosClient.Right
+$qronosBottomRight.Y = $qronosClient.Bottom
+if (
+    -not [QronosBoundWindowReader]::ClientToScreen($qronosHwnd, [ref]$qronosTopLeft) -or
+    -not [QronosBoundWindowReader]::ClientToScreen($qronosHwnd, [ref]$qronosBottomRight)
+) {{
+    throw 'The bound UI Automation client geometry could not be read.'
+}}
+if (
+    $qronosOuter.Left -ne {outer.left} -or $qronosOuter.Top -ne {outer.top} -or
+    $qronosOuter.Right -ne {outer.right} -or $qronosOuter.Bottom -ne {outer.bottom} -or
+    $qronosTopLeft.X -ne {client.left} -or $qronosTopLeft.Y -ne {client.top} -or
+    $qronosBottomRight.X -ne {client.right} -or $qronosBottomRight.Y -ne {client.bottom} -or
+    [QronosBoundWindowReader]::GetDpiForWindow($qronosHwnd) -ne {binding.snapshot.dpi}
+) {{
+    throw 'The bound UI Automation window moved, resized or changed DPI.'
+}}
+"""
+
+
 def _native_guard_script(
     binding: WindowBinding,
     authorization: BoundGuiAuthorization,
     input_authorization: BoundInputAuthorization | None,
+    *,
+    require_foreground: bool,
 ) -> str:
     """Recheck process ownership and expiry inside the UIA worker before acting."""
     expiry = authorization.expires_at
     if input_authorization is not None:
         expiry = min(expiry, input_authorization.expires_at)
     deadline_ms = int((time.time() + expiry - time.monotonic()) * 1000)
-    return f"""
+    return (
+        _native_layout_guard_script(binding) if require_foreground else ""
+    ) + f"""
 $process = [System.Diagnostics.Process]::GetProcessById({binding.snapshot.pid})
 if (
     $root.Current.ProcessId -ne {binding.snapshot.pid} -or
@@ -144,6 +234,8 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName WindowsBase
 
+{_WINDOW_STATE_READER_SCRIPT}
+
 $root = [System.Windows.Automation.AutomationElement]::FromHandle(
     [IntPtr]::new({handle})
 )
@@ -203,7 +295,7 @@ if ($null -eq $target) {{
 }}
 
 try {{
-    {_native_guard_script(binding, authorization, input_authorization)}
+    {_native_guard_script(binding, authorization, input_authorization, require_foreground=True)}
     $target.SetFocus()
 }}
 catch {{
@@ -362,6 +454,8 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName WindowsBase
 
+{_WINDOW_STATE_READER_SCRIPT}
+
 $root = [System.Windows.Automation.AutomationElement]::FromHandle(
     [IntPtr]::new({handle})
 )
@@ -465,7 +559,7 @@ if ($pattern.Current.IsReadOnly) {{
 }}
 
 try {{
-    {_native_guard_script(binding, authorization, input_authorization)}
+    {_native_guard_script(binding, authorization, input_authorization, require_foreground=True)}
     $pattern.SetValue(
         $desired
     )
@@ -675,7 +769,7 @@ try {{
         [System.Windows.Automation.InvokePattern]::Pattern
     )
 
-    {_native_guard_script(binding, authorization, input_authorization)}
+    {_native_guard_script(binding, authorization, input_authorization, require_foreground=False)}
     $pattern.Invoke()
 }}
 catch {{

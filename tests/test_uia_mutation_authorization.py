@@ -147,6 +147,7 @@ def test_semantic_invoke_survives_layout_and_foreground_changes(context):
     assert "ToUnixTimeMilliseconds()" in prefix
     assert prefix.count("$root.Current.ProcessId -ne 500") == 2
     assert "ToFileTimeUtc() -ne 123456" in prefix
+    assert "QronosBoundWindowReader" not in script
 
 
 @pytest.mark.parametrize("operation", MUTATIONS)
@@ -234,3 +235,101 @@ def test_generated_native_scripts_parse_without_executing_uia(operation, context
         capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize("operation,primitive", (
+    ("focus_runtime_id", "$target.SetFocus()"),
+    ("set_value_runtime_id", "$pattern.SetValue("),
+))
+def test_worker_rechecks_foreground_and_full_layout_after_enumeration(operation, primitive, context, monkeypatch):
+    monkeypatch.setattr(native, "actionable_element_by_runtime_id", lambda *args, **kwargs: Mock(runtime_id="42.1", value="private rollback text"))
+    call_native(operation, context)
+    script = context[5].call_args.args[0]
+    guard_start = script.rindex("$qronosHwnd =")
+    action = script.index(primitive)
+    assert script.index("$root.FindAll(") < guard_start < action
+    guard = script[guard_start:action]
+    for check in (
+        "::GetForegroundWindow()", "::GetAncestor($qronosHwnd, 2)",
+        "::IsWindowVisible($qronosHwnd)", "::IsIconic($qronosHwnd)",
+        "::GetWindowRect(", "::GetClientRect(", "::ClientToScreen(",
+        "::GetDpiForWindow($qronosHwnd) -ne 96",
+        "$qronosOuter.Left -ne 100", "$qronosOuter.Top -ne 50",
+        "$qronosOuter.Right -ne 1100", "$qronosOuter.Bottom -ne 750",
+        "$qronosTopLeft.X -ne 108", "$qronosTopLeft.Y -ne 80",
+        "$qronosBottomRight.X -ne 1092", "$qronosBottomRight.Y -ne 742",
+    ):
+        assert check in guard
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Executes only synthetic observations through the Windows PowerShell guard")
+@pytest.mark.parametrize("changed_state,accepted", (
+    ("", True),
+    ("[QronosBoundWindowReader]::Hosted = $true; [QronosBoundWindowReader]::Foreground = 88", True),
+    ("[QronosBoundWindowReader]::Foreground = 99", False),
+    ("[QronosBoundWindowReader]::Foreground = 0", False),
+    ("[QronosBoundWindowReader]::MoveX = 1", False),
+    ("[QronosBoundWindowReader]::ExtraWidth = 1", False),
+    ("[QronosBoundWindowReader]::ClientShift = 1", False),
+    ("[QronosBoundWindowReader]::ClientExtra = 1", False),
+    ("[QronosBoundWindowReader]::Dpi = 144", False),
+    ("[QronosBoundWindowReader]::Visible = $false", False),
+    ("[QronosBoundWindowReader]::Minimized = $true", False),
+    ("[QronosBoundWindowReader]::GeometryOk = $false", False),
+))
+def test_worker_layout_guard_blocks_changes_during_setup_without_real_gui(changed_state, accepted, context):
+    # These methods return synthetic observations. No user32 APIs or UIA
+    # operations are loaded or executed by this behavior test.
+    fake_reader = r"""
+Add-Type -TypeDefinition @'
+using System;
+public static class QronosBoundWindowReader {
+    public struct Rect { public int Left, Top, Right, Bottom; }
+    public struct Point { public int X, Y; }
+    public static long Foreground = 77;
+    public static bool Hosted = false, Visible = true, Minimized = false, GeometryOk = true;
+    public static int MoveX = 0, ExtraWidth = 0, ClientShift = 0, ClientExtra = 0;
+    public static uint Dpi = 96;
+    public static IntPtr GetForegroundWindow() { return new IntPtr(Foreground); }
+    public static IntPtr GetAncestor(IntPtr hwnd, uint flags) {
+        return Hosted && (hwnd.ToInt64() == 77 || hwnd.ToInt64() == 88) ? new IntPtr(88) : hwnd;
+    }
+    public static bool GetWindowRect(IntPtr hwnd, out Rect rect) {
+        rect = new Rect { Left = 100 + MoveX, Top = 50, Right = 1100 + MoveX + ExtraWidth, Bottom = 750 };
+        return GeometryOk;
+    }
+    public static bool GetClientRect(IntPtr hwnd, out Rect rect) {
+        rect = new Rect { Left = 0, Top = 0, Right = 984 + ClientExtra, Bottom = 662 };
+        return true;
+    }
+    public static bool ClientToScreen(IntPtr hwnd, ref Point point) {
+        point.X += 108 + ClientShift; point.Y += 80; return true;
+    }
+    public static uint GetDpiForWindow(IntPtr hwnd) { return Dpi; }
+    public static bool IsWindowVisible(IntPtr hwnd) { return Visible; }
+    public static bool IsIconic(IntPtr hwnd) { return Minimized; }
+}
+'@
+"""
+    script = (
+        "$ErrorActionPreference = 'Stop'\n" + fake_reader + "\n" + changed_state + "\ntry {\n"
+        + native._native_layout_guard_script(context[1])
+        + "\nWrite-Output 'synthetic-mutation-reached'\n} catch { Write-Output 'blocked' }"
+    )
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ("synthetic-mutation-reached" if accepted else "blocked")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Compiles only the Windows worker's native reader declarations")
+def test_native_window_reader_declarations_compile_without_querying_windows():
+    encoded = base64.b64encode(native._WINDOW_STATE_READER_SCRIPT.encode("utf-16-le")).decode()
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert result.returncode == 0, result.stderr
