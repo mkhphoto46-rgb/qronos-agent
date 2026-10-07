@@ -483,16 +483,28 @@ class TestTheQueueProtocol(QueueBridgeTestCase):
         task_id = self.submitted_tasks()[0]["taskId"]
 
         self.bridge.send({"command": "queue_cancel", "taskId": task_id})
-        cancelled = self.bridge.read_until("queue_task_finished")
+        # Submission and scheduler snapshots may still be buffered. Wait for
+        # this task's cancellation acknowledgement before consuming a view.
+        deadline = time.monotonic() + REPLY_TIMEOUT
+        while True:
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "cancellation was not acknowledged")
+            event = self.bridge.read_until("queue_task_finished", timeout=remaining)
+            self.assertIsNotNone(event, "cancellation was not acknowledged")
+            if json.loads(event["message"]).get("taskId") == task_id:
+                break
 
-        self.assertIsNotNone(cancelled, "the cancel was never announced")
         self.bridge.send({"command": "queue_list"})
-
-        deadline = time.time() + REPLY_TIMEOUT
+        # A concurrent scheduler callback can have captured an older view
+        # before the acknowledgement and publish it afterward.
+        deadline = time.monotonic() + REPLY_TIMEOUT
         states = {"queued"}
-
-        while time.time() < deadline and "queued" in states:
-            states = {task["state"] for task in self.queue()["tasks"]}
+        while "queued" in states:
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "cancelled queue view never arrived")
+            states = {
+                task["state"] for task in self.queue(timeout=remaining)["tasks"]
+            }
 
         self.assertNotIn("queued", states)
 
