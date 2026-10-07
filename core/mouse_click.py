@@ -66,4 +66,11 @@ class MouseClickController:
             return MouseClickResult(point=down.point, button=button)
         finally:
             if pressed:
-                self._buttons.release(button)
+                # Only a still-held button is released: if up_at delivered the
+                # native up and then failed its post-check, a second up could
+                # end a drag the user started in the meantime.
+                release_if_held = getattr(self._buttons, "release_if_held", None)
+                if callable(release_if_held):
+                    release_if_held(button)
+                else:
+                    self._buttons.release(button)

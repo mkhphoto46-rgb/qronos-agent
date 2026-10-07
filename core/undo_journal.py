@@ -64,6 +64,12 @@ class Reversal(Enum):
     # Something was started and can be stopped.
     STOP_STARTED = "stop_started"
 
+    # The target application's own undo history holds an exact, known number
+    # of edits made by this action, and Qronos holds the evidence needed to
+    # prove nothing else was stacked on top before replaying them. Without
+    # that evidence an app edit is recorded as IRREVERSIBLE instead.
+    APP_UNDO_STEPS = "app_undo_steps"
+
     # The change cannot be reversed by Qronos. Recorded, never hidden.
     IRREVERSIBLE = "irreversible"
 
@@ -98,6 +104,7 @@ _REQUIRES_RESTORATION = frozenset(
         Reversal.MOVE_BACK,
         Reversal.DELETE_CREATED,
         Reversal.STOP_STARTED,
+        Reversal.APP_UNDO_STEPS,
     }
 )
 
@@ -118,6 +125,10 @@ class UndoEntry:
     restoration: Mapping[str, Any] = field(default_factory=dict)
 
     state: EntryState = EntryState.PENDING
+
+    # What the action operated on (``ActionRequest.target``), so a reversal can
+    # refuse when a later action touched the same thing.
+    target: str = ""
 
     def __post_init__(self) -> None:
         if not self.action_id.strip():
@@ -154,6 +165,7 @@ class UndoEntry:
             "at": round(self.at, 3),
             "restoration": dict(self.restoration),
             "state": self.state.value,
+            "target": self.target,
         }
 
     @classmethod
@@ -173,6 +185,7 @@ class UndoEntry:
                 at=float(data.get("at", 0.0)),
                 restoration=data.get("restoration", {}),
                 state=EntryState(str(data.get("state", "pending"))),
+                target=str(data.get("target", "")),
             )
         except (KeyError, ValueError) as error:
             raise InvalidAction(f"Malformed undo entry: {error}.") from error
@@ -216,6 +229,7 @@ class UndoJournal:
             reversal=reversal,
             at=self.clock(),
             restoration=restoration or {},
+            target=request.target,
         )
 
         self._entries.append(entry)
@@ -244,6 +258,14 @@ class UndoJournal:
         candidates = self.undoable()
 
         return candidates[0] if candidates else None
+
+    def entries_after(self, action_id: str) -> tuple[UndoEntry, ...]:
+        """Entries recorded after ``action_id``'s first entry, oldest first."""
+        for index, entry in enumerate(self._entries):
+            if entry.action_id == action_id:
+                later = self._entries[index + 1 :]
+                return tuple(e for e in later if e.action_id != action_id)
+        raise NotUndoable(f"No undo entry for action {action_id}.")
 
     def claim(self, action_id: str) -> UndoEntry:
         """
@@ -288,6 +310,7 @@ class UndoJournal:
                 at=entry.at,
                 restoration=entry.restoration,
                 state=state,
+                target=entry.target,
             )
 
             self._entries[index] = updated

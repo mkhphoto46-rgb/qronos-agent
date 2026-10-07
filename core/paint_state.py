@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+from core.action_cancellation import CancellationToken, checkpoint
 from core.brain_runtime import BrainMessage, BrainMessageRole, BrainRuntime
 from core.input_capabilities import InputCapabilities
 from core.input_safety import BoundInputAuthorization
@@ -159,6 +160,10 @@ class PaintStateNormalizer:
         self._close_grounder = bool(close_grounder)
         if self._settle_seconds < 0.0:
             raise ValueError("settle_seconds cannot be negative.")
+        # Toolbar clicks change Paint's persisted tool/colour/size state. That
+        # is a real side effect Qronos does not reverse; callers report it.
+        self.toolbar_clicks_attempted = 0
+        self._cancel_token: CancellationToken | None = None
 
     def normalize(
         self,
@@ -166,7 +171,11 @@ class PaintStateNormalizer:
         *,
         authorization: BoundInputAuthorization,
         screen_approved: bool,
+        cancel_token: CancellationToken | None = None,
     ) -> PaintStateNormalization:
+        self.toolbar_clicks_attempted = 0
+        self._cancel_token = cancel_token
+        checkpoint(cancel_token)
         if binding.app_id != "paint" or binding.snapshot.process_name != "mspaint.exe":
             raise PaintStateError("PaintStateNormalizer refuses a non-Paint binding.")
 
@@ -194,6 +203,8 @@ class PaintStateNormalizer:
                 authorization,
                 screen_approved,
             )
+
+            checkpoint(cancel_token)
 
             # Selection verification is observational. It happens before the canvas
             # capture and before any drawing stroke, so failure remains side-effect
@@ -238,6 +249,7 @@ class PaintStateNormalizer:
                 minimum_size_selected_confidence=selected_minimum_size.confidence,
             )
         finally:
+            self._cancel_token = None
             if self._close_grounder:
                 close = getattr(self._grounder, "close", None)
                 if callable(close):
@@ -251,6 +263,7 @@ class PaintStateNormalizer:
         authorization: BoundInputAuthorization,
         screen_approved: bool,
     ) -> GroundedTarget:
+        checkpoint(self._cancel_token)
         frame = self._capture_frame(
             binding,
             f"Locate one Paint toolbar control before drawing: {target}",
@@ -274,6 +287,9 @@ class PaintStateNormalizer:
                 f"Paint UI target fell outside its verified safe control region: {target}."
             )
 
+        # Vision inference can take seconds; honour Stop before the click.
+        checkpoint(self._cancel_token)
+        self.toolbar_clicks_attempted += 1
         self._inputs.click.click_at(
             binding,
             x,
@@ -282,7 +298,10 @@ class PaintStateNormalizer:
             allowed_rect=allowed_rect,
         )
         if self._settle_seconds:
-            self._sleep(self._settle_seconds)
+            if self._cancel_token is not None:
+                self._cancel_token.sleep(self._settle_seconds)
+            else:
+                self._sleep(self._settle_seconds)
         return grounded
 
     def _capture_frame(

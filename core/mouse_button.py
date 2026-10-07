@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import threading
 from typing import Callable
 
 from core.input_safety import BoundInputAuthorization, BoundInputGuard, BoundInputPoint
@@ -57,6 +58,12 @@ class MouseButtonController:
         self._smooth_motion = bool(
             smooth_motion
         )
+        # Buttons for which this controller delivered a native down and has
+        # not yet delivered the matching up. Cleanup paths consult this so a
+        # failed stroke never sends a stray up that ends a user's own drag.
+        self._held: set[MouseButton] = set()
+        self._held_lock = threading.Lock()
+        self._presses_delivered = 0
 
     def down_at(
         self,
@@ -107,7 +114,29 @@ class MouseButtonController:
         """
         if not isinstance(button, MouseButton):
             raise ValueError("button must be a MouseButton.")
-        self._button(button.value, False)
+        try:
+            self._button(button.value, False)
+        finally:
+            with self._held_lock:
+                self._held.discard(button)
+
+    @property
+    def presses_delivered(self) -> int:
+        """Monotonic count of native mouse-downs this controller delivered."""
+        with self._held_lock:
+            return self._presses_delivered
+
+    def is_held(self, button: MouseButton = MouseButton.LEFT) -> bool:
+        """True while a Qronos-delivered down has no delivered up yet."""
+        with self._held_lock:
+            return button in self._held
+
+    def release_if_held(self, button: MouseButton = MouseButton.LEFT) -> bool:
+        """Emergency-release only a button this controller actually pressed."""
+        if not self.is_held(button):
+            return False
+        self.release(button)
+        return True
 
     def _set_at(
         self,
@@ -140,7 +169,21 @@ class MouseButtonController:
         )
         self._guard.revalidate(binding, authorization=authorization)
         self._button(button.value, down)
-        self._guard.revalidate(binding, authorization=authorization)
+        with self._held_lock:
+            if down:
+                self._held.add(button)
+                self._presses_delivered += 1
+            else:
+                self._held.discard(button)
+        try:
+            self._guard.revalidate(binding, authorization=authorization)
+        except BaseException:
+            # A press is atomic from the caller's view: if the window changed
+            # right after mouse-down, release before reporting the failure so
+            # no caller can lose track of a held synthetic button.
+            if down:
+                self.release(button)
+            raise
         return MouseButtonResult(
             point=hover_result.point,
             button=button,

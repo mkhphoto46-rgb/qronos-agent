@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 
+from core.action_cancellation import ActiveActionRegistry
 from core.runtime_bridge import QronosRuntime
 
 
@@ -16,6 +17,7 @@ class StopResponseRuntimeTests(unittest.TestCase):
         runtime._pending_playback_id = None
         runtime._voice_playback_metrics = {}
         runtime._voice_response_stop_requested = threading.Event()
+        runtime._computer_actions = ActiveActionRegistry()
         runtime._notify = lambda *args, **kwargs: None
         runtime._write_voice_playback_telemetry = (
             lambda *args, **kwargs: None

@@ -148,6 +148,8 @@ class TestActionResult(unittest.TestCase):
             (ActionOutcome.FAILED, True),
             (ActionOutcome.REFUSED, False),
             (ActionOutcome.AWAITING_APPROVAL, False),
+            # Cancelled part-way: it may already have changed something.
+            (ActionOutcome.CANCELLED, True),
         ):
             with self.subTest(outcome=outcome):
                 result = ActionResult(action_id="a", outcome=outcome)

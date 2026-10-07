@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.action_cancellation import CancellationToken, checkpoint
 from core.input_capabilities import InputCapabilities
 from core.input_safety import BoundInputAuthorization
-from core.pointer_stroke import PointerStrokeResult
+from core.pointer_stroke import PointerStrokeResult, StrokeProgress
 from core.shape_planner import ShapePlan
 from core.sketch_approval import VisualApprovedSketch
 from core.sketch_preview import digest_shape_plan
@@ -56,6 +57,38 @@ class PaintCanvasRegion:
         )
 
 
+class PaintCanvasProgress:
+    """
+    What the adapter actually did to the canvas, filled in as it goes.
+
+    Exceptions from ``execute`` propagate unchanged; the caller reads this
+    afterwards to report an honest partial outcome and to decide whether an
+    exact reversal is possible.
+
+    ``committed_marks`` counts strokes (complete or partial) whose mouse-up
+    provably landed in the exact bound Paint window: each is one Paint edit.
+    ``unproven_marks`` counts presses whose release could not be proven to
+    land there (window/focus changed mid-stroke). Any unproven mark makes the
+    number of Paint edits uncertain.
+    """
+
+    __slots__ = ("planned_strokes", "completed_strokes", "committed_marks", "unproven_marks")
+
+    def __init__(self) -> None:
+        self.planned_strokes = 0
+        self.completed_strokes = 0
+        self.committed_marks = 0
+        self.unproven_marks = 0
+
+    @property
+    def touched_canvas(self) -> bool:
+        return self.committed_marks > 0 or self.unproven_marks > 0
+
+    @property
+    def edit_count_certain(self) -> bool:
+        return self.unproven_marks == 0
+
+
 @dataclass(frozen=True)
 class PaintDrawResult:
     plan_name: str
@@ -93,6 +126,8 @@ class PaintAdapter:
         max_step_pixels: float = 8.0,
         press_settle_seconds: float = 0.012,
         release_settle_seconds: float = 0.012,
+        cancel_token: CancellationToken | None = None,
+        progress: PaintCanvasProgress | None = None,
     ) -> PaintDrawResult:
         """
         Production sketch path: only a visually approved frozen plan may reach Paint.
@@ -119,6 +154,8 @@ class PaintAdapter:
             max_step_pixels=max_step_pixels,
             press_settle_seconds=press_settle_seconds,
             release_settle_seconds=release_settle_seconds,
+            cancel_token=cancel_token,
+            progress=progress,
         )
 
     def execute(
@@ -133,7 +170,11 @@ class PaintAdapter:
         max_step_pixels: float = 8.0,
         press_settle_seconds: float = 0.012,
         release_settle_seconds: float = 0.012,
+        cancel_token: CancellationToken | None = None,
+        progress: PaintCanvasProgress | None = None,
     ) -> PaintDrawResult:
+        tracker = progress if progress is not None else PaintCanvasProgress()
+        checkpoint(cancel_token)
         if binding.app_id != "paint" or binding.snapshot.process_name != "mspaint.exe":
             raise PaintAdapterError("PaintAdapter refuses a non-Paint binding.")
         if not canvas.matches(binding):
@@ -157,19 +198,35 @@ class PaintAdapter:
             preserve_aspect=True,
         )
 
+        tracker.planned_strokes = len(screen_strokes)
         results: list[PointerStrokeResult] = []
         for points in screen_strokes:
-            # No automatic retry: a completed earlier stroke is a real side effect.
-            result = self._inputs.stroke.stroke(
-                binding,
-                points,
-                authorization=authorization,
-                allowed_rect=canvas.rect,
-                step_delay_seconds=step_delay_seconds,
-                max_step_pixels=max_step_pixels,
-                press_settle_seconds=press_settle_seconds,
-                release_settle_seconds=release_settle_seconds,
-            )
+            # Stop is honoured between strokes as well as inside each stroke.
+            checkpoint(cancel_token)
+            stroke_progress = StrokeProgress()
+            try:
+                # No automatic retry: a completed earlier stroke is a real side effect.
+                result = self._inputs.stroke.stroke(
+                    binding,
+                    points,
+                    authorization=authorization,
+                    allowed_rect=canvas.rect,
+                    step_delay_seconds=step_delay_seconds,
+                    max_step_pixels=max_step_pixels,
+                    press_settle_seconds=press_settle_seconds,
+                    release_settle_seconds=release_settle_seconds,
+                    cancel_token=cancel_token,
+                    progress=stroke_progress,
+                )
+            except BaseException:
+                if stroke_progress.pressed:
+                    if stroke_progress.clean_release:
+                        tracker.committed_marks += 1
+                    else:
+                        tracker.unproven_marks += 1
+                raise
+            tracker.completed_strokes += 1
+            tracker.committed_marks += 1
             results.append(result)
 
         return PaintDrawResult(
