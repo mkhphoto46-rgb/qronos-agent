@@ -17,6 +17,7 @@ from core.brain_runtime import (
 )
 from core.compute_estimator import ComputeEstimator, ComputeLevel
 from core.model_manager import (
+    InstalledModelSizes,
     ModelManager,
     TaskClass,
 )
@@ -125,6 +126,29 @@ class StepResult:
     resource_blocked: bool = False
 
 
+def _installed_size_reader(runtime) -> InstalledModelSizes | None:
+    """
+    Installed model sizes from the same local model runtime, for admission.
+
+    Only for a runtime that names a local base URL; the store listing goes
+    through the loopback-only local model client. Anything else gets no
+    installed-size evidence, and admission uses the configured estimate.
+    """
+    base_url = getattr(runtime, "base_url", None)
+
+    if not isinstance(base_url, str) or not base_url:
+        return None
+
+    try:
+        from core.ollama_models import OllamaModelCatalog
+
+        catalog = OllamaModelCatalog(base_url)
+    except Exception:
+        return None
+
+    return InstalledModelSizes(catalog.list_installed_models)
+
+
 class Orchestrator:
     """
     Execute Qronos plans with resource and activity awareness.
@@ -158,6 +182,7 @@ class Orchestrator:
             if model_manager is not None
             else ModelManager(
                 runtime=self.runtime,
+                installed_size_bytes=_installed_size_reader(self.runtime),
             )
         )
 
@@ -322,6 +347,7 @@ class Orchestrator:
                     error=self._resource_error(
                         selection.decision,
                         resource_pressure,
+                        selection,
                     ),
                     resource_blocked=True,
                 )
@@ -356,6 +382,7 @@ class Orchestrator:
                     error=self._resource_error(
                         selection.decision,
                         live_state.resource_pressure,
+                        selection,
                     ),
                     resource_blocked=True,
                 )
@@ -558,6 +585,7 @@ class Orchestrator:
                 self._resource_error(
                     selection.decision,
                     activity.resource_pressure,
+                    selection,
                 )
             )
 
@@ -952,12 +980,27 @@ class Orchestrator:
     def _resource_error(
         decision: ResourceDecision,
         pressure: ResourcePressure,
+        selection=None,
     ) -> str:
-        return (
+        message = (
             "Qronos blocked this task because the current "
             f"resource state is {pressure.value} and the "
             f"resource policy returned {decision.value}."
         )
+
+        needed = getattr(selection, "vram_needed_mb", None)
+        free = getattr(selection, "vram_free_mb", None)
+
+        if isinstance(needed, int) and isinstance(free, int):
+            # Said plainly, so a deferral for capacity is not mistaken for a
+            # busy machine: the model would only fit by taking memory other
+            # applications are using right now.
+            message += (
+                f" The model needs about {needed / 1024:.1f} GB of free "
+                f"video memory and {free / 1024:.1f} GB is free now."
+            )
+
+        return message
 
     @staticmethod
     def _get_task_class(
