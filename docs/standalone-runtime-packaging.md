@@ -60,6 +60,12 @@ To inspect missing assets, run the installed backend's `doctor` service.
 bounded read-only request. It never starts Ollama, pulls or loads models.
 Asset presence alone does not demonstrate model quality or hardware support.
 
+The desktop's local setup report lists each missing asset and configured model
+role, with a read-only refresh. Wake-word provisioning includes the Qronos
+head and its external data plus `models/openwakeword/melspectrogram.onnx`,
+`embedding_model.onnx`, and `silero_vad.onnx` in that same folder. The loader
+uses these explicit paths; it does not download package-default weights.
+
 The source build remains useful without these assets for text/UI setup, but
 voice, wake-word and vision acceptance requires the corresponding approved
 assets. Wake-word training/data quality, model redistribution licenses,

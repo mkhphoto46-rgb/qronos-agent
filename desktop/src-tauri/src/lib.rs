@@ -759,6 +759,7 @@ pub fn run() {
             hotkeys::set_hotkey_enabled,
             hotkeys::reset_hotkeys,
             runtime::get_runtime_status,
+            runtime::runtime_setup_snapshot,
             runtime::start_runtime,
             runtime::ping_runtime,
             runtime::send_runtime_action,

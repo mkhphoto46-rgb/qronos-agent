@@ -36,6 +36,8 @@ import ConversationsView from "./components/ConversationsView";
 import LibraryView from "./components/LibraryView";
 import PermissionsView from "./components/PermissionsView";
 import SettingsView from "./components/SettingsView";
+import SetupStatus from "./components/SetupStatus";
+import { setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QronosOrb from "./components/QronosOrb";
@@ -175,6 +177,7 @@ function App() {
 
   const { unreadCount: libraryUnreadCount } = useLibraryStore();
   const settingsState = useSettingsStore();
+  const setupState = useSetupStore();
   const [conversationFocusMessageId, setConversationFocusMessageId] = useState<string | null>(null);
 
   const [
@@ -2025,19 +2028,25 @@ function App() {
   const statusLabel =
     useMemo(
       () =>
+        scenario === "idle" && (setupState.loading || setupState.error || !setupState.snapshot || setupNeedsAttention(setupState.snapshot))
+          ? (setupState.loading ? "بررسی راه‌اندازی" : "راه‌اندازی را بررسی کنید")
+          :
         statusByScenario[
           scenario
         ],
-      [scenario],
+      [scenario, setupState],
     );
 
   const statusSubtitle =
     useMemo(
       () =>
+        scenario === "idle" && (setupState.loading || setupState.error || !setupState.snapshot || setupNeedsAttention(setupState.snapshot))
+          ? "LOCAL SETUP"
+          :
         subtitleByScenario[
           scenario
         ],
-      [scenario],
+      [scenario, setupState],
     );
 
   const setRuntimePause =
@@ -2328,6 +2337,7 @@ function App() {
 
 
       <RightTelemetryPanel />
+      <SetupStatus />
 
       <section className="core-zone">
         <div className="orb-shell">
