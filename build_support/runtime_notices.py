@@ -16,6 +16,7 @@ unspecified. Nothing is downloaded.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 import hashlib
 import importlib.metadata
@@ -33,6 +34,9 @@ NOTICE_DIRECTORY = "third-party-notices"
 INVENTORY_NAME = "inventory.json"
 README_NAME = "README.txt"
 REVIEWS_FILE = Path(__file__).with_name("runtime_notice_reviews.json")
+# Upstream license texts vendored for native binaries whose wheel omits them.
+# Each one is pinned by SHA-256 in the reviews file; nothing is downloaded.
+VENDORED_TEXTS = Path(__file__).with_name("runtime_notice_texts")
 MAX_NOTICE_BYTES = 4 * 1024 * 1024
 
 # License-like file names a distribution may ship (LICENSE, COPYING, NOTICE,
@@ -84,7 +88,8 @@ _CPYTHON_COMPONENTS = (
 )
 
 # Distributions whose wheels carry native binaries without the upstream
-# license text. Bundling one needs a reviewed entry for its exact version.
+# license text. Bundling one needs a reviewed entry for its exact version
+# whose pinned upstream texts cover every bundled native file by SHA-256.
 NATIVE_REVIEW_REQUIRED = frozenset({"sounddevice"})
 
 # The sounddevice wheel ships PortAudio for several platforms. The packaged
@@ -96,6 +101,12 @@ PORTAUDIO_KEEP = "libportaudio64bit.dll"
 PORTAUDIO_README = "README.md"
 _PORTAUDIO_BINARY = re.compile(r"^libportaudio[0-9a-z_-]*\.(dll|dylib)$", re.IGNORECASE)
 
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_REVIEW_KEYS = {"name", "version", "provenance", "supplementalNotices", "vendoredNotices",
+                "binaryProvenance", "unresolved", "noNoticeReason"}
+_VENDORED_KEYS = {"component", "version", "sourceRepository", "sourceCommit", "sourceUrl",
+                  "file", "sha256", "covers"}
 
 PRODUCT_LICENSE_NOTE = (
     "Qronos's own source and configuration (core, security, the runtime entry point and "
@@ -134,6 +145,7 @@ class _Distribution:
     files: tuple[PurePosixPath, ...]
     metadata: object
     roots: set[str] = field(default_factory=set)
+    record_hashes: dict[PurePosixPath, str] = field(default_factory=dict)  # RECORD path -> "sha256=<b64>"
 
 
 @dataclass(frozen=True)
@@ -220,9 +232,14 @@ def _installed_distributions(distributions: Iterable[object]) -> list[_Distribut
         canonical = _canonical(name)
         if canonical in result:
             raise NoticeError(f"Distribution {name} is installed more than once in the build environment.")
-        files = tuple(PurePosixPath(str(item).replace("\\", "/")) for item in (dist.files or ()))
+        entries = list(dist.files or ())
+        files = tuple(PurePosixPath(str(item).replace("\\", "/")) for item in entries)
         base = Path(dist.locate_file("")).resolve()
         record = _Distribution(canonical, str(dist.version), base, files, metadata)
+        for item, path in zip(entries, files):
+            digest = getattr(item, "hash", None)
+            if digest is not None:
+                record.record_hashes[path] = f"{digest.mode}={digest.value}"
         for item in files:
             parts = item.parts
             if not parts or parts[0] == ".." or parts[0].endswith((".dist-info", ".egg-info")):
@@ -303,26 +320,122 @@ def load_reviews(path: Path = REVIEWS_FILE) -> dict[tuple[str, str], dict]:
     """Reviewed, exact name/version records for notices metadata cannot provide.
 
     Each record names its provenance and either supplemental notice files the
-    wheel ships outside its license metadata, or the reason a distribution
-    without any notice file is accepted. Unresolved terms stay recorded.
+    wheel ships outside its license metadata, upstream texts vendored under
+    ``runtime_notice_texts`` with pinned source and hashes, or the reason a
+    distribution without any notice file is accepted. Unresolved terms stay
+    recorded. Unknown fields are refused so a typo cannot weaken a check.
     """
     if not path.is_file():
         return {}
     raw = json.loads(path.read_text(encoding="utf-8"))
     result: dict[tuple[str, str], dict] = {}
     for entry in raw.get("reviews", []):
+        if not isinstance(entry, dict) or set(entry) - _REVIEW_KEYS:
+            raise NoticeError("A notice review contains unknown fields.")
         if not all(isinstance(entry.get(key), str) and entry[key].strip() for key in ("name", "version", "provenance")):
             raise NoticeError("A notice review must record name, version and provenance.")
         notices = entry.get("supplementalNotices", [])
         if not isinstance(notices, list) or not all(isinstance(item, str) for item in notices):
             raise NoticeError("Supplemental notices must be a list of relative paths.")
-        if not notices and not (isinstance(entry.get("noNoticeReason"), str) and entry["noNoticeReason"].strip()):
+        vendored = entry.get("vendoredNotices", [])
+        if not isinstance(vendored, list):
+            raise NoticeError("Vendored notices must be a list.")
+        for item in vendored:
+            _validate_vendored_record(item)
+        provenance = entry.get("binaryProvenance", {})
+        if not isinstance(provenance, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) and value.strip() for key, value in provenance.items()
+        ):
+            raise NoticeError("Binary provenance must map names to non-empty strings.")
+        if not notices and not vendored and not (isinstance(entry.get("noNoticeReason"), str) and entry["noNoticeReason"].strip()):
             raise NoticeError("A review without supplemental notices must explain why none exist.")
         key = (_canonical(entry["name"]), entry["version"])
         if key in result:
             raise NoticeError(f"Duplicate notice review for {entry['name']} {entry['version']}.")
         result[key] = entry
     return result
+
+
+def _validate_vendored_record(item: object) -> None:
+    if not isinstance(item, dict) or set(item) != _VENDORED_KEYS:
+        raise NoticeError(f"A vendored notice must record exactly: {sorted(_VENDORED_KEYS)}.")
+    for key in ("component", "version", "sourceRepository", "sourceUrl", "file"):
+        if not isinstance(item[key], str) or not item[key].strip():
+            raise NoticeError(f"A vendored notice is missing {key}.")
+    if not isinstance(item["sourceCommit"], str) or not _GIT_COMMIT.match(item["sourceCommit"]):
+        raise NoticeError("A vendored notice must pin a full 40-character source commit.")
+    if not item["sourceRepository"].startswith("https://"):
+        raise NoticeError("A vendored notice source repository must be an https URL.")
+    if not (item["sourceUrl"].startswith(item["sourceRepository"].rstrip("/") + "/")
+            and item["sourceCommit"] in item["sourceUrl"]):
+        raise NoticeError("A vendored notice URL must point into its repository at the pinned commit.")
+    if not isinstance(item["sha256"], str) or not _SHA256.match(item["sha256"]):
+        raise NoticeError("A vendored notice must record its lowercase SHA-256.")
+    _safe_relative(PurePosixPath(item["file"]))
+    covers = item["covers"]
+    if not isinstance(covers, list) or not covers:
+        raise NoticeError("A vendored notice must name the bundled files it covers.")
+    for cover in covers:
+        if (not isinstance(cover, dict) or set(cover) != {"path", "sha256"}
+                or not isinstance(cover["path"], str) or not isinstance(cover["sha256"], str)
+                or not _SHA256.match(cover["sha256"])):
+            raise NoticeError("A covered file must record exactly its path and lowercase SHA-256.")
+        _safe_relative(PurePosixPath(cover["path"]))
+
+
+def _record_sha256(value: str | None) -> str | None:
+    """Hex SHA-256 from a RECORD hash ("sha256=<urlsafe base64>")."""
+    if not value or not value.startswith("sha256="):
+        return None
+    encoded = value.split("=", 1)[1]
+    try:
+        return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).hex()
+    except ValueError:
+        return None
+
+
+def _vendored_source(root: Path, relative: str, expected_sha256: str) -> Path:
+    """A pinned upstream text inside ``root``: regular, contained and unchanged."""
+    root = root.resolve()
+    candidate = root.joinpath(*_safe_relative(PurePosixPath(relative)).split("/"))
+    if not candidate.exists() and not candidate.is_symlink():
+        raise NoticeError(f"Vendored notice is missing: {relative}")
+    _require_regular(candidate)
+    resolved = candidate.resolve()
+    if root not in resolved.parents or not resolved.is_file():
+        raise NoticeError(f"Vendored notice escapes its folder: {relative}")
+    if resolved.stat().st_size > MAX_NOTICE_BYTES:
+        raise NoticeError(f"Vendored notice is unexpectedly large: {relative}")
+    if _sha256(resolved) != expected_sha256:
+        raise NoticeError(f"Vendored notice does not match its pinned SHA-256: {relative}")
+    return resolved
+
+
+def _check_covered_binary(dist: _Distribution, cover: dict, bundle_internal: Path | None) -> None:
+    """The covered file must be the reviewed one: in RECORD, installed and bundled."""
+    path = PurePosixPath(cover["path"])
+    expected = cover["sha256"]
+    label = f"{dist.name} {dist.version}: {cover['path']}"
+    if path not in dist.files:
+        raise NoticeError(f"Reviewed binary is not part of {label}.")
+    if _record_sha256(dist.record_hashes.get(path)) != expected:
+        raise NoticeError(f"Installed RECORD hash differs from the reviewed binary for {label}.")
+    installed = dist.base.joinpath(*cover["path"].split("/"))
+    if not installed.is_file():
+        raise NoticeError(f"Installed file is missing for {label}.")
+    _require_regular(installed)
+    resolved = installed.resolve()
+    if dist.base not in resolved.parents:
+        raise NoticeError(f"Installed file escapes its distribution for {label}.")
+    if _sha256(resolved) != expected:
+        raise NoticeError(f"Installed file differs from the reviewed binary for {label}.")
+    if bundle_internal is not None:
+        bundled = bundle_internal.joinpath(*cover["path"].split("/"))
+        if not bundled.is_file():
+            raise NoticeError(f"Reviewed binary is not in the bundle for {label}.")
+        _require_regular(bundled)
+        if _sha256(bundled) != expected:
+            raise NoticeError(f"Bundled file differs from the reviewed binary for {label}.")
 
 
 # ------------------------------------------------------------------ pruning
@@ -372,9 +485,11 @@ def plan_runtime_notices(
     reviews: Mapping[tuple[str, str], dict] | None = None,
     pruned: Sequence[str] = (),
     bundle_internal: Path | None = None,
+    vendored_root: Path = VENDORED_TEXTS,
 ) -> NoticePlan:
     """Attribute every frozen piece and choose the notice texts to copy (read-only)."""
     reviews = dict(reviews or {})
+    used_reviews: set[tuple[str, str]] = set()
     installed = _installed_distributions(distributions)
     by_name = {dist.name: dist for dist in installed}
     stdlib = frozenset(stdlib_names)
@@ -445,12 +560,35 @@ def plan_runtime_notices(
     for name in sorted(represented):
         dist = by_name[name]
         review = reviews.get((dist.name, dist.version))
+        if review is not None:
+            used_reviews.add((dist.name, dist.version))
         notices = _notice_files(dist)
-        if name in NATIVE_REVIEW_REQUIRED and review is None:
-            missing.append(f"{dist.name} {dist.version} (native binaries need a reviewed provenance entry)")
-            continue
+        native = sorted(
+            relative
+            for root in represented[name]
+            for relative in contents.internal_roots.get(root, ())
+            if relative.lower().endswith(".dll")
+        )
+        if name in NATIVE_REVIEW_REQUIRED:
+            if review is None or not review.get("vendoredNotices"):
+                missing.append(f"{dist.name} {dist.version} (native binaries need a reviewed, pinned upstream notice)")
+                continue
+            covered = {cover["path"] for item in review["vendoredNotices"] for cover in item["covers"]}
+            bundled_native = {
+                relative
+                for root in represented[name]
+                for relative in contents.internal_roots.get(root, ())
+                if relative.lower().endswith((".dll", ".dylib", ".so"))
+                and relative not in microsoft_files
+            }
+            if bundled_native - covered:
+                raise NoticeError(
+                    f"Bundled native files of {dist.name} {dist.version} are not covered by its "
+                    f"reviewed upstream notices: {sorted(bundled_native - covered)}"
+                )
         supplemental = [PurePosixPath(item) for item in (review or {}).get("supplementalNotices", [])]
-        if not notices and not supplemental and review is None:
+        vendored = list((review or {}).get("vendoredNotices", []))
+        if not notices and not supplemental and not vendored and review is None:
             missing.append(f"{dist.name} {dist.version}")
             continue
         destination_root = PurePosixPath(NOTICE_DIRECTORY, "python", f"{dist.name}-{dist.version}")
@@ -462,12 +600,25 @@ def plan_runtime_notices(
             destination = (destination_root / relative).as_posix()
             copies.append(NoticeCopy(_source_inside(dist.base, relative), destination))
             copied.append(destination)
-        native = sorted(
-            relative
-            for root in represented[name]
-            for relative in contents.internal_roots.get(root, ())
-            if relative.lower().endswith(".dll")
-        )
+        vendored_entries: list[dict] = []
+        for item in vendored:
+            _validate_vendored_record(item)
+            for cover in item["covers"]:
+                _check_covered_binary(dist, cover, bundle_internal)
+            source = _vendored_source(vendored_root, item["file"], item["sha256"])
+            destination = (destination_root / "upstream" / _safe_relative(PurePosixPath(item["file"]))).as_posix()
+            copies.append(NoticeCopy(source, destination))
+            copied.append(destination)
+            vendored_entries.append({
+                "component": item["component"],
+                "version": item["version"],
+                "sourceRepository": item["sourceRepository"],
+                "sourceCommit": item["sourceCommit"],
+                "sourceUrl": item["sourceUrl"],
+                "notice": destination,
+                "sha256": item["sha256"],
+                "covers": sorted(item["covers"], key=lambda cover: cover["path"]),
+            })
         entry = {
             "name": dist.name,
             "version": dist.version,
@@ -483,11 +634,21 @@ def plan_runtime_notices(
                 for key in ("provenance", "unresolved", "noNoticeReason")
                 if isinstance(review.get(key), str) and review[key].strip()
             }
+            if vendored_entries:
+                entry["review"]["vendoredNotices"] = sorted(vendored_entries, key=lambda item: item["notice"])
+            if review.get("binaryProvenance"):
+                entry["review"]["binaryProvenance"] = dict(sorted(review["binaryProvenance"].items()))
         entries.append(entry)
     if missing:
         raise NoticeError(
             "Bundled third-party distributions lack license/notice coverage and have no "
             f"reviewed entry: {missing}"
+        )
+    stale = sorted(f"{name} {version}" for name, version in set(reviews) - used_reviews)
+    if stale:
+        raise NoticeError(
+            "Notice review records match no bundled distribution at its installed version "
+            f"(stale or mismatched): {stale}"
         )
 
     license_text = python_base / "LICENSE.txt"
@@ -611,6 +772,10 @@ def _readme(inventory: dict) -> str:
         lines += ["", "Reviewed provenance records (see inventory.json):"]
         for entry in reviewed:
             lines.append(f"  {entry['name']} {entry['version']}: {entry['review']['provenance']}")
+            for item in entry["review"].get("vendoredNotices", []):
+                lines.append(
+                    f"    Upstream {item['component']} {item['version']} text ({item['sourceUrl']}): {item['notice']}"
+                )
             if entry["review"].get("unresolved"):
                 lines.append(f"    Unresolved: {entry['review']['unresolved']}")
     if inventory.get("prunedBinaries"):

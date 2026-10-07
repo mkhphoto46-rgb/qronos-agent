@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
 from email.message import Message
+import hashlib
+import importlib.metadata
+from importlib.metadata import FileHash, PackagePath
 import importlib.util
 import json
 import os
@@ -27,7 +31,12 @@ class FakeDistribution:
     def __init__(self, site: Path, name: str, version: str, files: dict[str, str], metadata: dict[str, object]):
         self._site = site
         self.version = version
-        self.files = [PurePosixPath(relative) for relative in files]
+        self.files = []
+        for relative, text in files.items():
+            entry = PackagePath(relative)
+            digest = base64.urlsafe_b64encode(hashlib.sha256(text.encode("utf-8")).digest()).rstrip(b"=").decode()
+            entry.hash = FileHash(f"sha256={digest}")
+            self.files.append(entry)
         self.metadata = Message()
         self.metadata["Name"] = name
         self.metadata["Version"] = version
@@ -292,30 +301,166 @@ def test_existing_bundle_notices_are_preserved_and_never_overwritten(fixture):
         write_runtime_notices(plan, fixture.bundle)
 
 
-def test_native_package_needs_a_reviewed_provenance_record(fixture):
+PORTAUDIO_DLL = "_sounddevice_data/portaudio-binaries/libportaudio64bit.dll"
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def add_sounddevice(fixture: Fixture, *, dll: str = "native x64 build") -> tuple[dict, Path]:
+    """A synthetic sounddevice wheel, its bundled DLL and a pinned upstream text."""
     fixture.distributions.append(fixture.install("sounddevice", "0.5.6", {
         "sounddevice.py": "code",
         "_sounddevice_data/portaudio-binaries/README.md": "PortAudio attribution",
-        "_sounddevice_data/portaudio-binaries/libportaudio64bit.dll": "native",
+        PORTAUDIO_DLL: dll,
         "sounddevice-0.5.6.dist-info/licenses/LICENSE": "sounddevice license",
     }, {"License-Expression": "MIT"}))
-    fixture.add_bundle_file("_sounddevice_data/portaudio-binaries/libportaudio64bit.dll")
+    fixture.add_bundle_file(PORTAUDIO_DLL, dll.encode("utf-8"))
     fixture.archive.append("sounddevice")
-    with pytest.raises(NoticeError, match="sounddevice 0.5.6"):
-        fixture.plan()
+    texts = fixture.root / "vendored"
+    (texts / "portaudio").mkdir(parents=True)
+    (texts / "portaudio/LICENSE.txt").write_text("PortAudio upstream license text", encoding="utf-8")
     review = {
         "provenance": "Shipped inside the sounddevice wheel.",
         "supplementalNotices": ["_sounddevice_data/portaudio-binaries/README.md"],
-        "unresolved": "The upstream license text is not shipped.",
+        "vendoredNotices": [{
+            "component": "PortAudio",
+            "version": "v19.7.0",
+            "sourceRepository": "https://example.invalid/portaudio",
+            "sourceCommit": COMMIT,
+            "sourceUrl": f"https://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt",
+            "file": "portaudio/LICENSE.txt",
+            "sha256": sha256_text("PortAudio upstream license text"),
+            "covers": [{"path": PORTAUDIO_DLL, "sha256": sha256_text(dll)}],
+        }],
+        "binaryProvenance": {"wheelSha256": "f" * 64},
+        "unresolved": "Statically linked runtime terms need review.",
     }
-    plan = fixture.plan(reviews={("sounddevice", "0.5.6"): review}, pruned=["_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit-asio.dll"])
+    return review, texts
+
+
+def plan_sounddevice(fixture: Fixture, review: dict, texts: Path, **overrides):
+    return fixture.plan(reviews={("sounddevice", "0.5.6"): review}, vendored_root=texts, **overrides)
+
+
+def test_native_package_copies_its_pinned_upstream_notice(fixture):
+    review, texts = add_sounddevice(fixture)
+    plan = plan_sounddevice(fixture, review, texts, pruned=["_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit-asio.dll"])
     sounddevice = entry(plan, "sounddevice")
+    upstream = "third-party-notices/python/sounddevice-0.5.6/upstream/portaudio/LICENSE.txt"
+    assert upstream in sounddevice["notices"]
     assert "third-party-notices/python/sounddevice-0.5.6/_sounddevice_data/portaudio-binaries/README.md" in sounddevice["notices"]
-    assert sounddevice["review"]["unresolved"] == "The upstream license text is not shipped."
+    vendored = sounddevice["review"]["vendoredNotices"]
+    assert vendored == [{
+        "component": "PortAudio",
+        "version": "v19.7.0",
+        "sourceRepository": "https://example.invalid/portaudio",
+        "sourceCommit": COMMIT,
+        "sourceUrl": f"https://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt",
+        "notice": upstream,
+        "sha256": sha256_text("PortAudio upstream license text"),
+        "covers": [{"path": PORTAUDIO_DLL, "sha256": sha256_text("native x64 build")}],
+    }]
+    assert sounddevice["review"]["binaryProvenance"] == {"wheelSha256": "f" * 64}
     write_runtime_notices(plan, fixture.root / "out")
-    readme = (fixture.root / "out/third-party-notices/README.txt").read_text(encoding="utf-8")
-    assert "The upstream license text is not shipped." in readme
+    out = fixture.root / "out"
+    assert (out / upstream).read_text(encoding="utf-8") == "PortAudio upstream license text"
+    readme = (out / "third-party-notices/README.txt").read_text(encoding="utf-8")
+    assert f"https://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt" in readme
+    assert "Statically linked runtime terms need review." in readme
     assert "libportaudio64bit-asio.dll" in readme
+    assert str(fixture.root) not in (out / "third-party-notices/inventory.json").read_text(encoding="utf-8")
+
+
+def test_native_package_without_a_pinned_upstream_notice_fails(fixture):
+    review, texts = add_sounddevice(fixture)
+    with pytest.raises(NoticeError, match="sounddevice 0.5.6"):
+        fixture.plan(vendored_root=texts)
+    del review["vendoredNotices"]
+    with pytest.raises(NoticeError, match="pinned upstream notice"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_changed_vendored_text_fails(fixture):
+    review, texts = add_sounddevice(fixture)
+    (texts / "portaudio/LICENSE.txt").write_text("PortAudio upstream license text, edited", encoding="utf-8")
+    with pytest.raises(NoticeError, match="pinned SHA-256"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_missing_vendored_text_fails(fixture):
+    review, texts = add_sounddevice(fixture)
+    (texts / "portaudio/LICENSE.txt").unlink()
+    with pytest.raises(NoticeError, match="missing"):
+        plan_sounddevice(fixture, review, texts)
+
+
+@pytest.mark.parametrize("unsafe", ["../outside/LICENSE.txt", "C:/outside/LICENSE.txt", "portaudio\\LICENSE.txt", "/LICENSE.txt"])
+def test_unsafe_vendored_path_is_refused(fixture, unsafe):
+    review, texts = add_sounddevice(fixture)
+    review["vendoredNotices"][0]["file"] = unsafe
+    with pytest.raises(NoticeError, match="Unsafe"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_vendored_text_reached_through_a_link_is_refused(fixture):
+    review, texts = add_sounddevice(fixture)
+    outside = fixture.root / "outside"
+    outside.mkdir()
+    (outside / "LICENSE.txt").write_text("PortAudio upstream license text", encoding="utf-8")
+    link_directory(texts / "linked", outside)
+    review["vendoredNotices"][0]["file"] = "linked/LICENSE.txt"
+    with pytest.raises(NoticeError, match="escapes"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_bundled_binary_must_be_the_reviewed_one(fixture):
+    review, texts = add_sounddevice(fixture)
+    fixture.add_bundle_file(PORTAUDIO_DLL, b"a different build")
+    with pytest.raises(NoticeError, match="Bundled file differs"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_installed_binary_must_match_its_record_and_the_review(fixture):
+    review, texts = add_sounddevice(fixture)
+    (fixture.site / PORTAUDIO_DLL).write_text("replaced after installation", encoding="utf-8")
+    with pytest.raises(NoticeError, match="Installed file differs"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_review_for_a_different_binary_fails(fixture):
+    review, texts = add_sounddevice(fixture)
+    review["vendoredNotices"][0]["covers"][0]["sha256"] = sha256_text("another release")
+    with pytest.raises(NoticeError, match="RECORD hash differs"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_reviewed_binary_missing_from_the_bundle_fails(fixture):
+    review, texts = add_sounddevice(fixture)
+    (fixture.internal / PORTAUDIO_DLL).unlink()
+    fixture.add_bundle_file("_sounddevice_data/portaudio-binaries/README.md")
+    with pytest.raises(NoticeError, match="not in the bundle"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_uncovered_bundled_native_file_fails(fixture):
+    review, texts = add_sounddevice(fixture)
+    asio = "_sounddevice_data/portaudio-binaries/libportaudio64bit-asio.dll"
+    fixture.distributions[-1].files.append(PurePosixPath(asio))
+    fixture.add_bundle_file(asio, b"asio build")
+    with pytest.raises(NoticeError, match="not covered"):
+        plan_sounddevice(fixture, review, texts)
+
+
+def test_stale_or_mismatched_review_records_fail(fixture):
+    review, texts = add_sounddevice(fixture)
+    with pytest.raises(NoticeError, match="sounddevice 0.5.6"):
+        fixture.plan(reviews={("sounddevice", "0.5.5"): review}, vendored_root=texts)
+    stale = {("sounddevice", "0.5.6"): review, ("unrelated", "2.0"): {"provenance": "old", "noNoticeReason": "old"}}
+    with pytest.raises(NoticeError, match="stale.*unrelated 2.0"):
+        fixture.plan(reviews=stale, vendored_root=texts)
 
 
 def test_reviewed_notice_must_belong_to_the_distribution(fixture):
@@ -340,11 +485,84 @@ def test_review_file_requires_exact_identity_and_provenance(tmp_path):
     assert load_reviews(tmp_path / "absent.json") == {}
 
 
-def test_committed_reviews_record_exact_versions_and_provenance():
+def vendored_record(**changes):
+    record = {
+        "component": "PortAudio",
+        "version": "v19.7.0",
+        "sourceRepository": "https://example.invalid/portaudio",
+        "sourceCommit": COMMIT,
+        "sourceUrl": f"https://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt",
+        "file": "portaudio/LICENSE.txt",
+        "sha256": "a" * 64,
+        "covers": [{"path": PORTAUDIO_DLL, "sha256": "b" * 64}],
+    }
+    record.update(changes)
+    return record
+
+
+@pytest.mark.parametrize("record", [
+    vendored_record(sourceCommit="0123456"),
+    vendored_record(sourceUrl="https://example.invalid/portaudio/blob/main/LICENSE.txt"),
+    vendored_record(sourceUrl=f"https://elsewhere.invalid/blob/{COMMIT}/LICENSE.txt"),
+    vendored_record(sourceRepository="http://example.invalid/portaudio",
+                    sourceUrl=f"http://example.invalid/portaudio/blob/{COMMIT}/LICENSE.txt"),
+    vendored_record(sha256="A" * 64),
+    vendored_record(file="../LICENSE.txt"),
+    vendored_record(covers=[]),
+    vendored_record(covers=[{"path": PORTAUDIO_DLL}]),
+    vendored_record(covers=[{"path": "../outside.dll", "sha256": "b" * 64}]),
+    vendored_record(license="MIT"),
+    {key: value for key, value in vendored_record().items() if key != "sourceCommit"},
+])
+def test_review_file_refuses_incomplete_or_unpinned_vendored_notices(tmp_path, record):
+    path = tmp_path / "reviews.json"
+    review = {"name": "sounddevice", "version": "0.5.6", "provenance": "wheel", "vendoredNotices": [record]}
+    path.write_text(json.dumps({"reviews": [review]}), encoding="utf-8")
+    with pytest.raises(NoticeError):
+        load_reviews(path)
+    review["vendoredNotices"] = [vendored_record()]
+    path.write_text(json.dumps({"reviews": [review]}), encoding="utf-8")
+    assert set(load_reviews(path)) == {("sounddevice", "0.5.6")}
+
+
+def test_review_file_refuses_unknown_fields(tmp_path):
+    path = tmp_path / "reviews.json"
+    review = {"name": "x", "version": "1.0", "provenance": "wheel", "noNoticeReason": "reviewed", "approved": "yes"}
+    path.write_text(json.dumps({"reviews": [review]}), encoding="utf-8")
+    with pytest.raises(NoticeError, match="unknown fields"):
+        load_reviews(path)
+
+
+def test_committed_reviews_pin_vendored_texts_that_match_their_hashes():
     reviews = load_reviews()
-    assert reviews, "the sounddevice PortAudio review record is expected"
-    for (name, version), review in reviews.items():
-        assert name and version and review["provenance"].strip()
+    assert set(reviews) == {("sounddevice", "0.5.6")}
+    review = reviews[("sounddevice", "0.5.6")]
+    vendored = review["vendoredNotices"]
+    assert {item["file"] for item in vendored} == {
+        "portaudio-v19.7.0/LICENSE.txt", "portaudio-v19.7.0/COPYRIGHT-NOTICES.txt",
+    }
+    for item in vendored:
+        runtime_notices._vendored_source(runtime_notices.VENDORED_TEXTS, item["file"], item["sha256"])
+        assert item["sourceCommit"] in item["sourceUrl"]
+        assert [cover["path"] for cover in item["covers"]] == [PORTAUDIO_DLL]
+    text = (runtime_notices.VENDORED_TEXTS / "portaudio-v19.7.0/LICENSE.txt").read_text(encoding="ascii")
+    assert "Copyright (c) 1999-2006 Ross Bencina and Phil Burk" in text
+    assert "Permission is hereby granted, free of charge" in text
+
+
+def test_committed_review_matches_the_installed_wheel_when_present():
+    try:
+        dist = importlib.metadata.distribution("sounddevice")
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip("sounddevice is not installed here.")
+    reviews = load_reviews()
+    if ("sounddevice", dist.version) not in reviews:
+        pytest.fail(f"sounddevice {dist.version} is installed but has no notice review; review the new wheel.")
+    review = reviews[("sounddevice", dist.version)]
+    record = runtime_notices._installed_distributions([dist])[0]
+    for item in review["vendoredNotices"]:
+        for cover in item["covers"]:
+            runtime_notices._check_covered_binary(record, cover, None)
 
 
 @pytest.mark.skipif(sysconfig.get_platform() != "win-amd64", reason="Checks the x64 Windows library choice.")

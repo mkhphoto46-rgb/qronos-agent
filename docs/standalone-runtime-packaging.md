@@ -67,10 +67,28 @@ The build stops if a frozen module or file cannot be attributed to a package,
 CPython, PyInstaller, Microsoft's C/C++ runtime or Qronos. It also stops if a
 bundled package ships no license or notice text. An exception must be
 recorded for the exact package name and version, with its provenance, in
-`build_support/runtime_notice_reviews.json`. The same applies to native
-binaries whose wheel lacks the upstream license text. The file currently holds
-one record: the PortAudio DLL in sounddevice 0.5.6, whose wheel names the MIT
-License but does not include its text.
+`build_support/runtime_notice_reviews.json`.
+
+Some wheels carry native binaries without the upstream license text. For
+these, the missing text is kept in `build_support/runtime_notice_texts/`. It
+is pinned to an exact upstream commit, public URL and SHA-256. The record also
+lists the SHA-256 of every bundled binary it covers. The build checks that
+each covered binary has the same hash in the package's RECORD, in the
+installed package and in the bundle. It also checks that every bundled native
+file of that package is covered and that each vendored text still has its
+pinned hash. A record that matches no bundled package version stops the
+build. Changing a text or upgrading the package therefore needs a new review.
+
+The only such record today is for sounddevice 0.5.6. Its x64 PortAudio DLL is
+byte-identical to the one in the published wheel and in the
+`spatialaudio/portaudio-binaries` commit pinned by sounddevice's 0.5.6 tag.
+That repository's workflow builds PortAudio v19.7.0
+(commit `147dd722548358763a8b649b3e4b41dfffbcfbb6`). The vendored texts are
+PortAudio's `LICENSE.txt` from that commit and the copyright lines copied
+verbatim from the source files compiled into the DLL. The review record lists
+the remaining open points: the statically linked Microsoft C runtime, a
+Wine-derived constant with an informal BSD permission, and the fact that the
+binary was not rebuilt independently.
 
 Some items are recorded rather than resolved:
 

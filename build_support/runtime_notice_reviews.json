@@ -3,11 +3,56 @@
     {
       "name": "sounddevice",
       "version": "0.5.6",
-      "provenance": "The PortAudio DLLs under _sounddevice_data/portaudio-binaries are shipped inside the installed sounddevice 0.5.6 wheel. Its README states that they were built automatically with GitHub Actions (.github/workflows/build-libs.yml) and credits PortAudio by Ross Bencina and Phil Burk under the MIT License.",
+      "provenance": "The PortAudio libraries under _sounddevice_data/portaudio-binaries come from the published sounddevice 0.5.6 win_amd64 wheel. Its source tag pins the spatialaudio/portaudio-binaries submodule at a GitHub Actions 'Update binaries' commit whose x64 DLL blob is byte-identical to the installed file. That repository's workflow builds PortAudio tag v19.7.0 with CMake and MSVC; the x64 DLL used here is the build without ASIO.",
       "supplementalNotices": [
         "_sounddevice_data/portaudio-binaries/README.md"
       ],
-      "unresolved": "The wheel names PortAudio's MIT License but does not include the PortAudio license text itself. Only the x64 build with the default host APIs (libportaudio64bit.dll) is bundled; the ASIO builds, which credit the Steinberg ASIO SDK without stating its terms, are removed."
+      "vendoredNotices": [
+        {
+          "component": "PortAudio",
+          "version": "v19.7.0",
+          "sourceRepository": "https://github.com/PortAudio/portaudio",
+          "sourceCommit": "147dd722548358763a8b649b3e4b41dfffbcfbb6",
+          "sourceUrl": "https://github.com/PortAudio/portaudio/blob/147dd722548358763a8b649b3e4b41dfffbcfbb6/LICENSE.txt",
+          "file": "portaudio-v19.7.0/LICENSE.txt",
+          "sha256": "ec52a1952d701f94e5135719a47376da4ee0b4a0201f1cafb49f61db6480ac3d",
+          "covers": [
+            {
+              "path": "_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
+              "sha256": "ec080194f01e4095c7fb43dbd7ed05af922c5b34295056a9ff56782741d65481"
+            }
+          ]
+        },
+        {
+          "component": "PortAudio copyright notices (verbatim lines from the compiled source files)",
+          "version": "v19.7.0",
+          "sourceRepository": "https://github.com/PortAudio/portaudio",
+          "sourceCommit": "147dd722548358763a8b649b3e4b41dfffbcfbb6",
+          "sourceUrl": "https://github.com/PortAudio/portaudio/tree/147dd722548358763a8b649b3e4b41dfffbcfbb6",
+          "file": "portaudio-v19.7.0/COPYRIGHT-NOTICES.txt",
+          "sha256": "b3dab92474ad229e4b53487493561f5ed502116093f9cb202155fb18f7622b66",
+          "covers": [
+            {
+              "path": "_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
+              "sha256": "ec080194f01e4095c7fb43dbd7ed05af922c5b34295056a9ff56782741d65481"
+            }
+          ]
+        }
+      ],
+      "binaryProvenance": {
+        "wheelFile": "sounddevice-0.5.6-py3-none-win_amd64.whl",
+        "wheelSha256": "7f4162f514f007b0bf25a3ccfed3f1705bc2ec311888a90232729eec4f57a4f4",
+        "wheelUrl": "https://files.pythonhosted.org/packages/8d/3e/cbc593c31a5f0d817b3fe97e64aa8461bd0f55cb07b67ce1b776296ae336/sounddevice-0.5.6-py3-none-win_amd64.whl",
+        "wheelRecordSha256": "42486384fe0c2885a27cced8a308e6970e4db310fa82ee247eaf7e76a9b0a156",
+        "wheelRecordLine": "_sounddevice_data/portaudio-binaries/libportaudio64bit.dll,sha256=7AgBlPAeQJXH-0Pb1-0Fr5IsWzQpUFap_1Z4J0HWVIE,307712",
+        "sounddeviceSourceTag": "https://github.com/spatialaudio/python-sounddevice/tree/bd3f0dfe325a45506eea8d97d91949cc4e9dbb4f",
+        "binariesCommit": "https://github.com/spatialaudio/portaudio-binaries/tree/bf2681cd2c6c88c2ad83341049b2420d805d5353",
+        "binariesDllGitBlob": "dc64d34c6dd6dad6c9af92c8adb4a5aecf040f1c",
+        "binariesWorkflowGitBlob": "a2b670e513d037f0194e758b8cdd060c8c0ef5f1",
+        "portaudioLicenseGitBlob": "e0ac4e8a0c0188cece03c15e956b800f34e1c449",
+        "portaudioCMakeListsGitBlob": "122fe932f8a9e435a50c028a84be012f8001c0a3"
+      },
+      "unresolved": "The DLL imports only Windows system libraries, so it links the Microsoft C runtime statically; those terms fall under the Microsoft distributable-code review. pa_win_ds.c defines eight WAVE_FORMAT constants (only when the Windows SDK lacks them) from a Wine patch whose author granted use 'under the BSD license' without a license text; the note is reproduced in COPYRIGHT-NOTICES.txt. The binary was not rebuilt independently; its identity rests on the matching wheel, RECORD and repository blob hashes."
     }
   ]
 }
