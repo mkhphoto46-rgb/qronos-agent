@@ -1,0 +1,13 @@
+{
+  "reviews": [
+    {
+      "name": "sounddevice",
+      "version": "0.5.6",
+      "provenance": "The PortAudio DLLs under _sounddevice_data/portaudio-binaries are shipped inside the installed sounddevice 0.5.6 wheel. Its README states that they were built automatically with GitHub Actions (.github/workflows/build-libs.yml) and credits PortAudio by Ross Bencina and Phil Burk under the MIT License.",
+      "supplementalNotices": [
+        "_sounddevice_data/portaudio-binaries/README.md"
+      ],
+      "unresolved": "The wheel names PortAudio's MIT License but does not include the PortAudio license text itself. Only the x64 build with the default host APIs (libportaudio64bit.dll) is bundled; the ASIO builds, which credit the Steinberg ASIO SDK without stating its terms, are removed."
+    }
+  ]
+}
