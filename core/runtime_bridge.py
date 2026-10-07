@@ -111,6 +111,7 @@ from core.queue_journal import (
     RecordState,
     StorageProblem,
     StorageStatus,
+    QueueStatePathError,
     default_queue_state_path,
 )
 from core.safe_queue import TaskState
@@ -1536,14 +1537,25 @@ class QronosRuntime:
 
     def _ensure_queue_journal(self) -> QueueJournal:
         if self._queue_journal is None:
+            reason = ""
+
             try:
                 path = default_queue_state_path()
+            except QueueStatePathError as exc:
+                # A configured location that cannot be used safely. Not
+                # silently replaced by the default: the override was a choice.
+                path = None
+                reason = str(exc)
             except Exception:
                 # No writable per-user location at all. The journal runs in
                 # memory and says so; it never pretends to be durable.
                 path = None
+                reason = "No per-user location for the queue is available."
 
-            self._queue_journal = QueueJournal(path)
+            self._queue_journal = QueueJournal(
+                path,
+                unavailable_detail=reason,
+            )
 
         return self._queue_journal
 

@@ -62,12 +62,31 @@ QUEUE_STATE_FILE_NAME = "queue_state.json"
 MAX_FINISHED_RECORDS = 50
 
 
+class QueueStatePathError(ValueError):
+    """The configured queue state location cannot be used safely."""
+
+
 def default_queue_state_path() -> Path:
-    """The per-user location for queue state, under Qronos's own data root."""
+    """
+    The per-user location for queue state, under Qronos's own data root.
+
+    An override must be absolute. A relative one would resolve against
+    whatever directory the runtime was started in - for an installed copy,
+    possibly the folder holding its binaries - so it is refused rather than
+    guessed at, and the queue then says plainly that it is not being saved.
+    """
     override = os.environ.get(QUEUE_STATE_PATH_ENV, "").strip()
 
     if override:
-        return Path(override)
+        path = Path(override)
+
+        if not path.is_absolute():
+            raise QueueStatePathError(
+                f"{QUEUE_STATE_PATH_ENV} must be an absolute path; the queue "
+                "is not being saved."
+            )
+
+        return path
 
     # Imported here so that merely importing this module touches nothing on
     # disk: load_storage_locations creates directories.
@@ -235,7 +254,7 @@ class QueueRecord:
         record = cls(
             task_id=text("taskId"),
             request_id=text("requestId"),
-            summary=text("summary"),
+            summary=text("summary", required=False),
             route=text("route"),
             weight=text("weight"),
             required_vram_mb=whole("requiredVramMb"),
@@ -248,7 +267,9 @@ class QueueRecord:
             context=tuple(context),
         )
 
-        if not record.state.finished and not record.text.strip():
+        if not record.state.finished and (
+            not record.text.strip() or not record.summary.strip()
+        ):
             raise StoreCorrupt(
                 "A queue record that may still run has lost its request."
             )
@@ -282,6 +303,7 @@ class QueueJournal:
         self,
         path: str | Path | None,
         clock: Callable[[], float] = time.time,
+        unavailable_detail: str = "",
     ) -> None:
         self._store = JsonStore(path, version=QUEUE_STATE_VERSION)
         self._persistent = path is not None
@@ -296,7 +318,8 @@ class QueueJournal:
             detail=(
                 ""
                 if self._persistent
-                else "No place to save the queue was configured."
+                else unavailable_detail
+                or "No place to save the queue was configured."
             ),
         )
         self._opened = False
@@ -375,7 +398,22 @@ class QueueJournal:
             finished_early: list[str] = []
             now = self._clock()
 
+            scrubbed = False
+
             for record in records:
+                if record.state.finished and (
+                    record.summary or record.text or record.context
+                ):
+                    # Written by an earlier version that kept part of the
+                    # request after it finished. Removed on sight.
+                    record = _finished(
+                        record,
+                        record.state,
+                        record.detail,
+                        record.updated_at,
+                    )
+                    scrubbed = True
+
                 if not record.state.finished and answered(record.request_id):
                     # Its answer is already in the conversation. Whatever the
                     # file says - running, or a stale "queued" left by a save
@@ -405,7 +443,7 @@ class QueueJournal:
             self._paused = paused
             self._status = StorageStatus(durable=True)
 
-            if interrupted or finished_early or document.migrated:
+            if interrupted or finished_early or scrubbed or document.migrated:
                 # The interrupted marks are written before anything can act
                 # on them, so a second crash cannot turn them back into
                 # "running".
@@ -642,12 +680,19 @@ def _finished(
     detail: str,
     now: float,
 ) -> QueueRecord:
-    """A finished record, without the request text it no longer needs."""
+    """
+    A finished record, keeping none of the request it answered.
+
+    Not the text, not the conversation context, and not the short summary
+    either: the request lives in the conversation history, where the user
+    can see and delete it. The outcome is all the queue needs to show.
+    """
     return replace(
         record,
         state=state,
         detail=detail,
         updated_at=now,
+        summary="",
         text="",
         context=(),
     )

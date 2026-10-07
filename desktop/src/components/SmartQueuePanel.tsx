@@ -94,6 +94,9 @@ type SmartQueuePanelProps = {
   onDismissRefusal: () => void;
   onDismissNotice?: () => void;
   onShowRequest?: (requestId: string) => void;
+  // Finished outcomes keep no copy of the request; the drawer looks it up in
+  // the conversation, where it lives.
+  describeRequest?: (requestId: string) => string | null;
 };
 
 /**
@@ -166,6 +169,7 @@ export function SmartQueuePanel({
   onDismissRefusal,
   onDismissNotice,
   onShowRequest,
+  describeRequest,
 }: SmartQueuePanelProps) {
   const tasks = snapshot?.tasks ?? [];
   const recent = snapshot?.recent ?? [];
@@ -405,7 +409,11 @@ export function SmartQueuePanel({
                 </span>
 
                 <div className="smart-queue-row-main">
-                  <p className="smart-queue-row-summary">{outcome.summary}</p>
+                  <p className="smart-queue-row-summary">
+                    {outcome.summary ||
+                      describeRequest?.(outcome.requestId) ||
+                      "درخواست صف"}
+                  </p>
                   <dl className="smart-queue-row-meta">
                     <div>
                       <dt>OUTCOME</dt>
