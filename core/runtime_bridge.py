@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 import wave
 from pathlib import Path
 
