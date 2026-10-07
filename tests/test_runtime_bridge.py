@@ -647,7 +647,7 @@ class TestPendingScreenApproval(unittest.TestCase):
 
         runtime.conversation_session.start()
         runtime.pending_look = (
-            "?? ??? ????? ???? ??"
+            "به این پنجره نگاه کن"
         )
 
         self.assertFalse(

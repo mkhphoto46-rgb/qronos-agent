@@ -92,7 +92,7 @@ class TestPersianIsRouted(unittest.TestCase):
     def test_calculator_arithmetic_interaction_is_computer(self) -> None:
         self.assertEqual(
             self.router.route(
-                "??? ???????? ?? ?? ?? ????? ???? ??"
+                "با ماشین حساب دو رو ضربدر چهار کن"
             ).task_type,
             TaskType.COMPUTER,
         )
