@@ -10,10 +10,6 @@ WAIT_OBJECT_0 = 0x00000000
 WAIT_ABANDONED = 0x00000080
 WAIT_TIMEOUT = 0x00000102
 
-PROCESS_TERMINATE = 0x0001
-PROCESS_SET_QUOTA = 0x0100
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 
@@ -112,12 +108,8 @@ def _kernel32():
         ]
         kernel32.SetInformationJobObject.restype = wintypes.BOOL
 
-        kernel32.OpenProcess.argtypes = [
-            wintypes.DWORD,
-            wintypes.BOOL,
-            wintypes.DWORD,
-        ]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
+        kernel32.GetProcessId.restype = wintypes.DWORD
 
         kernel32.AssignProcessToJobObject.argtypes = [
             wintypes.HANDLE,
@@ -248,49 +240,24 @@ class WindowsSidecarGuard:
 
         self._job_handle = job
 
-    def bind_process(self, pid: int) -> None:
-        if int(pid) <= 0:
-            raise ValueError("pid must be greater than zero")
+    def bind_process(self, pid: int, *, process_handle) -> None:
+        """Bind the exact child handle returned by Popen, never reopen its PID."""
+        if type(pid) is not int or pid <= 0:
+            raise ValueError("pid must be a positive integer")
+        if process_handle is None or int(process_handle) <= 0:
+            raise SidecarGuardUnavailable("The captured child process handle is unavailable.")
 
         with self._lock:
-            if self._closed:
-                raise SidecarGuardUnavailable(
-                    "Cannot bind a process to a closed sidecar guard."
-                )
-
-            job = self._job_handle
-
-        if not job:
-            raise SidecarGuardUnavailable(
-                "Qronos sidecar Job Object is not available."
-            )
-
-        kernel32 = _kernel32()
-
-        process_handle = kernel32.OpenProcess(
-            PROCESS_TERMINATE
-            | PROCESS_SET_QUOTA
-            | PROCESS_QUERY_LIMITED_INFORMATION,
-            False,
-            int(pid),
-        )
-        if not process_handle:
-            _raise_last_error(
-                f"Could not open Qronos sidecar process PID {pid}"
-            )
-
-        try:
-            ok = kernel32.AssignProcessToJobObject(
-                job,
-                process_handle,
-            )
-            if not ok:
-                _raise_last_error(
-                    f"Could not bind Qronos sidecar PID {pid} "
-                    "to the parent-death Job Object"
-                )
-        finally:
-            kernel32.CloseHandle(process_handle)
+            if self._closed or not self._job_handle:
+                raise SidecarGuardUnavailable("Qronos sidecar Job Object is not available.")
+            kernel32 = _kernel32()
+            if (
+                int(kernel32.GetProcessId(process_handle)) != pid
+                or kernel32.WaitForSingleObject(process_handle, 0) != WAIT_TIMEOUT
+            ):
+                raise SidecarGuardUnavailable("The captured sidecar process is no longer valid.")
+            if not kernel32.AssignProcessToJobObject(self._job_handle, process_handle):
+                _raise_last_error("Could not bind the captured Qronos sidecar to its lifetime job")
 
     def close(self) -> None:
         with self._lock:

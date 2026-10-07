@@ -40,7 +40,7 @@ class FakeGuard:
         self.bound_pids: list[int] = []
         self.closed = False
 
-    def bind_process(self, pid: int) -> None:
+    def bind_process(self, pid: int, *, process_handle=None) -> None:
         if self.bind_error is not None:
             raise self.bind_error
         self.bound_pids.append(pid)

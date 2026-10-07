@@ -18,6 +18,10 @@ import requests
 
 from core.activity_guard import ActivityGuard, ActivityMode, ResourcePressure
 from core.config import CONFIG
+from core.local_ipc import (
+    local_base_url, local_port, local_timeout, process_owns_listener, request_json,
+)
+from core.windows_sidecar_guard import WindowsSidecarGuard
 from core.user_memory import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_VERSION,
@@ -68,18 +72,15 @@ class SidecarEmbeddingProvider(EmbeddingProvider):
         base_url: str = MEMORY_SIDECAR_BASE_URL,
         timeout_seconds: float = MEMORY_RETRIEVAL_TIMEOUT_SECONDS,
         keep_alive: str = MEMORY_SIDECAR_KEEP_ALIVE,
+        owner_check: Callable[[], object | None] | None = None,
     ) -> None:
-        cleaned = base_url.rstrip("/")
-        if cleaned not in {
-            "http://127.0.0.1:11435",
-            "http://localhost:11435",
-        }:
-            raise ValueError("Runtime Memory embedding endpoint must remain the local sidecar.")
+        cleaned = local_base_url(base_url, required_port=MEMORY_SIDECAR_PORT)
         self._model_name = model_name.strip()
         self._model_version = model_version.strip() or DEFAULT_EMBEDDING_VERSION
         self._base_url = cleaned
-        self._timeout = max(0.1, float(timeout_seconds))
+        self._timeout = local_timeout(timeout_seconds)
         self._keep_alive = keep_alive
+        self._owner_check = owner_check
 
     @property
     def model_name(self) -> str:
@@ -91,12 +92,11 @@ class SidecarEmbeddingProvider(EmbeddingProvider):
 
     def available(self) -> tuple[bool, str]:
         try:
-            response = requests.get(
-                f"{self._base_url}/api/tags",
+            payload = request_json(
+                "GET",
+                f"{local_base_url(self._base_url, required_port=MEMORY_SIDECAR_PORT)}/api/tags",
                 timeout=min(self._timeout, 0.35),
             )
-            response.raise_for_status()
-            payload = response.json()
         except Exception as exc:
             return False, f"memory_sidecar_unavailable:{type(exc).__name__}"
 
@@ -123,29 +123,35 @@ class SidecarEmbeddingProvider(EmbeddingProvider):
         if not cleaned or any(not value for value in cleaned):
             raise ValueError("Embedding input must contain non-empty text.")
 
-        response = requests.post(
-            f"{self._base_url}/api/embed",
-            json={
-                "model": self._model_name,
-                "input": cleaned,
-                "truncate": False,
-                "keep_alive": self._keep_alive,
-                "options": {"num_gpu": 0},
-            },
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        vectors = payload.get("embeddings") if isinstance(payload, dict) else None
-        if not isinstance(vectors, list) or len(vectors) != len(cleaned):
-            raise RuntimeError("Memory sidecar embedding response has an invalid shape.")
-        matrix = np.asarray(vectors, dtype=np.float32)
-        if matrix.ndim != 2 or matrix.shape[0] != len(cleaned):
-            raise RuntimeError("Memory sidecar returned an invalid embedding matrix.")
-        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-        if np.any(norms <= 1e-12) or not np.isfinite(matrix).all():
-            raise RuntimeError("Memory sidecar returned an invalid embedding vector.")
-        return (matrix / norms).astype(np.float32, copy=False)
+        try:
+            owner = self._owner_check() if self._owner_check is not None else None
+            if owner is None or owner is False:
+                raise EmbeddingUnavailable("Memory sidecar ownership is unavailable.")
+            payload = request_json(
+                "POST",
+                f"{local_base_url(self._base_url, required_port=MEMORY_SIDECAR_PORT)}/api/embed",
+                json={
+                    "model": self._model_name,
+                    "input": cleaned,
+                    "truncate": False,
+                    "keep_alive": self._keep_alive,
+                    "options": {"num_gpu": 0},
+                },
+                timeout=self._timeout,
+                owner=owner,
+            )
+            vectors = payload.get("embeddings") if isinstance(payload, dict) else None
+            if not isinstance(vectors, list) or len(vectors) != len(cleaned):
+                raise RuntimeError("Memory sidecar embedding response has an invalid shape.")
+            matrix = np.asarray(vectors, dtype=np.float32)
+            if matrix.ndim != 2 or matrix.shape[0] != len(cleaned):
+                raise RuntimeError("Memory sidecar returned an invalid embedding matrix.")
+            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            if np.any(norms <= 1e-12) or not np.isfinite(matrix).all():
+                raise RuntimeError("Memory sidecar returned an invalid embedding vector.")
+            return (matrix / norms).astype(np.float32, copy=False)
+        except Exception:
+            raise EmbeddingUnavailable("Local memory embedding request failed.") from None
 
 
 class MemorySidecarManager:
@@ -158,10 +164,20 @@ class MemorySidecarManager:
         host: str = MEMORY_SIDECAR_HOST,
         port: int = MEMORY_SIDECAR_PORT,
         project_root: Path | None = None,
+        sidecar_guard_factory=None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.host = host
-        self.port = int(port)
+        self.base_url = local_base_url(base_url, required_port=MEMORY_SIDECAR_PORT)
+        if host not in {MEMORY_SIDECAR_HOST, "localhost:11435"}:
+            raise ValueError("Memory sidecar host must remain the dedicated loopback endpoint.")
+        if local_port(port) != MEMORY_SIDECAR_PORT:
+            raise ValueError("Memory sidecar must remain on its dedicated port.")
+        self.host = MEMORY_SIDECAR_HOST
+        self.port = port
+        self._identity: psutil.Process | None = None
+        self._sidecar_guard = None
+        self._sidecar_guard_factory = sidecar_guard_factory or (
+            lambda: WindowsSidecarGuard.acquire(r"Local\Qronos.Memory.Sidecar.v1")
+        )
         self.project_root = project_root or Path(__file__).resolve().parent.parent
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
@@ -176,23 +192,23 @@ class MemorySidecarManager:
             / "temp"
             / "qronos_memory_sidecar_owner.json"
         )
-        self._adopt_stale_owned_sidecar()
+        self._pid_file_written = False
         atexit.register(self.shutdown)
 
     def _api_ready(self, timeout: float = 0.25) -> bool:
         try:
-            response = requests.get(
-                f"{self.base_url}/api/version",
+            payload = request_json(
+                "GET",
+                f"{local_base_url(self.base_url, required_port=MEMORY_SIDECAR_PORT)}/api/version",
                 timeout=timeout,
             )
-            response.raise_for_status()
-            return True
+            return isinstance(payload, dict) and isinstance(payload.get("version"), str)
         except Exception:
             return False
 
     def _port_open(self) -> bool:
         try:
-            with socket.create_connection(("127.0.0.1", self.port), timeout=0.15):
+            with socket.create_connection(("127.0.0.1", local_port(self.port)), timeout=0.15):
                 return True
         except OSError:
             return False
@@ -207,19 +223,19 @@ class MemorySidecarManager:
         tmp = self._pid_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
         os.replace(tmp, self._pid_file)
+        self._pid_file_written = True
 
-    def _adopt_stale_owned_sidecar(self) -> None:
-        if not self._pid_file.is_file() or not self._api_ready():
-            return
-        try:
-            payload = json.loads(self._pid_file.read_text(encoding="utf-8"))
-            pid = int(payload.get("pid", 0))
-            proc = psutil.Process(pid)
-            if "ollama" not in proc.name().casefold():
-                return
-            self._owned = True
-        except Exception:
-            return
+    def _owns_server(self) -> bool:
+        with self._lock:
+            owned = self._owned
+            process = self._process
+            identity = self._identity
+        return bool(
+            owned and identity is not None and process is not None
+            and process.poll() is None
+            and process_owns_listener(identity, self.port)
+            and process.poll() is None
+        )
 
     @staticmethod
     def _ollama_executable() -> str | None:
@@ -236,11 +252,13 @@ class MemorySidecarManager:
     def ensure_server(self) -> bool:
         with self._lock:
             if self._api_ready():
-                return True
+                return self._owns_server()
             if self._port_open():
                 # Never interfere with an unrelated service occupying the port.
                 return False
 
+            if self.host != MEMORY_SIDECAR_HOST or self.port != MEMORY_SIDECAR_PORT:
+                return False
             executable = self._ollama_executable()
             if not executable:
                 return False
@@ -262,6 +280,8 @@ class MemorySidecarManager:
                 creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
             try:
+                if os.name == "nt":
+                    self._sidecar_guard = self._sidecar_guard_factory()
                 self._process = subprocess.Popen(
                     [executable, "serve"],
                     cwd=str(self.project_root),
@@ -271,10 +291,21 @@ class MemorySidecarManager:
                     stderr=subprocess.DEVNULL,
                     creationflags=creationflags,
                 )
+                self._identity = psutil.Process(self._process.pid)
+                self._identity.create_time()  # Capture PID lifetime before publishing ownership.
+                if self._sidecar_guard is not None:
+                    self._sidecar_guard.bind_process(
+                        self._process.pid, process_handle=getattr(self._process, "_handle", None),
+                    )
                 self._owned = True
-                self._write_pid_file(self._process.pid)
                 try:
-                    psutil.Process(self._process.pid).nice(
+                    # Diagnostics only; a read-only installation must not undo
+                    # verified live/job ownership or prevent local inference.
+                    self._write_pid_file(self._process.pid)
+                except OSError:
+                    pass
+                try:
+                    self._identity.nice(
                         psutil.BELOW_NORMAL_PRIORITY_CLASS
                         if os.name == "nt"
                         else 10
@@ -282,13 +313,24 @@ class MemorySidecarManager:
                 except Exception:
                     pass
             except Exception:
+                # Only the captured Popen may be cleaned up on failed startup.
+                if self._process is not None and self._process.poll() is None:
+                    try:
+                        self._process.kill()
+                        self._process.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                if self._sidecar_guard is not None:
+                    self._sidecar_guard.close()
+                self._sidecar_guard = None
+                self._identity = None
                 self._process = None
                 self._owned = False
                 return False
 
         deadline = time.monotonic() + 1.25
         while time.monotonic() < deadline:
-            if self._api_ready(timeout=0.2):
+            if self._api_ready(timeout=0.2) and self._owns_server():
                 return True
             if self._process is not None and self._process.poll() is not None:
                 return False
@@ -297,15 +339,29 @@ class MemorySidecarManager:
 
     def _running_models(self) -> list[dict[str, object]]:
         try:
-            response = requests.get(f"{self.base_url}/api/ps", timeout=0.3)
-            response.raise_for_status()
-            payload = response.json()
+            payload = request_json(
+                "GET",
+                f"{local_base_url(self.base_url, required_port=MEMORY_SIDECAR_PORT)}/api/ps",
+                timeout=0.3,
+            )
             models = payload.get("models", []) if isinstance(payload, dict) else []
             return [item for item in models if isinstance(item, dict)]
         except Exception:
             return []
 
+    @property
+    def owned_process(self):
+        with self._lock:
+            return self._identity if self._owns_server() else None
+
+    @property
+    def owns_server(self) -> bool:
+        with self._lock:
+            return self._owns_server()
+
     def model_ready_cpu_only(self) -> bool:
+        if not self.owns_server:
+            return False
         wanted = DEFAULT_EMBEDDING_MODEL.casefold()
         for item in self._running_models():
             name = str(item.get("name", item.get("model", ""))).casefold()
@@ -314,22 +370,23 @@ class MemorySidecarManager:
                 or name.split(":", 1)[0] == wanted.split(":", 1)[0]
             ):
                 continue
-            return int(item.get("size_vram", 0) or 0) == 0
+            vram = item.get("size_vram")
+            return type(vram) is int and vram == 0
         return False
 
     def warm_model(self) -> bool:
-        # If another application owns an Ollama service on the sidecar port,
-        # Qronos may use an already-resident CPU-only BGE but never load, unload,
-        # or otherwise mutate that external service.
-        if self._api_ready() and not self._owned:
-            return self.model_ready_cpu_only()
+        # A healthy endpoint alone never authorizes load/unload on another server.
         if not self.ensure_server():
             return False
         if self.model_ready_cpu_only():
             return True
+        owner = self.owned_process
+        if owner is None:
+            return False
         try:
-            response = requests.post(
-                f"{self.base_url}/api/embed",
+            request_json(
+                "POST",
+                f"{local_base_url(self.base_url, required_port=MEMORY_SIDECAR_PORT)}/api/embed",
                 json={
                     "model": DEFAULT_EMBEDDING_MODEL,
                     "input": ["Qronos local memory warmup"],
@@ -338,18 +395,20 @@ class MemorySidecarManager:
                     "options": {"num_gpu": 0},
                 },
                 timeout=MEMORY_SIDECAR_WARM_TIMEOUT_SECONDS,
+                owner=owner,
             )
-            response.raise_for_status()
         except Exception:
             return False
         return self.model_ready_cpu_only()
 
     def unload_owned_model(self) -> None:
-        if not self._owned or not self._api_ready():
+        owner = self.owned_process
+        if owner is None or not self._api_ready():
             return
         try:
-            requests.post(
-                f"{self.base_url}/api/embed",
+            request_json(
+                "POST",
+                f"{local_base_url(self.base_url, required_port=MEMORY_SIDECAR_PORT)}/api/embed",
                 json={
                     "model": DEFAULT_EMBEDDING_MODEL,
                     "input": ["Qronos memory unload"],
@@ -357,6 +416,7 @@ class MemorySidecarManager:
                     "options": {"num_gpu": 0},
                 },
                 timeout=3.0,
+                owner=owner,
             )
         except Exception:
             pass
@@ -413,33 +473,31 @@ class MemorySidecarManager:
         with self._lock:
             if not self._owned:
                 return
-            pid = None
-            if self._process is not None:
-                pid = self._process.pid
-            elif self._pid_file.is_file():
+            # Never reconstruct authority from persisted metadata or a process name.
+            proc = self._identity
+            if proc is not None:
                 try:
-                    pid = int(json.loads(self._pid_file.read_text(encoding="utf-8")).get("pid", 0))
-                except Exception:
-                    pid = None
-
-            if pid:
-                try:
-                    proc = psutil.Process(pid)
-                    if "ollama" in proc.name().casefold():
-                        proc.terminate()
+                    if proc.is_running():
+                        proc.terminate()  # psutil verifies PID + creation time again.
                         try:
                             proc.wait(timeout=2.0)
                         except psutil.TimeoutExpired:
                             proc.kill()
-                except Exception:
+                except psutil.Error:
                     pass
+            guard = self._sidecar_guard
+            self._sidecar_guard = None
+            if guard is not None:
+                guard.close()
+            self._identity = None
             self._process = None
             self._owned = False
             try:
-                self._pid_file.unlink(missing_ok=True)
-            except Exception:
+                if self._pid_file_written:
+                    self._pid_file.unlink(missing_ok=True)
+                    self._pid_file_written = False
+            except OSError:
                 pass
-
 
 class MemoryRuntime:
     """Fail-open, resource-aware User Memory retrieval for Brain context."""
@@ -455,7 +513,9 @@ class MemoryRuntime:
         self.activity_guard = activity_guard
         self.sidecar = sidecar or MemorySidecarManager()
         self.store_factory = store_factory
-        self.provider = SidecarEmbeddingProvider()
+        self.provider = SidecarEmbeddingProvider(
+            owner_check=lambda: getattr(self.sidecar, "owned_process", None),
+        )
         self.store = self.store_factory(provider=self.provider)
         if start_supervisor:
             self.sidecar.start_supervisor(

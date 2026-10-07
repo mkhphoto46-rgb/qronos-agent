@@ -38,7 +38,7 @@ class FakeGuard:
         self.bound_pids: list[int] = []
         self.closed = False
 
-    def bind_process(self, pid: int) -> None:
+    def bind_process(self, pid: int, *, process_handle=None) -> None:
         self.bound_pids.append(pid)
 
     def close(self) -> None:
@@ -213,10 +213,12 @@ class TestWhisperServerRuntime(unittest.TestCase):
                 "prepare",
                 return_value=None,
             ), patch(
-                "core.whisper_server_runtime.urllib.request.urlopen",
-                side_effect=lambda *args, **kwargs: FakeResponse(
+                "core.whisper_server_runtime.process_owns_listener", return_value=True,
+            ), patch(
+                "core.whisper_server_runtime.request_bytes",
+                return_value=json.dumps(
                     {"text": "دو به علاوه دو چند می شه؟"}
-                ),
+                ).encode("utf-8"),
             ):
                 transcript = runtime.transcribe_file(
                     audio,
