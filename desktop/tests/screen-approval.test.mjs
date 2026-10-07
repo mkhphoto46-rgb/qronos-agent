@@ -283,12 +283,36 @@ test("re-announcing the displayed identity does not duplicate it", () => {
 
 // ---------------------------------------------------------------- dialog
 
-function dialogModule() {
+/**
+ * A tiny stand-in for React's renderer, just enough to run the real panel's
+ * hooks across re-renders: refs persist per mounted instance (a new approval
+ * identity remounts, as the component's key does), refs are attached to fake
+ * nodes before effects run (as React's commit does), and effects re-run only
+ * when their dependencies change, layout effects first. Fake nodes ignore
+ * focus() while disabled, like browsers. This exercises the component's focus
+ * logic; it does NOT prove real browser focus behaviour (see the browser QA).
+ */
+function mountDialog(onAnswer = () => {}) {
   const jsx = (type, props, key) => ({ type, props: props ?? {}, key });
-  const effects = [];
+  const doc = { activeElement: null, focusLog: [] };
+  let slots = [];
+  let index = 0;
+  let queue = [];
+  const effectHook = (kind) => (fn, deps) => {
+    const slot = index++;
+    const previous = slots[slot];
+    const changed = !previous || !deps || deps.some((dep, at) => !Object.is(dep, previous.deps[at]));
+    slots[slot] = { deps };
+    if (changed) queue.push({ kind, fn });
+  };
   const react = {
-    useRef: (value) => ({ current: value }),
-    useEffect: (fn) => { effects.push(fn); },
+    useRef(value) {
+      const slot = index++;
+      if (!slots[slot]) slots[slot] = { current: value };
+      return slots[slot];
+    },
+    useEffect: effectHook("effect"),
+    useLayoutEffect: effectHook("layout"),
   };
   const { exports } = load(compile("../src/components/ScreenApprovalDialog.tsx", true), {
     react,
@@ -296,15 +320,53 @@ function dialogModule() {
     "../screenApproval": approval,
     "./ScreenApprovalDialog.css": {},
   });
-  return { Dialog: exports.default, effects };
+  const Dialog = exports.default;
+  let mountedKey = null;
+
+  function render(view) {
+    const outer = Dialog({ view, onAnswer });
+    if (outer === null) {
+      slots = [];
+      mountedKey = null;
+      return null;
+    }
+    assert.equal(outer.key, view.prompt.approvalId); // fresh dialog per identity
+    if (outer.key !== mountedKey) {
+      slots = [];
+      mountedKey = outer.key;
+    }
+    index = 0;
+    queue = [];
+    const tree = outer.type(outer.props);
+    for (const node of findAll(tree, (n) => n.props?.ref)) {
+      const ref = node.props.ref;
+      if (!ref.current) {
+        const label = node.props.role ?? text(node);
+        ref.current = {
+          label,
+          disabled: false,
+          focus() {
+            if (this.disabled) return; // a disabled control cannot take focus
+            doc.activeElement = this;
+            doc.focusLog.push(label);
+          },
+        };
+      }
+      ref.current.disabled = node.props.disabled === true;
+      // A focused control that becomes disabled loses focus (to <body>).
+      if (ref.current.disabled && doc.activeElement === ref.current) doc.activeElement = null;
+    }
+    for (const kind of ["layout", "effect"]) {
+      queue.filter((item) => item.kind === kind).forEach((item) => item.fn());
+    }
+    return tree;
+  }
+
+  return { render, doc };
 }
 
 function render(view, onAnswer) {
-  const { Dialog, effects } = dialogModule();
-  const outer = Dialog({ view, onAnswer });
-  if (outer === null) return { tree: null, effects };
-  assert.equal(outer.key, view.prompt.approvalId); // fresh dialog per identity
-  return { tree: outer.type(outer.props), effects };
+  return { tree: mountDialog(onAnswer).render(view) };
 }
 
 function findAll(node, predicate, found = []) {
@@ -329,6 +391,9 @@ function viewFor(approvalId, overrides = {}) {
   return { ...controller.getSnapshot(), ...overrides };
 }
 
+const dialogOf = (tree) => findAll(tree, (n) => n.props?.role === "alertdialog")[0];
+const buttonsOf = (tree) => findAll(tree, (n) => n.type === "button");
+
 test("dialog renders nothing when no prompt is displayed", () => {
   assert.equal(render(null, () => {}).tree, null);
 });
@@ -336,13 +401,14 @@ test("dialog renders nothing when no prompt is displayed", () => {
 test("dialog is an accessible modal alert dialog with Persian copy", () => {
   const view = viewFor(id("a"));
   const { tree } = render(view, () => {});
-  const [dialog] = findAll(tree, (n) => n.props?.role === "alertdialog");
+  const dialog = dialogOf(tree);
   assert.equal(dialog.props["aria-modal"], "true");
+  assert.equal(dialog.props.tabIndex, -1); // focusable by script only, not a Tab stop
   const [title] = findAll(tree, (n) => n.props?.id === dialog.props["aria-labelledby"]);
   const [body] = findAll(tree, (n) => n.props?.id === dialog.props["aria-describedby"]);
   assert.match(text(title), /Paint/);
   assert.match(text(body), /یک گربه/);
-  const buttons = findAll(tree, (n) => n.type === "button");
+  const buttons = buttonsOf(tree);
   assert.deepEqual(buttons.map(text), ["رد کردن", "اجازه می‌دهم"]);
   assert.ok(buttons.every((b) => b.props.disabled === false));
 });
@@ -350,42 +416,41 @@ test("dialog is an accessible modal alert dialog with Persian copy", () => {
 test("dialog buttons answer exactly the displayed identity", () => {
   const calls = [];
   const { tree } = render(viewFor(id("a")), (...args) => calls.push(args));
-  const [decline, allow] = findAll(tree, (n) => n.type === "button");
+  const [decline, allow] = buttonsOf(tree);
   decline.props.onClick();
   allow.props.onClick();
   assert.deepEqual(calls, [[id("a"), false], [id("a"), true]]);
 });
 
+const keyEvent = (key, extra = {}) => ({
+  key,
+  shiftKey: false,
+  preventDefault() { this.prevented = true; },
+  stopPropagation() { this.stopped = true; },
+  ...extra,
+});
+
 test("Escape declines; it is ignored while a decision is being sent", () => {
   const calls = [];
-  const keyEvent = (key) => ({
-    key,
-    shiftKey: false,
-    preventDefault() { this.prevented = true; },
-    stopPropagation() { this.stopped = true; },
-  });
-
   const idle = render(viewFor(id("a")), (...args) => calls.push(args)).tree;
-  const [dialog] = findAll(idle, (n) => n.props?.role === "alertdialog");
   const escape = keyEvent("Escape");
-  dialog.props.onKeyDown(escape);
+  dialogOf(idle).props.onKeyDown(escape);
   assert.equal(escape.prevented, true);
   assert.equal(escape.stopped, true);
   const other = keyEvent("x");
-  dialog.props.onKeyDown(other);
-  assert.equal(other.stopped, undefined); // other keys still reach app hotkeys
+  dialogOf(idle).props.onKeyDown(other);
+  assert.equal(other.stopped, undefined); // other keys (e.g. Stop hotkey) still reach the app
   assert.deepEqual(calls, [[id("a"), false]]);
 
   const busy = render(viewFor(id("a"), { submitting: true }), (...args) => calls.push(args)).tree;
-  const [busyDialog] = findAll(busy, (n) => n.props?.role === "alertdialog");
-  busyDialog.props.onKeyDown(keyEvent("Escape"));
+  dialogOf(busy).props.onKeyDown(keyEvent("Escape"));
   assert.equal(calls.length, 1);
-  assert.equal(busyDialog.props["aria-busy"], true);
+  assert.equal(dialogOf(busy).props["aria-busy"], true);
 });
 
 test("buttons are disabled while sending and an unconfirmed outcome is announced honestly", () => {
   const sending = render(viewFor(id("a"), { submitting: true }), () => {}).tree;
-  const buttons = findAll(sending, (n) => n.type === "button");
+  const buttons = buttonsOf(sending);
   assert.ok(buttons.every((b) => b.props.disabled === true));
   assert.equal(text(buttons[1]), "در حال ارسال...");
 
@@ -400,12 +465,67 @@ test("buttons are disabled while sending and an unconfirmed outcome is announced
 });
 
 test("focus starts on the safe decline choice", () => {
-  const { tree, effects } = render(viewFor(id("a")), () => {});
-  const [decline] = findAll(tree, (n) => n.type === "button" && text(n) === "رد کردن");
-  let focused = false;
-  decline.props.ref.current = { focus() { focused = true; } };
-  effects.forEach((fn) => fn());
-  assert.equal(focused, true);
+  const dialog = mountDialog();
+  dialog.render(viewFor(id("a")));
+  assert.equal(dialog.doc.activeElement.label, "رد کردن");
+});
+
+test("while a decision is sending, focus moves to the dialog itself, not the page", () => {
+  const dialog = mountDialog();
+  const view = viewFor(id("a"));
+  dialog.render(view);
+  dialog.render({ ...view, submitting: true });
+
+  // Without the fix the disabled decline button would drop focus to <body>.
+  assert.ok(dialog.doc.activeElement !== null, "focus fell to <body>");
+  assert.equal(dialog.doc.activeElement.label, "alertdialog");
+});
+
+test("Tab with no enabled button is held inside the dialog while sending", () => {
+  const dialog = mountDialog();
+  const view = viewFor(id("a"));
+  dialog.render(view);
+  const busy = dialog.render({ ...view, submitting: true });
+  const enabled = buttonsOf(busy).filter((b) => !b.props.disabled);
+  for (const shiftKey of [false, true]) {
+    const tab = keyEvent("Tab", { shiftKey, currentTarget: { querySelectorAll: () => enabled } });
+    dialogOf(busy).props.onKeyDown(tab);
+    assert.equal(tab.prevented, true);
+  }
+  assert.equal(dialog.doc.activeElement.label, "alertdialog");
+});
+
+test("an unconfirmed send gives focus back to decline on the same prompt", () => {
+  const dialog = mountDialog();
+  const view = viewFor(id("a"));
+  dialog.render(view);
+  dialog.render({ ...view, submitting: true });
+  dialog.render({ ...view, submitting: false, unconfirmed: true });
+
+  assert.equal(dialog.doc.activeElement.label, "رد کردن");
+  assert.deepEqual(dialog.doc.focusLog, ["رد کردن", "alertdialog", "رد کردن"]);
+});
+
+test("the next prompt starts on decline after a send settles", () => {
+  const dialog = mountDialog();
+  const first = viewFor(id("a"));
+  dialog.render(first);
+  dialog.render({ ...first, submitting: true });
+  dialog.render(viewFor(id("b"))); // first closed; a new identity mounts
+
+  assert.equal(dialog.doc.activeElement.label, "رد کردن");
+  assert.deepEqual(dialog.doc.focusLog, ["رد کردن", "alertdialog", "رد کردن"]);
+});
+
+test("an unrelated re-render does not move focus the person placed", () => {
+  const dialog = mountDialog();
+  const view = viewFor(id("a"));
+  dialog.render(view);
+  const allow = { label: "اجازه می‌دهم" };
+  dialog.doc.activeElement = allow; // the person tabbed to allow
+  dialog.render({ ...view });
+  assert.equal(dialog.doc.activeElement, allow);
+  assert.deepEqual(dialog.doc.focusLog, ["رد کردن"]);
 });
 
 test("the approval flow never uses the blocking window.confirm", () => {
