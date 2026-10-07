@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import type { KeyboardEvent } from "react";
 
 import {
@@ -44,6 +44,8 @@ function ScreenApprovalPanel({
   onAnswer: Props["onAnswer"];
 }) {
   const declineRef = useRef<HTMLButtonElement | null>(null);
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const wasSubmitting = useRef(false);
   const { prompt, text, submitting, unconfirmed } = view;
   const titleId = `screen-approval-title-${prompt.approvalId}`;
   const bodyId = `screen-approval-body-${prompt.approvalId}`;
@@ -51,6 +53,22 @@ function ScreenApprovalPanel({
   useEffect(() => {
     declineRef.current?.focus();
   }, []);
+
+  // While a decision is being sent both buttons are disabled. Chromium (and
+  // so WebView2) then moves focus from the disabled button to <body>, where
+  // Tab no longer reaches this dialog's handler and walks into the page
+  // behind the modal. Keep focus on the dialog itself while nothing is
+  // enabled, and give it back to the safe choice if the send settles with
+  // this same prompt still shown (the unconfirmed case). A settled send that
+  // closes the prompt unmounts this panel; the next prompt starts on decline.
+  useLayoutEffect(() => {
+    if (submitting) {
+      sectionRef.current?.focus();
+    } else if (wasSubmitting.current) {
+      declineRef.current?.focus();
+    }
+    wasSubmitting.current = submitting;
+  }, [submitting]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (screenApprovalKeyIntent(event.key, submitting) === "decline") {
@@ -88,6 +106,8 @@ function ScreenApprovalPanel({
   return (
     <div className="file-approval-backdrop" role="presentation">
       <section
+        ref={sectionRef}
+        tabIndex={-1}
         className="file-approval-dialog screen-approval-dialog"
         role="alertdialog"
         aria-modal="true"
