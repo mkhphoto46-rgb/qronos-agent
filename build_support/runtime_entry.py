@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from typing import Sequence
 
@@ -25,7 +26,20 @@ SERVICES = {
 }
 
 
+def _prevent_asio_selection() -> None:
+    """Keep the frozen backend on the bundled non-ASIO PortAudio build.
+
+    sounddevice loads its ASIO-enabled DLL when SD_ENABLE_ASIO is set. That
+    build is not shipped or reviewed, so the inherited variable is dropped from
+    this process only, before any service can import sounddevice. Source mode
+    and the user's environment settings are left alone.
+    """
+    if getattr(sys, "frozen", False):
+        os.environ.pop("SD_ENABLE_ASIO", None)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _prevent_asio_selection()
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["--version"]:
         print(json.dumps({"name": "qronos-runtime", "protocolVersion": PROTOCOL_VERSION}))

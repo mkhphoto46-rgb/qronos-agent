@@ -16,8 +16,9 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import sysconfig
 
-from build_support.runtime_notices import collect_runtime_notices
+from build_support.runtime_notices import collect_runtime_notices, prune_portaudio
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -156,9 +157,14 @@ def build(destination: Path) -> Path:
     for override in ("QRONOS_PACKAGED_RUNTIME", "QRONOS_DATA_ROOT", "QRONOS_ASSET_ROOT", "QRONOS_BRAIN_CONFIG"):
         environment.pop(override, None)
     subprocess.run(command, cwd=ROOT, env=environment, check=True)
-    # Notices are added before the manifest is written, so the manifest
-    # describes exactly what ships.
-    collect_runtime_notices(bundle)
+    # Notices are added and unused PortAudio builds removed before the
+    # manifest is written, so the manifest describes exactly what ships.
+    pruned: tuple[str, ...] = ()
+    if os.name == "nt":
+        if sysconfig.get_platform() != "win-amd64":
+            raise ValueError("The packaged Windows backend supports x64 builds only.")
+        pruned = prune_portaudio(bundle)
+    collect_runtime_notices(bundle, pruned=pruned)
     write_manifest(bundle)
     verify_manifest(bundle)
     # Use a separate disposable profile; never import the developer's user data.

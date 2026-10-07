@@ -87,6 +87,21 @@ Some items are recorded rather than resolved:
 
 This is technical notice packaging, not a legal clearance.
 
+## Audio host APIs in the packaged backend
+
+The sounddevice package ships PortAudio builds for 32-bit, x64 and ARM64
+Windows, each with and without ASIO. The packaged backend supports x64
+Windows only. It keeps only `libportaudio64bit.dll`, which provides the MME,
+DirectSound, WDM-KS and WASAPI host APIs. Qronos's device selection prefers
+WASAPI and does not use ASIO. The builder refuses to package on non-x64
+Windows. The frozen backend also removes an inherited `SD_ENABLE_ASIO`
+variable from its own process before any audio code loads, so it cannot
+select an ASIO build. Audio devices that are available only through ASIO are
+therefore not supported by the packaged backend. Running from source, and the
+user's environment settings, are unchanged. As before, sounddevice first
+looks for a PortAudio library on the system search path and uses the bundled
+DLL only if none is found.
+
 ## Installed data and optional local assets
 
 Writable settings, logs, memory, cache and temporary audio use the operating

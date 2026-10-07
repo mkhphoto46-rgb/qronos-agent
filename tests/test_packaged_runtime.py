@@ -87,8 +87,24 @@ def test_dispatch_preserves_cli_errors_in_frozen_mode():
     assert json.loads(output.getvalue()) == {"ok": False, "error": "Backend unavailable.", "errorType": "RuntimeError"}
 
 
+@pytest.mark.parametrize("frozen", [True, False])
+def test_inherited_asio_selection_is_dropped_only_by_the_frozen_runtime(monkeypatch, frozen):
+    monkeypatch.setenv("SD_ENABLE_ASIO", "1")
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    seen_at_import = []
+    with patch.object(sys, "argv", ["runtime"]), patch("build_support.runtime_entry.importlib.import_module") as imported:
+        imported.return_value.main.return_value = 0
+        imported.side_effect = lambda module: seen_at_import.append(os.environ.get("SD_ENABLE_ASIO")) or imported.return_value
+        assert main(["audio", "devices"]) == 0
+    assert seen_at_import == ([None] if frozen else ["1"])
+    assert os.environ.get("SD_ENABLE_ASIO") == (None if frozen else "1")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="The packaged backend is built for Windows.")
-def test_build_collects_notices_before_writing_the_manifest(tmp_path, monkeypatch):
+def test_build_prunes_and_collects_notices_before_writing_the_manifest(tmp_path, monkeypatch):
     from build_support import build_runtime
     calls = []
 
@@ -100,11 +116,25 @@ def test_build_collects_notices_before_writing_the_manifest(tmp_path, monkeypatc
         return SimpleNamespace(stdout=json.dumps({"ok": True, "packaged": True}))
 
     monkeypatch.setattr(build_runtime.subprocess, "run", run)
-    monkeypatch.setattr(build_runtime, "collect_runtime_notices", lambda bundle: calls.append("notices"))
+    monkeypatch.setattr(build_runtime.sysconfig, "get_platform", lambda: "win-amd64")
+    monkeypatch.setattr(build_runtime, "prune_portaudio", lambda bundle: calls.append("prune") or ("removed.dll",))
+    monkeypatch.setattr(build_runtime, "collect_runtime_notices", lambda bundle, pruned: calls.append(("notices", pruned)))
     monkeypatch.setattr(build_runtime, "write_manifest", lambda bundle: calls.append("manifest"))
     monkeypatch.setattr(build_runtime, "verify_manifest", lambda bundle: calls.append("verify"))
     build_runtime.build(tmp_path / "out")
-    assert calls == ["pyinstaller", "notices", "manifest", "verify", "self-check"]
+    assert calls == ["pyinstaller", "prune", ("notices", ("removed.dll",)), "manifest", "verify", "self-check"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The packaged backend is built for Windows.")
+def test_build_refuses_non_x64_windows_before_writing_a_manifest(tmp_path, monkeypatch):
+    from build_support import build_runtime
+    calls = []
+    monkeypatch.setattr(build_runtime.subprocess, "run", lambda command, **_options: calls.append("pyinstaller"))
+    monkeypatch.setattr(build_runtime.sysconfig, "get_platform", lambda: "win-arm64")
+    monkeypatch.setattr(build_runtime, "write_manifest", lambda bundle: calls.append("manifest"))
+    with pytest.raises(ValueError, match="x64"):
+        build_runtime.build(tmp_path / "out")
+    assert calls == ["pyinstaller"]
 
 
 def test_installed_storage_locator_uses_the_same_isolated_profile(tmp_path, monkeypatch):
