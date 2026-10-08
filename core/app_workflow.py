@@ -628,11 +628,12 @@ class SideEffectJournal:
             return False
 
     def reconcile_interrupted(self, *, alive: Callable[[str], bool] | None = None) -> tuple[str, ...]:
-        """Mark attempts whose owning process is gone as UNCERTAIN.
+        """Mark attempts whose owning process has certainly ended as UNCERTAIN.
 
         A crash after ``begin`` leaves SUBMITTING behind. Its outcome is
         unknown, so it becomes UNCERTAIN: still blocking a repeat, but now
-        visible to a person who can check and acknowledge it.
+        visible to a person who can check and acknowledge it. An attempt whose
+        owner cannot be proven gone stays SUBMITTING and cannot be released.
         """
         is_alive = alive or _owner_alive
         changed: list[str] = []
@@ -707,19 +708,32 @@ def _current_owner() -> str:
 
 
 def _owner_alive(owner: str) -> bool:
-    """True only when the recorded process (same pid and start time) still runs."""
+    """False only when the recorded process has certainly ended.
+
+    Releasing an attempt whose owner might still be running would allow the
+    same print or download twice, so anything short of proof counts as alive:
+    an unreadable owner, a missing start time while the pid runs, denied
+    access, or psutil itself being unavailable. Such an attempt keeps
+    blocking until a later check can prove its process is gone.
+    """
     pid_text, _, started = owner.partition(":")
     try:
         pid = int(pid_text)
     except ValueError:
-        return False
+        return True
     try:
         import psutil
-
+    except ImportError:
+        return True
+    try:
         process = psutil.Process(pid)
-        return bool(started) and f"{process.create_time():.3f}" == started
-    except Exception:  # noqa: BLE001 - gone, inaccessible or unknown: not alive
+        if not started:
+            return True  # this pid runs; it may be the owner
+        return f"{process.create_time():.3f}" == started
+    except psutil.NoSuchProcess:  # includes a zombie: it has exited
         return False
+    except Exception:  # noqa: BLE001 - access denied or unknown: not proof of an end
+        return True
 
 
 def operation_key(approval_id: str, digest: str) -> str:

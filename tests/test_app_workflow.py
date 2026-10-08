@@ -484,6 +484,89 @@ def test_an_attempt_owned_by_a_running_process_is_not_reconciled(tmp_path):
     assert journal.get("op-live").state is SideEffectState.SUBMITTING
 
 
+def test_a_live_owner_without_a_readable_start_time_is_never_released_w7(tmp_path):
+    """Reviewer W7: a running child whose start time psutil cannot read."""
+    path = tmp_path / "side-effects.json"
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-c", textwrap.dedent("""
+            import sys, time
+            sys.path.insert(0, sys.argv[1])
+            import psutil
+            def denied(self):
+                raise psutil.AccessDenied()
+            psutil.Process.create_time = denied
+            from core.app_workflow import SideEffectJournal
+            SideEffectJournal(sys.argv[2]).begin("op-live", "content-x")
+            print("begun", flush=True)
+            sys.stdin.read()  # stays alive until the test closes stdin
+        """), str(ROOT), str(path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "begun"
+        journal = SideEffectJournal(path)
+        assert journal.reconcile_interrupted() == ()
+        assert journal.get("op-live").state is SideEffectState.SUBMITTING
+        with pytest.raises(WorkflowError):
+            journal.acknowledge("op-live")
+        with pytest.raises(DuplicateSideEffect):
+            journal.begin("op-repeat", "content-x")
+    finally:
+        child.stdin.close()
+        child.wait(timeout=60)
+    # Once its process has certainly ended, a person can check and release it.
+    assert journal.reconcile_interrupted() == ("op-live",)
+    journal.acknowledge("op-live", "checked")
+    journal.begin("op-repeat", "content-x")
+
+
+class _Process:
+    def __init__(self, pid, created=None, error=None):
+        self.created = created
+        self.error = error
+
+    def create_time(self):
+        if self.error is not None:
+            raise self.error
+        return self.created
+
+
+@pytest.mark.parametrize("owner, process, alive", [
+    ("", None, True),                      # unreadable owner: never assumed gone
+    ("not-a-pid:1.000", None, True),
+    ("4242:", "running", True),            # no start time while the pid runs
+    ("4242:1.000", "denied-open", True),
+    ("4242:1.000", "denied-time", True),
+    ("4242:1.000", "running", True),
+    ("4242:2.000", "running", False),      # the pid was reused by another process
+    ("4242:1.000", "gone", False),
+    ("4242:", "gone", False),
+])
+def test_owner_liveness_is_only_false_with_proof_the_process_ended(monkeypatch, owner, process, alive):
+    import psutil
+
+    from core.app_workflow import _owner_alive
+
+    def make(pid):
+        if process == "gone":
+            raise psutil.NoSuchProcess(pid)
+        if process == "denied-open":
+            raise psutil.AccessDenied(pid)
+        if process == "denied-time":
+            return _Process(pid, error=psutil.AccessDenied(pid))
+        return _Process(pid, created=1.0)
+
+    monkeypatch.setattr(psutil, "Process", make)
+    assert _owner_alive(owner) is alive
+
+
+def test_without_psutil_no_owner_counts_as_ended(monkeypatch):
+    from core.app_workflow import _owner_alive
+
+    monkeypatch.setitem(sys.modules, "psutil", None)  # import psutil now fails
+    assert _owner_alive("4242:1.000") is True
+
+
 def test_settle_if_unresolved_never_overrides_a_settled_outcome(tmp_path):
     journal = SideEffectJournal(tmp_path / "side-effects.json")
     journal.begin("op", "content")
