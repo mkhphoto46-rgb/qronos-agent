@@ -22,6 +22,7 @@ import unittest
 import pytest
 
 import core.runtime_bridge as runtime_bridge
+import tests.test_screen_capture as screen_capture_tests
 from tests import conftest
 from tests.live_device import (
     LIVE_DEVICE_ENV,
@@ -202,17 +203,61 @@ def test_names_bound_elsewhere_in_core_are_replaced_too():
         runtime_bridge.foreground_window()
 
 
+class _NeverStarted:
+    """Fake Popen delegate. Records entry and does nothing, so a broken guard
+    in these tests can never start a real program."""
+
+    entered: list = []
+
+    def __init__(self, args, *pargs, **kwargs):
+        _NeverStarted.entered.append(args)
+
+
+@pytest.fixture
+def fake_popen():
+    _NeverStarted.entered = []
+    return conftest.guarded_popen_class(_NeverStarted)
+
+
+BLOCKED_PROGRAMS = [
+    # Sequences: the first item is one whole path, spaces included.
+    (["E:/Local AI/whisper/bin/Release/whisper-cli.exe", "-m", "E:/Local AI/models/x.bin"], {}),
+    ([r"E:\Local AI\whisper\bin\Release\whisper-server.exe", "--port", "8178"], {}),
+    ([r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "--query-gpu=memory.used"], {}),
+    (["C:/Program Files/Ollama/ollama.exe", "serve"], {}),
+    ([r"D:\tools\crispasr.EXE", "--server"], {}),
+    (["nvidia-smi"], {}),
+    ([Path("E:/Local AI/llama/llama-server.exe")], {}),
+    # String commands, quoted or not.
+    ('"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe" --query-gpu=name', {}),
+    ("C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe --query-gpu=name", {}),
+    ("ollama run anything", {}),
+    # Through a shell, shell=True, or an explicit executable.
+    (["cmd", "/c", "E:/Local AI/whisper/whisper-cli.exe", "-h"], {}),
+    (["powershell.exe", "-Command", "& 'C:\\Program Files\\Ollama\\ollama.exe' serve"], {}),
+    (["echo ready & whisper-cli.exe -h"], {"shell": True}),
+    (["tool"], {"executable": r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"}),
+]
+
+
+@pytest.mark.parametrize("args, kwargs", BLOCKED_PROGRAMS)
+def test_gpu_and_inference_programs_are_refused_and_the_delegate_never_entered(fake_popen, args, kwargs):
+    with pytest.raises(LiveDeviceBlocked):
+        fake_popen(args, **kwargs)
+    assert _NeverStarted.entered == []
+
+
 @pytest.mark.parametrize("args", [
-    ["nvidia-smi", "--query-gpu=memory.used", "--format=csv"],
-    [r"C:\runtime\whisper\bin\Release\whisper-cli.exe", "-m", "model.bin"],
-    "ollama run anything",
-    [r"D:\tools\crispasr.EXE", "--server"],
+    [sys.executable, "-c", "print('fixture')"],
+    ["C:/Program Files/Python/python.exe", "-m", "pytest"],
+    "git status --short",
+    ["powershell.exe", "-NoProfile", "-Command", "[Windows.UI.Automation]"],
+    [r"E:\Local AI\tools\not-nvidia-smi-helper.exe"],
+    ["cmd", "/c", "echo", "whisper-client-notes.txt"],
 ])
-def test_gpu_and_inference_processes_are_refused_before_they_start(args):
-    with pytest.raises(LiveDeviceBlocked):
-        subprocess.Popen(args)
-    with pytest.raises(LiveDeviceBlocked):
-        subprocess.run(args)
+def test_ordinary_programs_reach_the_delegate(fake_popen, args):
+    fake_popen(args)
+    assert _NeverStarted.entered == [args]
 
 
 def test_ordinary_child_processes_still_run():
@@ -220,14 +265,61 @@ def test_ordinary_child_processes_still_run():
     assert result.stdout.strip() == "fixture process"
 
 
-def test_the_local_model_port_is_refused_before_connecting():
-    for host in ("127.0.0.1", "localhost"):
-        with socket.socket() as probe:
-            with pytest.raises(LiveDeviceBlocked):
-                probe.connect((host, 11434))
-        with socket.socket() as probe:
-            with pytest.raises(LiveDeviceBlocked):
-                probe.connect_ex((host, 11434))
+def test_the_boundary_is_installed_in_this_software_test():
+    assert getattr(subprocess.Popen, "live_device_guard", False) is True
+    assert getattr(socket.socket.connect, "live_device_guard", False) is True
+    assert getattr(socket.socket.connect_ex, "live_device_guard", False) is True
+
+
+@pytest.mark.parametrize("address", [
+    ("127.0.0.1", 11434), ("localhost", 11434), ("::1", 11434), ("0.0.0.0", 11434),
+    ("127.0.0.1", 11435), ("LOCALHOST", 11435), ("127.0.0.2", 11435),
+    ("127.0.0.1", 8178), ("[::1]", 8178),
+])
+def test_real_local_inference_endpoints_are_refused_and_the_delegate_never_entered(address):
+    entered = []
+    connect = conftest.guarded_connect(lambda sock, addr: entered.append(addr))
+    with pytest.raises(LiveDeviceBlocked):
+        connect(None, address)
+    assert entered == []
+
+
+@pytest.mark.parametrize("address", [
+    ("127.0.0.1", 0), ("127.0.0.1", 49152), ("127.0.0.1", 11436), ("192.0.2.1", 11434), "/tmp/socket",
+])
+def test_other_addresses_reach_the_connect_delegate(address):
+    entered = []
+    connect = conftest.guarded_connect(lambda sock, addr: entered.append(addr))
+    connect(None, address)
+    assert entered == [address]
+
+
+def test_the_endpoint_ports_match_the_product_defaults():
+    from core.memory_runtime import MEMORY_SIDECAR_PORT
+    from core.ollama_controller import OllamaController
+    from core.whisper_server_runtime import DEFAULT_PORT
+
+    assert {MEMORY_SIDECAR_PORT, DEFAULT_PORT} <= conftest.LIVE_MODEL_PORTS
+    assert OllamaController().base_url.rsplit(":", 1)[-1].rstrip("/") == "11434"
+    assert 11434 in conftest.LIVE_MODEL_PORTS
+
+
+def test_primitive_aliases_in_test_modules_are_replaced_too():
+    # tests/test_screen_capture.py imports foreground_window by name; this
+    # module imported it at collection, before the boundary was installed.
+    assert getattr(screen_capture_tests.foreground_window, "live_device_stand_in", None) == (
+        "reading the real foreground window"
+    )
+
+
+def test_the_only_alias_exemption_is_the_platform_forced_unit_test():
+    assert conftest.REAL_ALIAS_EXEMPT_NODES == {
+        "tests/test_screen_capture.py::TestOffWindows::test_there_is_no_foreground_window_without_windows",
+    }
+    import inspect
+    from tests.test_screen_capture import TestOffWindows
+    source = inspect.getsource(TestOffWindows.test_there_is_no_foreground_window_without_windows)
+    assert source.index('screen_capture.sys.platform = "linux"') < source.index("foreground_window()")
 
 
 def test_loopback_fixture_servers_still_work():

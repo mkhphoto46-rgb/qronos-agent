@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -27,8 +29,15 @@ from tests.live_device import (
 #
 # Real device primitives. Every test that is not an opted-in live-device test
 # gets a stand-in that raises before the device is touched. They are replaced
-# wherever a loaded core module bound them by name (runtime_bridge imports
-# foreground_window directly), matched by identity.
+# wherever a loaded core module or test module bound them by name
+# (runtime_bridge imports foreground_window directly), matched by identity.
+#
+# What this boundary does NOT promise: it covers the primitives listed here,
+# subprocess.Popen and socket.socket.connect/connect_ex. Code that reaches a
+# device another way (ctypes/WinRT calls not listed, os.system, asyncio's
+# Windows proactor connects, a module bound before this fixture ran through a
+# closure, or a new adapter) is not intercepted. The marker inventory and the
+# direct unittest skips are the primary gate; this is a second layer.
 LIVE_DEVICE_FUNCTIONS = (
     (screen_capture, "_grab_with_gdi", "capturing real screen or window pixels"),
     (screen_capture, "foreground_window", "reading the real foreground window"),
@@ -42,9 +51,25 @@ LIVE_DEVICE_FUNCTIONS = (
 LIVE_DEVICE_EXECUTABLES = frozenset({
     "nvidia-smi", "whisper-cli", "whisper-server", "crispasr", "ollama", "llama-server",
 })
-# The local model server's default port: a test may not reach a real model.
-LIVE_MODEL_PORTS = frozenset({11434})
-_LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+# Programs that run another command line given to them.
+_SHELLS = frozenset({"cmd", "powershell", "pwsh", "bash", "sh", "wsl", "start"})
+# Real local inference endpoints a test may not reach:
+#   11434 Ollama (core/ollama_controller.py, core/user_memory.py)
+#   11435 BGE-M3 CPU embedding sidecar (core/memory_runtime.py MEMORY_SIDECAR_PORT)
+#   8178  whisper-server default (core/whisper_server_runtime.py DEFAULT_PORT)
+# Chatterbox picks its port at run time; its crispasr process is blocked above.
+LIVE_MODEL_PORTS = frozenset({11434, 11435, 8178})
+_TESTS_DIR = Path(__file__).resolve().parent
+# Test modules that keep their own by-name binding of a primitive because the
+# test forces the non-Windows branch before calling it (no OS call is made).
+REAL_ALIAS_EXEMPT_NODES = frozenset({
+    "tests/test_screen_capture.py::TestOffWindows::test_there_is_no_foreground_window_without_windows",
+})
+_TOOL_IN_COMMAND = re.compile(
+    r"(?:^|[\s\"'\\/=&|;(])(" + "|".join(re.escape(name) for name in sorted(LIVE_DEVICE_EXECUTABLES))
+    + r")(?:\.exe)?(?=$|[\s\"'&|;)])",
+    re.IGNORECASE,
+)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -68,60 +93,130 @@ def _blocked(what: str):
     return refuse
 
 
-def _executable_name(args) -> str:
-    first = args if isinstance(args, (str, bytes, os.PathLike)) else (next(iter(args), "") if args else "")
-    text = os.fsdecode(first) if isinstance(first, (bytes, os.PathLike)) else str(first)
-    token = text.strip().split()[0] if text.strip() else ""
-    name = token.strip('"').replace("\\", "/").rsplit("/", 1)[-1].lower()
+def _program_name(path) -> str:
+    """Base name of one whole executable path, without splitting on spaces."""
+    text = os.fsdecode(path) if isinstance(path, (bytes, os.PathLike)) else str(path)
+    name = text.strip().strip("\"'").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
     return name[:-4] if name.endswith(".exe") else name
 
 
-def install_live_device_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace every real device primitive with a stand-in that refuses."""
-    for module, name, what in LIVE_DEVICE_FUNCTIONS:
-        real = getattr(module, name)
-        stand_in = _blocked(what)
-        for loaded_name, loaded in list(sys.modules.items()):
-            if loaded is None or not (loaded_name == "core" or loaded_name.startswith("core.")):
-                continue
-            for attribute, value in list(vars(loaded).items()):
-                if value is real:
-                    monkeypatch.setattr(loaded, attribute, stand_in)
+def blocked_program(args, kwargs: dict | None = None) -> str | None:
+    """The GPU/inference program this Popen call would start, if any.
 
-    original_popen = subprocess.Popen
+    A sequence's first item is one path, spaces and all ("E:/Local AI/.../
+    whisper-cli.exe"). A string command, a shell=True call, an explicit
+    executable= and a shell launcher's arguments are all searched in full.
+    """
+    kwargs = kwargs or {}
+    names: list[str] = []
+    if kwargs.get("executable"):
+        names.append(_program_name(kwargs["executable"]))
+    if isinstance(args, (str, bytes)):
+        command = os.fsdecode(args)
+    elif isinstance(args, os.PathLike):
+        command = None
+        names.append(_program_name(args))
+    else:
+        items = [os.fsdecode(item) if isinstance(item, (bytes, os.PathLike)) else str(item) for item in args]
+        command = None
+        if items:
+            names.append(_program_name(items[0]))
+            if kwargs.get("shell") or _program_name(items[0]) in _SHELLS:
+                command = subprocess.list2cmdline(items)
+    for name in names:
+        if name in LIVE_DEVICE_EXECUTABLES:
+            return name
+    if command is not None:
+        match = _TOOL_IN_COMMAND.search(command)
+        if match:
+            return match.group(1).lower()
+    return None
 
-    class GuardedPopen(original_popen):  # type: ignore[misc, valid-type]
+
+def _is_loopback_host(host) -> bool:
+    text = str(host).strip("[]").lower()
+    if text in {"localhost", ""}:
+        return True
+    try:
+        address = ipaddress.ip_address(text.split("%", 1)[0])
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def refused_model_endpoint(address) -> str | None:
+    """'host:port' when the address is a real local inference endpoint."""
+    if isinstance(address, tuple) and len(address) >= 2 and isinstance(address[1], int) \
+            and address[1] in LIVE_MODEL_PORTS and _is_loopback_host(address[0]):
+        return f"{address[0]}:{address[1]}"
+    return None
+
+
+def guarded_popen_class(delegate: type) -> type:
+    """A Popen subclass that refuses GPU/inference programs before delegating."""
+
+    class GuardedPopen(delegate):  # type: ignore[misc, valid-type]
+        live_device_guard = True
+
         def __init__(self, args, *pargs, **kwargs):
-            if _executable_name(args) in LIVE_DEVICE_EXECUTABLES:
+            program = blocked_program(args, kwargs)
+            if program is not None:
                 raise LiveDeviceBlocked(
-                    f"A test attempted to start {_executable_name(args)} (GPU or local inference). "
+                    f"A test attempted to start {program} (GPU or local inference). "
                     "Mark it as a live-device test or inject a fake."
                 )
             super().__init__(args, *pargs, **kwargs)
 
-    monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
+    return GuardedPopen
 
-    original_connect = socket.socket.connect
-    original_connect_ex = socket.socket.connect_ex
 
-    def _refuse_model_port(address) -> None:
-        if isinstance(address, tuple) and len(address) >= 2 and address[1] in LIVE_MODEL_PORTS \
-                and str(address[0]).lower() in _LOOPBACK_NAMES:
-            raise LiveDeviceBlocked(
-                f"A test attempted to reach the real local model server at {address[0]}:{address[1]}. "
-                "Mark it as a live-device test or use a fixture server on another port."
-            )
+def guarded_connect(delegate):
+    """A socket connect method that refuses real local inference endpoints before delegating."""
 
     def connect(self, address):
-        _refuse_model_port(address)
-        return original_connect(self, address)
+        endpoint = refused_model_endpoint(address)
+        if endpoint is not None:
+            raise LiveDeviceBlocked(
+                f"A test attempted to reach a real local inference endpoint at {endpoint}. "
+                "Mark it as a live-device test or use a fixture server on another port."
+            )
+        return delegate(self, address)
 
-    def connect_ex(self, address):
-        _refuse_model_port(address)
-        return original_connect_ex(self, address)
+    connect.live_device_guard = True
+    return connect
 
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+def _alias_modules(nodeid: str | None):
+    for loaded_name, loaded in list(sys.modules.items()):
+        if loaded is None:
+            continue
+        if loaded_name == "core" or loaded_name.startswith("core."):
+            yield loaded
+            continue
+        file = getattr(loaded, "__file__", None)
+        if file and nodeid not in REAL_ALIAS_EXEMPT_NODES:
+            try:
+                Path(file).resolve().relative_to(_TESTS_DIR)
+            except (ValueError, OSError):
+                continue
+            yield loaded
+
+
+def install_live_device_boundary(monkeypatch: pytest.MonkeyPatch, nodeid: str | None = None) -> None:
+    """Replace every listed real device primitive with a stand-in that refuses."""
+    for module, name, what in LIVE_DEVICE_FUNCTIONS:
+        real = getattr(module, name)
+        if getattr(real, "live_device_stand_in", None):
+            continue
+        stand_in = _blocked(what)
+        for loaded in _alias_modules(nodeid):
+            for attribute, value in list(vars(loaded).items()):
+                if value is real:
+                    monkeypatch.setattr(loaded, attribute, stand_in)
+
+    monkeypatch.setattr(subprocess, "Popen", guarded_popen_class(subprocess.Popen))
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect(socket.socket.connect))
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect(socket.socket.connect_ex))
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +226,7 @@ def block_live_devices_unless_opted_in(
 ) -> None:
     """Only a marked live-device test, run with the explicit opt-in, reaches real devices."""
     if not live_devices_allowed(request.node):
-        install_live_device_boundary(monkeypatch)
+        install_live_device_boundary(monkeypatch, request.node.nodeid)
 
 
 def live_devices_allowed(node) -> bool:
