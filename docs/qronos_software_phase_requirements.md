@@ -73,11 +73,15 @@ an item to a document does not change its key.
 | B3 | Disk-pressure and battery/power signals in the resource sentinel (architecture) | M | No battery/power signal in `core/` (the only match is an intent word). Storage guards exist for disk *space*, not as a load signal |
 | B4 | Cancellation of running and queued inference (Stop/Pause/shutdown) | V | Suite; the cancellation doc |
 | B5 | Sustained latency, warm Heavy, VRAM coexistence | D | Single synthetic runs only |
+| B6 | Routing: deterministic → Fast → Heavy handoff, with a fresh resource re-check before generation; Vision describes and Heavy reasons | V | `runtime_bridge._select_production_task_type`, orchestrator, vision worker; suite |
+| B7 | Read-only setup diagnostics for missing models/assets (no load, no download) | V | `core/runtime_preflight.py` (`doctor` service); frozen smoke lists missing assets |
+| B8 | Error surfacing: "outcome unknown" after a possibly mutating IPC call, storage-failure and busy-lock results, no automatic retry | V | IPC doc; suite |
 
 ### C. Voice
 
 | # | Requirement | Key | Evidence / gap |
 |---|---|---|---|
+| C0 | Voice pipeline wired end to end in the runtime: wake → VAD → STT → normaliser → intent gate → router → brain → chunked TTS playback, with interruption/echo barrier | V | `runtime_bridge` wake-capture preparation; `test_voice_pipeline`, `test_runtime_bridge*`, voice continuity/echo tests. Live: D |
 | C1 | Wake-word adapter, trigger state machine, nothing runs before wake | V | `core/openwakeword_engine.py`, `voice_trigger.py`, suite |
 | C2 | Custom Qronos wake head `qronos.onnx` + `.data` | G | Absent; the source must come from the user. The wake word cannot work without it |
 | C3 | Local STT (whisper.cpp, `fa`) | V | Code + suite. Quality: D |
@@ -113,6 +117,17 @@ an item to a document does not change its key.
 | E5 | Relay deployment, operator, cost; reachability from Iranian networks (§5.6) | G/D | Infrastructure decision and field measurement | owner |
 | E6 | Phone signing/distribution | G | — | owner |
 | E7 | Live phone acceptance with a VPN | D | — | deferred |
+| E8 | Android build toolchain | G | No JDK, Gradle, Kotlin compiler or Android SDK on this machine (only `adb`); no global SDK installs are allowed. Source can be written; compilation is unproven until a toolchain is provided | owner |
+| E9 | iOS app | G | Needs macOS/Xcode. Apple documentation does not establish TLS 1.3 external-PSK support | owner |
+| E10 | Phone TLS 1.3 external PSK | P/G | Link worker's primary-source evidence: the Android platform stack offers PSK suites only up to TLS 1.2, so a bundled TLS library (Bouncy Castle) is planned. Its licence and notices need review before shipping | link worker / owner |
+
+### H. Device Hub (broader device scope)
+
+| # | Requirement | Key | Evidence / gap |
+|---|---|---|---|
+| H1 | Device Hub for printers, 3D printers and other local/LAN devices, with explicit per-device capability limits, permission, audit and live acceptance per workflow (project context; delivery status) | M | No source; not assigned this phase. The single print workflow (D6) is not Device Hub |
+| H2 | Local driver/spooler only; no vendor cloud or smart-device service | V (rule) | AGENTS rule; to be re-verified when H1 starts |
+| H3 | Wake-from-sleep via hardware capability or secure Wake-on-LAN, not a universal voice-wake claim | M | Not implemented. The `link_server` "wake" sockets are an internal socketpair that stops the accept loop, not Wake-on-LAN |
 
 ### F. Cross-cutting invariants
 
@@ -190,5 +205,22 @@ them; this report does not edit shared docs.
 
 ## Worker review log
 
-Commits are reviewed as they appear. See `work/opus-five-review-status.json`.
-At this report's creation no worker had committed beyond `8c7`.
+Commits are reviewed as they appear; exact reproducers and requested changes
+are in `work/opus-five-review-status.json`.
+
+- **Independent baseline at `8c7`:** 3968 passed, 9 skipped, run alongside the
+  four active workers. The skip differences from Root's run are
+  environmental: no `node_modules` in this worktree, and the Cargo registry
+  is present here.
+- **Workflows `61a6302`** (`core/app_workflow.py`): only safety rails are in
+  place. Nothing in the product imports them yet. The single-shot side-effect
+  journal is not safe across journal instances or processes:
+  - Real two-process fixtures allowed two submissions for one content key
+    and lost one record.
+  - The shared fixed `.tmp` name in `core/json_store.py` corrupted the
+    journal in 2 of 40 natural rounds.
+  - Settled operation keys are evicted after 2048 entries, after which the
+    same approved attempt can begin again.
+  - Malformed entries raise untyped errors, or stop blocking (fail open).
+  - These must be fixed before the Telegram or printer executors use the
+    journal.
