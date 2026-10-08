@@ -3,7 +3,7 @@
 This build-time tool requires a prepared Python bundle, the locked desktop
 dependencies and the pinned offline WebView2 installer in .cache/wv2/. It
 never packages local models, voice binaries or user state, and it never
-downloads anything (see docs/desktop-offline-installer.md).
+downloads anything (see docs/offline-windows-installer.md).
 """
 
 from __future__ import annotations

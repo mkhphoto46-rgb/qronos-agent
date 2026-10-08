@@ -1,4 +1,4 @@
-; Qronos offline WebView2 prerequisite (docs/desktop-offline-installer.md).
+; Qronos offline WebView2 prerequisite (docs/offline-windows-installer.md).
 ;
 ; tauri.conf.json sets webviewInstallMode to "skip", so Tauri's own WebView2
 ; section neither downloads nor embeds anything. This hook installs the
