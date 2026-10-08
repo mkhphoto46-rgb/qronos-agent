@@ -38,8 +38,15 @@ import {
 } from "./screenApproval";
 import {
   refreshSettings,
+  setSetting,
   useSettingsStore,
 } from "./settingsStore";
+import {
+  DeviceLinkController,
+  applyDeviceLinkEvent,
+  bindPairingDelivery,
+  createDeviceLinkController,
+} from "./deviceLink";
 
 import "./App.css";
 
@@ -293,6 +300,41 @@ function App() {
   }
 
   const workflowApproval = workflowApprovalRef.current;
+
+  // The Device Link page: one controller, fed by link_* runtime events.
+  const deviceLinkRef = useRef<DeviceLinkController | null>(null);
+
+  if (deviceLinkRef.current === null) {
+    deviceLinkRef.current = createDeviceLinkController(
+      invoke,
+      async (enabled) => {
+        await setSetting("link.enabled", enabled);
+        const status = await invoke<{ running: boolean }>("get_runtime_status");
+        if (status.running) {
+          await invoke("send_runtime_action", { actionId: "qronos.settings_reload" });
+        }
+      },
+      (error) => {
+        console.error("[Qronos Device Link] request not confirmed:", error);
+      },
+    );
+  }
+
+  const deviceLink = deviceLinkRef.current;
+
+  useEffect(() => {
+    // Pairing replies come only to this window, on their own event.
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void bindPairingDelivery(listen, deviceLink).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [deviceLink]);
 
   const workflowApprovalView = useSyncExternalStore(
     workflowApproval.subscribe,
@@ -1336,7 +1378,10 @@ function App() {
               event.payload.eventType !==
                 "voice_audio_spectrum" &&
               event.payload.eventType !==
-                "microphone_input_level"
+                "microphone_input_level" &&
+              // Holds a new phone's key: never logged.
+              event.payload.eventType !==
+                "link_pairing"
             ) {
               console.info(
                 "[Qronos Runtime]",
@@ -1349,6 +1394,15 @@ function App() {
             if (screenApprovalRef.current !== null) {
               applyScreenApprovalEvent(
                 screenApprovalRef.current,
+                event.payload.eventType,
+                event.payload.message,
+              );
+            }
+
+            // Device Link status, devices, pairing code and refusals.
+            if (deviceLinkRef.current !== null) {
+              applyDeviceLinkEvent(
+                deviceLinkRef.current,
                 event.payload.eventType,
                 event.payload.message,
               );
@@ -2920,6 +2974,7 @@ function App() {
         onOpenPermissions={
           openPermissions
         }
+        deviceLink={deviceLink}
       />
 
       <nav

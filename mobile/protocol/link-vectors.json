@@ -1,0 +1,164 @@
+{
+  "comment": "Generated from the Qronos Python link modules by tests/fixtures/link_vectors.py. Test values only.",
+  "relay": [
+    {
+      "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "route_key": "5c5dd970583304e7c4c6b36243e2489a2de3fc86873ded07d3551f82f7cbec45",
+      "route_id": "98e6607c772857a00df6675dc63072c7ee305b88dd8526ce6895083bcf967049",
+      "phone_hello": "51524c310298e6607c772857a00df6675dc63072c7ee305b88dd8526ce6895083bcf967049",
+      "host_hello": "51524c31015c5dd970583304e7c4c6b36243e2489a2de3fc86873ded07d3551f82f7cbec45"
+    },
+    {
+      "secret": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0",
+      "route_key": "b07d11a8d2a3b9da6be72cd966d43f977751db0a906feadda00bc869ff3624e1",
+      "route_id": "04306869403a63c98aae4cd33c8166cb96e742d58b1e9b52df15f1a76100d6db",
+      "phone_hello": "51524c310204306869403a63c98aae4cd33c8166cb96e742d58b1e9b52df15f1a76100d6db",
+      "host_hello": "51524c3101b07d11a8d2a3b9da6be72cd966d43f977751db0a906feadda00bc869ff3624e1"
+    }
+  ],
+  "frames": [
+    {
+      "bytes": "000000657b226b696e64223a22726573706f6e7365222c226964223a372c226f6b223a747275652c22726573756c74223a7b22616e73776572223a22d9bed8a7d8b3d8ae20d981d8a7d8b1d8b3db8c222c22706572666f726d65645f616374696f6e73223a5b5d7d7d",
+      "expect": {
+        "kind": "response",
+        "id": 7,
+        "ok": true,
+        "result": {
+          "answer": "پاسخ فارسی",
+          "performed_actions": []
+        }
+      }
+    },
+    {
+      "bytes": "0000006f7b226b696e64223a22726573706f6e7365222c226964223a382c226f6b223a66616c73652c226572726f72223a2254686174206973206e6f7420616c6c6f776564206f766572207468697320636f6e6e656374696f6e2e222c22636f6465223a226f75745f6f665f73636f7065227d",
+      "expect": {
+        "kind": "response",
+        "id": 8,
+        "ok": false,
+        "code": "out_of_scope",
+        "error": "That is not allowed over this connection."
+      }
+    },
+    {
+      "bytes": "000000507b226b696e64223a226576656e74222c22746f706963223a227468696e6b696e67222c2264617461223a7b227068617365223a22616e73776572696e67222c2270726f6772657373223a6e756c6c7d7d",
+      "expect": {
+        "kind": "event",
+        "topic": "thinking",
+        "data": {
+          "phase": "answering",
+          "progress": null
+        }
+      }
+    },
+    {
+      "bytes": "000000647b226b696e64223a226576656e74222c22746f706963223a22766f6963655f7265706c79222c2264617461223a7b22736571223a302c22666f726d6174223a22776176222c2264617461223a22556b6c4752673d3d222c226c617374223a747275657d7d",
+      "expect": {
+        "kind": "event",
+        "topic": "voice_reply",
+        "data": {
+          "seq": 0,
+          "format": "wav",
+          "data": "UklGRg==",
+          "last": true
+        }
+      }
+    }
+  ],
+  "bad_frames": [
+    {
+      "bytes": "00000000",
+      "fault": "malformed_length"
+    },
+    {
+      "bytes": "7fffffff",
+      "fault": "oversize"
+    },
+    {
+      "bytes": "ffffffff",
+      "fault": "oversize"
+    },
+    {
+      "bytes": "000000107b7d",
+      "fault": "truncated"
+    },
+    {
+      "bytes": "0003",
+      "fault": "malformed_length"
+    },
+    {
+      "bytes": "000000057b6e6f7065",
+      "fault": "malformed_json"
+    },
+    {
+      "bytes": "000000117b226b696e64223a22676f73736970227d",
+      "fault": "unknown_kind"
+    },
+    {
+      "bytes": "000000317b226b696e64223a2272657175657374222c226964223a312c226f70223a2270696e67222c22706172616d73223a7b7d7d",
+      "fault": "unexpected_frame"
+    }
+  ],
+  "pairing": {
+    "valid": [
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "host": "192.168.1.20",
+        "port": 47711,
+        "device_id": "0123456789abcdef",
+        "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expires_at": 1800000120.0
+      }
+    ],
+    "invalid": [
+      {
+        "uri": "https://pair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "scheme"
+      },
+      {
+        "uri": "qronos://unpair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "action"
+      },
+      {
+        "uri": "qronos://pair?v=2&h=192.168.1.20&p=47711&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "version"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=0&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "port"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=70000&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "port"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123456789ABCDEF&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "device id"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "device id"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg&e=1800000120",
+        "why": "key length"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=!!!&e=1800000120",
+        "why": "key encoding"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=&p=47711&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120",
+        "why": "host"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&e=1800000120&d=0123456789abcdef",
+        "why": "repeated field"
+      },
+      {
+        "uri": "qronos://pair?v=1&h=x&p=1&d=0123456789abcdef&e=1",
+        "why": "missing key"
+      }
+    ]
+  },
+  "max_frame_bytes": 1048576
+}

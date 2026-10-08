@@ -584,6 +584,117 @@ class Orchestrator:
 
         return changed
 
+    def answer_chat_only(self, messages: Sequence[BrainMessage]) -> str:
+        """
+        One tool-free answer from the Fast Brain, under its configured profile.
+
+        For callers that must not plan, act or queue: the Device Link's remote
+        questions. It is a Fast plan step without the plan. It gets the same
+        admission: activity and resource checks, repeated immediately before
+        the call. It uses the same model, context, think, ``num_predict`` and
+        keep-alive (including the activity-mode keep-alive rule), and the same
+        reservation and foreground cleanup. It adds nothing else: no planner,
+        no workers, no user-memory context, no conversation history, no
+        web-research overrides.
+
+        ``messages`` are the caller's own system rules and the question. The
+        Qronos identity always comes first; caller system messages follow it
+        and cannot replace it.
+
+        Raises ``RuntimeError`` when admission refuses, so the caller can say
+        "busy" rather than wait or queue.
+        """
+
+        chat = [
+            BrainMessage(
+                role=BrainMessageRole.SYSTEM,
+                content=QRONOS_SYSTEM_PROMPT,
+            )
+        ]
+        chat.extend(message for message in messages if message.content.strip())
+
+        task_class = TaskClass.FAST
+        activity = self.activity_guard.detect()
+        selection = self._prepare_resources(
+            task_class=task_class,
+            activity_mode=activity.mode,
+            resource_pressure=activity.resource_pressure,
+        )
+
+        if selection.decision is not ResourceDecision.ALLOW:
+            raise RuntimeError(
+                self._resource_error(
+                    selection.decision,
+                    activity.resource_pressure,
+                    selection,
+                )
+            )
+
+        # Re-read immediately before loading or running the brain, exactly as
+        # a plan step does: the first snapshot may be stale after cleanup.
+        live_state = self.activity_guard.detect()
+        selection = self._prepare_resources(
+            task_class=task_class,
+            activity_mode=live_state.mode,
+            resource_pressure=live_state.resource_pressure,
+        )
+
+        if selection.decision is not ResourceDecision.ALLOW:
+            raise RuntimeError(
+                self._resource_error(
+                    selection.decision,
+                    live_state.resource_pressure,
+                    selection,
+                )
+            )
+
+        generation_effort = self._generation_effort(
+            task_class=task_class,
+            description="",
+        )
+        generation = selection.model.generation_for(generation_effort)
+        keep_alive = self._effective_keep_alive(
+            configured_keep_alive=generation.keep_alive,
+            activity_mode=live_state.mode,
+        )
+        timeout_seconds = self._brain_timeout_seconds(
+            task_class=task_class,
+            generation_effort=generation_effort,
+            already_resident=selection.already_resident,
+        )
+        reservation = self._reserve_brain_resources(
+            selection.model.name,
+            selection.model.estimated_vram_gb,
+        )
+
+        try:
+            return self.runtime.chat(
+                model_name=selection.model.name,
+                messages=chat,
+                think=generation.think,
+                num_predict=generation.num_predict,
+                num_ctx=selection.model.context_tokens,
+                keep_alive=keep_alive,
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            # The foreground cleanup of a Fast plan step, unchanged.
+            if not _keep_alive_enabled(keep_alive):
+                try:
+                    self.runtime.stop_model(selection.model.name)
+                except Exception:
+                    try:
+                        self.model_manager.unload_qronos_models()
+                    except Exception:
+                        pass
+
+                self._release_brain_resources(reservation.reservation_id)
+            else:
+                self._sync_resident_brain_ownership()
+
+                if not self.model_manager.is_model_resident(selection.model.name):
+                    self._release_brain_resources(reservation.reservation_id)
+
     def answer_web_prompt(self, prompt: str) -> str:
         """Run Web Research's evidence prompt through the guarded Fast Brain."""
         activity = self.activity_guard.detect()

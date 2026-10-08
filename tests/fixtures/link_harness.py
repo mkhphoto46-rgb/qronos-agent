@@ -20,6 +20,7 @@ from core.link_client import LinkClient
 from core.link_devices import DeviceRegistry
 from core.link_pairing import PairingService
 from core.link_server import Handler, LinkServer, LinkSettings
+from core.security_monitor import SecurityMonitor
 
 
 CLIENT_TIMEOUT = 5.0
@@ -114,6 +115,13 @@ class ServerHarness:
             ),
             clock=clock,
             scope_resolver=scope_resolver,
+            # Remote access does not start without a monitor; an in-memory
+            # one is enough for a test.
+            monitor=(
+                SecurityMonitor()
+                if LinkScope.REMOTE_TUNNEL in base.allowed_scopes
+                else None
+            ),
         )
         self.server.start()
 

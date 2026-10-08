@@ -139,7 +139,7 @@ NETWORK_EXCEPTIONS = {
     ),
 }
 # Approved exceptions whose module has not landed yet. Remove once it exists.
-PENDING_EXCEPTIONS = {"core.link_tunnel"}
+PENDING_EXCEPTIONS: set[str] = set()
 
 
 def _dotted(node: ast.AST) -> str:
@@ -484,6 +484,20 @@ def _fake_product(tmp_path: Path, modules: dict[str, str]) -> Path:
         path = tmp_path.joinpath(*module.split(".")).with_suffix(".py")
         path.write_text(source, encoding="utf-8")
     return tmp_path
+
+
+def test_the_relay_dialler_uses_exactly_its_grant_and_nothing_added_to_it_passes():
+    root = Path(__file__).resolve().parent.parent
+    source = (root / "core" / "link_tunnel.py").read_text(encoding="utf-8")
+    allowed = NETWORK_EXCEPTIONS["core.link_tunnel"][0]
+    assert set(network_findings(source)) == allowed == {"socket", "ssl"}
+    # The same module with one more path in it is no longer covered by its grant.
+    for addition, family in (
+        ("import urllib.request\n", "urllib.request"),
+        ("import asyncio\nasync def f():\n    await asyncio.open_connection('relay', 443)\n", "asyncio-network"),
+        ("import subprocess\nsubprocess.run(['curl', 'https://relay.example'])\n", "subprocess-network"),
+    ):
+        assert set(network_findings(source + "\n" + addition)) - allowed == {family}
 
 
 def test_an_exception_cannot_widen_to_another_family(tmp_path):

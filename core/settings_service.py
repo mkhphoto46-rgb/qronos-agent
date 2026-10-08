@@ -436,4 +436,12 @@ DEFAULT_DEFINITIONS: tuple[SettingDefinition, ...] = (
             "what is already stored."
         ),
     ),
+    SettingDefinition(
+        key="link.enabled",
+        default=False,
+        description=(
+            "Let paired phones reach Qronos on this network. Off until "
+            "the user turns it on."
+        ),
+    ),
 )

@@ -277,5 +277,30 @@ class TestAtTheSizeLimit(unittest.TestCase):
         self.assertEqual(read_frame(reader_over(frame)), payload)
 
 
+
+class TestCommandIds(unittest.TestCase):
+    CID = "0123456789abcdef0123456789abcdef"
+
+    def test_a_request_without_one_is_byte_for_byte_layer_one(self) -> None:
+        payload = Request(id=1, op="ping").to_payload()
+
+        self.assertNotIn("cid", payload)
+        self.assertEqual(set(payload), {"kind", "id", "op", "params"})
+
+    def test_a_command_id_round_trips(self) -> None:
+        request = Request(id=3, op="ask", params={"question": "سلام"}, command_id=self.CID)
+
+        parsed = parse_frame(read_frame(reader_over(encode_frame(request))))
+
+        self.assertEqual(parsed, request)
+
+    def test_a_malformed_command_id_is_a_typed_refusal(self) -> None:
+        for bad in ("short", self.CID.upper(), 12, ["x"], self.CID + "0"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ProtocolError) as caught:
+                    parse_frame({"kind": "request", "id": 1, "op": "ask", "cid": bad})
+
+                self.assertIs(caught.exception.fault, ProtocolFault.BAD_FIELD_TYPE)
+
 if __name__ == "__main__":
     unittest.main()

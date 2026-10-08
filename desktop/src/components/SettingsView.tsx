@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -31,6 +32,9 @@ import {
   type AudioOutputDevicesResponse,
 } from "../audio/audioOutput";
 
+import type { DeviceLinkController } from "../deviceLink";
+import DeviceLinkPanel from "./DeviceLinkPanel";
+
 import "./SettingsView.css";
 
 type SettingsPhase =
@@ -43,6 +47,7 @@ type SettingsViewProps = {
   phase: SettingsPhase;
   onClose: () => void;
   onOpenPermissions: () => void;
+  deviceLink: DeviceLinkController;
 };
 
 type SectionId =
@@ -54,6 +59,7 @@ type SectionId =
   | "performance"
   | "web"
   | "notifications"
+  | "link"
   | "data";
 
 type SectionDefinition = {
@@ -74,7 +80,8 @@ const sections: SectionDefinition[] = [
   { id: "performance", group: "SYSTEM", label: "عملکرد", english: "Performance", icon: "06", keywords: ["eco", "balanced", "performance", "priority", "عملکرد", "منابع"] },
   { id: "web", group: "SYSTEM", label: "وب و جست‌وجو", english: "Web & Search", icon: "07", keywords: ["web", "search", "sources", "citation", "وب", "جستجو", "منابع"] },
   { id: "notifications", group: "SYSTEM", label: "اعلان‌ها", english: "Notifications", icon: "08", keywords: ["notification", "warning", "sound", "اعلان", "هشدار", "صدا"] },
-  { id: "data", group: "DATA", label: "داده و پشتیبان‌گیری", english: "Data & Backup", icon: "09", keywords: ["data", "backup", "export", "restore", "داده", "پشتیبان", "خروجی"] },
+  { id: "link", group: "SYSTEM", label: "اتصال گوشی", english: "Device Link", icon: "09", keywords: ["phone", "link", "pair", "device", "revoke", "گوشی", "اتصال", "جفت", "دستگاه"] },
+  { id: "data", group: "DATA", label: "داده و پشتیبان‌گیری", english: "Data & Backup", icon: "10", keywords: ["data", "backup", "export", "restore", "داده", "پشتیبان", "خروجی"] },
 ];
 
 type HotkeyBinding = {
@@ -166,7 +173,8 @@ function SettingRow({
   );
 }
 
-function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) {
+function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: SettingsViewProps) {
+  const deviceLinkView = useSyncExternalStore(deviceLink.subscribe, deviceLink.getSnapshot);
   const [activeSection, setActiveSection] = useState<SectionId>("general");
   const [query, setQuery] = useState("");
   const [sensitivityDraft, setSensitivityDraft] = useState(56);
@@ -1472,6 +1480,23 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     </>
   );
 
+  const renderDeviceLink = () => (
+    <DeviceLinkPanel
+      view={deviceLinkView}
+      enabled={settingsState.values["link.enabled"] === true}
+      onSetEnabled={(enabled) => void deviceLink.setEnabled(enabled)}
+      onRefresh={() => void deviceLink.refresh()}
+      onOpenPairing={(name) => void deviceLink.openPairing(name)}
+      onCancelPairing={() => void deviceLink.cancelPairing()}
+      onRevoke={(deviceId) => void deviceLink.revoke(deviceId)}
+      onRemoteOff={(deviceId) => void deviceLink.remoteOff(deviceId)}
+      onResetSecurity={() => void deviceLink.resetSecurity()}
+      onTick={deviceLink.tick}
+      onDismissError={deviceLink.dismissError}
+      onClose={deviceLink.close}
+    />
+  );
+
   const renderData = () => (
     <>
       <SectionHeader kicker="USER-OWNED DATA" title="داده و پشتیبان‌گیری" description="گفتگوها، فایل‌های پیوست و تنظیمات شخصی خود را مدیریت کنید." />
@@ -1495,6 +1520,7 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     performance: renderPerformance,
     web: renderWeb,
     notifications: renderNotifications,
+    link: renderDeviceLink,
     data: renderData,
   };
 

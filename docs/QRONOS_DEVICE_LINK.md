@@ -5,7 +5,7 @@
 | Layer | Name | State |
 |---|---|---|
 | Layer 1 | Local Link — phone and PC on the same network | Implemented; verified on Windows 11 |
-| Layer 2 | Relay Link — phone reaches the PC over the internet | Proposed, not built |
+| Layer 2 | Relay Link — phone reaches the PC over the internet | PC-side transport, self-hostable relay and the Android protocol core implemented and tested on loopback with real outer TLS (§5.3, §5.4, §5.8). Android app compiled and packaged unsigned without the SDK, never run; no iOS. No relay deployed; not wired into the desktop; no phone has used it |
 
 Layer 1 ships first and is useful on its own. Layer 2 is a transport change on
 top of it, not a redesign. The point of this document is to make that true: the
@@ -225,6 +225,17 @@ Two rules:
 
 Records redact the key in `repr`, so a stray debug print cannot leak it.
 
+**More than one process uses the file** — the link service, and whatever the
+user revokes a phone from — so no registry trusts its own memory. Every lookup
+checks whether the file has been replaced (modification time, size, file id)
+and re-reads it if so; every change takes a lock shared between processes,
+re-reads the file under it, and writes it back whole. A revocation written by
+another process therefore reaches the next handshake and the next request of
+an open session, and two processes changing the file at once cannot undo each
+other. A file that cannot be read fails closed: handshakes are refused and open
+sessions end until it is readable again. Tested with separate Python processes
+on a disposable file.
+
 ### 4.4 Capability model
 
 This is the part Layer 2 depends on, and the reason to build it now.
@@ -337,6 +348,9 @@ nothing that matters.
 | `core/link_server.py` | Listener, per-connection handshake, dispatch |
 | `core/link_client.py` | Reference client — the specification for the phone app |
 | `core/link_handlers.py` | Default operation handlers, dependencies injected |
+| `core/link_relay_wire.py` | Layer 2: the 37-byte relay hello, status bytes, route derivation |
+| `core/link_tunnel.py` | Layer 2: relay endpoint, outer TLS, the PC's outbound parking dialler |
+| `core/link_commands.py` | Layer 2: command-id ledger against duplicate execution, request budget |
 
 Every module follows the existing conventions in `core/`: frozen dataclasses,
 enums over string literals, pure decision functions where the decision can be
@@ -447,7 +461,7 @@ certificates, and no `cryptography` dependency.
 
 ---
 
-## 5. Layer 2 — Relay Link (proposed)
+## 5. Layer 2 — Relay Link (PC side implemented; not deployed)
 
 ### 5.1 Shape
 
@@ -497,34 +511,301 @@ For the relay itself: `rathole` (Rust, MIT/Apache-2.0, fits the Tauri stack) or
 `frp` (Apache-2.0). Both do outbound-only reverse tunnelling. It is also a few
 hundred lines to write, since the relay's whole job is to copy bytes.
 
-### 5.4 What actually changes in the code
+**Built:** the few hundred lines, in `relay/` — Python standard library and
+asyncio, so it runs on any small Linux machine with Python 3.11+ and nothing
+installed, and so it speaks the Layer 2 hello natively instead of needing
+rathole's or frp's own protocol on the PC. Outer TLS is mandatory; every
+resource is bounded; it logs counts only, never routes or addresses.
+`relay/README.md` is the self-hosting guide. It is not deployed and has no
+default address.
 
-Very little, which is the point of §4.4.
+### 5.4 What was built (8 October 2026)
 
-| Change | Size |
+The proposal above was implemented on the PC side, with one deliberate change
+to it and several rules it did not have. Everything here is tested on loopback
+with fresh keys; none of it has carried a real phone's traffic.
+
+**Two TLS sessions, one inside the other.**
+
+| Layer | Between | Authenticated by | What it is for |
+|---|---|---|---|
+| Outer | each end and the relay | the relay's certificate, verified like HTTPS (system trust store, or a pinned CA for a self-hosted relay) | Looks like any HTTPS connection; hides the route from the network; rides inside the phone's VPN |
+| Inner | phone and PC, end to end | the pairing key — the unchanged Layer 1 TLS 1.3 PSK handshake with an ephemeral key exchange | Everything the relay must not read, alter or inject into |
+
+Python's `wrap_socket` cannot run TLS inside TLS, so the inner session runs
+over OpenSSL memory BIOs (`TlsStream` in `core/link_transport.py`), presenting
+the same socket methods the session loop already used.
+
+**Relay wire format** (`core/link_relay_wire.py`). After the outer handshake each
+side sends one 37-byte hello — `"QRL1"`, a role byte, a 32-byte token — and the
+relay answers with status bytes (`PARKED`, `KEEPALIVE`, `SPLICED`, or a terminal
+refusal). Every byte after `SPLICED` is the inner session.
+
+- One route per remote-enabled device. The PC's token is the *route key*,
+  `HMAC-SHA256(pairing key, "qronos relay route key v1")`; the phone's token is
+  the *route id*, `SHA-256("qronos relay route id v1" ‖ route key)`.
+- The relay files a host under the hash of what it presented, so a host can
+  only park under a route whose key it holds, and a phone's hello cannot be
+  replayed as a host.
+- What the relay learns: one opaque route per device, the route key once the
+  PC has parked, timing and volume. It cannot derive the pairing key (HMAC is
+  one-way). With the route key it can pretend to be the PC to the phone, and
+  that fails at the inner handshake.
+
+**The change from §5.4 as proposed: scope comes from the path, not the address.**
+The proposal had peer classification return `REMOTE_TUNNEL`. That would have
+meant the listening port accepting internet addresses. Instead
+`scope_for_peer` still refuses every non-local address, and only the relay path
+— `LinkServer.serve_relayed`, fed by the dialler — produces a remote session.
+The PC still has no internet-facing listener.
+
+**The dialler** (`RelayDialler` in `core/link_tunnel.py`) keeps one outbound
+parked connection per device that is active and inside a remote opt-in, re-read
+from the registry every two seconds and on demand. A revoked, opted-out or
+expired device loses its parked connection. Reconnects use exponential backoff
+with full jitter, 1 to 60 seconds. A relay that goes silent past 60 seconds is
+abandoned and redialled. Losing and regaining the relay is audited once per
+transition, not once per retry. It will not start unless the server's
+`allowed_scopes` includes `REMOTE_TUNNEL`. No relay address is built in.
+
+**Rules for remote sessions, as enforced:**
+
+| Rule | Where |
 |---|---|
-| Peer classification returns `REMOTE_TUNNEL` instead of refusing | One branch |
-| Server accepts a scope other than `local_network` | One entry in `allowed_scopes`, behind `remote_access_enabled` |
-| Per-device `remote_enabled` is checked | One check, already in the record |
-| A tunnel dialler: outbound connection, reconnect with backoff | New, small |
-| Relay: accept two sides, match them, copy | New, or adopted |
+| Off by default, per device, **with an expiry**: default 30 days, at most 365, renewed at the PC. A record with no expiry reads as lapsed | `DeviceRecord.remote_allowed`, `set_remote_enabled` |
+| **No pairing over the relay**, decided by the path. A relay on the local network does not make pairing local | `_authorise_session` |
+| Opt-in checked at the handshake **and before every request** | `_still_valid` |
+| **Revocation reaches open sessions** in both layers: `LinkServer.revoke` closes them at once; a revocation written straight to the registry applies at the next request | `revoke`, `_still_valid` |
+| **Short-lived sessions**: 30 minutes, then a fresh handshake with fresh ephemeral keys | `remote_session_lifetime` |
+| **Request budget**: a burst of 10, then one every two seconds | `RequestBudget` |
+| **Duplicate-command safety**: every remote request but `ping` carries a 128-bit command id (`cid`); a retry is answered from a bounded per-device ledger, never run twice; the same id with different parameters is refused | `core/link_commands.py` |
+| The capability ceiling is not negotiable: three of nine capabilities, unchanged | `SCOPE_PROFILES` |
 
-The capability profile for `remote_tunnel` already exists and already grants
-three capabilities out of nine. The audit log already records scope. Nothing in
-the protocol changes.
+**What a hostile relay can make the PC do** (review finding L3, repaired). As
+first built, a relay answering every parking with `SPLICED` and a hang-up made
+the PC redial 312–374 times in three seconds, with an audit line each, while
+those connections shared the LAN's four slots. Now, measured with the same
+reproducer and production settings: 3 connections and 3 audit lines in three
+seconds. The rules:
+
+| Rule | Where |
+|---|---|
+| A splice is a success only when the server reports an **authenticated** session; anything else is a failure with exponential backoff (1 s doubling to 60 s, jittered) | `serve_relayed(..., on_outcome)`, `_Parker._await_verdict` |
+| Each device has a **splice quota**: a burst of 20, then one every 5 s, authenticated or not | `TunnelSettings.splice_burst` |
+| A `PARK_EXPIRED` sooner than 30 s after parking, or keepalives faster than about one a second, is **misbehaviour**, answered with backoff | `min_park_seconds`, `keepalive_per_second` |
+| Relayed connections have **their own four slots**; they cannot crowd out the phone on the LAN | `LinkSettings.max_relay_connections` |
+| Identical failure lines are **coalesced**: written once, then counted, then one summary line with `repeated` per minute; at most 256 failure keys counted at once; the in-memory copy is a window of 4096 lines | `core/link_audit.py` |
+
+**Replay, stated precisely.** TLS already makes recorded traffic useless: a
+recorded session replayed into a new connection fails the handshake, because
+the server's half of the key exchange is new (tested: the replay is refused and
+nothing runs). What TLS cannot stop is the phone itself retrying a command after
+a dropped connection; that is what the command ledger is for. The ledger is in
+memory only, so a retry that arrives after the PC restarts runs again. The
+remote profile holds only `ask`, `search` and `status`, so that costs
+computation, not safety.
+
+**Measured while building it.** On Windows 11 with Python 3.13,
+`socket.shutdown(SHUT_RDWR)` from another thread does not wake a blocked `recv`
+— with or without a timeout — until the peer reacts; `close()` wakes it at
+once. Ending a session (revocation, opt-out, stop) therefore closes the
+transport, so a revoked phone that simply goes quiet cannot hold its session
+thread until the idle timeout.
+
+**The relay address reaches the phone over the local link.** `ping` on the
+local network includes the relay endpoint (and a pinned CA, if any) for a
+device inside an opt-in. The QR format is unchanged.
+
+**Not done here:** the desktop has no switch, device toggle or relay field for
+any of this yet; nothing constructs a `RelayDialler` in production. The
+requested wiring is: start `LinkServer` with `REMOTE_TUNNEL` in
+`allowed_scopes` and a `RelayDialler` only when
+`CONFIG.security.remote_access_enabled` is on and a relay endpoint is
+configured; revoke through `LinkServer.revoke` and change opt-ins through
+`LinkServer.set_remote_access`, then call `RelayDialler.refresh`.
 
 ### 5.5 Additional rules for remote sessions
 
 - **Off by default, per device, with an expiry.** Turning it on is a decision
-  taken at the PC for one named phone, not a global setting.
+  taken at the PC for one named phone, not a global setting. Implemented, §5.4.
 - **Push-to-talk, not always-listening.** Bandwidth — Opus speech is 16–24 kbit/s
   against 256 kbit/s for raw audio — and an always-open remote microphone is a
-  bad idea on its own terms.
+  bad idea on its own terms. Implemented on the PC side, §5.6.
 - **The capability ceiling is not negotiable at runtime.** A remote session
   cannot request elevation. If the user wants to run an application, they do it
   on the local network.
+- **`ask` cannot smuggle actions past the ceiling.** `ask` is natural language,
+  so "open Notepad" or "delete the report" is just a question to the link. The
+  remote profile would be hollow if a remote question reached the full
+  assistant. So the handler picks the answering path by authenticated scope:
+  local sessions reach the assistant as before; remote sessions reach only a
+  `ToolFreeAsk`, which holds one `chat(messages)` callable and nothing that can
+  open, write, delete, print, browse or queue. A plain function offered as the
+  remote path is refused when the handler is built. On top, for honesty: a
+  request that reads as an action (the task router's computer, browser or
+  vision routes, plus printing, which the router does not catch) gets a fixed
+  Persian refusal without reaching the model, and every remote answer carries
+  `performed_actions: []`, which the phone shows. Tested with a hostile remote
+  session against a stand-in for the full assistant, in Persian and English.
 
-### 5.6 Must be measured before Layer 2 is built
+### 5.6 Push-to-talk protocol (`core/link_voice.py`)
+
+Three operations, all under the `ask` capability, so the remote ceiling does not
+move:
+
+| Operation | Phone sends | PC answers |
+|---|---|---|
+| `voice_begin` | `format: "pcm_s16le"`, `sample_rate: 16000`, `channels: 1`, `language: fa/en/auto` | `voice_id`, `max_seconds` (30), `max_chunk_bytes` (48 KiB) |
+| `voice_chunk` | `voice_id`, `seq` 0,1,2…, `data` (base64 PCM) | bytes received so far |
+| `voice_end` | `voice_id`, `reply: text/audio` | `transcript`, `answer`, `refused_action`, `performed_actions`; for `audio`, `voice_reply` events first, carrying the spoken answer as WAV in order |
+
+Raw 16 kHz PCM is 32 kB/s — more than Opus, but it needs no codec on either side
+and nothing to decode before the PC's speech-to-text. `format` is a field so a
+codec can be added later without a protocol change.
+
+Bounded: one upload per device, 30 seconds, chunks in order and at most 48 KiB,
+an idle upload dropped after a minute, a spoken reply of at most 4 MiB.
+Chunks carry command ids, so a chunk resent after a dropped connection is
+acknowledged rather than appended twice, and an upload survives a reconnect.
+
+The recording is the user's voice. It is kept in memory while uploading, in a
+private temporary WAV only while it is transcribed, then deleted; the
+synthesised reply file is deleted once read. Neither audio nor transcript is
+logged. A transcript is answered through the same scope rule as a typed
+question.
+
+The PC's speech-to-text and text-to-speech are injected: `transcribe(wav_path,
+language) -> text` and `speak(text) -> wav_path`. Without `transcribe`, the
+voice operations refuse with `not_configured`. Wiring them to the existing
+Whisper and Chatterbox runtimes is part of the runtime contract in §5.7; it is
+not done here, and nothing in this protocol has run against a real microphone,
+model or phone.
+
+### 5.7 Runtime contract (`core/link_runtime.py`) — wiring requested, not applied
+
+`LinkRuntime` is the one object the Qronos runtime holds for the link. It owns
+the registry, audit log, server, pairing window and relay dialler, and offers
+only the actions the desktop needs. It is tested on its own (pairing, device
+list, revocation ending sessions, remote opt-in through the fake relay, relay
+settings). It is **not yet constructed by the runtime**; the shared files are
+owned elsewhere, so the wiring below is a request to Root, not a change made.
+
+Construction, in `QronosRuntime.__init__` — the whole of it:
+
+```python
+self.link = LinkRuntime(
+    LinkRuntimeSettings.from_config(
+        link_enabled=bool(self.settings.get("link.enabled")),                        # default off
+        remote_access_enabled=bool(self.settings.get("link.remote_access_enabled")),  # default off
+    ),
+    services=runtime_services(self),
+)
+```
+
+`runtime_services` (in `core/link_runtime.py`, tested on a stand-in runtime
+whose planner and queue raise if touched) builds the services from what the
+runtime already has, with its existing models and settings:
+
+| Service | Existing call | Not used |
+|---|---|---|
+| remote chat (the only remote answer path, wrapped in `ToolFreeAsk`) | `orchestrator.answer_chat_only(messages)` — the Fast brain under its configured profile (today num_predict 256, keep_alive 60s, its model and context) with the same resource and activity admission as a Fast turn; an admission refusal is answered `busy` | `execute_plan`, workers, tools, the queue, user memory, and `answer_web_prompt`, whose web-research overrides (768 / "0") are not the Fast profile (review finding L4) |
+| speech-to-text | `speech_runtime.transcribe_file(path, language)` | — |
+| text-to-speech | `voice_output.speak_to_file(text).audio_path` | — |
+
+Each refuses with `busy` while the runtime is busy or paused, so a phone never
+queues behind the person at the PC and nothing waits to run after a restart.
+Local phones get the same answer-only path until an assistant path with
+on-screen approval and `LinkOrigin` propagation exists.
+
+The exact diffs for `core/runtime_bridge.py` (Control's) and
+`core/settings_service.py` — two default-off settings, the construction above,
+`start` after `runtime_prepared`, `stop` first in `_close`, restart on settings
+reload, and a `handle_link_action` for the desktop actions below — were
+generated against this branch's base, checked to apply and compile, and handed
+to Root. They are not applied here.
+
+Lifecycle: `self.link.start()` once the runtime is prepared (it returns False
+and does nothing when the link is off); `self.link.stop()` at the start of
+`_close`, before computer actions close, so no phone request can arrive
+during shutdown. A settings reload that changes either switch calls
+`self.link.restart()` with new settings.
+
+Threading and load: the link calls `remote_chat`, `transcribe` and `speak` on
+its own session threads. They must be thread-safe, must respect the runtime's
+foreground lifecycle and resource governor, and when the runtime is busy or
+paused must raise `LinkOperationError("busy", ...)` rather than queue: a
+remote question must never wait in, or be replayed from, the persistent queue.
+
+Desktop actions (through `handle_action`), each a thin call on `self.link`:
+
+| Action | Payload | Call | Event back |
+|---|---|---|---|
+| `link_status` | — | `status()` | link status (no keys, no phone addresses) |
+| `link_pair_open` | `name` | `open_pairing(name)` | the `qronos://pair` URI, **shown as a QR code only — never logged, stored or forwarded** |
+| `link_pair_cancel` | — | `cancel_pairing()` | status |
+| `link_devices` | — | `devices()` | `DeviceView` list, no keys |
+| `link_revoke` | `device_id` | `revoke(id)` | updated device |
+| `link_remote` | `device_id`, `enabled`, `days` | `set_remote_access(...)` | updated device |
+| `link_relay_set` | `host`, `port`, `server_name?`, `ca_file?` or empty to clear | `set_relay_endpoint(...)` | status |
+
+Revocation and opt-in changes must go through these calls, not through a
+registry of the desktop's own, so open sessions end at once; the registry's
+cross-process checks are the backstop, not the path.
+
+### 5.8 The phone app (`mobile/`)
+
+**Android: source and protocol core; iOS: nothing.** Stated precisely in
+`mobile/README.md`; in short:
+
+| Part | State |
+|---|---|
+| Protocol core, Kotlin (`mobile/android/linkcore`) | Compiled and unit-tested here (kotlinc 2.4.21 and the committed Gradle build); interoperates with the real PC server directly and through the real relay |
+| Android app (`mobile/android/app`) | Compiled against the Android 16 API and packaged as an **unsigned** APK without the Android SDK (aapt2 9.4.1, AOSP-built `android-all`, D8 9.4.28; `mobile/android/buildcheck/check_without_sdk.py`). Not built through Gradle — that needs the SDK licence, which was not accepted — and never run on a phone or emulator |
+| iOS | Not implemented, not supported |
+
+One finding changes §4's "the reference client is the specification the phone
+app should follow" in practice: **Android's platform TLS cannot speak the
+link.** The Android `SSLSocket` reference and Conscrypt's `CAPABILITIES.md`
+list PSK cipher suites only for TLS 1.0–1.2; the PC requires TLS 1.3 with an
+external PSK and `psk_dhe_ke`. The app therefore uses BouncyCastle's TLS
+(`bctls` 1.86.2), which implements TLS 1.3 external PSKs, for the link itself,
+and the platform's `SSLSocket` only for the outer connection to the relay. The
+same question is open on iOS: Apple's documentation of
+`sec_protocol_options_add_pre_shared_key` does not say it supports TLS 1.3
+external PSKs, and that must be settled on a Mac before any iOS work.
+
+Measured on loopback (`mobile/android/linkcore/interop/run_interop.py`, Kotlin
+client against `core/link_server.py`): TLS 1.3 with
+`TLS_CHACHA20_POLY1305_SHA256` both directly and through the relay with its
+outer certificate verified against a pinned CA; Persian text round-trips
+exactly; the remote ceiling and the action refusal hold; push-to-talk uploads
+16 kHz audio and plays back a spoken reply; a connection cut after the PC ran a
+command is retried and answered from the ledger with exactly one execution; a
+wrong key is refused at the handshake and a revoked device gets `NO_HOST` from
+the relay.
+
+What the app does that §2 asked for: it never declares a `VpnService`; on Wi-Fi
+it opens the PC connection from `requestNetwork(TRANSPORT_WIFI)`'s socket
+factory so a VPN holding the default route is bypassed rather than replaced;
+away from home it uses the relay as an ordinary TLS connection inside whatever
+VPN runs. None of that has run on a phone.
+
+### 5.8a Security Monitor (D9)
+
+Remote access is offered only through a deterministic Security Monitor:
+`docs/qronos_security_monitor.md`. It rejects, throttles, contains (remote
+off, LAN on) and quarantines (link off), latched until reset at the PC. No
+remote-scoped connection, relayed or otherwise, passes without its
+admission; a server will not start the remote scope without one, and the
+dialler will not start or park while it refuses. A hostile relay can be
+throttled or contained but cannot get a LAN phone or a named device refused.
+Implemented and loopback-tested; not yet independently reviewed or wired
+into the runtime.
+
+### 5.9 Must be measured before Layer 2 is relied on
+
+The code exists now; these questions are still open, and code does not answer
+them.
 
 1. **Is a European VPS reachable and stable from Iranian mobile networks under
    load?** The whole design assumes a long-lived outbound TLS connection stays
@@ -555,8 +836,10 @@ the protocol changes.
 | Two phones pair at once | Second window cancels the first | Second phone fails and re-pairs |
 | Malicious frame, huge declared length | Memory exhaustion | Length checked before allocation |
 | Handshake flood on the LAN | CPU waste | Connection cap, post-failure interval, logged |
-| Relay compromised (Layer 2) | Metadata exposure only | End-to-end encryption; pairing stays local-only |
-| Relay unavailable (Layer 2) | No remote access | Local network still works; relay address configurable |
+| Relay compromised (Layer 2) | Metadata exposure; denial of service | End-to-end encryption; pairing refused over the relay by path, not address. Tested: tampered bytes end the session with nothing run; a recorded session replayed into the PC fails the handshake |
+| Relay unavailable (Layer 2) | No remote access | Local network still works; relay address configurable; dialler backs off to once a minute and audits the outage once |
+| Phone retries after a dropped connection (Layer 2) | The same command could run twice | Command id; the retry is answered from the PC's ledger. In memory only: a retry after a PC restart runs again |
+| Device revoked or opted out mid-session | An open session outliving the decision | `LinkServer.revoke` closes it at once; every request re-reads the record |
 
 ---
 
@@ -596,7 +879,7 @@ What follows:
 **Layer 2 as specified: the shape is right, the operational questions are open.**
 Outbound-only through an untrusted relay is the correct answer to the constraint
 in §2, and I would not expect a better one to emerge. What is unresolved is not
-the architecture but whether a relay can be run reliably and by whom — §5.6.
+the architecture but whether a relay can be run reliably and by whom — §5.9.
 Those are answerable with measurement, and should be answered before code.
 
 **What I would not do:** ship Layer 2 without the per-device remote opt-in and
