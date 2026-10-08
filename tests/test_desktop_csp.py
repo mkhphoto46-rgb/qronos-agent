@@ -125,7 +125,7 @@ def test_the_locked_tauri_builds_asset_urls_this_way():
 
 
 def test_the_spectrum_sidecar_fetch_is_allowed_in_both_policies():
-    url = asset_url_for("C:\\Users\\someone\\AppData\\Local\\Qronos\\Playback\\reply.spectrum.json")
+    url = asset_url_for(r"D:\QronosData\Playback\reply.spectrum.json")
     for name in ("csp", "devCsp"):
         policy = security()[name]
         assert allows(policy, "connect-src", url), name
@@ -153,7 +153,7 @@ def test_the_previous_policy_blocked_the_sidecar_fetch():
     """Before this change the spectrum sidecar fetch could never succeed, in either build."""
     previous = ("default-src 'self'; media-src 'self' asset: http://asset.localhost data: blob:; "
                 "connect-src 'self' ipc: http://ipc.localhost")
-    url = asset_url_for(r"C:\Users\someone\AppData\Local\Qronos\Playback\reply.spectrum.json")
+    url = asset_url_for(r"D:\QronosData\Playback\reply.spectrum.json")
 
     assert not allows(previous, "connect-src", url)
     assert allows(previous, "media-src", url)
