@@ -33,7 +33,11 @@ from core.inference_cancellation import LocalInferenceCancelled, inference_check
 from core.action_audit import ActionAuditLog
 from core.config import CONFIG
 from core.actions import ActionOutcome, ActionResult
-from core.app_workflow_runtime import APP_WORKFLOW_DECISION_ACTION, AppWorkflowCoordinator
+from core.app_workflow_runtime import (
+    APP_WORKFLOW_DECISION_ACTION,
+    APP_WORKFLOW_UNCERTAIN_ACTION,
+    AppWorkflowCoordinator,
+)
 from core.file_action_parser import FileActionParseError, parse_file_action
 from core.file_executor import FileAction, FileExecutor, FileOperation, PreparedFileAction
 from core.file_resolver import (
@@ -3291,7 +3295,7 @@ class QronosRuntime:
         if existing is not None:
             return existing
         self._ensure_file_runtime()
-        from core.app_workflow import SideEffectJournal, WorkflowRefused
+        from core.app_workflow import SideEffectJournal, WorkflowError, WorkflowRefused
         from core.file_resolver import NamedFileRequest
         from core.print_workflow import PrintWorkflow, ShellPrintToSubmitter, WinSpooler
         from core.telegram_workflow import LocalDownloadFolder, TelegramDownloadWorkflow, UiaTelegramUi
@@ -3299,6 +3303,12 @@ class QronosRuntime:
         journal = SideEffectJournal(Path(CONFIG.paths.data) / "workflows" / "side-effects.json")
         # Durable, shared by every workflow in this runtime; kept for inspection.
         self._app_workflow_journal = journal
+        try:
+            # Attempts left SUBMITTING by a process that no longer runs become
+            # UNCERTAIN: still blocking repeats, and visible for a person to check.
+            journal.reconcile_interrupted()
+        except WorkflowError:
+            pass  # a damaged journal refuses every side effect on use anyway
 
         def telegram_workflow() -> TelegramDownloadWorkflow:
             self._ensure_computer_runtime()
@@ -3355,6 +3365,7 @@ class QronosRuntime:
             verify_secret=None,
             paused=lambda: self.runtime_paused,
             audit=self.action_audit,
+            journal=journal,
         )
         return self._app_workflows
 
@@ -9787,6 +9798,16 @@ def handle_action(
                 ),
             )
 
+        return
+
+    if action_id == APP_WORKFLOW_UNCERTAIN_ACTION:
+        data = payload.get("data", {})
+        if not isinstance(data, dict):
+            raise ValueError("Uncertain-attempt request data must be an object.")
+        acknowledge = data.get("acknowledge")
+        if acknowledge is not None and (not isinstance(acknowledge, str) or len(acknowledge) > 128):
+            raise ValueError("acknowledge must be one operation key.")
+        runtime._ensure_app_workflows().report_uncertain(acknowledge)
         return
 
     if action_id == APP_WORKFLOW_DECISION_ACTION:

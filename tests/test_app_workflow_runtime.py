@@ -203,3 +203,24 @@ def test_answers_and_outcomes_are_audited_with_their_typed_category(harness):
     gui = [(r.event, r.decision or r.outcome) for r in harness.audit.records() if r.category == "gui_automation"]
     assert (AuditEvent.DENIED_BY_USER, "require_voice_confirmation") in gui
     assert (AuditEvent.COMPLETED, "refused") in gui
+
+
+def test_uncertain_attempts_are_listed_and_released_only_by_a_person(tmp_path):
+    from core.app_workflow import SideEffectJournal, SideEffectState
+
+    events = []
+    journal = SideEffectJournal(tmp_path / "j.json")
+    journal.begin("op-1", "content")
+    journal.settle("op-1", SideEffectState.UNCERTAIN, "no job seen")
+    coordinator = AppWorkflowCoordinator(
+        ledger=ApprovalLedger(), notify=lambda e, s, m: events.append((e, json.loads(m))),
+        actions=ActiveActionRegistry(), telegram_workflow=None, print_workflow=None,
+        resolve_file=None, default_printer=None, verify_secret=None, paused=lambda: False,
+        journal=journal,
+    )
+    coordinator.report_uncertain()
+    listed = events[-1][1]
+    assert listed["available"] and [a["operationKey"] for a in listed["attempts"]] == ["op-1"]
+    coordinator.report_uncertain(acknowledge="op-1")
+    assert events[-1][1]["attempts"] == []
+    assert journal.get("op-1").state is SideEffectState.ACKNOWLEDGED

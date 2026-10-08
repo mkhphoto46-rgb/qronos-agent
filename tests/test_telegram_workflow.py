@@ -487,3 +487,21 @@ def test_uia_actions_refuse_an_element_whose_identity_changed():
     with pytest.raises(AccessibilityTargetStale):
         ui.start_download(binding, newest, grant=gui_grant())
     assert not any(call[0] == "invoke" for call in calls)
+
+
+def test_a_folder_error_after_the_download_started_is_uncertain_not_raised(setup):
+    workflow, ui, _, _, journal, _ = setup
+    prepared = inspect(workflow)
+    calls = {"n": 0}
+    original = workflow._folder.listing
+
+    def failing_after_start():
+        calls["n"] += 1
+        if calls["n"] > 1:  # the first call is the snapshot before downloading
+            raise PermissionError("folder became unreadable")
+        return original()
+
+    workflow._folder.listing = failing_after_start
+    report = workflow.download(prepared, approve(prepared), token=None, approval_valid=lambda: True)
+    assert report.outcome == "uncertain"
+    assert journal.get(operation_key("approval-1", prepared.digest)).state is SideEffectState.UNCERTAIN

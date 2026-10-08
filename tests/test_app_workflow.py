@@ -447,3 +447,46 @@ def test_journal_in_a_linked_folder_is_refused(tmp_path):
         _winapi.CreateJunction(str(real), str(linked))
     with pytest.raises(JournalUnavailable, match="link"):
         SideEffectJournal(linked / "side-effects.json").begin("op", "c")
+
+
+# ------------------------------------------------ interrupted attempts (W3)
+
+
+def test_an_attempt_left_by_a_crashed_process_becomes_uncertain_and_can_be_released(tmp_path):
+    path = tmp_path / "side-effects.json"
+    crashed = subprocess.run(
+        [sys.executable, "-I", "-c", textwrap.dedent("""
+            import os, sys
+            sys.path.insert(0, sys.argv[1])
+            from core.app_workflow import SideEffectJournal
+            SideEffectJournal(sys.argv[2]).begin("op-crash", "content-x")
+            os._exit(9)  # dies before settling, like a crash
+        """), str(ROOT), str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert crashed.returncode == 9, crashed.stderr
+    journal = SideEffectJournal(path)
+    assert journal.get("op-crash").state is SideEffectState.SUBMITTING
+    with pytest.raises(WorkflowError):
+        journal.acknowledge("op-crash")
+    assert journal.reconcile_interrupted() == ("op-crash",)
+    assert [entry.operation_key for entry in journal.uncertain()] == ["op-crash"]
+    with pytest.raises(DuplicateSideEffect):
+        journal.begin("op-new", "content-x")
+    journal.acknowledge("op-crash", "checked")
+    journal.begin("op-new", "content-x")
+
+
+def test_an_attempt_owned_by_a_running_process_is_not_reconciled(tmp_path):
+    journal = SideEffectJournal(tmp_path / "side-effects.json")
+    journal.begin("op-live", "content")
+    assert journal.reconcile_interrupted() == ()
+    assert journal.get("op-live").state is SideEffectState.SUBMITTING
+
+
+def test_settle_if_unresolved_never_overrides_a_settled_outcome(tmp_path):
+    journal = SideEffectJournal(tmp_path / "side-effects.json")
+    journal.begin("op", "content")
+    journal.settle("op", SideEffectState.CONFIRMED)
+    assert journal.settle_if_unresolved("op", SideEffectState.UNCERTAIN) is False
+    assert journal.get("op").state is SideEffectState.CONFIRMED

@@ -397,7 +397,14 @@ class PrintWorkflow:
                 "Qronos will not print this file again; check the printer queue."
             ), guard)
 
-        job = self._await_job(printer.name, prepared.file_path.name, user, before, token)
+        try:
+            job = self._await_job(printer.name, prepared.file_path.name, user, before, token)
+        except Exception as error:  # noqa: BLE001 - the handler may already have printed
+            self._journal.settle_if_unresolved(op, SideEffectState.UNCERTAIN, type(error).__name__)
+            return self._report("uncertain", (
+                "Windows was asked to print but the queue could not be checked. "
+                "Qronos will not print this file again; check the printer."
+            ), guard)
         if job is None:
             self._journal.settle(op, SideEffectState.UNCERTAIN, "no matching job seen")
             return self._report("uncertain", (
@@ -411,7 +418,13 @@ class PrintWorkflow:
             ), guard)
 
         self._journal.settle(op, SideEffectState.CONFIRMED, f"job {job.job_id}")
-        return self._monitor(printer.name, job, token, guard)
+        try:
+            return self._monitor(printer.name, job, token, guard)
+        except Exception as error:  # noqa: BLE001 - the job is already in the queue
+            return self._report("submitted", (
+                "The job is in the printer queue; following it further failed "
+                f"({type(error).__name__}). Qronos will not print it again."
+            ), guard, {"jobId": job.job_id, "printer": printer.name})
 
     def _await_job(self, printer, file_name, user, before, token):
         deadline = self._clock() + self._appear_timeout

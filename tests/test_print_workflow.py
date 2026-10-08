@@ -410,3 +410,29 @@ def test_an_expired_printing_grant_submits_nothing(setup, monkeypatch):
         submit(workflow, prepared)
     assert submitter.submissions == []
     assert journal.get(operation_key("print-approval-1", prepared.digest)) is None
+
+
+def test_a_queue_failure_after_submission_is_uncertain_not_raised(setup):
+    workflow, spooler, submitter, document, journal, _ = setup
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    original = submitter.submit
+
+    def submit_then_break(path, printer):
+        result = original(path, printer)
+        spooler.jobs = lambda printer: (_ for _ in ()).throw(RuntimeError("spooler crashed"))
+        return result
+
+    submitter.submit = submit_then_break
+    report = submit(workflow, prepared)
+    assert report.outcome == "uncertain"
+    assert journal.get(operation_key("print-approval-1", prepared.digest)).state is SideEffectState.UNCERTAIN
+
+
+def test_a_failure_while_following_a_confirmed_job_reports_submitted(setup, monkeypatch):
+    workflow, spooler, submitter, document, journal, _ = setup
+    submitter.job_status = 0x10  # printing
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    monkeypatch.setattr(workflow, "_monitor", lambda *args: (_ for _ in ()).throw(RuntimeError("monitor broke")))
+    report = submit(workflow, prepared)
+    assert report.outcome == "submitted" and report.result["jobId"] == 41
+    assert journal.get(operation_key("print-approval-1", prepared.digest)).state is SideEffectState.CONFIRMED

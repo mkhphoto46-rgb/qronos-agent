@@ -412,7 +412,19 @@ class TelegramDownloadWorkflow:
                 result={"fileName": prepared.message.file_name},
             )
 
-        return self._verify(prepared, op, before, token, guard)
+        try:
+            return self._verify(prepared, op, before, token, guard)
+        except Exception as error:  # noqa: BLE001 - the download may have happened
+            self._journal.settle_if_unresolved(op, SideEffectState.UNCERTAIN, type(error).__name__)
+            return WorkflowReport(
+                outcome="uncertain",
+                detail=(
+                    "The download was started but could not be checked. Qronos will not "
+                    "download it again; check the folder."
+                ),
+                steps=guard.steps,
+                result={"fileName": prepared.message.file_name},
+            )
 
     def _verify(self, prepared, op, before, token, guard) -> WorkflowReport:
         bounds = approximate_size(prepared.message.size_text)

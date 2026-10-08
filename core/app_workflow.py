@@ -546,6 +546,7 @@ class SideEffectJournal:
                 and isinstance(value.get("contentKey"), str) and value["contentKey"]
                 and value.get("state") in _STATE_VALUES
                 and isinstance(value.get("detail", ""), str)
+                and isinstance(value.get("owner", ""), str)
                 and isinstance(value.get("updatedAt", 0.0), (int, float))
                 and not isinstance(value.get("updatedAt", 0.0), bool)
             ):
@@ -609,8 +610,54 @@ class SideEffectJournal:
                 "state": SideEffectState.SUBMITTING.value,
                 "detail": detail[:500],
                 "updatedAt": float(self._clock()),
+                # Which process owns the attempt, so a later process can tell an
+                # attempt interrupted by a crash from one still in progress.
+                "owner": _current_owner(),
             }
             self._save(entries)
+
+    def settle_if_unresolved(self, operation_key: str, state: SideEffectState, detail: str = "") -> bool:
+        """Settle when still SUBMITTING/UNCERTAIN; False when already settled."""
+        try:
+            self.settle(operation_key, state, detail)
+            return True
+        except WorkflowError:
+            entry = self.get(operation_key)
+            if entry is None or entry.state in _UNRESOLVED:
+                raise
+            return False
+
+    def reconcile_interrupted(self, *, alive: Callable[[str], bool] | None = None) -> tuple[str, ...]:
+        """Mark attempts whose owning process is gone as UNCERTAIN.
+
+        A crash after ``begin`` leaves SUBMITTING behind. Its outcome is
+        unknown, so it becomes UNCERTAIN: still blocking a repeat, but now
+        visible to a person who can check and acknowledge it.
+        """
+        is_alive = alive or _owner_alive
+        changed: list[str] = []
+        with self._locked():
+            entries = self._load()
+            for key, value in entries.items():
+                if SideEffectState(value["state"]) is SideEffectState.SUBMITTING and not is_alive(
+                    str(value.get("owner", ""))
+                ):
+                    value["state"] = SideEffectState.UNCERTAIN.value
+                    value["detail"] = "Interrupted before its outcome was recorded."
+                    value["updatedAt"] = float(self._clock())
+                    changed.append(key)
+            if changed:
+                self._save(entries)
+        return tuple(changed)
+
+    def uncertain(self) -> tuple[SideEffectEntry, ...]:
+        """Attempts a person must check before the same content can run again."""
+        with self._locked():
+            return tuple(
+                self._entry(key, value)
+                for key, value in sorted(self._load().items())
+                if SideEffectState(value["state"]) is SideEffectState.UNCERTAIN
+            )
 
     def settle(self, operation_key: str, state: SideEffectState, detail: str = "") -> None:
         if state is SideEffectState.SUBMITTING:
@@ -648,6 +695,31 @@ class SideEffectJournal:
 
 
 _STATE_VALUES = frozenset(state.value for state in SideEffectState)
+
+
+def _current_owner() -> str:
+    try:
+        import psutil
+
+        return f"{os.getpid()}:{psutil.Process().create_time():.3f}"
+    except Exception:  # noqa: BLE001 - owner is evidence, not required for safety
+        return f"{os.getpid()}:"
+
+
+def _owner_alive(owner: str) -> bool:
+    """True only when the recorded process (same pid and start time) still runs."""
+    pid_text, _, started = owner.partition(":")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        return bool(started) and f"{process.create_time():.3f}" == started
+    except Exception:  # noqa: BLE001 - gone, inaccessible or unknown: not alive
+        return False
 
 
 def operation_key(approval_id: str, digest: str) -> str:
