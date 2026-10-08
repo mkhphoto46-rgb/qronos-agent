@@ -615,11 +615,56 @@ configured; revoke through `LinkServer.revoke` and change opt-ins through
   taken at the PC for one named phone, not a global setting. Implemented, §5.4.
 - **Push-to-talk, not always-listening.** Bandwidth — Opus speech is 16–24 kbit/s
   against 256 kbit/s for raw audio — and an always-open remote microphone is a
-  bad idea on its own terms. Not implemented: the protocol has no audio
-  operation yet, and adding one needs the PC's speech-to-text runtime.
+  bad idea on its own terms. Implemented on the PC side, §5.7.
 - **The capability ceiling is not negotiable at runtime.** A remote session
   cannot request elevation. If the user wants to run an application, they do it
   on the local network.
+- **`ask` cannot smuggle actions past the ceiling.** `ask` is natural language,
+  so "open Notepad" or "delete the report" is just a question to the link. The
+  remote profile would be hollow if a remote question reached the full
+  assistant. So the handler picks the answering path by authenticated scope:
+  local sessions reach the assistant as before; remote sessions reach only a
+  `ToolFreeAsk`, which holds one `chat(messages)` callable and nothing that can
+  open, write, delete, print, browse or queue. A plain function offered as the
+  remote path is refused when the handler is built. On top, for honesty: a
+  request that reads as an action (the task router's computer, browser or
+  vision routes, plus printing, which the router does not catch) gets a fixed
+  Persian refusal without reaching the model, and every remote answer carries
+  `performed_actions: []`, which the phone shows. Tested with a hostile remote
+  session against a stand-in for the full assistant, in Persian and English.
+
+### 5.7 Push-to-talk protocol (`core/link_voice.py`)
+
+Three operations, all under the `ask` capability, so the remote ceiling does not
+move:
+
+| Operation | Phone sends | PC answers |
+|---|---|---|
+| `voice_begin` | `format: "pcm_s16le"`, `sample_rate: 16000`, `channels: 1`, `language: fa/en/auto` | `voice_id`, `max_seconds` (30), `max_chunk_bytes` (48 KiB) |
+| `voice_chunk` | `voice_id`, `seq` 0,1,2…, `data` (base64 PCM) | bytes received so far |
+| `voice_end` | `voice_id`, `reply: text/audio` | `transcript`, `answer`, `refused_action`, `performed_actions`; for `audio`, `voice_reply` events first, carrying the spoken answer as WAV in order |
+
+Raw 16 kHz PCM is 32 kB/s — more than Opus, but it needs no codec on either side
+and nothing to decode before the PC's speech-to-text. `format` is a field so a
+codec can be added later without a protocol change.
+
+Bounded: one upload per device, 30 seconds, chunks in order and at most 48 KiB,
+an idle upload dropped after a minute, a spoken reply of at most 4 MiB.
+Chunks carry command ids, so a chunk resent after a dropped connection is
+acknowledged rather than appended twice, and an upload survives a reconnect.
+
+The recording is the user's voice. It is kept in memory while uploading, in a
+private temporary WAV only while it is transcribed, then deleted; the
+synthesised reply file is deleted once read. Neither audio nor transcript is
+logged. A transcript is answered through the same scope rule as a typed
+question.
+
+The PC's speech-to-text and text-to-speech are injected: `transcribe(wav_path,
+language) -> text` and `speak(text) -> wav_path`. Without `transcribe`, the
+voice operations refuse with `not_configured`. Wiring them to the existing
+Whisper and Chatterbox runtimes is part of the runtime contract in §5.8; it is
+not done here, and nothing in this protocol has run against a real microphone,
+model or phone.
 
 ### 5.6 Must be measured before Layer 2 is relied on
 

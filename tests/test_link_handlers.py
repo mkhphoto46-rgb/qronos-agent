@@ -52,7 +52,15 @@ class TestDefaults(unittest.TestCase):
     def test_the_served_operations_are_the_documented_ones(self) -> None:
         self.assertEqual(
             set(default_handlers()),
-            {LinkOp.PING, LinkOp.STATUS, LinkOp.SEARCH, LinkOp.ASK},
+            {
+                LinkOp.PING,
+                LinkOp.STATUS,
+                LinkOp.SEARCH,
+                LinkOp.ASK,
+                LinkOp.VOICE_BEGIN,
+                LinkOp.VOICE_CHUNK,
+                LinkOp.VOICE_END,
+            },
         )
 
     def test_file_and_system_operations_are_absent(self) -> None:
