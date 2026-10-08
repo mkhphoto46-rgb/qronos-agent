@@ -86,6 +86,11 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Library rename/copy/move/delete goes through core.library_executor, "
         "which reaches the gate."
     ),
+    "core.supervisor": (
+        "Starts, watches and stops only the bundled Qronos runtime child it "
+        "supervises, with fixed arguments; holds a per-session named mutex. "
+        "It performs no user action and owns no audio, UI or dialog."
+    ),
     "core.pipe_peer": (
         "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "
         "ctypes only to read which process is on the other end of a Qronos pipe."
