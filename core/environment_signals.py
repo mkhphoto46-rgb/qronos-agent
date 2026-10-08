@@ -12,8 +12,9 @@ Two readings, both cheap and local:
     **Power.** ``psutil.sensors_battery()`` (on Windows it wraps
     ``GetSystemPowerStatus``) for whether the machine runs on battery and how
     much is left. A desktop without a battery is a known state, not an
-    unknown one. Battery saver is supported when a reader is injected and is
-    otherwise reported as unknown; see ``no_battery_saver_reading``.
+    unknown one. Battery saver comes from Windows' ``GetSystemPowerStatus``
+    through the read-only ``core/windows_power_status.py``; elsewhere, or when
+    Windows does not say, it is reported as unknown.
 
     **Disk.** Free space, through ``psutil.disk_usage``, on the volumes Qronos
     writes to — its data root,
@@ -47,9 +48,12 @@ BATTERY_CRITICAL_PERCENT = 10.0
 #: battery hovering at the line does not flap.
 BATTERY_RESUME_PERCENT = 15.0
 
-#: Free space on a watched volume below which Qronos refuses new work. Two
-#: GiB is roughly what one turn may write (history, journal, voice files) plus
-#: Windows' own page-file growth margin.
+#: Free space on a watched volume below which Qronos refuses new work. An
+#: engineering default, not a measurement: nobody has measured how much one
+#: turn writes. It is meant to stay clear of a volume that is effectively
+#: full — where history, queue-journal and voice-file writes start failing
+#: and Windows can no longer grow its page file — with a margin. Like the
+#: other lines here it is a candidate for project configuration.
 DISK_CRITICAL_FREE_MB = 2 * 1024
 
 #: A refused volume must recover to this before work starts again.
@@ -103,8 +107,8 @@ class PowerReading:
 
     battery_percent: Optional[float] = None
 
-    #: Battery saver. None when it was not read (the default; see
-    #: ``no_battery_saver_reading``).
+    #: Battery saver as Windows reports it. None when not known: not Windows,
+    #: the call failed, or Windows gave a value other than on or off.
     battery_saver: Optional[bool] = None
 
     @property
@@ -165,21 +169,25 @@ def _psutil_disk_usage(path: str) -> object:
 
 
 def no_battery_saver_reading() -> Optional[bool]:
-    """
-    Battery saver is not read by default.
-
-    psutil does not report it, and the Win32 ``GetSystemPowerStatus`` flag
-    that does would make this a system-access module under
-    ``tests/test_gate_discipline.py``. Until that is reviewed and allocated,
-    the reading says "not known" rather than "off"; a caller may inject a
-    reader.
-    """
+    """A saver reader for callers that do not want battery saver read at all."""
     return None
+
+
+def windows_battery_saver() -> Optional[bool]:
+    """
+    Battery saver as Windows reports it; None when not known.
+
+    The Win32 call lives in ``core/windows_power_status.py`` so that this
+    module stays free of system-access imports; that module only reads.
+    """
+    from core.windows_power_status import read_battery_saver
+
+    return read_battery_saver()
 
 
 def read_power(
     battery: BatteryReader = _psutil_battery,
-    saver: SaverReader = no_battery_saver_reading,
+    saver: SaverReader = windows_battery_saver,
 ) -> PowerReading:
     """A fresh power reading. Never raises."""
     try:
@@ -261,7 +269,7 @@ class EnvironmentReader:
         self,
         watch_paths: Callable[[], Iterable[tuple[str, Path]]] = default_watch_paths,
         battery: BatteryReader = _psutil_battery,
-        saver: SaverReader = no_battery_saver_reading,
+        saver: SaverReader = windows_battery_saver,
         disk_usage: DiskUsageReader = _psutil_disk_usage,
     ) -> None:
         self._watch_paths = watch_paths

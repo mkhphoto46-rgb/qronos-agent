@@ -90,10 +90,26 @@ def test_failed_saver_read_does_not_lose_the_battery_reading():
     assert reading.battery_percent == 80.0 and reading.battery_saver is None
 
 
-def test_battery_saver_is_unknown_unless_a_reader_is_injected():
+def test_battery_saver_comes_from_the_injected_reader():
     assert env.no_battery_saver_reading() is None
-    assert read_power(battery=battery(90, False)).battery_saver is None
+    assert read_power(battery=battery(90, False), saver=no_saver).battery_saver is None
     assert read_power(battery=battery(90, True), saver=lambda: True).battery_saver is True
+    assert read_power(battery=battery(90, True), saver=lambda: False).battery_saver is False
+
+
+def test_production_defaults_read_battery_saver_from_windows():
+    import inspect
+
+    # Checked by reference, without calling it: no test reads the real machine.
+    assert inspect.signature(read_power).parameters["saver"].default is env.windows_battery_saver
+    assert inspect.signature(EnvironmentReader).parameters["saver"].default is env.windows_battery_saver
+
+
+def test_windows_battery_saver_delegates_to_the_read_only_helper(monkeypatch):
+    from core import windows_power_status
+
+    monkeypatch.setattr(windows_power_status, "read_battery_saver", lambda: True)
+    assert env.windows_battery_saver() is True
 
 
 def test_default_disk_reader_is_psutil_not_a_system_access_module():
