@@ -126,12 +126,58 @@ override that lifts politeness but never the safety floor in
 and the model not fitting. A busy processor is a reason to wait, not a reason it
 is unsafe to proceed.
 
-Still required: disk and power signals, and safe cancellation of work already
-running — `SafeQueue.cancel` moves the state but nothing interrupts a task in
-flight, which is harmless while the queue holds placeholders and would be a lie
-in the interface once it holds real work. No software can guarantee that a
-computer will never crash; the goal is conservative prevention, graceful
-degradation, and tested recovery.
+Disk and power signals now exist too, in `core/environment_signals.py`. Every
+sentinel sample and every foreground pressure check reads them fresh, from the
+operating system's own battery status and the free space on the Qronos data
+volume. An unreadable signal is recorded as unknown rather than guessed.
+
+- **Sustained monitor.** Running on battery and a low drive count as load,
+  with the same dwell and hysteresis as CPU and GPU. Queued work waits for the
+  charger, but "run anyway" can still lift that. Battery saver counts too when
+  Windows reports it (read-only `GetSystemPowerStatus`, in
+  `core/windows_power_status.py`); otherwise it is reported as unknown.
+- **Drive contention.** Free space alone misses a creator workload that
+  saturates a drive with plenty of room left. The sentinel therefore also
+  measures the mean time per completed read or write since the previous
+  reading, from the operating system's I/O counters. At 50 ms or more over
+  at least ten operations a second, the drive counts as load (politeness
+  only), with the same dwell and hysteresis. There is no invented "busy
+  percent". The counters are system-wide, so a Qronos model load counts too;
+  its short burst stays below the dwell.
+- **Foreground model loads.** A battery at or below 20%, or a drive under 5 GiB
+  free, is high pressure. A battery at or below 10%, or under 2 GiB free, is
+  critical. The existing CPU and GPU thresholds are unchanged.
+- **Safety floor.** The floor refuses work on a discharging battery at or below
+  10% until it reaches 15%, and on a drive under 2 GiB free until it has 3 GiB.
+  Neither can be overridden. Fit is now judged on physically free graphics
+  memory, so memory a Qronos model still holds is never counted as room for
+  another.
+
+Work already running is protected too. When the floor breaches on two
+consecutive readings, the scheduler stops Qronos's own running work through
+that work's `pause`, which closes only its model request. Triggers are a hot
+card, nearly full RAM, a dying battery, a nearly full drive, or another
+application squeezed out of graphics memory. The work goes back in line under
+the floor's resume lines, without counting an attempt. Another application is
+never paused, closed or reprioritised. Work that cannot be paused, or that has
+already committed its answer, finishes, and the reason is shown.
+
+The squeeze rule closes a gap that partial offload opened. A model that cannot
+fit the card fills whatever was free, and its declared reservation can exceed
+the whole card. Subtracting that reservation therefore hid every other
+application's memory. Qronos now measures its own share against the external
+usage recorded just before it took the card. It counts growth during loading
+as its own and anything after that as somebody else's. A card full of Qronos
+alone never triggers a yield, so it cannot unload and reload itself.
+
+Still required: the foreground turn itself is not yet stopped mid-generation
+by the sentinel. Queued work is, as described above; a turn the user started
+still runs to its end once admitted. The partial-offload load itself still
+takes whatever is free, which is a property of the model runtime. Live
+behaviour with real batteries, drives and applications is part of the deferred
+hardware acceptance. No software can guarantee that a computer will never
+crash; the goal is conservative prevention, graceful degradation, and tested
+recovery.
 
 ## Model-Switch UX Requirements
 

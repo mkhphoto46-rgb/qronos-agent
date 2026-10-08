@@ -86,6 +86,10 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Library rename/copy/move/delete goes through core.library_executor, "
         "which reaches the gate."
     ),
+    "core.windows_power_status": (
+        "Calls GetSystemPowerStatus through ctypes only to read whether Windows "
+        "battery saver is on; it fills a structure it owns and changes nothing."
+    ),
     "core.path_safety": (
         "Calls GetDriveTypeW through ctypes only to read whether a drive is "
         "local or a mapped network drive; it changes nothing."

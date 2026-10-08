@@ -60,9 +60,19 @@ uses concrete verification and release gates instead.
   left untouched.
   Already-resident (warm) reuse, systems without GPU telemetry and legacy
   integrations without a size reader keep their previous behaviour. A model
-  that can never fit the card entirely keeps the earlier partial-offload check,
-  which does not protect other applications' video memory. Model tags,
-  quantization, context, generation and keep-alive settings are unchanged.
+  that can never fit the card entirely keeps the earlier partial-offload load
+  check, so the load itself still takes whatever video memory is free. Once
+  such a model holds the card, the sentinel measures Qronos's real share. When
+  another application then needs memory the card no longer has, Qronos stops
+  its own queued work. A foreground turn is not yet stopped mid-generation.
+  Model tags, quantization, context, generation and keep-alive settings are
+  unchanged.
+- Battery/power and disk-pressure signals feed the resource sentinel, the
+  foreground pressure check and the non-overridable safety floor, with
+  hysteresis and honest "unknown" handling. Under a sustained critical
+  reading, Qronos stops only its own running queued work and never another
+  application. This is verified with injected readings only; live battery,
+  drive and application behaviour is part of the deferred hardware acceptance.
 - Local sidecar communication has bounded loopback, ownership and lifecycle
   checks. Model downloads and cloud forwarding are refused. Public web access
   requires the approved visible browser workflow; saved links offer Copy Link

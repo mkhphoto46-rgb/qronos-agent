@@ -6,7 +6,14 @@ from typing import Callable
 
 import psutil
 
+from core.environment_signals import (
+    BATTERY_CRITICAL_PERCENT,
+    DISK_CRITICAL_FREE_MB,
+    EnvironmentReading,
+    environment_decision,
+)
 from core.resource_guard import read_gpu_status, read_system_status
+from core.resource_policy import ResourceDecision
 from core.telemetry_cache import Snapshot
 
 
@@ -148,6 +155,8 @@ class ActivityGuard:
     def _detect_resource_pressure(self) -> ResourcePressure:
         """Evaluate overall system pressure."""
 
+        environment: EnvironmentReading | None = None
+
         try:
             if self.snapshot_reader is None:
                 system = read_system_status()
@@ -156,6 +165,7 @@ class ActivityGuard:
                 snapshot = self.snapshot_reader()
                 system = snapshot.system
                 gpu = snapshot.gpu
+                environment = getattr(snapshot, "environment", None)
         except Exception:
             # Resource protection fails closed. Starting a model without a
             # trustworthy system snapshot would violate the load policy.
@@ -207,6 +217,11 @@ class ActivityGuard:
             elif gpu.temperature_c >= cls.HIGH_GPU_TEMP_C:
                 high = True
 
+        if environment is not None:
+            env_critical, env_high = self._environment_pressure(environment)
+            critical = critical or env_critical
+            high = high or env_high
+
         if critical:
             return ResourcePressure.CRITICAL
 
@@ -214,6 +229,27 @@ class ActivityGuard:
             return ResourcePressure.HIGH
 
         return ResourcePressure.NORMAL
+
+    @staticmethod
+    def _environment_pressure(reading: EnvironmentReading) -> tuple[bool, bool]:
+        """
+        Power and disk as (critical, high) for a model load the user asked for.
+
+        A battery that is merely in use is not pressure here: the user asked
+        for this turn on battery, and the queue already makes background work
+        wait for the charger. A nearly empty battery or a nearly full drive is.
+        An unreadable signal adds nothing; it is not mistaken for either.
+        """
+        power = reading.power
+        free = reading.disk_free_mb
+        critical = (
+            power.discharging
+            and power.battery_percent is not None
+            and power.battery_percent <= BATTERY_CRITICAL_PERCENT
+        ) or (free is not None and free < DISK_CRITICAL_FREE_MB)
+        high = environment_decision(reading) is ResourceDecision.BLOCK
+
+        return critical, high
 
     @staticmethod
     def _get_running_processes() -> set[str]:
