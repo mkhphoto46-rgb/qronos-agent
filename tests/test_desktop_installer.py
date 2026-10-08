@@ -326,6 +326,10 @@ def test_the_committed_tauri_config_never_downloads_webview2():
     lambda c: c["bundle"].update(createUpdaterArtifacts=True),
     lambda c: c.setdefault("plugins", {}).update(updater={"pubkey": "x"}),
     lambda c: c["bundle"]["windows"].update(minimumWebview2Version="120.0.0.0"),
+    lambda c: c.update(productName="Qronos"),  # per-user install folder = the user-data folder
+    lambda c: c.update(productName=" qronos "),
+    lambda c: c.update(identifier="QRONOS"),  # "delete app data" would remove the user-data folder
+    lambda c: c["bundle"]["windows"]["nsis"].update(installMode="both"),
 ])
 def test_a_config_that_could_download_webview2_is_refused(change):
     config = committed_config()
@@ -347,6 +351,20 @@ def test_only_a_windows_x64_nsis_installer_is_built(monkeypatch, bundles, machin
 
     with pytest.raises(ValueError, match="x86_64-pc-windows-msvc"):
         build_desktop.require_windows_x64(bundles)
+
+
+def test_the_install_and_app_data_folders_are_not_the_user_data_folder():
+    """The uninstaller never manages %LOCALAPPDATA%\\Qronos, where the backend keeps user data."""
+    config = committed_config()
+    backend_rs = (build_desktop.ROOT / "desktop" / "src-tauri" / "src" / "runtime" / "backend.rs").read_text(
+        encoding="utf-8")
+    config_py = (build_desktop.ROOT / "core" / "config.py").read_text(encoding="utf-8")
+
+    assert 'local.join("Qronos")' in backend_rs and '/ "Qronos"' in config_py  # the data folder name
+    assert config["productName"].casefold() != "qronos" and config["identifier"].casefold() != "qronos"
+    build_desktop.check_tauri_config(config)
+    hook = prerequisites.HOOK_PATH.read_text(encoding="utf-8")
+    assert "UNINSTALL" not in hook and "RMDir" not in hook and "RmDir" not in hook
 
 
 # ----------------------------------------------------------- wiring

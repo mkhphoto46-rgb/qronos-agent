@@ -55,6 +55,8 @@ SUPPORTED_BUNDLES = ("nsis",)
 #: Why an installer was built; recorded in its provenance.
 PURPOSES = ("packaging-check", "review-candidate")
 HOOK_SETTING = "installer-hooks/webview2-offline.nsh"
+#: The per-user data folder name under %LOCALAPPDATA% (core/config.py, runtime/backend.rs).
+USER_DATA_FOLDER = "Qronos"
 
 
 def require_windows_x64(bundles: str) -> None:
@@ -90,6 +92,17 @@ def check_tauri_config(config: dict[str, Any]) -> None:
                          "authenticated updates need their own reviewed design first.")
     if windows.get("minimumWebview2Version") or nsis.get("minimumWebview2Version"):
         raise ValueError("A minimum WebView2 version makes the installer contact Microsoft's updater.")
+    # The per-user install folder is %LOCALAPPDATA%\<productName>, and "Delete the
+    # application data" removes %APPDATA%\<identifier> and %LOCALAPPDATA%\<identifier>.
+    # Neither may be the folder that holds Qronos user data.
+    for setting, value in (("productName", config.get("productName", "")),
+                           ("identifier", config.get("identifier", ""))):
+        if str(value).strip().casefold() == USER_DATA_FOLDER.casefold():
+            raise ValueError(f"tauri.conf.json {setting} {value!r} would place installer-managed files in the "
+                             f"%LOCALAPPDATA%\\{USER_DATA_FOLDER} user-data folder.")
+    if nsis.get("installMode", "currentUser") not in ("currentUser", "perMachine"):
+        raise ValueError("The NSIS install mode must be currentUser or perMachine; the reviewed upgrade and "
+                         "uninstall paths cover only those.")
 
 
 def _target_dir(environment: dict[str, str]) -> Path:

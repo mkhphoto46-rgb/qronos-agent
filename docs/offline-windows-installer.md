@@ -152,6 +152,57 @@ A failed or unregistered runtime install stops the Qronos installation; it does
 not leave a half-working app. Uninstalling Qronos does not remove WebView2,
 because other applications share it.
 
+## Upgrading, uninstalling and user data
+
+These findings come from the locked NSIS template (`tauri-bundler` 2.9.4) and
+the Qronos source. None of this has been run on a real machine.
+
+**Where things live**
+
+| What | Where | Removed by the uninstaller? |
+| --- | --- | --- |
+| Program files (per-user install, Tauri's default) | `%LOCALAPPDATA%\qronos-desktop` | Only the files the installer itself placed there, then the empty folders |
+| Settings, history, memory, permissions, approval secret, runtime assets | `%LOCALAPPDATA%\Qronos` (from `core/config.py` and the desktop's `local_data_dir()`) | No |
+| Library and other user documents | the folders the user chose, by default under `Documents` | No |
+| WebView2 caches | `%LOCALAPPDATA%\com.qronos.agent` | Only when the user ticks "Delete the application data". The UI keeps no state there (no `localStorage`, `sessionStorage` or IndexedDB). |
+| WebView2 Runtime | Windows (shared by many apps) | No |
+
+- **Uninstalling keeps Qronos user data.** Removing it is a manual step, which
+  privacy-sensitive users need to be told about.
+- **Upgrading:** running a newer installer offers to uninstall the old version
+  first, which is the default choice. If the user declines, files that the new
+  version no longer ships stay in the program folder. The desktop's startup
+  check only confirms the runtime executable, its folder and protocol version,
+  not the full manifest, so such leftovers are not detected.
+- **The same or an older version:** the installer warns and asks; downgrading
+  is possible.
+- **Guard:** `build_desktop` refuses a configuration that would move user data
+  into a folder the installer or uninstaller manages. That is a `productName`
+  of "Qronos", which would make the per-user install folder
+  `%LOCALAPPDATA%\Qronos`, or an identifier of "Qronos", which "Delete the
+  application data" would remove.
+
+## Updates and rollback
+
+There is no in-app updater. Updates are new installers, delivered and run by
+the user, for example offline from a USB drive.
+
+Adding Tauri's updater is a separate decision that needs:
+- an owner-held signing key (Qronos must never generate or store one in the
+  repository);
+- a signed update feed, which is an internet endpoint beyond the current
+  offline-first exceptions;
+- a fix for the locked bundler's behaviour: an updater build switches the
+  installer to the WebView2 download bootstrapper.
+
+`build_desktop` refuses `createUpdaterArtifacts` and an `updater` plugin until
+that design exists.
+
+Rollback is only possible by reinstalling an older signed installer. The
+installer allows a downgrade after a warning. Nothing rolls back user data
+automatically, and schema migrations of user data are not reversible by
+reinstalling.
+
 ## Not yet verified on a real machine
 
 These checks need a clean Windows virtual machine, and they wait until live
@@ -167,6 +218,11 @@ acceptance testing is allowed:
 4. An ARM64 machine without WebView2. The refusal message should appear.
 5. A Windows SmartScreen warning is expected while the Qronos installer is
    unsigned.
+6. Upgrading over an older Qronos, with both "uninstall first" choices.
+   `%LOCALAPPDATA%\Qronos` and the Library should be unchanged afterwards.
+7. Uninstalling with and without "Delete the application data".
+   `%LOCALAPPDATA%\Qronos` and the Library should remain; WebView2 should
+   remain installed.
 
 ## Owner decisions still open
 
