@@ -55,6 +55,7 @@ from core.hard_floor import (
     HardFloorConfig,
 )
 from core.hard_floor import check as check_floor
+from core.hard_floor import check_running
 from core.load_signal import (
     LoadLevel,
     LoadSample,
@@ -228,6 +229,11 @@ class _Entry:
     #: a machine the work keeps finding too busy is not asked every tick.
     not_before: Optional[float] = None
 
+    #: The safety floor stopped this while it ran. Its own ``pause`` closed
+    #: the model request; when the work reports back, it is requeued under
+    #: this verdict rather than under whatever its pause path says.
+    preempted: Optional[FloorVerdict] = None
+
 
 @dataclass(frozen=True)
 class SchedulerConfig:
@@ -246,6 +252,15 @@ class SchedulerConfig:
 
     #: How long a task that deferred itself waits before it is offered again.
     retry_after_deferral_seconds: float = 30.0
+
+    #: Consecutive readings that must breach the safety floor before running
+    #: Qronos work is stopped. One reading is a spike; two, a tick apart, is a
+    #: state. The floor's own resume lines then keep it from flapping back.
+    preempt_after_samples: int = 2
+
+    def __post_init__(self) -> None:
+        if self.preempt_after_samples < 1:
+            raise ValueError("preempt_after_samples must be at least 1.")
 
 
 DEFAULT_SCHEDULER_CONFIG = SchedulerConfig()
@@ -338,6 +353,17 @@ class QueueScheduler:
         self._lifecycle = threading.Lock()
 
         self._last_level: LoadLevel | None = None
+
+        # Protective preemption: how many readings in a row have breached the
+        # floor while work ran, and whether the floor is currently refusing
+        # running work (which moves its lines to their resume values).
+        self._running_breaches = 0
+        self._running_refused = False
+
+        # Running work that has no pause and has already been told why it is
+        # left to finish, so a long breach does not repeat the notice every
+        # tick. Cleared when the breach ends.
+        self._unstoppable_notified: set[str] = set()
 
     # ------------------------------------------------------------ admission
 
@@ -774,6 +800,11 @@ class QueueScheduler:
         self._forget_old_entries()
         self._renew_inflight_leases()
 
+        # Safety comes before every hold below, paused included: a queue the
+        # user paused still must not keep a model running on an overheating
+        # card or a dying battery.
+        self._protect_running(sample)
+
         if self._paused or self._runtime_paused:
             self._hold_everything(
                 HoldReason.PAUSED,
@@ -998,6 +1029,11 @@ class QueueScheduler:
             except KeyError:
                 task = None
 
+            if entry is not None and result.outcome is not WorkOutcome.DEFERRED:
+                # Finished, failed or cancelled before the stop took effect:
+                # what it did stands, and nothing is left to requeue.
+                entry.preempted = None
+
             if entry is None or task is None:
                 summary = ""
             elif task.state is not TaskState.RUNNING:
@@ -1005,6 +1041,22 @@ class QueueScheduler:
                 # announced; what is new is only that the machine is free.
                 entry.finished_at = self.clock()
                 summary = task.summary
+            elif result.outcome is WorkOutcome.DEFERRED and entry.preempted is not None:
+                # Stopped by the safety floor rather than by its own choice.
+                # Not the task's fault, so the attempt does not count, and the
+                # floor's resume lines apply before it may start again.
+                verdict = entry.preempted
+                entry.preempted = None
+                self.queue.requeue(task_id, count_attempt=False)
+                hold_reason = HoldReason.SAFETY_FLOOR
+                entry.started_at = None
+                entry.not_before = None
+                entry.floor_refusal = verdict
+                entry.override = False
+                entry.hold = hold_reason
+                entry.detail = verdict.message()
+                summary = task.summary
+                event = QueueEventType.DEFERRED
             elif result.outcome is WorkOutcome.DEFERRED:
                 self.queue.requeue(
                     task_id,
@@ -1057,6 +1109,94 @@ class QueueScheduler:
         self._wake.set()
 
     # ------------------------------------------------------------ internals
+
+    def _protect_running(self, sample: LoadSample) -> None:
+        """
+        Stop Qronos's own running work when the safety floor says it must.
+
+        Only Qronos work is touched, and only through the work's own
+        ``pause``, which closes its model request and lets it go back in line;
+        another application is never paused, closed or reprioritised. Work
+        without a ``pause`` cannot be stopped safely from here and is left to
+        finish, with the reason recorded where the user can see it. Work that
+        has already committed its answer refuses the pause and finishes.
+        """
+        with self._lock:
+            running = [
+                self._entries[task_id]
+                for task_id in sorted(self._inflight)
+                if task_id in self._entries
+            ]
+
+        if not running:
+            self._running_breaches = 0
+            self._running_refused = False
+            self._unstoppable_notified.clear()
+            return
+
+        verdict = check_running(
+            sample,
+            config=self.floor,
+            currently_refused=self._running_refused,
+        )
+
+        if verdict.passed:
+            self._running_breaches = 0
+            self._running_refused = False
+            self._unstoppable_notified.clear()
+            return
+
+        self._running_breaches += 1
+
+        if self._running_breaches < self.config.preempt_after_samples:
+            return
+
+        self._running_refused = True
+        stopped: list[_Entry] = []
+        unstoppable: list[_Entry] = []
+
+        for entry in running:
+            if entry.preempted is not None:
+                continue  # already asked to stop; waiting for it to return
+
+            stop = getattr(entry.work, "pause", None)
+
+            if not callable(stop):
+                if entry.task_id not in self._unstoppable_notified:
+                    self._unstoppable_notified.add(entry.task_id)
+                    unstoppable.append(entry)
+                continue
+
+            if stop() is False:
+                continue  # committed its answer; it finishes as it is
+
+            stopped.append(entry)
+
+        with self._lock:
+            for entry in stopped:
+                entry.preempted = verdict
+                entry.hold = HoldReason.SAFETY_FLOOR
+                entry.detail = verdict.message()
+
+            for entry in unstoppable:
+                entry.detail = (
+                    verdict.message()
+                    + " This task cannot be stopped safely while it runs, so "
+                    "it is left to finish."
+                )
+
+            if stopped or unstoppable:
+                self._bump()
+
+        for entry in stopped + unstoppable:
+            self._emit(
+                QueueEventType.HOLD_STATE,
+                task_id=entry.task_id,
+                summary=self.queue.get(entry.task_id).summary,
+                reason=HoldReason.SAFETY_FLOOR,
+                detail=entry.detail,
+                floor=verdict,
+            )
 
     def _hold(self, entry: _Entry, reason: HoldReason, detail: str) -> None:
         """Record why something is waiting. Called with the lock held."""
