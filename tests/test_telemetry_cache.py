@@ -4,6 +4,7 @@ import time
 import unittest
 
 from core.resource_guard import GpuStatus, SystemStatus
+from tests.live_device import requires_live_device
 from core.telemetry_cache import (
     DEFAULT_MAX_AGE_SECONDS,
     TelemetryCache,
@@ -280,6 +281,7 @@ class TestTheDefaultReaderIsCheap(unittest.TestCase):
             read_system_status_since_last_call,
         )
 
+    @requires_live_device  # reads the real GPU (nvidia-smi), CPU and RAM
     def test_the_first_real_reading_is_structurally_valid(self) -> None:
         instance = TelemetryCache()
 
@@ -316,6 +318,7 @@ class TestTheDefaultReaderIsCheap(unittest.TestCase):
             first.system.ram_total_gb,
         )
 
+    @requires_live_device  # reads the real GPU (nvidia-smi), CPU and RAM
     def test_invalidating_does_not_pay_for_accuracy_again(self) -> None:
         instance = TelemetryCache()
 
@@ -331,6 +334,7 @@ class TestTheDefaultReaderIsCheap(unittest.TestCase):
             0.4,
         )
 
+    @requires_live_device  # reads the real GPU (nvidia-smi), CPU and RAM
     def test_a_real_burst_costs_one_read(self) -> None:
         instance = TelemetryCache()
 

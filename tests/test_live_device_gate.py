@@ -39,6 +39,10 @@ ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_LIVE_NODES = frozenset({
     # Runs the real nvidia-smi.
     "tests/test_resource_guard.py::TestResourceGuard::test_gpu_status",
+    # TelemetryCache's default reader: the real nvidia-smi, CPU and RAM.
+    "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_a_real_burst_costs_one_read",
+    "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_invalidating_does_not_pay_for_accuracy_again",
+    "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_the_first_real_reading_is_structurally_valid",
 }) | frozenset(
     f"tests/test_screen_capture.py::TestTheRealScreen::{name}"
     for name in (
