@@ -5,7 +5,7 @@
 | Layer | Name | State |
 |---|---|---|
 | Layer 1 | Local Link — phone and PC on the same network | Implemented; verified on Windows 11 |
-| Layer 2 | Relay Link — phone reaches the PC over the internet | PC-side transport implemented and tested on loopback (§5.4). No relay deployed; not wired into the desktop; no phone has used it |
+| Layer 2 | Relay Link — phone reaches the PC over the internet | PC-side transport and self-hostable relay implemented and tested on loopback with real outer TLS (§5.3, §5.4). No relay deployed; not wired into the desktop; no phone has used it |
 
 Layer 1 ships first and is useful on its own. Layer 2 is a transport change on
 top of it, not a redesign. The point of this document is to make that true: the
@@ -499,6 +499,14 @@ endpoint. A default may be provided; depending on it must be optional.
 For the relay itself: `rathole` (Rust, MIT/Apache-2.0, fits the Tauri stack) or
 `frp` (Apache-2.0). Both do outbound-only reverse tunnelling. It is also a few
 hundred lines to write, since the relay's whole job is to copy bytes.
+
+**Built:** the few hundred lines, in `relay/` — Python standard library and
+asyncio, so it runs on any small Linux machine with Python 3.11+ and nothing
+installed, and so it speaks the Layer 2 hello natively instead of needing
+rathole's or frp's own protocol on the PC. Outer TLS is mandatory; every
+resource is bounded; it logs counts only, never routes or addresses.
+`relay/README.md` is the self-hosting guide. It is not deployed and has no
+default address.
 
 ### 5.4 What was built (8 October 2026)
 

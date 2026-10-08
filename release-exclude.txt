@@ -35,6 +35,10 @@ desktop/src-tauri/tests/
 tools/
 build_support/
 
+# The Device Link relay is a separate program deployed on its own server by
+# whoever operates it. It is not part of the PC application.
+relay/
+
 
 # ---------------------------------------------------------------------------
 # Development files. No reason to ship them, no harm if they slip through.
