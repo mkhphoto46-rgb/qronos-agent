@@ -293,24 +293,26 @@ Documents. It never runs the Qronos installer or reads real user folders.
 
 ## Updates and rollback
 
-There is no in-app updater. Updates are new installers, delivered and run by
-the user, for example offline from a USB drive.
+Qronos does not use Tauri's network updater. Updates are new installers that a
+person gets through the approved browser or on removable media. They are
+checked by the authenticated local update software in `core/local_update.py`,
+documented in `local-update-packages.md`:
+- an owner-signed manifest binds the version, architecture, product and
+  installer hash;
+- the version, rollback, security-floor and data-schema rules are enforced;
+- a verified copy is staged for the user-approved install step.
 
-Adding Tauri's updater is a separate decision that needs:
-- an owner-held signing key (Qronos must never generate or store one in the
-  repository);
-- a signed update feed, which is an internet endpoint beyond the current
-  offline-first exceptions;
-- a fix for the locked bundler's behaviour: an updater build switches the
-  installer to the WebView2 download bootstrapper.
+It accepts no package until the owner adds a public key.
 
-`build_desktop` refuses `createUpdaterArtifacts` and an `updater` plugin until
-that design exists.
+`build_desktop` keeps refusing `createUpdaterArtifacts` and an `updater` plugin.
+In the locked bundler, an updater build switches the installer to the WebView2
+download bootstrapper. Tauri's updater would also need an update feed on the
+internet, beyond the current offline-first exceptions.
 
-Rollback is only possible by reinstalling an older signed installer. The
-installer allows a downgrade after a warning. Nothing rolls back user data
-automatically, and schema migrations of user data are not reversible by
-reinstalling.
+A rollback means installing an older package that the owner signed explicitly
+as a rollback, at or above the security floor, that can still read the installed
+data format. The installer itself allows a downgrade after a warning. Nothing
+rolls user data back automatically.
 
 ## Not yet verified on a real machine
 

@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "comment": "Owner-provided Ed25519 public keys trusted to sign Qronos local update manifests (core/local_update.py). Empty on purpose: with no key, Qronos accepts no update package. Adding or revoking a key is an owner decision made in a reviewed change. Never put a private key here or anywhere in the repository.",
+  "keys": []
+}
