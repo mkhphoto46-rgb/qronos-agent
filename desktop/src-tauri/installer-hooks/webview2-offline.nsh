@@ -46,25 +46,56 @@
   ${EndIf}
 !macroend
 
+; Stops the installation. SetOutPath $INSTDIR has already created the install
+; folder, so it is removed again, but only if it is still empty (RMDir without
+; /r never deletes files). A probe harness can define QRONOS_PROBE_RESULT to
+; also record the message in a file; the installer never defines it.
+!macro QRONOS_FAIL MESSAGE
+  !ifdef QRONOS_PROBE_RESULT
+    FileOpen $R7 "${QRONOS_PROBE_RESULT}" w
+    FileWrite $R7 "${MESSAGE}"
+    FileClose $R7
+  !endif
+  SetOutPath "$TEMP"  ; $INSTDIR is the current directory, which Windows will not remove
+  RMDir "$INSTDIR"
+  Abort "${MESSAGE}"
+!macroend
+
+; Unpacks the embedded installer and runs it. A process that cannot be started
+; (ExecWait sets the error flag and leaves the exit-code variable untouched) is
+; reported as such; a non-zero exit code is reported with the code.
+!macro QRONOS_WEBVIEW2_RUN_INSTALLER
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\${QRONOS_WEBVIEW2_FILE}" "${QRONOS_WEBVIEW2_INSTALLER}"
+  StrCpy $R8 ""
+  ClearErrors
+  ExecWait '"$PLUGINSDIR\${QRONOS_WEBVIEW2_FILE}" /silent /install' $R8
+  ${If} ${Errors}
+    Delete "$PLUGINSDIR\${QRONOS_WEBVIEW2_FILE}"
+    !insertmacro QRONOS_FAIL "The Microsoft Edge WebView2 Runtime installer could not be started. Qronos was not installed."
+  ${EndIf}
+  Delete "$PLUGINSDIR\${QRONOS_WEBVIEW2_FILE}"
+  ${If} $R8 == ""
+  ${OrIf} $R8 <> 0
+    !insertmacro QRONOS_FAIL "The Microsoft Edge WebView2 Runtime could not be installed (exit code $R8). Qronos was not installed."
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
+  Push $R7
   Push $R8
   Push $R9
   !insertmacro QRONOS_WEBVIEW2_VERSION_TO_R9
   ${If} $R9 == ""
     ${IfNot} ${IsNativeAMD64}
-      Abort "Qronos needs the Microsoft Edge WebView2 Runtime. This installer contains only the x64 runtime, which does not match this computer. Nothing was installed."
+      !insertmacro QRONOS_FAIL "Qronos needs the Microsoft Edge WebView2 Runtime. This installer contains only the x64 runtime, which does not match this computer. Nothing was installed."
     ${EndIf}
     DetailPrint "Installing the Microsoft Edge WebView2 Runtime ${QRONOS_WEBVIEW2_VERSION} from this installer (no internet needed)..."
-    InitPluginsDir
-    File "/oname=$PLUGINSDIR\${QRONOS_WEBVIEW2_FILE}" "${QRONOS_WEBVIEW2_INSTALLER}"
-    ExecWait '"$PLUGINSDIR\${QRONOS_WEBVIEW2_FILE}" /silent /install' $R8
-    Delete "$PLUGINSDIR\${QRONOS_WEBVIEW2_FILE}"
-    ${If} $R8 <> 0
-      Abort "The Microsoft Edge WebView2 Runtime could not be installed (exit code $R8). Qronos was not installed."
-    ${EndIf}
+    !insertmacro QRONOS_WEBVIEW2_RUN_INSTALLER
+    ; The exit code alone is not trusted: the runtime must now be registered.
     !insertmacro QRONOS_WEBVIEW2_VERSION_TO_R9
     ${If} $R9 == ""
-      Abort "The Microsoft Edge WebView2 Runtime installer finished but the runtime is still not registered. Qronos was not installed."
+      !insertmacro QRONOS_FAIL "The Microsoft Edge WebView2 Runtime installer finished but the runtime is still not registered. Qronos was not installed."
     ${EndIf}
     DetailPrint "Microsoft Edge WebView2 Runtime $R9 is installed."
   ${Else}
@@ -72,4 +103,5 @@
   ${EndIf}
   Pop $R9
   Pop $R8
+  Pop $R7
 !macroend

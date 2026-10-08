@@ -495,7 +495,11 @@ def test_the_install_and_app_data_folders_are_not_the_user_data_folder():
     assert config["productName"].casefold() != "qronos" and config["identifier"].casefold() != "qronos"
     build_desktop.check_tauri_config(config)
     hook = prerequisites.HOOK_PATH.read_text(encoding="utf-8")
-    assert "UNINSTALL" not in hook and "RMDir" not in hook and "RmDir" not in hook
+    assert "UNINSTALL" not in hook
+    # The only removals: the hook's own temporary payload, and $INSTDIR when it is still empty.
+    removals = [line.strip() for line in hook.splitlines()
+                if line.strip().lower().startswith(("rmdir", "delete"))]
+    assert set(removals) == {'RMDir "$INSTDIR"', 'Delete "$PLUGINSDIR\\${QRONOS_WEBVIEW2_FILE}"'}
 
 
 # ----------------------------------------------------------- wiring
@@ -842,3 +846,105 @@ def test_source_state_outside_a_repository_is_not_clean(tmp_path):
     state = installer_verify.source_state(tmp_path)
 
     assert state["clean"] is False and state["commit"] == "unavailable"
+
+
+# ------------------------------------- the hook's launch handling (I4)
+#
+# A throwaway NSIS probe, compiled into tmp_path, runs only the hook's
+# QRONOS_WEBVIEW2_RUN_INSTALLER macro against a stand-in payload. It is not the
+# Qronos installer: it installs nothing, reads no registry value and runs no
+# Microsoft installer. Each stand-in is either not an executable at all or a
+# tiny compiled program whose only action is to set its exit code.
+
+
+def makensis(script: Path) -> None:
+    if MAKENSIS is None or not MAKENSIS.is_file():
+        pytest.skip("Tauri's NSIS compiler is not installed on this machine.")
+    result = subprocess.run([str(MAKENSIS), "/V1", str(script)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def exit_code_stub(tmp_path: Path, code: int) -> Path:
+    script = tmp_path / f"stub{code}.nsi"
+    stub = tmp_path / f"stub{code}" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    stub.parent.mkdir()
+    script.write_text("\n".join(("Unicode true", 'Name "stub"', f'OutFile "{stub}"', "RequestExecutionLevel user",
+                                 "SilentInstall silent", "Section", f"  SetErrorLevel {code}", "SectionEnd", "")),
+                      encoding="utf-8")
+    makensis(script)
+    return stub
+
+
+def run_probe(tmp_path: Path, payload: Path) -> tuple[str, Path]:
+    install_dir = tmp_path / "instdir"
+    result_file = tmp_path / "result.txt"
+    script = tmp_path / "probe.nsi"
+    script.write_text("\n".join((
+        "Unicode true", "SetCompressor /SOLID lzma", 'Name "probe"', f'OutFile "{tmp_path / "probe.exe"}"',
+        "RequestExecutionLevel user", "SilentInstall silent", f'InstallDir "{install_dir}"',
+        f'!define QRONOS_WEBVIEW2_INSTALLER "{payload}"', '!define QRONOS_WEBVIEW2_VERSION "1.2.3.4"',
+        f'!define QRONOS_PROBE_RESULT "{result_file}"', f'!include "{prerequisites.HOOK_PATH}"',
+        "Section", '  SetOutPath "$INSTDIR"', "  !insertmacro QRONOS_WEBVIEW2_RUN_INSTALLER",
+        '  FileOpen $R7 "${QRONOS_PROBE_RESULT}" w', '  FileWrite $R7 "ran, exit code $R8"', "  FileClose $R7",
+        "SectionEnd", "")), encoding="utf-8")
+    makensis(script)
+    subprocess.run([str(tmp_path / "probe.exe")], check=False, timeout=120)
+    return result_file.read_text(encoding="utf-16" if result_file.read_bytes()[:2] == b"\xff\xfe" else "utf-8",
+                                 errors="replace").lstrip("\ufeff"), install_dir
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NSIS probes run on Windows only.")
+def test_an_installer_that_cannot_start_is_reported_as_such(tmp_path):
+    payload = tmp_path / "payload" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    payload.parent.mkdir()
+    payload.write_text("not a program", encoding="utf-8")
+
+    message, install_dir = run_probe(tmp_path, payload)
+
+    assert message == ("The Microsoft Edge WebView2 Runtime installer could not be started. "
+                       "Qronos was not installed.")
+    assert not install_dir.exists()  # the empty folder SetOutPath created is removed again
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NSIS probes run on Windows only.")
+def test_a_failing_installer_reports_its_exit_code(tmp_path):
+    message, install_dir = run_probe(tmp_path, exit_code_stub(tmp_path, 7))
+
+    assert message == ("The Microsoft Edge WebView2 Runtime could not be installed (exit code 7). "
+                       "Qronos was not installed.")
+    assert not install_dir.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NSIS probes run on Windows only.")
+def test_a_successful_run_continues_to_the_registry_check(tmp_path):
+    message, install_dir = run_probe(tmp_path, exit_code_stub(tmp_path, 0))
+
+    assert message == "ran, exit code 0"
+    assert install_dir.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NSIS probes run on Windows only.")
+def test_a_failure_never_removes_a_folder_that_holds_files(tmp_path):
+    install_dir = tmp_path / "instdir"
+    install_dir.mkdir()
+    (install_dir / "keep.txt").write_text("user file", encoding="utf-8")
+    payload = tmp_path / "payload" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    payload.parent.mkdir()
+    payload.write_text("not a program", encoding="utf-8")
+
+    message, _ = run_probe(tmp_path, payload)
+
+    assert "could not be started" in message
+    assert (install_dir / "keep.txt").read_text(encoding="utf-8") == "user file"
+
+
+def test_the_hook_clears_errors_and_the_exit_code_before_running_the_installer():
+    hook = prerequisites.HOOK_PATH.read_text(encoding="utf-8")
+    run = hook[hook.index("!macro QRONOS_WEBVIEW2_RUN_INSTALLER"):]
+    run = run[:run.index("!macroend")]
+    order = [run.index(step) for step in ('StrCpy $R8 ""', "ClearErrors", "ExecWait", "${If} ${Errors}")]
+    assert order == sorted(order)
+    preinstall = hook[hook.index("!macro NSIS_HOOK_PREINSTALL"):]
+    # The registry is checked again after the installer reports success.
+    assert preinstall.index("QRONOS_WEBVIEW2_RUN_INSTALLER") < preinstall.rindex("QRONOS_WEBVIEW2_VERSION_TO_R9")
+    assert "Abort" not in preinstall.replace("!insertmacro QRONOS_FAIL", "")  # every stop goes through QRONOS_FAIL
