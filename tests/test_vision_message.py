@@ -304,10 +304,17 @@ class TestWhenTheModelIsNotThere(unittest.TestCase):
 
         import requests
 
+        from core.ollama_controller import OLLAMA_AUTO_START_ENV
+
+        # Unreachable means unreachable everywhere: the readiness probe must
+        # not reach a real local server, and nothing may start one.
         with patch(
             "core.ollama_controller.requests.post",
             side_effect=requests.ConnectionError("refused"),
-        ):
+        ), patch(
+            "core.ollama_controller.requests.get",
+            side_effect=requests.ConnectionError("refused"),
+        ), patch.dict("os.environ", {OLLAMA_AUTO_START_ENV: "0"}):
             message = self.ask()
 
         self.assertNotIn("not installed", message)

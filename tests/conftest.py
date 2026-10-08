@@ -1,11 +1,142 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
 
 import pytest
 
+import core.audio_input as audio_input
+import core.audio_output as audio_output
 import core.computer_executor as computer_executor
+import core.screen_capture as screen_capture
+import core.window_binding as window_binding
+import core.windows_accessibility as accessibility_reader
 import core.windows_accessibility_mutation as accessibility_mutation
+from tests.live_device import (
+    LIVE_DEVICE_MARKER,
+    SKIP_REASON,
+    LiveDeviceBlocked,
+    live_device_enabled,
+)
+
+
+# ------------------------------------------------------------ live devices
+#
+# Real device primitives. Every test that is not an opted-in live-device test
+# gets a stand-in that raises before the device is touched. They are replaced
+# wherever a loaded core module bound them by name (runtime_bridge imports
+# foreground_window directly), matched by identity.
+LIVE_DEVICE_FUNCTIONS = (
+    (screen_capture, "_grab_with_gdi", "capturing real screen or window pixels"),
+    (screen_capture, "foreground_window", "reading the real foreground window"),
+    (window_binding, "enumerate_windows", "enumerating real desktop windows"),
+    (audio_input, "_get_sounddevice", "opening the real audio input stack (microphone)"),
+    (audio_output, "_get_sounddevice", "opening the real audio output stack (speakers)"),
+    (accessibility_reader, "_run_uia_script", "reading the real UI Automation tree"),
+    (accessibility_reader, "focused_element", "reading the real focused UI element"),
+)
+# Child processes that read the GPU or run local inference.
+LIVE_DEVICE_EXECUTABLES = frozenset({
+    "nvidia-smi", "whisper-cli", "whisper-server", "crispasr", "ollama", "llama-server",
+})
+# The local model server's default port: a test may not reach a real model.
+LIVE_MODEL_PORTS = frozenset({11434})
+_LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if live_device_enabled():
+        return
+    skip = pytest.mark.skip(reason=SKIP_REASON)
+    for item in items:
+        if item.get_closest_marker(LIVE_DEVICE_MARKER) is not None:
+            item.add_marker(skip)
+
+
+def _blocked(what: str):
+    def refuse(*args, **kwargs):
+        raise LiveDeviceBlocked(
+            f"A test attempted {what}. Live-device tests must be marked with "
+            "tests.live_device.requires_live_device and run only with "
+            "QRONOS_RUN_LIVE_DEVICE_TESTS=1; software tests must inject a fake."
+        )
+
+    refuse.live_device_stand_in = what
+    return refuse
+
+
+def _executable_name(args) -> str:
+    first = args if isinstance(args, (str, bytes, os.PathLike)) else (next(iter(args), "") if args else "")
+    text = os.fsdecode(first) if isinstance(first, (bytes, os.PathLike)) else str(first)
+    token = text.strip().split()[0] if text.strip() else ""
+    name = token.strip('"').replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def install_live_device_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace every real device primitive with a stand-in that refuses."""
+    for module, name, what in LIVE_DEVICE_FUNCTIONS:
+        real = getattr(module, name)
+        stand_in = _blocked(what)
+        for loaded_name, loaded in list(sys.modules.items()):
+            if loaded is None or not (loaded_name == "core" or loaded_name.startswith("core.")):
+                continue
+            for attribute, value in list(vars(loaded).items()):
+                if value is real:
+                    monkeypatch.setattr(loaded, attribute, stand_in)
+
+    original_popen = subprocess.Popen
+
+    class GuardedPopen(original_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, args, *pargs, **kwargs):
+            if _executable_name(args) in LIVE_DEVICE_EXECUTABLES:
+                raise LiveDeviceBlocked(
+                    f"A test attempted to start {_executable_name(args)} (GPU or local inference). "
+                    "Mark it as a live-device test or inject a fake."
+                )
+            super().__init__(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+
+    def _refuse_model_port(address) -> None:
+        if isinstance(address, tuple) and len(address) >= 2 and address[1] in LIVE_MODEL_PORTS \
+                and str(address[0]).lower() in _LOOPBACK_NAMES:
+            raise LiveDeviceBlocked(
+                f"A test attempted to reach the real local model server at {address[0]}:{address[1]}. "
+                "Mark it as a live-device test or use a fixture server on another port."
+            )
+
+    def connect(self, address):
+        _refuse_model_port(address)
+        return original_connect(self, address)
+
+    def connect_ex(self, address):
+        _refuse_model_port(address)
+        return original_connect_ex(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+
+@pytest.fixture(autouse=True)
+def block_live_devices_unless_opted_in(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a marked live-device test, run with the explicit opt-in, reaches real devices."""
+    if not live_devices_allowed(request.node):
+        install_live_device_boundary(monkeypatch)
+
+
+def live_devices_allowed(node) -> bool:
+    """Both the explicit opt-in and the live-device marker; neither alone is enough."""
+    return live_device_enabled() and node.get_closest_marker(LIVE_DEVICE_MARKER) is not None
 
 
 @pytest.fixture(autouse=True)

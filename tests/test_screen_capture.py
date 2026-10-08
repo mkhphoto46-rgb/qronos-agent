@@ -36,6 +36,7 @@ from core.screen_capture import (
 from core.vision_image import SEND_LONG_EDGE
 from security import gate
 from security.permissions import ActionCategory
+from tests.live_device import requires_live_device
 
 
 def blue_pixels(width: int, height: int) -> bytes:
@@ -542,6 +543,7 @@ class TestVirtualDesktopClipping(unittest.TestCase):
         self.assertEqual((clipped.width, clipped.height), (0, 200))
 
 
+@requires_live_device
 @unittest.skipUnless(sys.platform == "win32", "GDI is a Windows thing.")
 class TestTheRealScreen(unittest.TestCase):
     """
