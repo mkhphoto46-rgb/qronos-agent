@@ -135,8 +135,10 @@ class AppWorkflowCoordinator:
         audit: ActionAuditLog | None = None,
         journal: SideEffectJournal | None = None,
         browser_workflow: Callable[[], BrowserResearchWorkflow] | None = None,
+        secret_status: Callable[[], str] | None = None,
     ) -> None:
         self._browser = browser_workflow
+        self._secret_status = secret_status
         self._audit = audit
         self._journal = journal
         self._ledger = ledger
@@ -194,9 +196,23 @@ class AppWorkflowCoordinator:
                 )
                 self._finish(request_id, PHASE_PRINT, "refused", message, "typed-secret path unavailable")
                 return message
+            state = self._secret_state()
+            if state != "ready":
+                # A prompt nobody can approve would only invite guesses.
+                message = _SECRET_STATE_FA.get(state, _SECRET_STATE_FA["unavailable"])
+                self._finish(request_id, PHASE_PRINT, "refused", message, f"approval secret {state}")
+                return message
             self._run_async(lambda: self._prepare_print(intent, request_id))
             return "فایل و چاپگر بررسی می‌شوند؛ پیش از چاپ، جزئیات برای تأیید نشان داده می‌شود."
         return None
+
+    def _secret_state(self) -> str:
+        if self._secret_status is None:
+            return "ready"
+        try:
+            return str(self._secret_status())
+        except Exception:  # noqa: BLE001 - an unreadable store never allows printing
+            return "unavailable"
 
     def _try_begin_navigation(self, text: str, request_id: str) -> str | None:
         navigation = plan_navigation(text)
@@ -511,6 +527,16 @@ class AppWorkflowCoordinator:
 
 
 _COLOR_FA = {"default": "رنگ پیش‌فرض چاپگر", "color": "رنگی", "monochrome": "سیاه و سفید"}
+
+# Why printing cannot be approved right now; nothing was printed in any case.
+_SECRET_STATE_FA = {
+    "not_configured": (
+        "چاپ به رمز تأیید نیاز دارد و هنوز رمزی تعیین نشده است. "
+        "ابتدا در بخش مجوزها رمز تأیید را تعیین کنید؛ چیزی چاپ نشد."
+    ),
+    "locked": "رمز تأیید به‌خاطر تلاش‌های نادرست موقتاً قفل است؛ بعداً دوباره امتحان کنید. چیزی چاپ نشد.",
+    "unavailable": "وضعیت رمز تأیید قابل خواندن نیست؛ چیزی چاپ نشد.",
+}
 
 
 def _pages_fa(description: str) -> str:

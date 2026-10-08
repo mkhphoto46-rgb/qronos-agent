@@ -1273,6 +1273,48 @@ class LibraryExecutor:
             ) from exc
 
 
+class WorkflowSecretCheck:
+    """
+    The approval secret for one approved native workflow step (printing).
+
+    Printing needs the typed secret, and only this module and the Permissions
+    CLI may open the secret store. The runtime borrows this narrow check: the
+    same per-profile store and persisted lockout as Library actions, a status
+    word before prompting and a yes/no for one typed secret. The secret is
+    never kept, logged or returned.
+    """
+
+    def __init__(self, store: ApprovalSecretStore | None = None) -> None:
+        self._store = store
+
+    @property
+    def store(self) -> ApprovalSecretStore:
+        if self._store is None:
+            self._store = ApprovalSecretStore()
+        return self._store
+
+    def status(self) -> str:
+        """One of: ready, not_configured, locked, unavailable."""
+        try:
+            status = self.store.status()
+        except ApprovalSecretError:
+            return "unavailable"
+        if not status.configured:
+            return "not_configured"
+        if status.locked_until:
+            return "locked"
+        return "ready"
+
+    def verify(self, secret: object) -> bool:
+        """True only for the configured secret; a wrong one counts toward the lockout."""
+        if not isinstance(secret, str) or not secret:
+            return False
+        try:
+            return self.store.verify(secret)
+        except ApprovalSecretError:
+            return False
+
+
 def _reason(exc: BaseException) -> str:
     if isinstance(exc, (_ItemRefused, LibraryActionRefused)):
         return str(exc)

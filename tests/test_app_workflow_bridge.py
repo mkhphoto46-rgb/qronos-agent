@@ -174,9 +174,9 @@ def temporary_data_root(tmp_path, monkeypatch):
     return root
 
 
-def test_production_wiring_refuses_printing_until_a_secret_checking_path_exists(temporary_data_root, monkeypatch):
-    """The runtime bridge may not reach the approval secret store, so a print
-    request is refused before any prompt or spooler access."""
+def test_production_wiring_refuses_printing_until_an_approval_secret_is_set(temporary_data_root, monkeypatch):
+    """With no secret in this profile, a print request is refused before any
+    prompt or spooler access (conftest gives every test its own secret path)."""
     events = []
     runtime = QronosRuntime(notify=lambda event, status, message: events.append((event, message)))
     runtime.task_router = TaskRouter()
@@ -193,7 +193,22 @@ def test_production_wiring_refuses_printing_until_a_secret_checking_path_exists(
     names = [event for event, _ in events]
     assert "app_workflow_approval_required" not in names
     finished = [json.loads(message) for event, message in events if event == "app_workflow_finished"][-1]
-    assert finished["outcome"] == "refused" and "رمز تأیید" in finished["message"]
+    assert finished["outcome"] == "refused" and "هنوز رمزی تعیین نشده" in finished["message"]
+
+
+def test_production_wiring_checks_the_profile_secret_with_the_shared_lockout(temporary_data_root):
+    from core.approval_secret import ApprovalSecretStore, approval_secret_path
+
+    # Provisioned the way the Permissions view does, in this test's own profile path.
+    ApprovalSecretStore().set_secret("correct horse battery")
+    runtime = QronosRuntime(notify=lambda *args: None)
+    runtime.action_audit = ActionAuditLog(path=None)
+    coordinator = runtime._ensure_app_workflows()
+    assert coordinator._secret_state() == "ready"
+    assert coordinator._verify_secret("wrong guess") is False
+    # The wrong guess counted in the same store the Library CLI reads.
+    assert ApprovalSecretStore(approval_secret_path()).status().remaining_attempts == 4
+    assert coordinator._verify_secret("correct horse battery") is True
 
 
 def test_production_wiring_uses_one_durable_journal_under_the_qronos_state_root(temporary_data_root):

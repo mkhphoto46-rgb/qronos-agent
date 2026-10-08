@@ -3371,6 +3371,11 @@ class QronosRuntime:
         def default_printer() -> str | None:
             return next((item.name for item in WinSpooler().printers() if item.is_default), None)
 
+        from core.library_executor import WorkflowSecretCheck
+
+        # The per-profile approval secret and its shared lockout (Library store).
+        secret_check = WorkflowSecretCheck()
+
         self._app_workflows = AppWorkflowCoordinator(
             ledger=self._approvals,
             notify=self._notify,
@@ -3379,9 +3384,10 @@ class QronosRuntime:
             print_workflow=print_workflow,
             resolve_file=resolve_file,
             default_printer=default_printer,
-            # The runtime bridge must not reach the approval secret store
-            # (tests/test_approval_secret.py); printing waits for a reviewed path.
-            verify_secret=None,
+            # The bridge never opens the secret store itself
+            # (tests/test_approval_secret.py); it borrows the Library's check.
+            verify_secret=secret_check.verify,
+            secret_status=secret_check.status,
             paused=lambda: self.runtime_paused,
             audit=self.action_audit,
             journal=journal,

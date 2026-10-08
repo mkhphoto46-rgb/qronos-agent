@@ -24,6 +24,7 @@ class Harness:
         self.ledger = ApprovalLedger()
         self.actions = ActiveActionRegistry()
         self.paused = False
+        self.secret_state = "ready"
         folder = tmp_path / "Telegram downloads"
         folder.mkdir()
         self.window_state = {"window": window()}
@@ -48,10 +49,16 @@ class Harness:
             resolve_file=self._resolve,
             default_printer=lambda: "Office Laser",
             verify_secret=lambda secret: secret == SECRET,
+            secret_status=self._secret_status,
             paused=lambda: self.paused,
             run_async=lambda work: work(),
             audit=self.audit,
         )
+
+    def _secret_status(self):
+        if isinstance(self.secret_state, Exception):
+            raise self.secret_state
+        return self.secret_state
 
     def _resolve(self, reference):
         if reference != "report.pdf":
@@ -160,6 +167,28 @@ def test_print_needs_the_typed_secret_and_never_echoes_it(harness):
     assert harness.last("app_workflow_finished")["outcome"] == "succeeded"
     every_message = json.dumps(harness.events, ensure_ascii=False)
     assert SECRET not in every_message and "wrong guess" not in every_message
+
+
+@pytest.mark.parametrize("state, fragment", [
+    ("not_configured", "هنوز رمزی تعیین نشده"),
+    ("locked", "موقتاً قفل"),
+    ("unavailable", "قابل خواندن نیست"),
+    (OSError("store unreadable"), "قابل خواندن نیست"),
+    ("something new", "قابل خواندن نیست"),
+])
+def test_print_is_refused_before_any_prompt_when_the_secret_cannot_approve_it(harness, state, fragment):
+    harness.secret_state = state
+
+    def untouched(*args):
+        raise AssertionError("the spooler must not be touched")
+
+    harness.spooler.printers = untouched
+    harness.spooler.jobs = untouched
+    reply = harness.coordinator.try_begin("print report.pdf on printer Office Laser", "p1")
+    assert fragment in reply and "چیزی چاپ نشد" in reply
+    assert "app_workflow_approval_required" not in harness.names()
+    assert harness.last("app_workflow_finished")["outcome"] == "refused"
+    assert harness.submitter.submissions == []
 
 
 def test_print_without_a_named_printer_shows_the_default_for_confirmation(harness):
