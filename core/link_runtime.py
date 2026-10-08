@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,7 +42,13 @@ from typing import Any, Callable
 from core.config import CONFIG
 from core.link_audit import DEFAULT_AUDIT_PATH, AuditEvent, AuditLog
 from core.link_capability import LinkScope
-from core.link_devices import DEFAULT_DEVICE_PATH, DeviceRecord, DeviceRegistry
+from core.link_devices import (
+    DEFAULT_DEVICE_PATH,
+    DeviceRecord,
+    DeviceRegistry,
+    DeviceStoreBusy,
+    DeviceStoreCorrupt,
+)
 from core.link_handlers import (
     ChatFunction,
     SearchFunction,
@@ -51,6 +58,7 @@ from core.link_handlers import (
 )
 from core.link_pairing import DEFAULT_PORT, PairingService
 from core.link_server import LinkOperationError, LinkServer, LinkSettings
+from core.security_monitor import SecurityMonitor
 from core.link_tunnel import (
     Connector,
     RelayConfigError,
@@ -61,6 +69,8 @@ from core.link_tunnel import (
 
 
 DEFAULT_RELAY_PATH = CONFIG.paths.data / "link_relay.json"
+DEFAULT_SECURITY_PATH = CONFIG.paths.data / "link_security.json"
+DEFAULT_INCIDENT_PATH = CONFIG.paths.logs / "link_incidents.jsonl"
 
 RELAY_SCHEMA_VERSION = 1
 
@@ -143,6 +153,15 @@ class LinkRuntimeSettings:
     audit_path: Path | None = DEFAULT_AUDIT_PATH
     relay_path: Path | None = DEFAULT_RELAY_PATH
 
+    # The Security Monitor's latched state and its hash-chained incident log.
+    security_path: Path | None = DEFAULT_SECURITY_PATH
+    incident_path: Path | None = DEFAULT_INCIDENT_PATH
+
+    # Ask the runtime for a safe shutdown of Qronos when the link is
+    # quarantined. Off: link signals cannot prove the whole PC is compromised,
+    # and quarantine already removes the link. A Root/user decision to change.
+    shutdown_on_quarantine: bool = False
+
     # The address put in the QR code. ``None`` picks the PC's own LAN address.
     pairing_host: str | None = None
 
@@ -177,6 +196,11 @@ class LinkServices:
     local_ask: SearchFunction | None = None
     transcribe: Any = None
     speak: Any = None
+
+    # Asked to stop Qronos safely if the monitor escalates to SAFE_SHUTDOWN
+    # (only with shutdown_on_quarantine). Qronos only: never Windows, never
+    # another program.
+    request_safe_shutdown: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -337,6 +361,21 @@ class LinkRuntime:
         self.dialler: RelayDialler | None = None
         self.relay: RelayEndpoint | None = None
 
+        # One monitor for the life of the runtime, so latches and throttles
+        # outlive a restart of the link. Its decisions are enforced by the
+        # server and dialler themselves; the runtime adds the parts only it
+        # can do - stopping the whole link, and asking for a safe shutdown.
+        self.monitor = SecurityMonitor(
+            state_path=settings.security_path,
+            incident_path=settings.incident_path,
+            shutdown_on_quarantine=settings.shutdown_on_quarantine,
+        )
+        self.monitor.on_quarantine(self._on_quarantine)
+        self.monitor.on_reset(self._on_security_reset)
+
+        if self.services.request_safe_shutdown is not None:
+            self.monitor.on_safe_shutdown(self.services.request_safe_shutdown)
+
     # -------------------------------------------------------------- queries
 
     @property
@@ -351,9 +390,12 @@ class LinkRuntime:
         """For the desktop's link page. No keys, no addresses of phones."""
 
         remote_reason = None
+        admission = self.monitor.remote_admission()
 
         if not self.settings.remote_access_enabled:
             remote_reason = "remote_access_off"
+        elif not admission.allowed:
+            remote_reason = admission.reason
         elif self.relay is None:
             try:
                 configured = self._configured_relay()
@@ -374,6 +416,7 @@ class LinkRuntime:
                 0 if self.dialler is None else len(self.dialler.parked_devices())
             ),
             "pairing_open": self.pairing is not None and self.pairing.is_open,
+            "security": self.monitor.status(),
         }
 
     def devices(self) -> list[DeviceView]:
@@ -395,6 +438,11 @@ class LinkRuntime:
             return True
 
         if not self.settings.link_enabled:
+            return False
+
+        if not self.monitor.link_admission().allowed:
+            # Quarantined: the link stays off, LAN included, until the user
+            # resets it at the PC.
             return False
 
         relay = None
@@ -422,6 +470,7 @@ class LinkRuntime:
                 allowed_scopes=frozenset(scopes),
             ),
             clock=self.clock,
+            monitor=self.monitor,
         )
         server.start()
 
@@ -437,10 +486,37 @@ class LinkRuntime:
         self.pairing = pairing
         self.relay = relay
 
-        if relay is not None:
+        if relay is not None and self.monitor.remote_admission().allowed:
             self._start_dialler(relay)
 
         return True
+
+    # ------------------------------------------------------------- security
+
+    def reset_security(self) -> dict[str, Any]:
+        """
+        The user, at the PC, clears containment, quarantine and throttles.
+
+        Console-only: nothing on the link can call this. A quarantined link
+        starts again if it is switched on; a contained one resumes parking.
+        """
+
+        self.monitor.reset("console")
+
+        if self.server is None and self.settings.link_enabled:
+            self.start()
+
+        return self.status()
+
+    def _on_quarantine(self, reason: str) -> None:
+        # The callback may arrive on a session thread the stop would join, so
+        # the link is stopped from a thread of its own.
+        threading.Thread(target=self.stop, name="qronos-link-quarantine", daemon=True).start()
+
+    def _on_security_reset(self) -> None:
+        if self.server is not None and self.relay is not None and self.dialler is None:
+            if self.monitor.remote_admission().allowed:
+                self._start_dialler(self.relay)
 
     def stop(self) -> None:
         dialler, self.dialler = self.dialler, None
@@ -454,7 +530,12 @@ class LinkRuntime:
             server.stop()
 
         if self.pairing is not None:
-            self.pairing.cancel()
+            try:
+                self.pairing.cancel()
+            except (DeviceStoreCorrupt, DeviceStoreBusy):
+                # Stopping must always succeed. A pending device left behind
+                # in an unreadable file cannot authenticate anyway.
+                pass
 
         self.pairing = None
         self.relay = None

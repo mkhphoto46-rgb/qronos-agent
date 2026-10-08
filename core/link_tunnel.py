@@ -63,6 +63,7 @@ from core.link_relay_wire import (
     phone_hello,
 )
 from core.link_server import LinkServer
+from core.security_monitor import Principal, SignalKind
 
 
 # The port a relay listens on unless configured otherwise. 443 because that is
@@ -443,6 +444,15 @@ class _Parker:
             if record is None:
                 return
 
+            if not self.dialler.relay_admitted():
+                # The Security Monitor is throttling the relay: no parking
+                # until it lifts. Checked every second, so a reset or the end
+                # of the throttle resumes parking promptly.
+                if self.stop.wait(1.0):
+                    return
+
+                continue
+
             result = self._park_once(record)
 
             if result is _Parked.AUTHENTICATED:
@@ -460,6 +470,7 @@ class _Parker:
             # relay answering every parking with SPLICED and a hang-up had the
             # PC redialling hundreds of times a second (review finding L3).
             self._note_failure(result)
+            self.dialler.report_failure(result)
 
             if self.stop.wait(backoff.next()):
                 return
@@ -634,6 +645,7 @@ class RelayDialler:
         self.clock = clock if clock is not None else time.time
 
         self._stopping = threading.Event()
+        self._hooked = False
         self._parkers: dict[str, _Parker] = {}
         self._lock = threading.Lock()
         self._supervisor: threading.Thread | None = None
@@ -652,8 +664,25 @@ class RelayDialler:
                 if parker.thread.is_alive()
             )
 
+    def relay_admitted(self) -> bool:
+        monitor = self.server.monitor
+
+        return monitor is None or monitor.admit(Principal.relay())
+
+    def report_failure(self, failure: RelayFailure) -> None:
+        """Tell the Security Monitor what the relay did, when it matters."""
+
+        monitor = self.server.monitor
+        signal = _SIGNAL_FOR_FAILURE.get(failure)
+
+        if monitor is not None and signal is not None:
+            monitor.observe(signal, Principal.relay())
+
     def eligible_record(self, device_id: str) -> DeviceRecord | None:
         """The device's record if it may be served remotely right now."""
+
+        if not self.server.remote_admission().allowed:
+            return None
 
         try:
             record = self.server.registry.get(device_id)
@@ -667,6 +696,10 @@ class RelayDialler:
         return record
 
     def eligible_devices(self) -> tuple[str, ...]:
+        if not self.server.remote_admission().allowed:
+            # Contained, quarantined or no monitor: nothing parks at all.
+            return ()
+
         now = self.clock()
 
         try:
@@ -688,6 +721,23 @@ class RelayDialler:
                 "Remote access is not switched on for this link server; the "
                 "relay dialler will not start without it."
             )
+
+        admission = self.server.remote_admission()
+
+        if not admission.allowed:
+            # Missing or not-ready monitor, containment or quarantine: the
+            # dialler refuses rather than starting around it.
+            raise RuntimeError(f"remote access is not admitted: {admission.reason}")
+
+        monitor = self.server.monitor
+
+        if monitor is not None and not self._hooked:
+            # Containment stops every parked connection now; a reset at the
+            # PC lets parking resume without restarting anything.
+            monitor.on_contain(lambda reason: self.refresh())
+            monitor.on_quarantine(lambda reason: self.refresh())
+            monitor.on_reset(self.refresh)
+            self._hooked = True
 
         if self._supervisor is not None:
             raise RuntimeError("the relay dialler is already running")
@@ -798,6 +848,16 @@ class RelayDialler:
             scope=LinkScope.REMOTE_TUNNEL,
             reason=reason,
         )
+
+
+# Relay failures that count against the relay with the Security Monitor.
+# Unreachable, silent or TLS-failing relays are an outage, not an attack, and
+# are handled by backoff alone.
+_SIGNAL_FOR_FAILURE = {
+    RelayFailure.UNAUTHENTICATED_SPLICE: SignalKind.UNAUTHENTICATED_SPLICE,
+    RelayFailure.MISBEHAVED: SignalKind.RELAY_MISBEHAVED,
+    RelayFailure.SPLICE_QUOTA: SignalKind.RELAY_MISBEHAVED,
+}
 
 
 def _close_quietly(connection: socket.socket) -> None:

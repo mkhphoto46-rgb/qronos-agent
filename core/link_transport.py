@@ -287,6 +287,9 @@ class TlsStream:
         self._lock = threading.RLock()
         self._closed = False
 
+        # Set when the inner TLS rejects a record after the handshake.
+        self.integrity_failed = False
+
     # ---------------------------------------------------------- construction
 
     @classmethod
@@ -386,6 +389,15 @@ class TlsStream:
                         return b""
             except ssl.SSLZeroReturnError:
                 return b""
+            except ssl.SSLEOFError:
+                return b""
+            except ssl.SSLError:
+                # A record that failed its integrity check, inside a session
+                # that authenticated. Over the relay that is evidence the bytes
+                # were altered after the outer TLS, so it is remembered for the
+                # Security Monitor before the error ends the session.
+                self.integrity_failed = True
+                raise
 
     def sendall(self, data: bytes) -> None:
         view = memoryview(data)

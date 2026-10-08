@@ -790,6 +790,18 @@ factory so a VPN holding the default route is bypassed rather than replaced;
 away from home it uses the relay as an ordinary TLS connection inside whatever
 VPN runs. None of that has run on a phone.
 
+### 5.8a Security Monitor (D9)
+
+Remote access is offered only through a deterministic Security Monitor:
+`docs/qronos_security_monitor.md`. It rejects, throttles, contains (remote
+off, LAN on) and quarantines (link off), latched until reset at the PC. No
+remote-scoped connection, relayed or otherwise, passes without its
+admission; a server will not start the remote scope without one, and the
+dialler will not start or park while it refuses. A hostile relay can be
+throttled or contained but cannot get a LAN phone or a named device refused.
+Implemented and loopback-tested; not yet independently reviewed or wired
+into the runtime.
+
 ### 5.9 Must be measured before Layer 2 is relied on
 
 The code exists now; these questions are still open, and code does not answer

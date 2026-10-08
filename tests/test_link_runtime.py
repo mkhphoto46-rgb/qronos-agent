@@ -51,6 +51,8 @@ class RuntimeTestCase(unittest.TestCase):
             device_path=self.folder / "link_devices.json",
             audit_path=self.folder / "link_audit.jsonl",
             relay_path=self.folder / "link_relay.json",
+            security_path=self.folder / "link_security.json",
+            incident_path=self.folder / "link_incidents.jsonl",
             pairing_host="127.0.0.1",
         )
         values.update(overrides)

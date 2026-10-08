@@ -20,6 +20,7 @@ from core.link_client import LinkClient
 from core.link_devices import DeviceRecord, DeviceRegistry
 from core.link_pairing import PairingService
 from core.link_server import Handler, LinkServer, LinkSettings
+from core.security_monitor import SecurityMonitor
 from core.link_relay_wire import route_id_for_secret
 from core.link_tunnel import RelayDialler, RelayEndpoint, TunnelSettings
 from tests.fixtures.link_fake_relay import FakeRelay
@@ -50,11 +51,13 @@ class RemoteRig:
         endpoint: RelayEndpoint | None = None,
         connector: Callable[..., Any] | None = None,
         tunnel: TunnelSettings = FAST_TUNNEL,
+        monitor: SecurityMonitor | None = None,
         **relay_options: Any,
     ) -> None:
         self.clock = FakeServerClock()
         self.registry = DeviceRegistry(path=None, clock=self.clock)
         self.audit = AuditLog(path=None, clock=self.clock)
+        self.monitor = monitor if monitor is not None else SecurityMonitor()
         self.pairing = PairingService(self.registry, host="127.0.0.1", port=0, clock=self.clock)
 
         base = settings if settings is not None else LinkSettings()
@@ -78,6 +81,7 @@ class RemoteRig:
                 remote_refill_per_second=base.remote_refill_per_second,
             ),
             clock=self.clock,
+            monitor=self.monitor,
         )
         self.server.start()
         self.port = self.server.address[1]

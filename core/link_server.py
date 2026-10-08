@@ -76,6 +76,13 @@ from enum import Enum
 from typing import Any, Callable, Protocol
 
 from core.link_audit import AuditEvent, AuditLog
+from core.security_monitor import (
+    Admission,
+    Principal,
+    Response as Verdict,
+    SecurityMonitor,
+    SignalKind,
+)
 from core.link_commands import (
     CommandLedger,
     CommandState,
@@ -174,6 +181,11 @@ class RejectReason(Enum):
     UNEXPECTED_FRAME = "unexpected_frame"
     PAIRING_OVER_RELAY = "pairing_over_relay"
 
+    # Security Monitor verdicts, enforced here.
+    THROTTLED = "throttled"
+    REMOTE_NOT_ADMITTED = "remote_not_admitted"
+    LINK_QUARANTINED = "link_quarantined"
+
 
 class SessionRule(Enum):
     """Why the PC ended a session or refused a request on session grounds."""
@@ -188,6 +200,9 @@ class SessionRule(Enum):
     COMMAND_IN_PROGRESS = "command_in_progress"
     COMMAND_ALREADY_DONE = "command_already_done"
     DUPLICATE_ANSWERED = "duplicate_answered"
+    THROTTLED = "throttled"
+    CONTAINED = "contained"
+    QUARANTINED = "quarantined"
 
 
 class LinkOperationError(Exception):
@@ -333,6 +348,7 @@ class LinkServer:
         clock: Clock | None = None,
         scope_resolver: Callable[[str], LinkScope | None] | None = None,
         ledger: CommandLedger | None = None,
+        monitor: SecurityMonitor | None = None,
     ) -> None:
         self.registry = registry
         self.pairing = pairing
@@ -373,6 +389,15 @@ class LinkServer:
         # device id -> its open sessions, so revocation can reach them.
         self._live: dict[str, set[int]] = {}
         self._sessions: dict[int, LinkSession] = {}
+
+        # The Security Monitor (core/security_monitor.py). Remote access does
+        # not run without one; see start(). The server enforces its own part
+        # of every verdict, so no caller can forget to.
+        self.monitor = monitor
+
+        if monitor is not None:
+            monitor.on_contain(self._contain)
+            monitor.on_quarantine(self._quarantine)
 
     # ---------------------------------------------------------------- registry
 
@@ -447,6 +472,63 @@ class LinkServer:
 
         return ended
 
+    # ------------------------------------------------------- security monitor
+
+    def remote_admission(self) -> Admission:
+        """Remote access runs only with a monitor that admits it."""
+
+        if self.monitor is None:
+            return Admission(False, "security_monitor_missing")
+
+        return self.monitor.remote_admission()
+
+    def _signal(self, kind: SignalKind, principal: Principal) -> Verdict:
+        """Report one signal; enforce a device throttle on the spot."""
+
+        if self.monitor is None:
+            return Verdict.ALLOW
+
+        decision = self.monitor.observe(kind, principal)
+
+        if decision.response is Verdict.THROTTLE and principal.ident and principal.scope:
+            self._end_device_sessions(principal.ident, principal.scope, SessionRule.THROTTLED)
+
+        return decision.response
+
+    def _admitted(self, principal: Principal) -> bool:
+        return self.monitor is None or self.monitor.admit(principal)
+
+    def _end_device_sessions(self, device_id: str, scope: str, rule: SessionRule) -> None:
+        with self._state_lock:
+            sessions = [
+                self._sessions[key]
+                for key in self._live.get(device_id, ())
+                if key in self._sessions
+            ]
+
+        for session in sessions:
+            if session.scope.value == scope:
+                session.end(rule)
+
+    def _contain(self, reason: str) -> None:
+        """Containment: every remote session ends now; LAN sessions carry on."""
+
+        with self._state_lock:
+            sessions = list(self._sessions.values())
+
+        for session in sessions:
+            if session.scope is LinkScope.REMOTE_TUNNEL:
+                session.end(SessionRule.CONTAINED)
+
+    def _quarantine(self, reason: str) -> None:
+        """Quarantine: every session ends; new connections are refused."""
+
+        with self._state_lock:
+            sessions = list(self._sessions.values())
+
+        for session in sessions:
+            session.end(SessionRule.QUARANTINED)
+
     def live_sessions(self, device_id: str) -> int:
         with self._state_lock:
             return len(self._live.get(device_id, ()))
@@ -499,6 +581,16 @@ class LinkServer:
 
         if self._listener is not None:
             raise RuntimeError("the link server is already running")
+
+        if LinkScope.REMOTE_TUNNEL in self.settings.allowed_scopes and self.monitor is None:
+            # Not bypassable: without a monitor there is no remote access,
+            # whoever constructs the server.
+            raise RuntimeError(
+                "remote access needs a Security Monitor; this server has none"
+            )
+
+        if self.monitor is not None and not self.monitor.link_admission().allowed:
+            raise RuntimeError("the device link is quarantined; reset it at the computer")
 
         self._stopping.clear()
 
@@ -773,7 +865,48 @@ class LinkServer:
 
             return
 
-        if not self._handshake_permitted(peer):
+        if self.monitor is not None and not self.monitor.link_admission().allowed:
+            self.audit.record(
+                AuditEvent.CONNECTION_REJECTED,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.LINK_QUARANTINED,
+            )
+
+            return
+
+        # Who this connection answers to before it has proved a key. Anything
+        # the relay delivers is the relay's, never a LAN address's - the relay
+        # shares one address with every phone it carries.
+        principal = Principal.relay() if relayed else Principal.lan(peer)
+
+        # Every remote-scoped connection passes the WAN gate, whatever path
+        # produced the scope - not only those the dialler hands over.
+        if (relayed or scope is LinkScope.REMOTE_TUNNEL) and not self.remote_admission().allowed:
+            self.audit.record(
+                AuditEvent.SCOPE_REFUSED,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.REMOTE_NOT_ADMITTED,
+            )
+
+            return
+
+        if not self._admitted(principal):
+            self.audit.record(
+                AuditEvent.CONNECTION_REJECTED,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.THROTTLED,
+            )
+
+            return
+
+        # The relay's address is kept apart from LAN addresses here too, so a
+        # failure through the relay never pauses a phone on the sofa.
+        pause_key = f"relay {peer}" if relayed else peer
+
+        if not self._handshake_permitted(pause_key):
             self.audit.record(
                 AuditEvent.CONNECTION_REJECTED,
                 peer=peer,
@@ -792,7 +925,7 @@ class LinkServer:
             else:
                 tls = context.wrap_socket(raw, server_side=True)
         except (ssl.SSLError, OSError, TimeoutError):
-            self._penalise_failure(peer)
+            self._penalise_failure(pause_key)
             self.audit.record(
                 AuditEvent.HANDSHAKE_REFUSED,
                 device_id=seen.identity or "",
@@ -800,6 +933,10 @@ class LinkServer:
                 scope=scope,
                 reason=RejectReason.BAD_KEY_OR_UNKNOWN_DEVICE,
             )
+            # Held against the source, never the identity it claimed: that
+            # identity was not proved, and holding it against the device would
+            # let anyone get a real phone refused by failing in its name.
+            self._signal(SignalKind.HANDSHAKE_FAILED, principal)
 
             return
 
@@ -832,6 +969,12 @@ class LinkServer:
                 self._session_loop(session)
             finally:
                 self._unregister(session)
+
+                if relayed and getattr(tls, "integrity_failed", False):
+                    # The inner TLS rejected a record inside an authenticated
+                    # relayed session. TCP and the outer TLS guard the wire up
+                    # to the relay, so the bytes were altered past it.
+                    self._signal(SignalKind.TAMPERING, Principal.relay())
 
                 if session.ended is not None:
                     self.audit.record(
@@ -881,7 +1024,10 @@ class LinkServer:
 
         try:
             record = self.registry.get(identity)
-        except (DeviceStoreCorrupt, DeviceStoreBusy):
+        except DeviceStoreCorrupt:
+            record = None
+            self._signal(SignalKind.REGISTRY_UNREADABLE, Principal.system())
+        except DeviceStoreBusy:
             record = None
 
         if record is None or not record.can_authenticate:
@@ -908,6 +1054,7 @@ class LinkServer:
                     scope=scope,
                     reason=RejectReason.PAIRING_OVER_RELAY,
                 )
+                self._signal(SignalKind.PAIRING_OVER_RELAY, Principal.relay())
 
                 return None
 
@@ -931,6 +1078,7 @@ class LinkServer:
                 scope=scope,
                 reason=RejectReason.REMOTE_NOT_ENABLED,
             )
+            self._signal(SignalKind.REQUEST_REFUSED, Principal.device(record.device_id, scope.value))
 
             return None
         else:
@@ -948,6 +1096,17 @@ class LinkServer:
                 )
 
                 return None
+
+        if not self._admitted(Principal.device(record.device_id, scope.value)):
+            self.audit.record(
+                AuditEvent.CONNECTION_REJECTED,
+                device_id=record.device_id,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.THROTTLED,
+            )
+
+            return None
 
         budget = (
             RequestBudget(
@@ -1034,14 +1193,29 @@ class LinkServer:
 
         try:
             record = self.registry.get(session.device.device_id)
-        except (DeviceStoreCorrupt, DeviceStoreBusy):
+        except DeviceStoreCorrupt:
             # The registry is shared with other processes. If it cannot be
             # read now, nobody can say this device is still trusted, so the
-            # session ends rather than carrying on from a stale copy.
+            # session ends rather than carrying on from a stale copy - and
+            # the monitor contains remote access until the user looks.
+            self._signal(SignalKind.REGISTRY_UNREADABLE, Principal.system())
+
+            return SessionRule.REVOKED
+        except DeviceStoreBusy:
             return SessionRule.REVOKED
 
         if record is None or record.status is not DeviceStatus.ACTIVE:
             return SessionRule.REVOKED
+
+        if self.monitor is not None:
+            if not self.monitor.link_admission().allowed:
+                return SessionRule.QUARANTINED
+
+            if session.scope is LinkScope.REMOTE_TUNNEL and not self.monitor.remote_admission().allowed:
+                return SessionRule.CONTAINED
+
+            if self.monitor.throttled(Principal.device(record.device_id, session.scope.value)):
+                return SessionRule.THROTTLED
 
         if session.scope is LinkScope.REMOTE_TUNNEL:
             now = self.clock()
@@ -1071,6 +1245,7 @@ class LinkServer:
                     peer=session.peer,
                     reason=exc.fault,
                 )
+                self._signal(SignalKind.PROTOCOL_FAULT, _device_principal(session))
 
                 return
 
@@ -1096,6 +1271,7 @@ class LinkServer:
                     peer=session.peer,
                     reason=exc.fault,
                 )
+                self._signal(SignalKind.PROTOCOL_FAULT, _device_principal(session))
 
                 return
 
@@ -1229,6 +1405,10 @@ class LinkServer:
             op=_known_op(request.op),
             reason=rule,
         )
+        signal = _SIGNAL_FOR_RULE.get(rule)
+
+        if signal is not None:
+            self._signal(signal, _device_principal(session))
 
         return Response.failure(request.id, rule.value, message)
 
@@ -1262,6 +1442,7 @@ class LinkServer:
                 op=decision.op,
                 reason=decision.reason,
             )
+            self._signal(SignalKind.REQUEST_REFUSED, _device_principal(session))
 
             return Response.failure(
                 request.id,
@@ -1418,6 +1599,20 @@ _REFUSAL_MESSAGES = {
 
 def _refusal_message(reason: AuthReason) -> str:
     return _REFUSAL_MESSAGES.get(reason, "Refused.")
+
+
+# Which session-rule refusals count against a device. A command still running
+# or already answered is a phone waiting or retrying correctly, never abuse.
+_SIGNAL_FOR_RULE = {
+    SessionRule.RATE_LIMITED: SignalKind.RATE_LIMITED,
+    SessionRule.COMMAND_CONFLICT: SignalKind.COMMAND_CONFLICT,
+    SessionRule.COMMAND_ID_REQUIRED: SignalKind.REQUEST_REFUSED,
+}
+
+
+def _device_principal(session: LinkSession) -> Principal:
+    """An authenticated session's device, in the scope it is connected in."""
+    return Principal.device(session.device.device_id, session.scope.value)
 
 
 def _known_op(name: str) -> LinkOp | None:

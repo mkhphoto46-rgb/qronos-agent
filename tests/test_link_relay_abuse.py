@@ -29,6 +29,13 @@ from core.link_capability import LinkOp, LinkScope
 from core.link_handlers import ping_handler
 from core.link_server import LinkSettings, RejectReason
 from core.link_tunnel import RelayFailure, TunnelSettings
+from core.security_monitor import (
+    DEFAULT_POLICIES,
+    Policy,
+    Principal,
+    SecurityMonitor,
+    SignalKind,
+)
 from tests.fixtures.link_harness import ok_handler, wait_for
 from tests.fixtures.link_hostile_relay import HostileRelay
 from tests.fixtures.link_remote_rig import RemoteRig
@@ -39,7 +46,13 @@ def failures(rig: RemoteRig) -> list[str]:
 
 
 class AbuseTestCase(unittest.TestCase):
-    def rig(self, behaviour: str, tunnel: TunnelSettings, settings: LinkSettings | None = None) -> tuple[RemoteRig, HostileRelay]:
+    def rig(
+        self,
+        behaviour: str,
+        tunnel: TunnelSettings,
+        settings: LinkSettings | None = None,
+        monitor: SecurityMonitor | None = None,
+    ) -> tuple[RemoteRig, HostileRelay]:
         relay = HostileRelay(behaviour)
         rig = RemoteRig(
             handlers={LinkOp.PING: ping_handler, LinkOp.STATUS: ok_handler},
@@ -48,6 +61,7 @@ class AbuseTestCase(unittest.TestCase):
             connector=HostileRelay.connector,
             tunnel=tunnel,
             settings=settings,
+            monitor=monitor,
         )
         self.addCleanup(relay.close)
         self.addCleanup(rig.close)
@@ -73,10 +87,22 @@ class TestUnauthenticatedSplices(AbuseTestCase):
         self.assertLessEqual(len(rig.audit.records()), 10)
         self.assertEqual(failures(rig), [RelayFailure.UNAUTHENTICATED_SPLICE.value])
 
-    def test_the_phone_on_the_lan_is_served_during_the_flood(self) -> None:
+    def test_the_monitor_throttles_the_relay_and_the_lan_phone_is_still_served(self) -> None:
         rig, relay = self.rig("splice_hangup", TunnelSettings(backoff_initial=0.01, backoff_max=0.02))
+        threshold = DEFAULT_POLICIES[SignalKind.UNAUTHENTICATED_SPLICE].threshold
 
-        self.assertTrue(wait_for(lambda: relay.connections >= 20, timeout=10))
+        self.assertTrue(wait_for(lambda: rig.monitor.throttled(Principal.relay()), timeout=10))
+        settled = relay.connections
+        time.sleep(0.5)
+
+        # Throttled: the dialler stopped dialling the relay.
+        self.assertGreaterEqual(settled, threshold)
+        self.assertLessEqual(relay.connections, settled + 1)
+
+        # The relay is not the phone: neither its LAN address nor the device
+        # it was parked for is held to account for what the relay did.
+        self.assertFalse(rig.monitor.throttled(Principal.device(self.record.device_id, "remote_tunnel")))
+        self.assertTrue(rig.monitor.remote_admission().allowed)
 
         with rig.local_phone(self.record) as phone:
             self.assertTrue(phone.call("ping").ok)
@@ -97,6 +123,12 @@ class TestUnauthenticatedSplices(AbuseTestCase):
 
 class TestSpliceQuota(AbuseTestCase):
     def test_a_device_is_handed_only_its_quota_of_splices(self) -> None:
+        # The monitor's relay thresholds are raised here so this test sees the
+        # dialler's own quota and nothing else.
+        lenient = {
+            signal: Policy(policy.signal, policy.principals, 10_000, policy.window, policy.response, policy.duration, policy.why)
+            for signal, policy in DEFAULT_POLICIES.items()
+        }
         rig, relay = self.rig(
             "splice_hangup",
             TunnelSettings(
@@ -105,6 +137,7 @@ class TestSpliceQuota(AbuseTestCase):
                 splice_burst=3,
                 splice_refill_per_second=0.0001,
             ),
+            monitor=SecurityMonitor(policies=lenient),
         )
 
         self.assertTrue(wait_for(lambda: relay.connections >= 15, timeout=10))
