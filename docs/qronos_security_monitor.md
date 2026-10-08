@@ -78,9 +78,14 @@ correctly. It never counts against the device.
 
 ## State, records, recovery
 
-- **Memory is bounded.** At most 1024 tracked windows and 1024 throttles,
-  with the least recently seen evicted. Each window holds no more entries
-  than its threshold.
+- **Memory is bounded, in two tables that never evict each other.** LAN
+  addresses: at most 1024 windows and 1024 throttles. The relay, the system
+  and devices: at most 256 of each. So the total is 1280 of each. Each
+  window holds no more entries than its threshold. When a table is full,
+  expired throttles go first, then its least recently seen entry. LAN churn
+  can therefore only ever forgive another LAN address early. It cannot
+  lift an active device or relay throttle, or wipe a device's partial count
+  (review finding D9-1, repaired).
 - **Latches persist.** `data/link_security.json` holds only the latches and
   the containment history. An unreadable file reads as contained.
 - **Incident log.** `logs/link_incidents.jsonl` is hash-chained and

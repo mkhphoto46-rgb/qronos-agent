@@ -15,6 +15,8 @@ from pathlib import Path
 from core.security_monitor import (
     DEFAULT_POLICIES,
     LAN_RETRY_INTERVAL_SECONDS,
+    MAX_LAN_TRACKED,
+    MAX_OTHER_TRACKED,
     MAX_TRACKED,
     QUARANTINE_AFTER_CONTAINMENTS,
     Principal,
@@ -272,8 +274,9 @@ class TestBoundsAndRecords(MonitorTestCase):
             for _ in range(threshold):
                 self.monitor.observe(SignalKind.HANDSHAKE_FAILED, peer)
 
-        self.assertLessEqual(len(self.monitor._throttles), MAX_TRACKED)
-        self.assertLessEqual(len(self.monitor._windows), MAX_TRACKED)
+        self.assertLessEqual(len(self.monitor._throttles["lan"]), MAX_LAN_TRACKED)
+        self.assertLessEqual(len(self.monitor._windows["lan"]), MAX_LAN_TRACKED)
+        self.assertLessEqual(self.monitor.status()["tracked"], MAX_TRACKED)
 
     def test_the_incident_log_is_one_line_per_decision_and_chained(self) -> None:
         peer = Principal.lan("192.168.1.9")
@@ -328,6 +331,123 @@ class TestBoundsAndRecords(MonitorTestCase):
             {PrincipalKind.RELAY, PrincipalKind.SYSTEM},
         )
 
+
+
+def lan_address(n: int) -> Principal:
+    return Principal.lan(f"10.{n // 65536 % 256}.{n // 256 % 256}.{n % 256}")
+
+
+class TestLanChurnCannotLiftOtherRestrictions(MonitorTestCase):
+    """
+    Review finding D9-1: one shared LRU of 1024 let a churn of ~1,030 LAN
+    addresses evict a device's and the relay's active throttles early.
+    """
+
+    def churn(self, addresses: int) -> None:
+        threshold = DEFAULT_POLICIES[SignalKind.HANDSHAKE_FAILED].threshold
+
+        for n in range(addresses):
+            for _ in range(threshold):
+                self.monitor.observe(SignalKind.HANDSHAKE_FAILED, lan_address(n))
+
+    def throttle(self, signal: SignalKind, principal: Principal) -> None:
+        for _ in range(DEFAULT_POLICIES[signal].threshold):
+            self.monitor.observe(signal, principal)
+
+        self.assertTrue(self.monitor.throttled(principal))
+
+    def test_active_device_and_relay_throttles_survive_lan_churn(self) -> None:
+        remote = Principal.device(DEVICE, "remote_tunnel")
+        local = Principal.device(DEVICE, "local_network")
+        relay = Principal.relay()
+        self.throttle(SignalKind.REQUEST_REFUSED, remote)
+        self.throttle(SignalKind.PROTOCOL_FAULT, local)
+        self.throttle(SignalKind.UNAUTHENTICATED_SPLICE, relay)
+
+        self.churn(3 * MAX_LAN_TRACKED)
+
+        for victim in (remote, local, relay):
+            with self.subTest(victim=victim.describe()):
+                self.assertTrue(self.monitor.throttled(victim))
+                self.assertFalse(self.monitor.admit(victim))
+
+        self.assertEqual(len(self.monitor._throttles["other"]), 3)
+        self.assertLessEqual(len(self.monitor._throttles["lan"]), MAX_LAN_TRACKED)
+
+    def test_they_still_expire_on_their_own_monotonic_time(self) -> None:
+        remote = Principal.device(DEVICE, "remote_tunnel")
+        relay = Principal.relay()
+        self.throttle(SignalKind.REQUEST_REFUSED, remote)
+        self.throttle(SignalKind.UNAUTHENTICATED_SPLICE, relay)
+        self.churn(MAX_LAN_TRACKED + 50)
+
+        duration = DEFAULT_POLICIES[SignalKind.REQUEST_REFUSED].duration
+        self.assertEqual(duration, DEFAULT_POLICIES[SignalKind.UNAUTHENTICATED_SPLICE].duration)
+
+        self.clock.now += duration - 1
+        self.assertFalse(self.monitor.admit(remote))
+        self.assertFalse(self.monitor.admit(relay))
+
+        self.clock.now += 1
+        self.assertTrue(self.monitor.admit(remote))
+        self.assertTrue(self.monitor.admit(relay))
+
+    def test_a_devices_partial_count_survives_lan_churn(self) -> None:
+        remote = Principal.device(DEVICE, "remote_tunnel")
+        threshold = DEFAULT_POLICIES[SignalKind.REQUEST_REFUSED].threshold
+
+        for _ in range(threshold - 1):
+            self.monitor.observe(SignalKind.REQUEST_REFUSED, remote)
+
+        self.churn(MAX_LAN_TRACKED + 50)
+
+        self.assertIs(self.monitor.observe(SignalKind.REQUEST_REFUSED, remote).response, Response.THROTTLE)
+
+    def test_expired_lan_throttles_are_evicted_before_an_active_one(self) -> None:
+        self.churn(MAX_LAN_TRACKED - 1)
+        self.clock.now += DEFAULT_POLICIES[SignalKind.HANDSHAKE_FAILED].duration
+
+        fresh = Principal.lan("192.168.1.77")
+        self.throttle(SignalKind.HANDSHAKE_FAILED, fresh)
+        self.churn_range(MAX_LAN_TRACKED, MAX_LAN_TRACKED + 40)
+
+        self.assertTrue(self.monitor.throttled(fresh))
+
+    def churn_range(self, start: int, stop: int) -> None:
+        threshold = DEFAULT_POLICIES[SignalKind.HANDSHAKE_FAILED].threshold
+
+        for n in range(start, stop):
+            for _ in range(threshold):
+                self.monitor.observe(SignalKind.HANDSHAKE_FAILED, lan_address(n))
+
+    def test_a_throttled_lan_address_keeps_its_retry_slot_under_churn(self) -> None:
+        peer = Principal.lan("192.168.1.9")
+        self.throttle(SignalKind.HANDSHAKE_FAILED, peer)
+        self.churn_range(0, 200)
+
+        self.assertFalse(self.monitor.admit(peer))
+        self.clock.now += LAN_RETRY_INTERVAL_SECONDS
+        self.assertTrue(self.monitor.admit(peer))
+
+    def test_the_bounds_hold_in_both_tables(self) -> None:
+        for n in range(MAX_OTHER_TRACKED + 40):
+            device = f"{n:016x}"
+            self.monitor.observe(SignalKind.REQUEST_REFUSED, Principal.device(device, "remote_tunnel"))
+
+        self.churn(MAX_LAN_TRACKED + 40)
+
+        self.assertLessEqual(len(self.monitor._windows["other"]), MAX_OTHER_TRACKED)
+        self.assertLessEqual(len(self.monitor._windows["lan"]), MAX_LAN_TRACKED)
+        self.assertLessEqual(self.monitor.status()["tracked"], MAX_TRACKED)
+        self.assertEqual(MAX_TRACKED, MAX_LAN_TRACKED + MAX_OTHER_TRACKED)
+
+    def test_reset_clears_both_tables(self) -> None:
+        self.throttle(SignalKind.UNAUTHENTICATED_SPLICE, Principal.relay())
+        self.churn(20)
+        self.monitor.reset()
+
+        self.assertEqual(self.monitor.status()["tracked"], 0)
+        self.assertEqual(self.monitor.status()["throttled"], [])
 
 if __name__ == "__main__":
     unittest.main()
