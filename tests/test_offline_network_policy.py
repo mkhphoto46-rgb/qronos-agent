@@ -61,10 +61,14 @@ NETWORK_MODULES = {
     "imaplib": "imaplib", "poplib": "poplib", "nntplib": "nntplib",
     "telnetlib": "telnetlib", "xmlrpc.client": "xmlrpc", "xmlrpc.server": "xmlrpc",
     "webbrowser": "webbrowser", "win32inet": "native-network",
+    # Listener/Client also speak TCP, so a local-pipe use must be granted explicitly.
+    "multiprocessing.connection": "multiprocessing-connection",
+    "multiprocessing.managers": "multiprocessing-connection",
     "winhttp": "native-network", "pycurl": "native-network",
 }
 # A parent package whose submodule may be bound by "from P import sub".
-NETWORK_PARENTS = {"urllib": {"request"}, "http": {"client", "server"}, "xmlrpc": {"client", "server"}}
+NETWORK_PARENTS = {"urllib": {"request"}, "http": {"client", "server"}, "xmlrpc": {"client", "server"},
+                   "multiprocessing": {"connection", "managers"}}
 # asyncio itself is local (events, queues, subprocesses); these calls are not.
 ASYNCIO_NETWORK_CALLS = {
     "open_connection", "start_server", "open_unix_connection", "start_unix_server",
@@ -117,6 +121,12 @@ NETWORK_EXCEPTIONS = {
     "core.link_server": ({"socket", "ssl"}, "Permission-controlled Device Link listener and its stop socketpair."),
     "core.link_transport": ({"socket", "ssl"}, "Authenticated/encrypted Device Link TLS transport."),
     "core.link_pairing": ({"socket"}, "Local Device Link address discovery; no inference or web requests."),
+    # D8 supervisor/broker channel (Runtime c3649ad, not yet integrated).
+    "core.supervisor_ipc": (
+        {"multiprocessing-connection"},
+        "Windows named pipes only: require_local_address admits only local qronos-<purpose>-<128-bit hex> "
+        "pipe names and refuses address tuples, remote server pipes and other names; no TCP endpoint.",
+    ),
     "build_support.runtime_entry": (
         {"dynamic-import"},
         "Frozen entry imports only a value of its fixed SERVICES map; proven local below.",
@@ -400,6 +410,12 @@ ADVERSARIAL_PROBES = {
         "import sys\nsys.modules['socket']\n",
     ],
     "dynamic-code": ["exec('import socket')\n", "eval(compile('1', 'x', 'eval'))\n"],
+    "multiprocessing-connection": [
+        "from multiprocessing.connection import Listener\nListener(('0.0.0.0', 6000))\n",
+        "import multiprocessing.connection as mpc\nmpc.Client(('example.com', 6000))\n",
+        "from multiprocessing import connection\n",
+        "from multiprocessing.managers import BaseManager\n",
+    ],
     "subprocess-network": [
         "import subprocess\nsubprocess.run(['curl', '-o', 'x', 'https://example.com'])\n",
         "import subprocess\nsubprocess.run('curl.exe https://example.com', shell=True)\n",
