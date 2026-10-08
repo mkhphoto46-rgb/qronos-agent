@@ -240,7 +240,13 @@ the following before anything is installed.
 
 - **The install folder must be Qronos's own.** It is compared in its canonical
   Windows form, so trailing dots or spaces and 8.3 short names cannot slip
-  past. The installer refuses a folder that:
+  past. Links and junctions in the part of the path that exists are resolved
+  by Windows (`GetFinalPathNameByHandleW`), for the install folder and for every
+  protected folder below, so a protected folder reached or redirected through
+  a junction is still recognised. The check runs on the directory page (so an
+  unsafe folder is refused before Tauri creates it) and again before any file
+  is installed; a silent install skips that page, so Tauri may already have
+  created the empty folder. The installer refuses a folder that:
   - is, sits inside, or contains `%LOCALAPPDATA%\Qronos`;
   - is, sits inside, or contains `Documents\Qronos` or `Documents\Qronos Files`;
   - is, sits inside, or contains the `com.qronos.agent` app-data folders;
@@ -250,7 +256,7 @@ the following before anything is installed.
     Program Files folder itself;
   - is a drive's top folder, a drive-relative path, a network share or a
     device name such as `CON` or `NUL.txt`;
-  - is a junction;
+  - is, or is reached through, any link or junction;
   - already contains files and has no valid Qronos manifest.
 
   NSIS itself removes `:` from the install path, so alternate data streams
@@ -261,11 +267,21 @@ the following before anything is installed.
   only then are the new files copied. A file that an older version had and the
   new version does not cannot linger. Files the manifest does not list, such
   as a user's own, are never touched.
-- **Fail closed.** The removal stops before deleting anything when the manifest:
-  - has any line that is not a plain relative path (with `..`, `:`, `/`, a
-    drive or a leading backslash);
-  - has a header that is not Qronos's;
-  - lists a folder that is a junction.
+- **Fail closed.** The whole manifest is checked before anything is deleted.
+  The removal stops without deleting anything when:
+  - any line is not a plain relative path under the same rules as the build
+    (`build_support/install_manifest.check_entry`). That excludes `..`, `:`,
+    `/`, the wildcards `*` and `?`, `"`, `<`, `>`, `|`, tab, CR or LF, a drive,
+    a leading, trailing or doubled backslash, names Windows would change, and
+    device names;
+  - the header is not Qronos's;
+  - any folder on the way to any listed entry, or the entry itself, is a link
+    or junction. This is checked on disk for every entry, whatever folder
+    lines the list contains;
+  - a listed file is really a folder, or a listed folder is really a file;
+  - the install folder itself is reached through a link.
+
+  Each path is checked again right before its removal.
 
   If a listed file cannot be deleted, for example because Qronos is still
   running, the installation stops and the manifest is kept, so running the

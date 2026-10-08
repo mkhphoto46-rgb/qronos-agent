@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -222,7 +223,7 @@ def test_a_junctioned_install_folder_is_refused(fx):
     target.mkdir()
     junction(target, fx.base / "apps-link")
 
-    assert fx.check(str(fx.base / "apps-link")) == "The chosen folder is a link to another folder."
+    assert fx.check(str(fx.base / "apps-link")).startswith("The chosen folder is reached through a link or junction")
 
 
 # ------------------------------------------------- owned-payload removal
@@ -280,7 +281,7 @@ def test_a_listed_folder_that_is_a_junction_stops_removal(fx):
     (owned / "qronos-runtime").rmdir()
     junction(elsewhere, owned / "qronos-runtime")
 
-    assert "is a link to another folder" in fx.remove(owned)
+    assert "qronos-runtime is a link to another location" in fx.remove(owned)
     assert (elsewhere / "qronos-runtime.exe").read_text(encoding="utf-8") == "not Qronos's"
     assert (owned / "qronos-desktop.exe").exists()  # nothing was deleted
 
@@ -305,3 +306,138 @@ def test_a_manifest_with_another_header_is_not_used(fx):
 
     assert fx.remove(owned) == "The previous installation's file list is not a Qronos file list."
     assert (owned / "qronos-desktop.exe").exists()
+
+
+# ---------------------------------------------- strict manifest entries (I8)
+
+
+def unsafe_list(owned: Path, *lines: str) -> None:
+    manifest = owned / install_manifest.FILE_NAME
+    manifest.write_bytes(manifest.read_bytes() + "".join(line + "\r\n" for line in lines).encode("utf-16-le"))
+
+
+def test_a_wildcard_entry_deletes_nothing(fx):
+    """I8 reproduction: "F foreign-*.bin" used to make Delete remove unlisted files."""
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    (owned / "foreign-a.bin").write_bytes(b"not listed")
+    (owned / "foreign-b.bin").write_bytes(b"not listed either")
+    unsafe_list(owned, "F foreign-*.bin")
+    before = fx.snapshot()
+
+    assert "unsafe entry: foreign-*.bin" in fx.remove(owned)
+    assert fx.snapshot() == before
+
+
+def test_a_file_through_an_unlisted_junction_is_refused(fx):
+    """I8 reproduction: "F linked\\foreign.bin" without a "D linked" line, where linked is a junction."""
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    outside = fx.base / "outside"
+    outside.mkdir()
+    (outside / "foreign.bin").write_bytes(b"outside the install folder")
+    junction(outside, owned / "linked")
+    unsafe_list(owned, "F linked\\foreign.bin")
+    before = fx.snapshot()
+
+    assert "linked is a link to another location" in fx.remove(owned)
+    assert (outside / "foreign.bin").read_bytes() == b"outside the install folder"
+    assert fx.snapshot() == before
+
+
+@pytest.mark.parametrize(("line", "message"), [
+    ("F qronos-runtime", "names qronos-runtime as a file, but it is a folder"),
+    ("D qronos-desktop.exe", "names qronos-desktop.exe as a folder, but it is a file"),
+])
+def test_an_entry_of_the_wrong_kind_stops_before_anything_is_deleted(fx, line, message):
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    unsafe_list(owned, line)
+    before = fx.snapshot()
+
+    assert message in fx.remove(owned)
+    assert fx.snapshot() == before
+
+
+ENTRIES = ["qronos-runtime\\_internal\\a.dll", "third-party-notices\\licenses\\npm\\@tauri-apps\\api\\2.11.1\\LICENSE",
+           "a b\\c.txt", "COM10\\x", "con-tools\\x", "x..y", "a\\..\\b", "..\\a", "a\\\\b", "\\a", "a\\", "a:b",
+           "a/b", "a*", "a?b", "a<b", "a>b", "a|b", "a\tb", "a.\\b", "a \\b", " a\\b", "CON\\x", "x\\nul.txt",
+           "x\\COM1.log", "x\\LPT9", "x\\CONIN$"]
+
+
+def nsis_entry_result(fx: Fixture, entry: str) -> str:
+    escaped = entry.replace("$", "$$").replace("\t", "$\\t")
+    return fx.probe([f'  StrCpy $QronosPath "{escaped}"', '  StrCpy $QronosMessage ""',
+                     "  Call QronosCheckEntry"])
+
+
+def python_entry_result(entry: str) -> bool:
+    """The builder's own rule for a manifest line (install_manifest.parse)."""
+    data = (install_manifest.HEADER + "\r\nF " + entry + "\r\n").encode("utf-16-le")
+    try:
+        install_manifest.parse(data)
+    except install_manifest.InstallManifestError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_the_hook_and_the_builder_agree_on_every_entry(fx, entry):
+    assert (nsis_entry_result(fx, entry) == "ok") == python_entry_result(entry), entry
+
+
+# ------------------------------------------- install root through links (I9)
+
+
+def test_an_install_folder_through_a_junction_into_user_data_is_refused(fx):
+    """I9 reproduction: <junction to AppData\\Local>\\Qronos\\app used to be accepted."""
+    junction(fx.local, fx.base / "looks-harmless")
+
+    message = fx.check(str(fx.base / "looks-harmless" / "Qronos" / "app"))
+
+    assert message.startswith("The chosen folder is reached through a link or junction"), message
+    assert not (fx.local / "Qronos" / "app").exists()
+
+
+def test_any_junction_on_the_way_is_refused_even_to_a_harmless_place(fx):
+    elsewhere = fx.base / "elsewhere"
+    elsewhere.mkdir()
+    junction(elsewhere, fx.base / "apps-link")
+
+    assert fx.check(str(fx.base / "apps-link" / "qronos-desktop")).startswith(
+        "The chosen folder is reached through a link or junction")
+
+
+def test_a_protected_root_that_is_itself_a_junction_is_matched_by_its_target(fx):
+    """Documents redirected through a junction: its real target must count as Documents."""
+    real_documents = fx.base / "RealDocs"
+    shutil.move(str(fx.documents), str(real_documents))
+    junction(real_documents, fx.documents)
+
+    assert fx.check(str(real_documents / "Qronos" / "app")).startswith("The chosen folder overlaps")
+    assert fx.check(str(real_documents)).startswith("Qronos cannot be installed directly into")
+
+
+def test_ordinary_install_folders_still_pass_after_resolution(fx):
+    assert fx.check(str(fx.local / "Programs" / "qronos-desktop")) == "ok"
+    (fx.base / "apps" / "Qronos Desktop").mkdir(parents=True)
+    assert fx.check(str(fx.base / "apps" / "Qronos Desktop")) == "ok"
+    assert fx.check(str(fx.base / "apps" / "not-yet" / "created")) == "ok"
+
+
+def test_removal_refuses_an_install_folder_reached_through_a_junction(fx):
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    junction(owned, fx.base / "owned-link")
+    before = fx.snapshot()
+
+    assert fx.remove(fx.base / "owned-link") == ("The install folder is reached through a link or junction; "
+                                                 "nothing was removed.")
+    assert fx.snapshot() == before
+
+
+def test_the_directory_page_runs_the_same_guard():
+    hook = (prerequisites.HOOK_PATH.parent / "qronos-install-root.nsh").read_text(encoding="utf-8")
+    body = hook[hook.index("Function .onVerifyInstDir"):]
+    body = body[:body.index("FunctionEnd")]
+    assert "Call QronosCheckInstallRoot" in body and "Abort" in body
