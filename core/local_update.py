@@ -174,9 +174,10 @@ def load_trusted_keys(path: Path = TRUSTED_KEYS_PATH) -> dict[str, TrustedKey]:
         if entry["keyId"] in keys:
             raise UpdateError("key_file", f"Trusted key {entry['keyId']!r} is listed twice.")
         try:
-            ed25519.verify(public, b"", bytes(64))  # rejects a public key that is not a curve point
+            ed25519.check_public_key(public)  # canonical, prime-order subgroup: no weak/identity keys
         except ed25519.SignatureError as error:
-            raise UpdateError("key_file", f"Trusted key {entry['keyId']!r} is not a valid Ed25519 key.") from error
+            raise UpdateError("key_file", f"Trusted key {entry['keyId']!r} is not an acceptable Ed25519 key: "
+                                          f"{error}") from error
         keys[entry["keyId"]] = TrustedKey(entry["keyId"], public, entry["owner"], entry["revoked"])
     return keys
 
@@ -224,7 +225,13 @@ def _authenticate(envelope: bytes, keys: dict[str, TrustedKey]) -> tuple[bytes, 
             raise UpdateError("malformed", "A signature names an invalid key id.")
         signature = _b64(entry["signature"], ed25519.SIGNATURE_BYTES, "A signature")
         key = keys.get(entry["keyId"])
-        if key is None or not ed25519.verify(key.public_key, payload, signature):
+        if key is None:
+            continue
+        try:
+            valid = ed25519.verify(key.public_key, payload, signature)
+        except ed25519.SignatureError as error:  # a weak key that reached this map some other way
+            raise UpdateError("weak_key", f"Trusted key {key.key_id!r} is not an acceptable Ed25519 key.") from error
+        if not valid:
             continue
         if key.revoked:
             revoked = True

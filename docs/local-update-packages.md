@@ -50,8 +50,16 @@ Each key entry records:
 - `owner`;
 - `revoked`.
 
-A `keyId` that does not match its key, a duplicate, or a value that is not a
-curve point is refused.
+The following key entries are refused:
+- a `keyId` that does not match its key;
+- a duplicate;
+- a value that is not a canonical encoding of a point in the prime-order
+  subgroup. That covers the identity point, the other small-order points and
+  mixed-order points; with the identity point as a key, an "unsigned" payload
+  would verify.
+
+Verification checks the key again. It also refuses a signature whose `R` is
+non-canonical or of small order, or whose `S` is not below the group order.
 
 **The repository never contains a private key, and no test key is ever
 committed.** Tests generate throwaway keys in memory.

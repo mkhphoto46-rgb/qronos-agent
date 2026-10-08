@@ -387,3 +387,35 @@ def test_the_module_has_no_network_path():
         encoding="utf-8")
     for name in ("socket", "urllib", "http.client", "requests", "httpx", "aiohttp", "websocket"):
         assert f"import {name}" not in source and f"from {name}" not in source
+
+
+# ------------------------------------------------- weak trusted keys (I6)
+
+IDENTITY = bytes([1]) + bytes(31)
+
+
+def forged_envelope(payload: dict, public: bytes) -> bytes:
+    """An 'unsigned' envelope: R = A (the identity), S = 0."""
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return json.dumps({"schema": 1, "payload": base64.b64encode(payload_bytes).decode(),
+                       "signatures": [{"keyId": local_update.key_id(public),
+                                       "signature": base64.b64encode(public + bytes(32)).decode()}]}).encode()
+
+
+def test_the_identity_key_is_refused_by_the_key_file(tmp_path):
+    entry = {"keyId": local_update.key_id(IDENTITY), "publicKey": base64.b64encode(IDENTITY).decode(),
+             "owner": "attacker", "revoked": False}
+
+    with pytest.raises(UpdateError) as refused:
+        local_update.load_trusted_keys(write_keys(tmp_path, [entry]))
+    assert refused.value.code == "key_file" and "weak" in str(refused.value)
+
+
+def test_an_injected_weak_key_cannot_validate_an_unsigned_payload(tmp_path):
+    installer = package(tmp_path)
+    keys = {local_update.key_id(IDENTITY): local_update.TrustedKey(local_update.key_id(IDENTITY), IDENTITY,
+                                                                   "attacker", False)}
+
+    with pytest.raises(UpdateError) as refused:
+        verify(forged_envelope(payload_for(installer), IDENTITY), installer, keys)
+    assert refused.value.code == "weak_key"
