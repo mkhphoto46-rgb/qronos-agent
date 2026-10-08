@@ -209,9 +209,11 @@ LINK_PAIR_CANCEL_ACTION = "qronos.link_pair_cancel"
 LINK_REVOKE_ACTION = "qronos.link_revoke"
 LINK_REMOTE_ACTION = "qronos.link_remote"
 LINK_RELAY_SET_ACTION = "qronos.link_relay_set"
+# Console-only: clears the Security Monitor's containment/quarantine (Link D9).
+LINK_SECURITY_RESET_ACTION = "qronos.link_security_reset"
 LINK_ACTIONS = frozenset({
     LINK_STATUS_ACTION, LINK_DEVICES_ACTION, LINK_PAIR_OPEN_ACTION, LINK_PAIR_CANCEL_ACTION,
-    LINK_REVOKE_ACTION, LINK_REMOTE_ACTION, LINK_RELAY_SET_ACTION,
+    LINK_REVOKE_ACTION, LINK_REMOTE_ACTION, LINK_RELAY_SET_ACTION, LINK_SECURITY_RESET_ACTION,
 })
 
 # How long shutdown waits for cancelled GUI actions to release input state.
@@ -3290,6 +3292,10 @@ class QronosRuntime:
             device_path=Path(CONFIG.paths.data) / "link_devices.json",
             audit_path=Path(CONFIG.paths.logs) / "link_audit.jsonl",
             relay_path=Path(CONFIG.paths.data) / "link_relay.json",
+            # The Security Monitor's latches and incident log (Link D9); a
+            # quarantine keeps the whole link off until reset at this PC.
+            security_path=Path(CONFIG.paths.data) / "link_security.json",
+            incident_path=Path(CONFIG.paths.logs) / "link_incidents.jsonl",
         )
 
     def _device_link(self):
@@ -10098,6 +10104,7 @@ _LINK_ACTION_KEYS = {
     LINK_REVOKE_ACTION: frozenset({"deviceId"}),
     LINK_REMOTE_ACTION: frozenset({"deviceId", "enabled", "days"}),
     LINK_RELAY_SET_ACTION: None,  # refused whole until the WAN gate is accepted
+    LINK_SECURITY_RESET_ACTION: frozenset(),
 }
 
 
@@ -10201,6 +10208,14 @@ def handle_link_action(
                 raise LinkRequestError("remote_unavailable")
 
             link.set_remote_access(device_id, False)
+        elif action_id == LINK_SECURITY_RESET_ACTION:
+            # The person at this PC clears the monitor's latches. Only this
+            # desktop action reaches it; nothing on the link can. A link that
+            # is switched on starts again, with phone questions answerable.
+            link.settings = runtime._link_runtime_settings()
+            if link.settings.link_enabled:
+                runtime._ensure_text_runtime()
+            link.reset_security()
     except LinkRequestError as refused:
         runtime._notify("link_error", "warning", json.dumps({"action": action_id, "code": refused.code}))
         return

@@ -363,3 +363,48 @@ def test_status_and_devices_are_available_with_the_link_off(bridge):
     bridge.action("qronos.link_status", {})
     assert bridge.last("link_status")["running"] is False
     assert bridge.last("link_devices") == []
+
+
+# ------------------------------------------------------------ security monitor (Link D9)
+
+
+def _latch(bridge, **state) -> None:
+    payload = {"version": 1, "contained": False, "contained_reason": "", "quarantined": False,
+               "quarantine_reason": "", "contain_history": []}
+    payload.update(state)
+    bridge.root.mkdir(parents=True, exist_ok=True)
+    (bridge.root / "link_security.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_quarantined_link_stays_off_even_on_the_lan_until_reset_at_this_pc(bridge):
+    _latch(bridge, quarantined=True, quarantine_reason="repeated_containment")
+    bridge.enable()
+    assert bridge.runtime.start_device_link() is False
+    status = bridge.last("link_status")
+    assert status["running"] is False
+    assert status["security"]["quarantined"] is True
+    bridge.action("qronos.link_pair_open", {"requestNonce": NONCE, "name": "x"})
+    assert bridge.last("link_error")["code"] == "not_running"
+
+    bridge.action("qronos.link_security_reset", {})
+    status = bridge.last("link_status")
+    assert status["running"] is True and status["security"]["quarantined"] is False
+    client, _ = bridge.pair()
+    assert client.call("ask", question="سلام").result["answer"] == "پاسخ کوتاه"
+
+
+def test_the_security_reset_takes_no_parameters(bridge):
+    bridge.action("qronos.link_security_reset", {"by": "phone"})
+    assert bridge.last("link_error") == {"action": "qronos.link_security_reset", "code": "invalid_request"}
+
+
+def test_the_monitor_keeps_its_state_in_this_profile_and_status_reports_it(bridge):
+    bridge.enable()
+    bridge.runtime.start_device_link()
+    security = bridge.last("link_status")["security"]
+    assert security["ready"] is True and security["quarantined"] is False
+    link = bridge.runtime._link_runtime
+    assert link.settings.security_path == bridge.root / "link_security.json"
+    assert link.settings.incident_path == bridge.logs / "link_incidents.jsonl"
+    # Remote stays off: the WAN path is not enabled from this runtime yet.
+    assert bridge.last("link_status")["remote_active"] is False
