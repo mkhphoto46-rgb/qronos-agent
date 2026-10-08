@@ -53,6 +53,7 @@ from typing import Callable
 
 from core.link_audit import AuditEvent
 from core.link_capability import LinkScope
+from core.link_commands import RequestBudget
 from core.link_devices import DeviceRecord, DeviceStoreBusy, DeviceStoreCorrupt
 from core.link_relay_wire import (
     RelayHello,
@@ -84,6 +85,31 @@ MAX_REMOTE_ROUTES = 8
 
 BACKOFF_INITIAL_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 60.0
+
+# A splice only counts as a success once the phone on the other end has
+# authenticated. The relay can say "joined" whenever it likes; until the inner
+# handshake proves a key, it is a failure and the dialler backs off. This is
+# how long the parker waits for the server's verdict: the server's own
+# handshake timeout, plus a margin.
+HANDSHAKE_WAIT_SECONDS = 15.0
+
+# Splices one device may be handed per minute, authenticated or not: a burst,
+# then one every five seconds. A person asking a question per press of a
+# button stays far below it; a relay or a stolen phone in a reconnect loop
+# does not.
+SPLICE_BURST = 20.0
+SPLICE_REFILL_PER_SECOND = 0.2
+
+# A PARK_EXPIRED is the relay's honest way of bounding a parking, and is
+# answered by parking again at once - but only after a parking that lasted. A
+# relay that "expires" a parking straight away is redialled with backoff.
+MIN_PARK_SECONDS = 30.0
+
+# Keepalives a parked connection may carry: a burst, then about one a second.
+# The real relay sends one every 25 seconds; a relay streaming them is spinning
+# the PC's CPU, and is left.
+KEEPALIVE_BURST = 10.0
+KEEPALIVE_PER_SECOND = 1.0
 
 # A self-hosted relay's certificate authority, handed to the phone over the
 # local link so it can verify the relay too. A CA certificate is a few
@@ -117,6 +143,25 @@ class RelayFailure(Enum):
     REFUSED = "relay_refused"
     SILENT = "relay_silent"
     CLOSED = "relay_closed"
+
+    # The relay said SPLICED, and no authenticated session followed.
+    UNAUTHENTICATED_SPLICE = "relay_unauthenticated_splice"
+
+    # More splices than the per-device quota allows.
+    SPLICE_QUOTA = "relay_splice_quota"
+
+    # Expired a parking at once, or streamed keepalives.
+    MISBEHAVED = "relay_misbehaved"
+
+
+class _Parked(Enum):
+    """How a parking ended when it did not fail."""
+
+    # A phone was joined and authenticated: park again at once, backoff reset.
+    AUTHENTICATED = "authenticated"
+
+    # The relay ended a parking that had lasted: park again at once.
+    RENEW = "renew"
 
 
 @dataclass(frozen=True)
@@ -331,6 +376,12 @@ class TunnelSettings:
     max_routes: int = MAX_REMOTE_ROUTES
     backoff_initial: float = BACKOFF_INITIAL_SECONDS
     backoff_max: float = BACKOFF_MAX_SECONDS
+    handshake_wait: float = HANDSHAKE_WAIT_SECONDS
+    splice_burst: float = SPLICE_BURST
+    splice_refill_per_second: float = SPLICE_REFILL_PER_SECOND
+    min_park_seconds: float = MIN_PARK_SECONDS
+    keepalive_burst: float = KEEPALIVE_BURST
+    keepalive_per_second: float = KEEPALIVE_PER_SECOND
 
 
 class _Parker:
@@ -349,7 +400,14 @@ class _Parker:
         )
         self.failing = False
         self.announced = False
+        self.parked_since_failure = False
         self.splices = 0
+        self.authenticated_splices = 0
+        self.splice_budget = RequestBudget(
+            dialler.settings.splice_burst,
+            dialler.settings.splice_refill_per_second,
+        )
+        self._parked_at: float | None = None
 
     def start(self) -> None:
         self.thread.start()
@@ -385,20 +443,28 @@ class _Parker:
             if record is None:
                 return
 
-            failure = self._park_once(record)
+            result = self._park_once(record)
 
-            if failure is None:
-                # Spliced, and the session was handed over. Park again at once:
-                # a phone that reconnects should find the PC waiting.
+            if result is _Parked.AUTHENTICATED:
+                # A phone proved its key. Park again at once: a phone that
+                # reconnects should find the PC waiting.
+                self.failing = False
                 backoff.reset()
                 continue
 
-            self._note_failure(failure)
+            if result is _Parked.RENEW:
+                self.failing = False
+                continue
+
+            # Every failure waits, a failed splice included. Without this a
+            # relay answering every parking with SPLICED and a hang-up had the
+            # PC redialling hundreds of times a second (review finding L3).
+            self._note_failure(result)
 
             if self.stop.wait(backoff.next()):
                 return
 
-    def _park_once(self, record: DeviceRecord) -> RelayFailure | None:
+    def _park_once(self, record: DeviceRecord) -> RelayFailure | _Parked:
         dialler = self.dialler
         hello = host_hello(record.secret)
 
@@ -420,8 +486,18 @@ class _Parker:
             return RelayFailure.CLOSED
         except RelayRefused as exc:
             if exc.status is RelayStatus.PARK_EXPIRED:
-                # Not a failure: the relay bounds how long anything may park.
-                return None
+                # Not a failure when the parking lasted: the relay bounds how
+                # long anything may park. An "expiry" straight after parking
+                # is a relay trying to make the PC redial, and is treated so.
+                lasted = (
+                    0.0 if self._parked_at is None
+                    else time.monotonic() - self._parked_at
+                )
+
+                if lasted >= dialler.settings.min_park_seconds:
+                    return _Parked.RENEW
+
+                return RelayFailure.MISBEHAVED
 
             if exc.status is None:
                 return RelayFailure.CLOSED
@@ -440,10 +516,13 @@ class _Parker:
         carrier: ssl.SSLSocket,
         hello: RelayHello,
         record: DeviceRecord,
-    ) -> RelayFailure | None:
+    ) -> RelayFailure | _Parked:
         dialler = self.dialler
-        carrier.settimeout(dialler.settings.parked_silence)
+        settings = dialler.settings
+        carrier.settimeout(settings.parked_silence)
         carrier.sendall(hello.encode())
+        self._parked_at = None
+        keepalives = 0
 
         while not self.stop.is_set():
             try:
@@ -452,16 +531,24 @@ class _Parker:
                 return RelayFailure.SILENT
 
             if status is RelayStatus.PARKED:
-                # Recorded once, and again only after a failure, so routine
-                # re-parking does not write a line every few minutes.
-                if self.failing or not self.announced:
-                    dialler.audit_relay(AuditEvent.RELAY_PARKED, record.device_id)
+                self._parked_at = time.monotonic()
 
-                self.failing = False
+                # Recorded the first time, and once more after the relay starts
+                # failing - not on every cycle of a relay that fails each time.
+                if not self.announced or (self.failing and not self.parked_since_failure):
+                    dialler.audit_relay(AuditEvent.RELAY_PARKED, record.device_id)
+                    self.parked_since_failure = True
+
                 self.announced = True
                 continue
 
             if status is RelayStatus.KEEPALIVE:
+                keepalives += 1
+                since = 0.0 if self._parked_at is None else time.monotonic() - self._parked_at
+
+                if keepalives > settings.keepalive_burst + settings.keepalive_per_second * since:
+                    return RelayFailure.MISBEHAVED
+
                 continue
 
             if status is RelayStatus.SPLICED:
@@ -472,23 +559,52 @@ class _Parker:
                 if dialler.eligible_record(record.device_id) is None:
                     return RelayFailure.CLOSED
 
+                if not self.splice_budget.take():
+                    return RelayFailure.SPLICE_QUOTA
+
                 with self._carrier_lock:
                     self._carrier = None
 
                 self.splices += 1
-                dialler.hand_over(carrier)
 
-                return None
+                return self._await_verdict(carrier)
 
             raise RelayRefused(status)
 
         return RelayFailure.CLOSED
 
+    def _await_verdict(self, carrier: ssl.SSLSocket) -> RelayFailure | _Parked:
+        """Hand the splice to the server and wait to hear if it authenticated."""
+
+        verdict = threading.Event()
+        authenticated: list[bool] = []
+
+        def on_outcome(ok: bool) -> None:
+            authenticated.append(ok)
+            verdict.set()
+
+        self.dialler.hand_over(carrier, on_outcome)
+
+        deadline = time.monotonic() + self.dialler.settings.handshake_wait
+
+        while not verdict.wait(0.05):
+            if self.stop.is_set() or time.monotonic() >= deadline:
+                break
+
+        if authenticated and authenticated[0]:
+            self.authenticated_splices += 1
+
+            return _Parked.AUTHENTICATED
+
+        return RelayFailure.UNAUTHENTICATED_SPLICE
+
     def _note_failure(self, failure: RelayFailure) -> None:
         # One line when the relay goes away, not one per retry. A relay that is
-        # down for an hour should not fill the audit log.
+        # down for an hour - or one failing on purpose - should not fill the
+        # audit log; the log coalesces whatever repeats beyond this.
         if not self.failing:
             self.failing = True
+            self.parked_since_failure = False
             self.dialler.audit_relay(
                 AuditEvent.RELAY_FAILED, self.device_id, reason=failure
             )
@@ -656,7 +772,11 @@ class RelayDialler:
 
     # ----------------------------------------------------------- callbacks
 
-    def hand_over(self, carrier: ssl.SSLSocket) -> None:
+    def hand_over(
+        self,
+        carrier: ssl.SSLSocket,
+        on_outcome: Callable[[bool], None] | None = None,
+    ) -> None:
         """Give a spliced connection to the server as a remote session."""
 
         try:
@@ -664,7 +784,7 @@ class RelayDialler:
         except (OSError, IndexError):
             peer = ""
 
-        self.server.serve_relayed(carrier, peer)
+        self.server.serve_relayed(carrier, peer, on_outcome)
 
     def audit_relay(
         self,

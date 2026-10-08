@@ -581,6 +581,21 @@ transition, not once per retry. It will not start unless the server's
 | **Duplicate-command safety**: every remote request but `ping` carries a 128-bit command id (`cid`); a retry is answered from a bounded per-device ledger, never run twice; the same id with different parameters is refused | `core/link_commands.py` |
 | The capability ceiling is not negotiable: three of nine capabilities, unchanged | `SCOPE_PROFILES` |
 
+**What a hostile relay can make the PC do** (review finding L3, repaired). As
+first built, a relay answering every parking with `SPLICED` and a hang-up made
+the PC redial 312–374 times in three seconds, with an audit line each, while
+those connections shared the LAN's four slots. Now, measured with the same
+reproducer and production settings: 3 connections and 3 audit lines in three
+seconds. The rules:
+
+| Rule | Where |
+|---|---|
+| A splice is a success only when the server reports an **authenticated** session; anything else is a failure with exponential backoff (1 s doubling to 60 s, jittered) | `serve_relayed(..., on_outcome)`, `_Parker._await_verdict` |
+| Each device has a **splice quota**: a burst of 20, then one every 5 s, authenticated or not | `TunnelSettings.splice_burst` |
+| A `PARK_EXPIRED` sooner than 30 s after parking, or keepalives faster than about one a second, is **misbehaviour**, answered with backoff | `min_park_seconds`, `keepalive_per_second` |
+| Relayed connections have **their own four slots**; they cannot crowd out the phone on the LAN | `LinkSettings.max_relay_connections` |
+| Identical failure lines are **coalesced**: written once, then counted, then one summary line with `repeated` per minute; at most 256 failure keys counted at once; the in-memory copy is a window of 4096 lines | `core/link_audit.py` |
+
 **Replay, stated precisely.** TLS already makes recorded traffic useless: a
 recorded session replayed into a new connection fails the handshake, because
 the server's half of the key exchange is new (tested: the replay is refused and

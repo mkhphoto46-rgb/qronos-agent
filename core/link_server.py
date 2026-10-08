@@ -127,6 +127,12 @@ DEFAULT_BIND_HOST = "0.0.0.0"
 # A phone, a tablet, and headroom.
 MAX_CONNECTIONS = 4
 
+# Connections arriving through the relay have slots of their own. A relay is
+# untrusted and can open connections as fast as the PC will take them; if the
+# two paths shared one budget, a hostile relay could keep the phone on the
+# sofa from connecting at all.
+MAX_RELAY_CONNECTIONS = 4
+
 # How long a failed handshake makes the next one from that peer wait.
 FAILURE_PAUSE_SECONDS = 1.0
 
@@ -212,6 +218,7 @@ class LinkSettings:
     )
 
     max_connections: int = MAX_CONNECTIONS
+    max_relay_connections: int = MAX_RELAY_CONNECTIONS
     handshake_timeout: float = HANDSHAKE_TIMEOUT_SECONDS
     idle_timeout: float = IDLE_TIMEOUT_SECONDS
     failure_pause: float = FAILURE_PAUSE_SECONDS
@@ -351,6 +358,7 @@ class LinkServer:
 
         self._state_lock = threading.Lock()
         self._active = 0
+        self._active_relayed = 0
 
         # peer address -> the time it may try again. Ordered, so the oldest
         # entry is the one evicted when the map is full.
@@ -657,7 +665,12 @@ class LinkServer:
 
     # ----------------------------------------------------------- relayed client
 
-    def serve_relayed(self, carrier: socket.socket, peer: str) -> None:
+    def serve_relayed(
+        self,
+        carrier: socket.socket,
+        peer: str,
+        on_outcome: Callable[[bool], None] | None = None,
+    ) -> None:
         """
         Serve one connection the relay has joined to a phone. Returns at once.
 
@@ -665,16 +678,24 @@ class LinkServer:
         the inner handshake runs inside it. ``peer`` is the relay's address,
         which is all the PC can know: the phone's own address is the relay's
         business, and that is part of what the relay is trusted not to need.
+
+        ``on_outcome`` is told, exactly once, whether the splice became an
+        authenticated session. The dialler needs that: a relay can say
+        "joined" whenever it likes, so a splice is only a success once the
+        phone on the other end has proved it holds a key.
         """
+
+        outcome = _Outcome(on_outcome)
 
         if self._stopping.is_set() or self._listener is None:
             self._shutdown(carrier)
+            outcome.report(False)
 
             return
 
         worker = threading.Thread(
             target=self._serve,
-            args=(carrier, peer, True),
+            args=(carrier, peer, True, outcome),
             name="qronos-link-relayed",
             daemon=True,
         )
@@ -692,8 +713,25 @@ class LinkServer:
         raw: socket.socket,
         peer: str,
         relayed: bool = False,
+        outcome: _Outcome | None = None,
     ) -> None:
-        if not self._claim_slot():
+        outcome = outcome if outcome is not None else _Outcome(None)
+
+        try:
+            self._serve_counted(raw, peer, relayed, outcome)
+        finally:
+            # Anything that did not reach an authenticated session is a
+            # failure, whichever way it ended.
+            outcome.report(False)
+
+    def _serve_counted(
+        self,
+        raw: socket.socket,
+        peer: str,
+        relayed: bool,
+        outcome: _Outcome,
+    ) -> None:
+        if not self._claim_slot(relayed):
             self.audit.record(
                 AuditEvent.CONNECTION_REJECTED,
                 peer=peer,
@@ -705,9 +743,9 @@ class LinkServer:
             return
 
         try:
-            self._serve_claimed(raw, peer, relayed)
+            self._serve_claimed(raw, peer, relayed, outcome)
         finally:
-            self._release_slot()
+            self._release_slot(relayed)
             self._shutdown(raw)
 
     def _serve_claimed(
@@ -715,6 +753,7 @@ class LinkServer:
         raw: socket.socket,
         peer: str,
         relayed: bool = False,
+        outcome: _Outcome | None = None,
     ) -> None:
         # A relayed connection is remote because of the path it took, not
         # because of any address. The default resolver, ``scope_for_peer``,
@@ -769,6 +808,9 @@ class LinkServer:
 
             if session is None:
                 return
+
+            if outcome is not None:
+                outcome.report(True)
 
             self.audit.record(
                 AuditEvent.HANDSHAKE_OK,
@@ -1271,18 +1313,29 @@ class LinkServer:
 
     # ---------------------------------------------------------------- limits
 
-    def _claim_slot(self) -> bool:
-        with self._state_lock:
-            if self._active >= self.settings.max_connections:
-                return False
+    def _claim_slot(self, relayed: bool = False) -> bool:
+        """Take a slot from the budget of the path the connection came by."""
 
-            self._active += 1
+        with self._state_lock:
+            if relayed:
+                if self._active_relayed >= self.settings.max_relay_connections:
+                    return False
+
+                self._active_relayed += 1
+            else:
+                if self._active >= self.settings.max_connections:
+                    return False
+
+                self._active += 1
 
             return True
 
-    def _release_slot(self) -> None:
+    def _release_slot(self, relayed: bool = False) -> None:
         with self._state_lock:
-            self._active = max(0, self._active - 1)
+            if relayed:
+                self._active_relayed = max(0, self._active_relayed - 1)
+            else:
+                self._active = max(0, self._active - 1)
 
     def _handshake_permitted(self, peer: str) -> bool:
         """Whether this peer may attempt a handshake yet."""
@@ -1330,6 +1383,28 @@ class LinkServer:
             connection.close()
         except OSError:
             pass
+
+
+class _Outcome:
+    """Tells a relayed connection's dialler once whether it authenticated."""
+
+    def __init__(self, callback: Callable[[bool], None] | None) -> None:
+        self._callback = callback
+        self._lock = threading.Lock()
+        self._reported = False
+
+    def report(self, authenticated: bool) -> None:
+        with self._lock:
+            if self._reported:
+                return
+
+            self._reported = True
+
+        if self._callback is not None:
+            try:
+                self._callback(authenticated)
+            except Exception:
+                pass
 
 
 _REFUSAL_MESSAGES = {

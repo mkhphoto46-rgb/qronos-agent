@@ -26,12 +26,18 @@ from tests.fixtures.link_fake_relay import FakeRelay
 from tests.fixtures.link_harness import CLIENT_TIMEOUT, FakeServerClock, wait_for
 
 
+# Fast timings for loopback tests. The fake relay keeps-alive every 0.2 s and
+# expires parkings after fractions of a second when asked to, so the
+# misbehaviour guards are scaled to match; their production values have their
+# own tests in test_link_relay_abuse.py.
 FAST_TUNNEL = TunnelSettings(
     connect_timeout=3.0,
     parked_silence=3.0,
     refresh=0.05,
     backoff_initial=0.05,
     backoff_max=0.2,
+    min_park_seconds=0.1,
+    keepalive_per_second=20.0,
 )
 
 
@@ -63,6 +69,7 @@ class RemoteRig:
                 port=0,
                 allowed_scopes=frozenset({LinkScope.LOCAL_NETWORK, LinkScope.REMOTE_TUNNEL}),
                 max_connections=base.max_connections,
+                max_relay_connections=base.max_relay_connections,
                 handshake_timeout=base.handshake_timeout,
                 idle_timeout=base.idle_timeout,
                 failure_pause=0.0,

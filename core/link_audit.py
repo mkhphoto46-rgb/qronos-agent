@@ -12,7 +12,16 @@ commands in their own home; the log needs the shape of the activity to be
 useful after an intrusion or a mistake, and does not need the contents to do
 that.
 
-Two smaller decisions worth naming:
+Three smaller decisions worth naming:
+
+    Repeated failures are coalesced. A hostile relay or a machine on the LAN
+    can produce failed handshakes as fast as it can connect, and a log that
+    writes one line per attempt lets that noise rotate the meaningful history
+    out of its size cap. So identical failure records - same event, device,
+    peer, scope, operation and reason - are written once, and the repeats
+    within the next minute are counted and written as a single summary line
+    with ``repeated``. Successes and decisions about real requests are never
+    coalesced. The memory copy is a bounded window, not the whole history.
 
     A device id that is not the right shape is logged as ``invalid`` rather
     than verbatim. The identity in a handshake comes from the peer, so it is
@@ -26,8 +35,10 @@ Two smaller decisions worth naming:
 
 from __future__ import annotations
 
+import threading
 import time
-from dataclasses import dataclass
+from collections import OrderedDict, deque
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
@@ -45,6 +56,18 @@ MAX_AUDIT_BYTES = 2 * 1024 * 1024
 
 INVALID_DEVICE = "invalid"
 UNPARSED_PEER = "unparsed"
+
+# Identical failures within this long of the first are counted, not written.
+COALESCE_SECONDS = 60.0
+
+# How many distinct failure keys may be counting at once. An attacker cycling
+# source addresses makes new keys; when the map is full, the oldest run is
+# written out early rather than the map growing.
+MAX_COALESCE_KEYS = 256
+
+# The in-memory copy, for the desktop's view and the tests. The file is the
+# record; memory is a window onto its recent end.
+MAX_MEMORY_RECORDS = 4096
 
 
 class Clock(Protocol):
@@ -98,6 +121,21 @@ class AuditEvent(Enum):
     RELAY_FAILED = "relay_failed"
 
 
+# Failures a peer can provoke at will. Only these are coalesced; a success, a
+# pairing, a revocation or an allowed request is always its own line.
+COALESCED_EVENTS = frozenset(
+    {
+        AuditEvent.HANDSHAKE_REFUSED,
+        AuditEvent.CONNECTION_REJECTED,
+        AuditEvent.SCOPE_REFUSED,
+        AuditEvent.PROTOCOL_FAULT,
+        AuditEvent.PAIRING_REFUSED,
+        AuditEvent.REQUEST_REFUSED,
+        AuditEvent.RELAY_FAILED,
+    }
+)
+
+
 @dataclass(frozen=True)
 class AuditRecord:
     """One line of the log."""
@@ -109,6 +147,15 @@ class AuditRecord:
     scope: LinkScope | None = None
     op: LinkOp | None = None
     reason: str = ""
+
+    # On a summary line: how many identical records were counted, not written,
+    # since the first. Zero on every ordinary line.
+    repeated: int = 0
+
+    @property
+    def occurrences(self) -> int:
+        """How many events this line stands for."""
+        return self.repeated if self.repeated else 1
 
     def to_json(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -131,6 +178,9 @@ class AuditRecord:
         if self.reason:
             payload["reason"] = self.reason
 
+        if self.repeated:
+            payload["repeated"] = self.repeated
+
         return payload
 
     def describe(self) -> str:
@@ -145,6 +195,9 @@ class AuditRecord:
 
         if self.reason:
             parts.append(f"({self.reason})")
+
+        if self.repeated:
+            parts.append(f"x{self.repeated} more")
 
         return " ".join(parts)
 
@@ -188,7 +241,12 @@ class AuditLog:
     ) -> None:
         self._file = AppendOnlyLog(path, max_bytes=max_bytes)
         self.clock: Clock = clock if clock is not None else time.time
-        self._memory: list[AuditRecord] = []
+        self._memory: deque[AuditRecord] = deque(maxlen=MAX_MEMORY_RECORDS)
+
+        # Failure key -> the run being counted for it. Ordered, so the oldest
+        # run is the one written out when the map is full.
+        self._runs: OrderedDict[tuple, _Run] = OrderedDict()
+        self._lock = threading.Lock()
 
     @property
     def path(self) -> Path | None:
@@ -233,10 +291,60 @@ class AuditLog:
             reason="" if reason is None else str(reason.value),
         )
 
-        self._memory.append(record)
-        self._append(record)
+        with self._lock:
+            self._close_expired_runs(record.at)
+
+            if event is AuditEvent.LINK_STOPPED:
+                # Nothing counted may be lost when the link stops.
+                self._close_all_runs()
+
+            if event in COALESCED_EVENTS:
+                key = (event, record.device_id, record.peer, scope, op, record.reason)
+                run = self._runs.get(key)
+
+                if run is not None:
+                    run.suppressed += 1
+                    run.last_at = record.at
+
+                    return record
+
+                self._runs[key] = _Run(first=record, last_at=record.at)
+
+                while len(self._runs) > MAX_COALESCE_KEYS:
+                    self._close_run(next(iter(self._runs)))
+
+            self._write(record)
 
         return record
+
+    def flush(self) -> None:
+        """Write out every run still being counted."""
+
+        with self._lock:
+            self._close_all_runs()
+
+    # ------------------------------------------------------------ coalescing
+
+    def _close_expired_runs(self, now: float) -> None:
+        for key in [
+            key for key, run in self._runs.items()
+            if now - run.first.at >= COALESCE_SECONDS
+        ]:
+            self._close_run(key)
+
+    def _close_all_runs(self) -> None:
+        for key in list(self._runs):
+            self._close_run(key)
+
+    def _close_run(self, key: tuple) -> None:
+        run = self._runs.pop(key)
+
+        if run.suppressed:
+            self._write(replace(run.first, at=run.last_at, repeated=run.suppressed))
+
+    def _write(self, record: AuditRecord) -> None:
+        self._memory.append(record)
+        self._append(record)
 
     # ------------------------------------------------------------- the file
 
@@ -251,16 +359,34 @@ class AuditLog:
     # ------------------------------------------------------------- reading
 
     def records(self) -> tuple[AuditRecord, ...]:
-        """Everything recorded by this instance, in order."""
-        return tuple(self._memory)
+        """The lines written, most recent window, in order."""
+        with self._lock:
+            return tuple(self._memory)
 
     def count(self, event: AuditEvent) -> int:
-        return sum(1 for record in self._memory if record.event is event)
+        """How many times ``event`` happened, counted repeats included."""
+
+        with self._lock:
+            written = sum(
+                record.occurrences for record in self._memory if record.event is event
+            )
+            counting = sum(
+                run.suppressed for run in self._runs.values() if run.first.event is event
+            )
+
+        return written + counting
 
     def describe(self, limit: int = 20) -> str:
-        return "\n".join(
-            record.describe() for record in self._memory[-limit:]
-        )
+        return "\n".join(record.describe() for record in self.records()[-limit:])
+
+
+@dataclass
+class _Run:
+    """Repeats of one failure being counted rather than written."""
+
+    first: AuditRecord
+    last_at: float
+    suppressed: int = 0
 
 
 def main() -> None:
