@@ -84,6 +84,19 @@ class AuditEvent(Enum):
 
     CONNECTION_REJECTED = "connection_rejected"
 
+    # An open session ended by the PC rather than by the phone: the device was
+    # revoked or opted out mid-session, or a remote session reached its
+    # lifetime. The reason says which.
+    SESSION_ENDED = "session_ended"
+
+    # A retried command answered from the ledger instead of being run again.
+    REQUEST_DUPLICATE = "request_duplicate"
+
+    # Layer 2. The PC's outbound connection to the relay is parked for a
+    # device, or was lost. Recorded on change, not on every retry.
+    RELAY_PARKED = "relay_parked"
+    RELAY_FAILED = "relay_failed"
+
 
 @dataclass(frozen=True)
 class AuditRecord:

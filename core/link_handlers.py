@@ -21,7 +21,7 @@ import time
 from typing import Any, Callable, Protocol
 
 from core.config import CONFIG
-from core.link_capability import LinkOp, resolve_capabilities
+from core.link_capability import LinkOp, LinkScope, resolve_capabilities
 from core.link_protocol import Request
 from core.link_server import Handler, LinkOperationError, LinkSession
 
@@ -90,6 +90,41 @@ def ping_handler(session: LinkSession, request: Request) -> dict[str, Any]:
     }
 
 
+def remote_ping_handler(
+    relay: Any,
+    clock: Callable[[], float] = time.time,
+) -> Handler:
+    """
+    ``ping``, plus what an opted-in phone needs to reach the PC from outside.
+
+    ``relay`` is the configured ``RelayEndpoint``. Its description goes only to
+    a device that is inside a remote opt-in, and only over the local network:
+    that is an authenticated session with a phone in the house, so the relay
+    address never has to be typed on the phone or carried in the QR code.
+    Nothing in it is secret — the route is derived from the pairing key the
+    phone already holds — but there is no reason to tell a phone that may not
+    use it, or to repeat it to a phone that is already outside.
+    """
+
+    def handle(session: LinkSession, request: Request) -> dict[str, Any]:
+        result = ping_handler(session, request)
+        now = clock()
+
+        if (
+            relay is not None
+            and session.scope is LinkScope.LOCAL_NETWORK
+            and session.device.remote_allowed(now)
+        ):
+            result["remote"] = {
+                "relay": relay.describe_for_phone(),
+                "expires_at": session.device.remote_expires_at,
+            }
+
+        return result
+
+    return handle
+
+
 def status_handler(provider: StatusProvider | None) -> Handler:
     """Report resource and storage state, if something can supply it."""
 
@@ -151,18 +186,22 @@ def default_handlers(
     status: StatusProvider | None = None,
     search: SearchFunction | None = None,
     ask: SearchFunction | None = None,
+    relay: Any = None,
 ) -> dict[LinkOp, Handler]:
     """
-    The operations Layer 1 serves.
+    The operations the link serves.
 
     File, application and system operations are absent on purpose. They belong
     to the assistant's own action layer, and the link would be the wrong place
     to grow a second implementation of them. Until that layer is wired in, the
     server answers ``not_implemented``, which is accurate.
+
+    ``relay`` is the configured ``RelayEndpoint`` when remote access is on, so
+    ``ping`` can hand it to opted-in phones on the local network.
     """
 
     return {
-        LinkOp.PING: ping_handler,
+        LinkOp.PING: ping_handler if relay is None else remote_ping_handler(relay),
         LinkOp.STATUS: status_handler(status),
         LinkOp.SEARCH: search_handler(search),
         LinkOp.ASK: ask_handler(ask),

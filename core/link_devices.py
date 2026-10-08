@@ -29,6 +29,7 @@ import os
 import re
 import secrets
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -52,6 +53,14 @@ DEVICE_ID_BYTES = 8
 DEVICE_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 
 SCHEMA_VERSION = 1
+
+# How long a remote opt-in lasts when the PC does not say. Remote access is a
+# decision about one phone for a period, not a setting that outlives the
+# reason it was turned on; the user renews it at the PC.
+DEFAULT_REMOTE_SECONDS = 30 * 24 * 3600.0
+
+# The longest a single opt-in may run, whatever the caller asks for.
+MAX_REMOTE_SECONDS = 365 * 24 * 3600.0
 
 
 class Clock(Protocol):
@@ -247,10 +256,31 @@ class DeviceRecord:
     # Layer 2 is opt-in for one named device at a time, not a global switch.
     remote_enabled: bool = False
 
+    # When that opt-in lapses. Remote access with no expiry is not a state the
+    # registry creates; a record that has one anyway (written before expiry
+    # existed, or edited by hand) is treated as lapsed, which is the safe
+    # reading of a missing limit.
+    remote_expires_at: float | None = None
+
     @property
     def can_authenticate(self) -> bool:
         """A pending device may connect; that is how pairing completes."""
         return self.status in {DeviceStatus.PENDING, DeviceStatus.ACTIVE}
+
+    def remote_allowed(self, now: float) -> bool:
+        """
+        Whether this device may be served through the relay at ``now``.
+
+        Active, opted in, and inside the opt-in's period. A pending device
+        never qualifies: pairing happens on the local network only.
+        """
+
+        return (
+            self.status is DeviceStatus.ACTIVE
+            and self.remote_enabled
+            and self.remote_expires_at is not None
+            and now < self.remote_expires_at
+        )
 
     def __repr__(self) -> str:
         """Never render the key."""
@@ -258,7 +288,8 @@ class DeviceRecord:
             f"DeviceRecord(device_id={self.device_id!r}, "
             f"name={self.name!r}, status={self.status.value}, "
             f"secret=<redacted {len(self.secret)} bytes>, "
-            f"remote_enabled={self.remote_enabled})"
+            f"remote_enabled={self.remote_enabled}, "
+            f"remote_expires_at={self.remote_expires_at})"
         )
 
     def describe(self) -> str:
@@ -290,6 +321,7 @@ class DeviceRecord:
                 else sorted(item.value for item in self.grants)
             ),
             "remote_enabled": self.remote_enabled,
+            "remote_expires_at": self.remote_expires_at,
         }
 
     @classmethod
@@ -335,6 +367,16 @@ class DeviceRecord:
             raise DeviceStoreCorrupt(f"{device_id} has malformed grants")
 
         last_seen = data.get("last_seen_at")
+        remote_expires = data.get("remote_expires_at")
+
+        try:
+            remote_expires_at = (
+                None if remote_expires is None else float(remote_expires)  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise DeviceStoreCorrupt(
+                f"{device_id} has a malformed remote expiry"
+            ) from exc
 
         return cls(
             device_id=device_id,
@@ -346,6 +388,7 @@ class DeviceRecord:
             paired_from=str(data.get("paired_from", "")),
             grants=grants,
             remote_enabled=bool(data.get("remote_enabled", False)),
+            remote_expires_at=remote_expires_at,
         )
 
 
@@ -367,6 +410,12 @@ class DeviceRegistry:
         # tests use.
         self.path = None if path is None else Path(path)
         self.clock: Clock = clock if clock is not None else time.time
+
+        # The link server's session threads, the relay dialler and the desktop
+        # all reach this registry. Each change is a read-modify-write of one
+        # record plus a file write, so changes are serialised; single lookups
+        # stay lock-free, which a dictionary read allows.
+        self._lock = threading.RLock()
         self._records: dict[str, DeviceRecord] = self._load()
 
     # ------------------------------------------------------------- persistence
@@ -497,37 +546,39 @@ class DeviceRegistry:
     ) -> DeviceRecord:
         """Mint a new pending device with a fresh key."""
 
-        device_id = new_device_id()
-
-        while device_id in self._records:  # pragma: no cover - 2**64 odds
+        with self._lock:
             device_id = new_device_id()
 
-        record = DeviceRecord(
-            device_id=device_id,
-            name=name,
-            secret=new_secret(),
-            status=DeviceStatus.PENDING,
-            created_at=self.clock(),
-            paired_from=paired_from,
-            grants=None if grants is None else frozenset(grants),
-        )
+            while device_id in self._records:  # pragma: no cover - 2**64 odds
+                device_id = new_device_id()
 
-        self._records[device_id] = record
-        self._save()
+            record = DeviceRecord(
+                device_id=device_id,
+                name=name,
+                secret=new_secret(),
+                status=DeviceStatus.PENDING,
+                created_at=self.clock(),
+                paired_from=paired_from,
+                grants=None if grants is None else frozenset(grants),
+            )
 
-        return record
+            self._records[device_id] = record
+            self._save()
+
+            return record
 
     def _update(self, device_id: str, **changes: object) -> DeviceRecord:
-        record = self._records.get(device_id)
+        with self._lock:
+            record = self._records.get(device_id)
 
-        if record is None:
-            raise UnknownDevice(device_id)
+            if record is None:
+                raise UnknownDevice(device_id)
 
-        updated = replace(record, **changes)  # type: ignore[arg-type]
-        self._records[device_id] = updated
-        self._save()
+            updated = replace(record, **changes)  # type: ignore[arg-type]
+            self._records[device_id] = updated
+            self._save()
 
-        return updated
+            return updated
 
     def activate(self, device_id: str) -> DeviceRecord:
         """
@@ -537,22 +588,41 @@ class DeviceRegistry:
         again, deliberately, at the PC.
         """
 
-        record = self._records.get(device_id)
+        with self._lock:
+            record = self._records.get(device_id)
 
-        if record is None:
-            raise UnknownDevice(device_id)
+            if record is None:
+                raise UnknownDevice(device_id)
 
-        if record.status is DeviceStatus.REVOKED:
-            raise ValueError(f"{device_id} is revoked and cannot be activated")
+            if record.status is DeviceStatus.REVOKED:
+                raise ValueError(
+                    f"{device_id} is revoked and cannot be activated"
+                )
 
-        return self._update(
-            device_id,
-            status=DeviceStatus.ACTIVE,
-            last_seen_at=self.clock(),
-        )
+            return self._update(
+                device_id,
+                status=DeviceStatus.ACTIVE,
+                last_seen_at=self.clock(),
+            )
 
     def revoke(self, device_id: str) -> DeviceRecord:
-        return self._update(device_id, status=DeviceStatus.REVOKED)
+        """
+        Stop a device authenticating, and withdraw its remote opt-in with it.
+
+        Withdrawing the opt-in is not what makes this safe — a revoked key does
+        not resolve — but it means a revoked record never reads as
+        remote-enabled anywhere, a device list included.
+
+        Revoking here takes effect at the next handshake. A running
+        ``LinkServer`` also closes sessions that are already open; use its
+        ``revoke`` so both happen together.
+        """
+        return self._update(
+            device_id,
+            status=DeviceStatus.REVOKED,
+            remote_enabled=False,
+            remote_expires_at=None,
+        )
 
     def rename(self, device_id: str, name: str) -> DeviceRecord:
         """A device's name is a label. Its identity does not change with it."""
@@ -562,10 +632,48 @@ class DeviceRegistry:
         return self._update(device_id, last_seen_at=self.clock())
 
     def set_remote_enabled(
-        self, device_id: str, enabled: bool
+        self,
+        device_id: str,
+        enabled: bool,
+        expires_at: float | None = None,
     ) -> DeviceRecord:
-        """Layer 2 opt-in for one device."""
-        return self._update(device_id, remote_enabled=enabled)
+        """
+        Layer 2 opt-in for one device, always with an end.
+
+        ``expires_at`` defaults to ``DEFAULT_REMOTE_SECONDS`` from now and is
+        clamped to ``MAX_REMOTE_SECONDS``. A revoked device cannot be opted in:
+        that is a decision about a phone that is no longer trusted at all.
+        """
+
+        if not enabled:
+            return self._update(
+                device_id, remote_enabled=False, remote_expires_at=None
+            )
+
+        with self._lock:
+            record = self._records.get(device_id)
+
+            if record is None:
+                raise UnknownDevice(device_id)
+
+            if record.status is DeviceStatus.REVOKED:
+                raise ValueError(
+                    f"{device_id} is revoked and cannot be given remote access"
+                )
+
+            now = self.clock()
+            until = (
+                now + DEFAULT_REMOTE_SECONDS if expires_at is None else expires_at
+            )
+
+            if until <= now:
+                raise ValueError("a remote opt-in must end in the future")
+
+            return self._update(
+                device_id,
+                remote_enabled=True,
+                remote_expires_at=min(until, now + MAX_REMOTE_SECONDS),
+            )
 
     def set_grants(
         self,
@@ -580,11 +688,12 @@ class DeviceRegistry:
     def remove(self, device_id: str) -> None:
         """Forget a device entirely. Pairing again produces a new identity."""
 
-        if device_id not in self._records:
-            raise UnknownDevice(device_id)
+        with self._lock:
+            if device_id not in self._records:
+                raise UnknownDevice(device_id)
 
-        del self._records[device_id]
-        self._save()
+            del self._records[device_id]
+            self._save()
 
 
 def main() -> None:

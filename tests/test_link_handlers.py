@@ -11,12 +11,14 @@ from core.link_handlers import (
     ask_handler,
     default_handlers,
     ping_handler,
+    remote_ping_handler,
     research_search_function,
     search_handler,
     status_handler,
 )
 from core.link_protocol import Request
 from core.link_server import LinkOperationError
+from core.link_tunnel import RelayEndpoint
 
 
 @dataclass
@@ -434,6 +436,59 @@ class TestResearchAdapter(unittest.TestCase):
         self.assertEqual(len(research.queries), 1)
         self.assertNotIsInstance(research.queries[0], str)
 
+
+
+class TestRemotePing(unittest.TestCase):
+    """The relay endpoint reaches an opted-in phone, on the local network only."""
+
+    def setUp(self) -> None:
+        self.now = 1_800_000_000.0
+        self.registry = DeviceRegistry(path=None, clock=lambda: self.now)
+        record = self.registry.create("phone")
+        self.registry.activate(record.device_id)
+        self.device_id = record.device_id
+        self.relay = RelayEndpoint(host="relay.example.org", port=8443)
+        self.handler = remote_ping_handler(self.relay, clock=lambda: self.now)
+
+    def ping(self, scope: LinkScope = LinkScope.LOCAL_NETWORK) -> dict[str, Any]:
+        session = StubSession(scope=scope, device=self.registry.get(self.device_id))
+
+        return self.handler(session, request("ping"))
+
+    def test_an_opted_in_phone_on_the_local_network_is_told_the_relay(self) -> None:
+        self.registry.set_remote_enabled(self.device_id, True, expires_at=self.now + 60)
+
+        result = self.ping()
+
+        self.assertEqual(
+            result["remote"],
+            {"relay": {"host": "relay.example.org", "port": 8443}, "expires_at": self.now + 60},
+        )
+
+    def test_a_phone_without_an_opt_in_is_not_told(self) -> None:
+        self.assertNotIn("remote", self.ping())
+
+    def test_an_expired_opt_in_is_not_told(self) -> None:
+        self.registry.set_remote_enabled(self.device_id, True, expires_at=self.now + 1)
+        self.now += 2
+
+        self.assertNotIn("remote", self.ping())
+
+    def test_it_is_not_repeated_to_a_phone_already_outside(self) -> None:
+        self.registry.set_remote_enabled(self.device_id, True)
+
+        self.assertNotIn("remote", self.ping(LinkScope.REMOTE_TUNNEL))
+
+    def test_the_rest_of_ping_is_unchanged(self) -> None:
+        self.registry.set_remote_enabled(self.device_id, True)
+        result = self.ping()
+
+        self.assertEqual(result["scope"], "local_network")
+        self.assertIn("capabilities", result)
+
+    def test_default_handlers_use_it_only_when_a_relay_is_configured(self) -> None:
+        self.assertIs(default_handlers()[LinkOp.PING], ping_handler)
+        self.assertIsNot(default_handlers(relay=self.relay)[LinkOp.PING], ping_handler)
 
 if __name__ == "__main__":
     unittest.main()
