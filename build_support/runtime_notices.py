@@ -6,6 +6,9 @@ CPython runtime. This module finds what the frozen executable and its
 distribution metadata (or to CPython, PyInstaller, Microsoft's runtime or
 Qronos itself), copies the license/NOTICE texts those distributions ship,
 and writes a deterministic inventory beside them.
+CPython's own bundled binaries are matched by SHA-256 to an audited interpreter
+build, and the third-party components inside them get their byte-exact
+upstream texts (see ``cpython_notices``).
 
 It is technical notice packaging, not a legal review: declared licenses are
 recorded as their packages declare them, nothing is inferred from names, and
@@ -23,9 +26,13 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import re
 import sys
+import sysconfig
 from typing import Iterable, Mapping, Sequence
+
+from build_support import cpython_notices
 
 
 SCHEMA_VERSION = 1
@@ -67,24 +74,10 @@ _MICROSOFT_RUNTIME = re.compile(
     re.IGNORECASE,
 )
 
-# Tcl/Tk data directories PyInstaller copies from the CPython installation.
-_CPYTHON_TCL_TK_DATA = frozenset({"_tcl_data", "_tk_data", "tcl8"})
-
-# Third-party components a Windows CPython build ships, the bundled files that
-# carry them and how the component would be named in CPython's LICENSE.txt.
-# The inventory records whether the copied text names each bundled component;
-# an unnamed one is left for review rather than assumed covered.
-_CPYTHON_COMPONENTS = (
-    ("OpenSSL", re.compile(r"^(libcrypto|libssl)-[0-9_]+(-x64)?\.dll$", re.I), re.compile(r"openssl", re.I)),
-    ("libffi", re.compile(r"^libffi-[0-9]+\.dll$", re.I), re.compile(r"libffi", re.I)),
-    ("SQLite", re.compile(r"^sqlite3\.dll$", re.I), re.compile(r"sqlite", re.I)),
-    ("Tcl/Tk", re.compile(r"^(tcl|tk)[0-9]+t\.dll$", re.I), re.compile(r"\btcl\b|\btk\b", re.I)),
-    ("zlib", re.compile(r"^zlib1?\.dll$", re.I), re.compile(r"\bzlib\b", re.I)),
-    ("bzip2", re.compile(r"^_bz2\.pyd$", re.I), re.compile(r"bzip2", re.I)),
-    ("XZ (liblzma)", re.compile(r"^_lzma\.pyd$", re.I), re.compile(r"liblzma|\bxz\b", re.I)),
-    ("Expat", re.compile(r"^pyexpat\.pyd$", re.I), re.compile(r"\bexpat\b", re.I)),
-    ("mpdecimal", re.compile(r"^_decimal\.pyd$", re.I), re.compile(r"mpdecimal|libmpdec", re.I)),
-)
+# Tcl/Tk data directories PyInstaller copies from the CPython installation
+# (Tcl/Tk 8.6; Tcl 9 keeps them inside its DLLs). Each one must match an
+# audited data tree of the build interpreter.
+_CPYTHON_TCL_TK_DATA = cpython_notices.TCL_TK_DATA_ROOTS
 
 # Distributions whose wheels carry native binaries without the upstream
 # license text. Bundling one needs a reviewed entry for its exact version
@@ -135,9 +128,10 @@ MICROSOFT_NOTE = (
     "owner review."
 )
 CPYTHON_NOTE = (
-    "LICENSE.txt is copied exactly as the build interpreter installed it. A bundled "
-    "component it does not name (namedInLicenseText false) may still be covered by an "
-    "unlabelled text in it or may need its own text; that is unresolved and needs review."
+    "LICENSE.txt is copied exactly as the audited build interpreter installed it. Every bundled "
+    "CPython binary and data folder was matched by SHA-256 to that audited interpreter build, and "
+    "the third-party components inside them are listed with byte-exact upstream texts under "
+    "components/. Items marked unresolved need owner review; nothing here is a licence decision."
 )
 
 
@@ -151,6 +145,7 @@ class FrozenContents:
 
     archive_modules: frozenset[str]  # PYZ and CArchive module/script top-level names
     internal_roots: Mapping[str, tuple[str, ...]]  # first _internal component -> relative files
+    archive_names: frozenset[str] = frozenset()  # full PYZ and CArchive module/script names
 
 
 @dataclass
@@ -170,7 +165,7 @@ class NoticeCopy:
     destination: str  # relative to the bundle, POSIX form
     sha256: str
     size: int
-    kind: str  # "license-text" or "auxiliary"
+    kind: str  # "license-text", "terms-excerpt" (CPython components) or "auxiliary"
 
     def record(self) -> dict:
         return {"path": self.destination, "size": self.size, "sha256": self.sha256, "kind": self.kind}
@@ -208,10 +203,11 @@ def frozen_contents(bundle: Path, archive_modules: Iterable[str]) -> FrozenConte
             _require_regular(path)
             relative = path.relative_to(internal).as_posix()
             roots.setdefault(relative.split("/", 1)[0], []).append(relative)
-    tops = frozenset(name.split(".", 1)[0] for name in archive_modules if name)
+    names = frozenset(name for name in archive_modules if name)
     return FrozenContents(
-        archive_modules=tops,
+        archive_modules=frozenset(name.split(".", 1)[0] for name in names),
         internal_roots={root: tuple(sorted(files)) for root, files in sorted(roots.items())},
+        archive_names=names,
     )
 
 
@@ -570,14 +566,22 @@ def plan_runtime_notices(
     distributions: Iterable[object],
     python_base: Path,
     python_version: str,
+    python_platform: str,
+    python_build: str,
     stdlib_names: Iterable[str],
+    bundle_internal: Path,
     reviews: Mapping[tuple[str, str], dict] | None = None,
     pruned: Sequence[str] = (),
-    bundle_internal: Path | None = None,
     vendored_root: Path = VENDORED_TEXTS,
+    cpython_registry: cpython_notices.Registry | None = None,
     private_roots: Sequence[str] | None = None,
 ) -> NoticePlan:
-    """Attribute every frozen piece and choose the notice texts to copy (read-only)."""
+    """Attribute every frozen piece and choose the notice texts to copy (read-only).
+
+    The build interpreter must match an audited record of ``cpython_registry``
+    (the committed registry by default) by version, platform and build tag, and
+    every bundled CPython binary and data folder must equal that record's bytes.
+    """
     reviews = dict(reviews or {})
     used_reviews: set[tuple[str, str]] = set()
     installed = _installed_distributions(distributions)
@@ -612,6 +616,7 @@ def plan_runtime_notices(
         for relative in files:
             if _MICROSOFT_RUNTIME.match(PurePosixPath(relative).name):
                 microsoft_files[relative] = owner
+    microsoft_entries = [{"path": path, "deliveredBy": owner} for path, owner in sorted(microsoft_files.items())]
 
     cpython_roots: list[str] = []
     project_roots: list[str] = []
@@ -764,21 +769,28 @@ def plan_runtime_notices(
     if not re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", python_version):
         raise NoticeError("The build interpreter version is not a plain X.Y.Z version.")
     _require_regular(license_text)
+    try:
+        registry = cpython_registry if cpython_registry is not None else cpython_notices.load_registry()
+        cpython_plan = cpython_notices.plan_cpython_notices(
+            registry,
+            cpython_notices.Interpreter(python_version, python_platform, python_build, python_base),
+            bundle_internal=bundle_internal,
+            cpython_roots=cpython_roots,
+            archive_names=contents.archive_names,
+            notice_root=NOTICE_DIRECTORY,
+        )
+    except cpython_notices.CPythonNoticeError as error:
+        raise NoticeError(str(error)) from error
     cpython_destination = f"{NOTICE_DIRECTORY}/python/cpython-{python_version}/LICENSE.txt"
     cpython_copy = _planned_copy(license_text.resolve(), cpython_destination, True)
     if cpython_copy.kind != "license-text":
         raise NoticeError("The CPython LICENSE.txt of the build interpreter is empty.")
     copies.append(cpython_copy)
-    text = license_text.read_text(encoding="utf-8", errors="replace")
-    components = []
-    for component, files, named in _CPYTHON_COMPONENTS:
-        bundled = sorted(root for root in cpython_roots if files.match(root))
-        if bundled:
-            components.append({
-                "component": component,
-                "files": bundled,
-                "namedInLicenseText": bool(named.search(text)),
-            })
+    for text in cpython_plan.texts:
+        copies.append(NoticeCopy(text.source, text.destination, text.sha256, text.size, text.kind))
+    for item in microsoft_entries:
+        bundled = bundle_internal.joinpath(*item["path"].split("/"))
+        item["identicalToAuditedInterpreterFile"] = cpython_notices.microsoft_identity(cpython_plan.interpreter, bundled)
 
     inventory = {
         "schemaVersion": SCHEMA_VERSION,
@@ -789,14 +801,18 @@ def plan_runtime_notices(
         "distributions": entries,
         "cpython": {
             "version": python_version,
-            "notices": [cpython_destination],
-            "noticeFiles": [cpython_copy.record()],
+            "notices": sorted([cpython_destination] + [text.destination for text in cpython_plan.texts]),
+            "noticeFiles": sorted(
+                [cpython_copy.record()]
+                + [{"path": t.destination, "size": t.size, "sha256": t.sha256, "kind": t.kind} for t in cpython_plan.texts],
+                key=lambda item: item["path"],
+            ),
             "frozenRoots": sorted(cpython_roots),
-            "bundledComponents": components,
+            **cpython_plan.inventory,
             "note": CPYTHON_NOTE,
         },
         "microsoftRuntime": {
-            "files": [{"path": path, "deliveredBy": owner} for path, owner in sorted(microsoft_files.items())],
+            "files": microsoft_entries,
             "status": "review-required",
             "note": MICROSOFT_NOTE,
         },
@@ -923,13 +939,18 @@ def _readme(inventory: dict) -> str:
         "Models, speech binaries and voice assets are not part of this runtime; they are",
         "provisioned separately and carry their own terms.",
     ]
-    unnamed = [item["component"] for item in inventory["cpython"]["bundledComponents"] if not item["namedInLicenseText"]]
-    if unnamed:
-        lines += [
-            "",
-            "CPython components not named in the copied CPython LICENSE.txt (review required):",
-            "  " + ", ".join(unnamed),
-        ]
+    cpython = inventory["cpython"]
+    lines += [
+        "",
+        f"CPython {cpython['version']} ({cpython['interpreter']['build']}, {cpython['interpreter']['platform']}): "
+        "bundled binaries and data folders match an audited interpreter build by SHA-256.",
+        f"Component texts are under python/cpython-{cpython['version']}/components/:",
+    ]
+    for item in cpython["components"]:
+        lines.append(f"  {item['name']} {item['version']}")
+    if cpython["unresolved"]:
+        lines += ["", "Unresolved CPython component terms (owner review required):"]
+        lines += [f"  {item}" for item in cpython["unresolved"]]
     reviewed = [entry for entry in inventory["distributions"] if entry.get("review")]
     if reviewed:
         lines += ["", "Reviewed provenance records (see inventory.json):"]
@@ -956,6 +977,8 @@ def collect_runtime_notices(bundle: Path, *, pruned: Sequence[str] = ()) -> Path
         distributions=importlib.metadata.distributions(),
         python_base=Path(sys.base_prefix),
         python_version=".".join(map(str, sys.version_info[:3])),
+        python_platform=sysconfig.get_platform(),
+        python_build=platform.python_build()[0],
         stdlib_names=sys.stdlib_module_names,
         reviews=load_reviews(),
         pruned=pruned,

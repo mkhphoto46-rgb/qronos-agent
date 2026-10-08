@@ -14,7 +14,7 @@ import sysconfig
 
 import pytest
 
-from build_support import runtime_notices
+from build_support import cpython_notices, runtime_notices
 from build_support.runtime_notices import (
     NoticeError,
     frozen_contents,
@@ -23,6 +23,7 @@ from build_support.runtime_notices import (
     prune_portaudio,
     write_runtime_notices,
 )
+from tests.fixtures.cpython_registry import BUILD, PLATFORM, RegistryBuilder
 
 
 class FakeDistribution:
@@ -73,6 +74,25 @@ class Fixture:
         (self.python / "LICENSE.txt").write_text("Python license text\nbzip2 and libffi terms\n", encoding="utf-8")
         (self.python / "python313.dll").write_bytes(b"python core")
         (self.python / "DLLs" / "_bz2.pyd").write_bytes(b"bz2 extension")
+        (self.python / "DLLs" / "_ssl.pyd").write_bytes(b"stdlib extension")
+        (self.python / "DLLs" / "sqlite3.dll").write_bytes(b"sqlite")
+        (self.python / "vcruntime140.dll").write_bytes(b"microsoft runtime")
+        (self.python / "tcl" / "tcl8.6").mkdir(parents=True)
+        (self.python / "tcl" / "tcl8.6" / "init.tcl").write_bytes(b"# tcl init\n")
+        (self.python / "tcl" / "tcl8.6" / "license.terms").write_bytes(b"tcl terms\n")
+        self.registry_builder = RegistryBuilder(tmp_path / "registry", self.python)
+        count, digest = cpython_notices.tree_digest(self.python / "tcl" / "tcl8.6")
+        self.registry_raw = self.registry_builder.raw(
+            {
+                "python313.dll": ["zlib@1.3.1"],
+                "DLLs/_bz2.pyd": ["bzip2@1.0.8"],
+                "DLLs/_ssl.pyd": [],
+                "DLLs/sqlite3.dll": ["sqlite@3.50.4"],
+                "vcruntime140.dll": None,
+            },
+            {"_tcl_data": {"source": "tcl/tcl8.6", "excludes": ["demos"], "files": count, "treeSha256": digest,
+                           "components": ["tcl@8.6.15"]}},
+        )
         self.internal.mkdir(parents=True)
         for relative, data in {
             "python313.dll": b"python core",
@@ -114,15 +134,23 @@ class Fixture:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
+    def registry(self, raw=None):
+        path = self.registry_builder.write(raw or self.registry_raw)
+        return cpython_notices.load_registry(path, self.registry_builder.text_root)
+
     def plan(self, **overrides):
         options = {
             "distributions": self.distributions,
             "python_base": self.python,
             "python_version": "3.13.13",
-            "stdlib_names": {"json", "_ssl", "_bz2"},
+            "python_platform": PLATFORM,
+            "python_build": BUILD,
+            "stdlib_names": {"json", "_ssl", "_bz2", "ctypes", "unicodedata"},
             "reviews": {},
             "bundle_internal": self.internal,
         }
+        if "cpython_registry" not in overrides:
+            options["cpython_registry"] = self.registry()
         options.update(overrides)
         return plan_runtime_notices(frozen_contents(self.bundle, self.archive), **options)
 
@@ -161,32 +189,148 @@ def test_inventory_maps_only_bundled_distributions_and_copies_their_notices(fixt
 
 def test_inventory_separates_cpython_microsoft_and_project_owned_pieces(fixture):
     inventory = fixture.plan().inventory
-    assert inventory["cpython"]["frozenRoots"] == ["_bz2.pyd", "_ssl.pyd", "base_library.zip", "json", "python313.dll"]
-    assert inventory["cpython"]["notices"] == ["third-party-notices/python/cpython-3.13.13/LICENSE.txt"]
-    assert inventory["cpython"]["bundledComponents"] == [
-        {"component": "bzip2", "files": ["_bz2.pyd"], "namedInLicenseText": True},
+    cpython = inventory["cpython"]
+    assert cpython["frozenRoots"] == ["_bz2.pyd", "_ssl.pyd", "base_library.zip", "json", "python313.dll"]
+    assert cpython["interpreter"]["build"] == BUILD and cpython["interpreter"]["id"] == "synthetic-3.13.13"
+    assert [(item["path"], item["interpreterPath"], item["components"]) for item in cpython["binaries"]] == [
+        ("_bz2.pyd", "DLLs/_bz2.pyd", ["bzip2@1.0.8"]),
+        ("_ssl.pyd", "DLLs/_ssl.pyd", []),
+        ("python313.dll", "python313.dll", ["zlib@1.3.1"]),
     ]
-    assert inventory["microsoftRuntime"]["files"] == [{"path": "vcruntime140.dll", "deliveredBy": "bundle top level"}]
+    assert {item["id"]: item["boundTo"] for item in cpython["components"]} == {
+        "bzip2@1.0.8": ["_bz2.pyd"],
+        "cpython-incorporated@3.13.13": ["CPython runtime"],
+        "zlib@1.3.1": ["python313.dll"],
+    }
+    assert cpython["pythonRoots"] == ["base_library.zip"]
+    assert "third-party-notices/python/cpython-3.13.13/LICENSE.txt" in cpython["notices"]
+    assert "third-party-notices/python/cpython-3.13.13/components/zlib-1.3.1/LICENSE" in cpython["notices"]
+    assert inventory["microsoftRuntime"]["files"] == [{
+        "path": "vcruntime140.dll", "deliveredBy": "bundle top level", "identicalToAuditedInterpreterFile": "vcruntime140.dll",
+    }]
     assert inventory["microsoftRuntime"]["status"] == "review-required"
     assert inventory["projectOwned"]["frozenRoots"] == ["config", "core", "runtime_entry"]
     assert inventory["projectOwned"]["license"] == "unspecified"
 
 
-def test_unnamed_cpython_component_is_left_for_review(fixture):
-    (fixture.python / "DLLs" / "sqlite3.dll").write_bytes(b"sqlite")
+def test_bundled_cpython_binary_copies_every_text_of_its_audited_components(fixture):
     fixture.add_bundle_file("sqlite3.dll", b"sqlite")
     plan = fixture.plan()
-    assert {"component": "SQLite", "files": ["sqlite3.dll"], "namedInLicenseText": False} in plan.inventory["cpython"]["bundledComponents"]
-    write_runtime_notices(plan, fixture.root / "out")
-    readme = (fixture.root / "out/third-party-notices/README.txt").read_text(encoding="utf-8")
-    assert "review required" in readme and "SQLite" in readme
+    sqlite = next(item for item in plan.inventory["cpython"]["components"] if item["id"] == "sqlite@3.50.4")
+    assert sqlite["boundTo"] == ["sqlite3.dll"] and sqlite["attribution"] == []
+    assert [text["kind"] for text in sqlite["texts"]] == ["terms-excerpt"]
+    zlib = next(item for item in plan.inventory["cpython"]["components"] if item["id"] == "zlib@1.3.1")
+    assert [(PurePosixPath(t["path"]).name, t["kind"]) for t in zlib["texts"]] == [("LICENSE", "license-text"), ("README", "auxiliary")]
+    target = write_runtime_notices(plan, fixture.root / "out")
+    components = target / "python/cpython-3.13.13/components"
+    for name, text_id in (("sqlite-3.50.4/sqlite3.h.leading-comment.txt", "sqlite/sqlite3.h.leading-comment.txt"),
+                          ("zlib-1.3.1/README", "zlib/README"),
+                          ("cpython-incorporated-3.13.13/license.rst", "cpython/Doc/license.rst")):
+        assert (components / name).read_bytes() == (fixture.registry_builder.text_root / text_id).read_bytes()
+    readme = (target / "README.txt").read_text(encoding="utf-8")
+    assert "SQLite 3.50.4" in readme and BUILD in readme
+
+
+def test_unaudited_interpreter_build_fails_closed(fixture):
+    for options in ({"python_version": "3.13.14"}, {"python_build": "tags/v3.13.13:deadbee"}, {"python_platform": "linux-x86_64"}):
+        with pytest.raises(NoticeError, match="not an audited interpreter"):
+            fixture.plan(**options)
+
+
+def test_build_interpreter_with_changed_bytes_fails(fixture):
+    (fixture.python / "DLLs" / "_ssl.pyd").write_bytes(b"patched extension")
+    with pytest.raises(NoticeError, match=r"Build interpreter file DLLs/_ssl.pyd differs"):
+        fixture.plan()
+
+
+def test_changed_interpreter_license_fails(fixture):
+    (fixture.python / "LICENSE.txt").write_text("Different license text\n", encoding="utf-8")
+    with pytest.raises(NoticeError, match="LICENSE.txt differs"):
+        fixture.plan()
+
+
+def test_bundled_cpython_binary_with_other_bytes_fails(fixture):
+    fixture.add_bundle_file("_bz2.pyd", b"rebuilt bz2 extension")
+    with pytest.raises(NoticeError, match=r"Bundled CPython binary _bz2.pyd differs"):
+        fixture.plan()
+
+
+def test_bundled_cpython_binary_missing_from_the_audit_fails(fixture):
+    fixture.add_bundle_file("unicodedata.pyd", b"unicode data")
+    with pytest.raises(NoticeError, match="unicodedata.pyd is not part of audited"):
+        fixture.plan()
+
+
+def test_tcl_data_matching_the_audited_tree_binds_tcl(fixture):
+    fixture.add_bundle_file("_tcl_data/init.tcl", b"# tcl init\n")
+    fixture.add_bundle_file("_tcl_data/license.terms", b"tcl terms\n")
+    trees = fixture.plan().inventory["cpython"]["dataTrees"]
+    assert [(tree["path"], tree["interpreterPath"], tree["files"], tree["components"]) for tree in trees] == [
+        ("_tcl_data", "tcl/tcl8.6", 2, ["tcl@8.6.15"]),
+    ]
+
+
+@pytest.mark.parametrize("change", ["edited", "extra", "missing"])
+def test_tcl_data_differing_from_the_audited_tree_fails(fixture, change):
+    fixture.add_bundle_file("_tcl_data/init.tcl", b"# edited\n" if change == "edited" else b"# tcl init\n")
+    if change != "missing":
+        fixture.add_bundle_file("_tcl_data/license.terms", b"tcl terms\n")
+    if change == "extra":
+        fixture.add_bundle_file("_tcl_data/extra.tcl", b"# extra\n")
+    with pytest.raises(NoticeError, match="Bundled data folder _tcl_data"):
+        fixture.plan()
+
+
+def test_tcl_data_without_an_audited_tree_fails(fixture):
+    raw = fixture.registry_builder.variant(fixture.registry_raw)
+    raw["interpreters"][0]["dataTrees"] = {}
+    raw["components"].pop("tcl@8.6.15")
+    raw["texts"].pop("tcl/license.terms")
+    (fixture.registry_builder.text_root / "tcl/license.terms").unlink()
+    fixture.add_bundle_file("_tcl_data/init.tcl", b"# tcl init\n")
+    with pytest.raises(NoticeError, match="_tcl_data is not an audited data tree"):
+        fixture.plan(cpython_registry=fixture.registry(raw))
+
+
+def test_stdlib_folder_with_native_code_fails_and_without_is_python_code(fixture):
+    fixture.add_bundle_file("ctypes/helper.py", b"print('x')")
+    assert "ctypes" in fixture.plan().inventory["cpython"]["pythonRoots"]
+    fixture.add_bundle_file("ctypes/native.pyd", b"native")
+    with pytest.raises(NoticeError, match="ctypes contains native code"):
+        fixture.plan()
+
+
+def test_module_bound_component_follows_the_frozen_archive(fixture):
+    assert "macholib@3.13.13" not in {item["id"] for item in fixture.plan().inventory["cpython"]["components"]}
+    fixture.archive += ["ctypes", "ctypes.macholib", "ctypes.macholib.dyld"]
+    components = {item["id"]: item for item in fixture.plan().inventory["cpython"]["components"]}
+    assert components["macholib@3.13.13"]["boundTo"] == ["module ctypes.macholib"]
+    assert components["macholib@3.13.13"]["unresolved"]
+    assert any("macholib@3.13.13" in line for line in fixture.plan().inventory["cpython"]["unresolved"])
+
+
+def test_microsoft_runtime_differing_from_the_interpreter_copy_is_recorded(fixture):
+    fixture.add_bundle_file("vcruntime140.dll", b"system32 runtime")
+    files = fixture.plan().inventory["microsoftRuntime"]["files"]
+    assert files == [{"path": "vcruntime140.dll", "deliveredBy": "bundle top level", "identicalToAuditedInterpreterFile": None}]
+
+
+def test_distribution_notice_colliding_with_cpython_notices_fails(fixture):
+    fixture.distributions.append(fixture.install("cpython", "3.13.13", {
+        "cpython/__init__.py": "code",
+        "LICENSE.txt": "A colliding license text\n\nPermission is granted for this synthetic fixture only.\n",
+    }, {"License-Expression": "MIT"}))
+    fixture.archive.append("cpython")
+    with pytest.raises(NoticeError, match="destination"):
+        fixture.plan()
 
 
 def test_microsoft_runtime_inside_a_package_is_flagged_with_its_owner(fixture):
     fixture.distributions[0].files.append(PurePosixPath("examplepkg/msvcp140-0123456789abcdef.dll"))
     fixture.add_bundle_file("examplepkg/msvcp140-0123456789abcdef.dll")
     files = fixture.plan().inventory["microsoftRuntime"]["files"]
-    assert {"path": "examplepkg/msvcp140-0123456789abcdef.dll", "deliveredBy": "examplepkg"} in files
+    assert {"path": "examplepkg/msvcp140-0123456789abcdef.dll", "deliveredBy": "examplepkg",
+            "identicalToAuditedInterpreterFile": None} in files
 
 
 def test_inventory_is_deterministic_and_has_no_workstation_paths(fixture):
