@@ -18,6 +18,7 @@ export const LINK_ACTIONS = {
   pairCancel: "qronos.link_pair_cancel",
   revoke: "qronos.link_revoke",
   remote: "qronos.link_remote",
+  securityReset: "qronos.link_security_reset",
 } as const;
 
 export const LINK_EVENTS = new Set(["link_status", "link_devices", "link_pairing", "link_error"]);
@@ -28,6 +29,13 @@ const MAX_NAME = 40;
 /** The runtime's pairing window; the URI's own expiry wins when sooner. */
 export const PAIRING_SECONDS = 120;
 
+/** The link's Security Monitor (Link D9). Missing means not ready. */
+export type LinkSecurity = {
+  ready: boolean;
+  contained: boolean;
+  quarantined: boolean;
+};
+
 export type LinkStatus = {
   enabled: boolean;
   running: boolean;
@@ -35,7 +43,18 @@ export type LinkStatus = {
   remoteActive: boolean;
   remoteUnavailable: string | null;
   pairingOpen: boolean;
+  security: LinkSecurity;
 };
+
+function parseSecurity(value: unknown): LinkSecurity | null {
+  if (value === undefined) return { ready: false, contained: false, quarantined: false };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const r = value as Record<string, unknown>;
+  if (typeof r.ready !== "boolean" || typeof r.contained !== "boolean" || typeof r.quarantined !== "boolean") {
+    return null;
+  }
+  return { ready: r.ready, contained: r.contained, quarantined: r.quarantined };
+}
 
 export type LinkDevice = {
   deviceId: string;
@@ -73,8 +92,10 @@ const finite = (value: unknown): value is number => typeof value === "number" &&
 
 export function parseLinkStatus(message: string): LinkStatus | null {
   const r = parseObject(message);
+  const security = r === null ? null : parseSecurity(r.security);
   if (
     r === null ||
+    security === null ||
     typeof r.enabled !== "boolean" ||
     typeof r.running !== "boolean" ||
     typeof r.remote_active !== "boolean" ||
@@ -91,7 +112,20 @@ export function parseLinkStatus(message: string): LinkStatus | null {
     remoteActive: r.remote_active,
     remoteUnavailable: r.remote_unavailable as string | null,
     pairingOpen: r.pairing_open,
+    security,
   };
+}
+
+const REMOTE_TEXT: Record<string, string> = {
+  security_quarantined: "پایشگر امنیتی اتصال را قرنطینه کرده است.",
+  security_contained: "پایشگر امنیتی دسترسی از بیرون خانه را بسته است.",
+  security_monitor_not_ready: "پایشگر امنیتی آماده نیست؛ دسترسی از بیرون خانه بسته می‌ماند.",
+};
+
+/** Why access from outside the home network is unavailable, in Persian. */
+export function remoteText(status: LinkStatus | null): string {
+  const reason = status?.remoteUnavailable ?? null;
+  return (reason !== null && REMOTE_TEXT[reason]) || "دسترسی از بیرون خانه در این نسخه فعال نیست.";
 }
 
 export function parseLinkDevices(message: string): LinkDevice[] | null {
@@ -341,6 +375,15 @@ export class DeviceLinkController {
     this.error = linkErrorText(error.code);
     this.publish();
   }
+
+  /** Clear the Security Monitor's latches; only from this PC's desktop. */
+  resetSecurity = (): Promise<boolean> => {
+    const security = this.status?.security;
+    if (!security || (!security.quarantined && !security.contained)) return Promise.resolve(false);
+    this.error = null;
+    this.publish();
+    return this.send(LINK_ACTIONS.securityReset);
+  };
 
   dismissError = (): void => {
     this.error = null;

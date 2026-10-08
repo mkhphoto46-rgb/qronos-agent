@@ -42,7 +42,13 @@ const URI = `qronos://pair?v=1&h=192.168.1.20&p=47711&d=${ID_A}&k=${"K".repeat(4
 
 const statusMessage = (overrides = {}) => JSON.stringify({
   enabled: true, running: true, port: 47711, remote_active: false,
-  remote_unavailable: "remote_access_off", parked_devices: 0, pairing_open: false, ...overrides,
+  remote_unavailable: "remote_access_off", parked_devices: 0, pairing_open: false,
+  security: { ready: true, contained: false, contained_reason: "", quarantined: false, quarantine_reason: "", throttled: [], tracked: 0 },
+  ...overrides,
+});
+const latched = (overrides) => ({
+  ready: true, contained: false, contained_reason: "", quarantined: false, quarantine_reason: "",
+  throttled: [], tracked: 0, ...overrides,
 });
 const device = (id, overrides = {}) => ({
   device_id: id, name: "گوشی سارا", status: "active", created_at: 1000, last_seen_at: 1001,
@@ -77,7 +83,8 @@ test("status, devices and errors are accepted only in their exact shape", () => 
   assert.equal(link.parseLinkStatus(statusMessage()).running, true);
   for (const bad of [
     statusMessage({ running: "true" }), statusMessage({ port: 0 }), statusMessage({ port: 1.5 }),
-    statusMessage({ pairing_open: 1 }), "garbage", "[]",
+    statusMessage({ pairing_open: 1 }), statusMessage({ security: { ready: "yes" } }),
+    statusMessage({ security: [] }), "garbage", "[]",
   ]) {
     assert.equal(link.parseLinkStatus(bad), null, bad);
   }
@@ -237,6 +244,7 @@ function mountPanel() {
     react,
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "../qrCode": qr,
+    "../deviceLink": link,
     "./DeviceLinkPanel.css": {},
   });
   return (view, enabled, handlers = {}) => {
@@ -247,6 +255,7 @@ function mountPanel() {
       onSetEnabled: handlers.setEnabled ?? noop, onRefresh: noop,
       onOpenPairing: handlers.open ?? noop, onCancelPairing: handlers.cancel ?? noop,
       onRevoke: handlers.revoke ?? noop, onRemoteOff: handlers.remoteOff ?? noop,
+      onResetSecurity: handlers.resetSecurity ?? noop,
       onTick: noop, onDismissError: noop, onClose: noop,
     });
   };
@@ -307,6 +316,38 @@ test("pairing needs a running link; revoking asks once more", () => {
   tree = render(view, true, { revoke: (id) => revoked.push(id) });
   findAll(tree, (n) => n.type === "button" && text(n).includes("بله"))[0].props.onClick();
   assert.deepEqual(revoked, [ID_A]);
+});
+
+test("a quarantine is explained in Persian and reset only after a second click", () => {
+  const render = mountPanel();
+  const reset = [];
+  const view = baseView({
+    status: link.parseLinkStatus(statusMessage({
+      running: false, remote_unavailable: "security_quarantined",
+      security: latched({ quarantined: true, quarantine_reason: "repeated_containment" }),
+    })),
+  });
+  let tree = render(view, true, { resetSecurity: () => reset.push(true) });
+  const all = text(tree);
+  assert.ok(all.includes("قرنطینه"));
+  assert.ok(all.includes("فقط از همین رایانه"));
+  findAll(tree, (n) => n.type === "button" && text(n).includes("بازنشانی پایشگر"))[0].props.onClick();
+  assert.deepEqual(reset, [], "the first click only asks");
+  tree = render(view, true, { resetSecurity: () => reset.push(true) });
+  findAll(tree, (n) => n.type === "button" && text(n).includes("بله، بازنشانی"))[0].props.onClick();
+  assert.deepEqual(reset, [true]);
+  const calm = text(render(baseView(), true));
+  assert.ok(!calm.includes("بازنشانی پایشگر"), "nothing to reset when nothing is latched");
+});
+
+test("the security reset is sent only when something is latched", async () => {
+  const h = harness();
+  h.emit("link_status", statusMessage());
+  assert.equal(await h.controller.resetSecurity(), false);
+  h.emit("link_status", statusMessage({ security: latched({ contained: true, contained_reason: "tampering" }) }));
+  await h.controller.resetSecurity();
+  assert.deepEqual(plain(h.sent), [{ actionId: "qronos.link_security_reset", data: {} }]);
+  assert.ok(link.remoteText(link.parseLinkStatus(statusMessage({ remote_unavailable: "security_contained" }))).includes("بسته"));
 });
 
 // ------------------------------------------------------------ App wiring

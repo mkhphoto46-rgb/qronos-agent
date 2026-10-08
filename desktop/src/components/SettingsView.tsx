@@ -1490,6 +1490,7 @@ function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: Setting
       onCancelPairing={() => void deviceLink.cancelPairing()}
       onRevoke={(deviceId) => void deviceLink.revoke(deviceId)}
       onRemoteOff={(deviceId) => void deviceLink.remoteOff(deviceId)}
+      onResetSecurity={() => void deviceLink.resetSecurity()}
       onTick={deviceLink.tick}
       onDismissError={deviceLink.dismissError}
       onClose={deviceLink.close}

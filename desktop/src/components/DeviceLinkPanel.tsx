@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { remoteText } from "../deviceLink";
 import type { DeviceLinkView, LinkDevice, LinkStatus } from "../deviceLink";
 import { encodeQr, qrSvgPath } from "../qrCode";
 
@@ -14,6 +15,7 @@ type Props = {
   onCancelPairing: () => void;
   onRevoke: (deviceId: string) => void;
   onRemoteOff: (deviceId: string) => void;
+  onResetSecurity: () => void;
   onTick: () => void;
   onDismissError: () => void;
   onClose: () => void;
@@ -28,6 +30,9 @@ const STATUS_TEXT: Record<LinkDevice["status"], string> = {
 function statusLine(enabled: boolean, status: LinkStatus | null): string {
   if (!enabled) return "خاموش است؛ هیچ گوشی‌ای نمی‌تواند به Qronos وصل شود.";
   if (status === null) return "در حال دریافت وضعیت...";
+  if (status.security.quarantined) {
+    return "پایشگر امنیتی به‌خاطر نشانه‌های حمله اتصال را قرنطینه کرده است؛ حتی در شبکهٔ خانگی خاموش است.";
+  }
   if (status.running) return `روشن است؛ فقط گوشی‌های جفت‌شده در همین شبکهٔ خانگی (درگاه ${status.port ?? "?"}).`;
   return "روشن شده ولی اجرا نشد؛ وضعیت را تازه کنید یا Qronos را دوباره باز کنید.";
 }
@@ -48,6 +53,7 @@ export default function DeviceLinkPanel(props: Props) {
   const { view, enabled } = props;
   const [name, setName] = useState("");
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
   const pairing = view.pairing;
 
   useEffect(() => {
@@ -94,7 +100,35 @@ export default function DeviceLinkPanel(props: Props) {
         <span>اجازهٔ اتصال گوشی‌های جفت‌شده در این شبکه</span>
       </label>
       <p className="device-link-status" role="status">{statusLine(enabled, view.status)}</p>
-      <p className="device-link-note">دسترسی از بیرون خانه در این نسخه فعال نیست.</p>
+      <p className="device-link-note">{remoteText(view.status)}</p>
+
+      {view.status !== null && (view.status.security.quarantined || view.status.security.contained) && (
+        <div className="device-link-security" role="alert">
+          <p>
+            پیش از بازنشانی، دستگاه‌های جفت‌شده را بررسی کنید و هر گوشی ناآشنا یا گم‌شده را لغو کنید.
+            بازنشانی فقط از همین رایانه ممکن است.
+          </p>
+          {confirmReset ? (
+            <span className="device-link-confirm">
+              <button
+                type="button"
+                className="file-approval-button file-approval-deny"
+                onClick={() => {
+                  setConfirmReset(false);
+                  props.onResetSecurity();
+                }}
+              >
+                بله، بازنشانی شود
+              </button>
+              <button type="button" className="file-approval-button" onClick={() => setConfirmReset(false)}>نه</button>
+            </span>
+          ) : (
+            <button type="button" className="file-approval-button" onClick={() => setConfirmReset(true)}>
+              بازنشانی پایشگر امنیتی
+            </button>
+          )}
+        </div>
+      )}
 
       {view.error && (
         <div className="device-link-error" role="alert">
