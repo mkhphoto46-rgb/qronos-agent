@@ -144,7 +144,7 @@ def test_clarifications_are_reported_without_prompts(harness):
     finished = harness.last("app_workflow_finished")
     assert finished["workflow"] == "clarification" and "مخاطب" in finished["message"]
     assert "app_workflow_approval_required" not in harness.names()
-    assert harness.coordinator.try_begin("سلام", "r2") is False
+    assert harness.coordinator.try_begin("سلام", "r2") is None
 
 
 def test_print_needs_the_typed_secret_and_never_echoes_it(harness):

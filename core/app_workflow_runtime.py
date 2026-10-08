@@ -113,7 +113,7 @@ class AppWorkflowCoordinator:
         print_workflow: Callable[[], PrintWorkflow],
         resolve_file: Callable[[str], Path],
         default_printer: Callable[[], str | None],
-        verify_secret: Callable[[str], bool],
+        verify_secret: Callable[[str], bool] | None,
         paused: Callable[[], bool],
         run_async: Callable[[Callable[[], None]], None] = _start_thread,
         audit: ActionAuditLog | None = None,
@@ -133,34 +133,50 @@ class AppWorkflowCoordinator:
 
     # ------------------------------------------------------------ entry
 
-    def try_begin(self, text: str, request_id: str) -> bool:
-        """Handle the request if it is an application workflow; else False."""
+    def try_begin(self, text: str, request_id: str) -> str | None:
+        """Handle an application-workflow request.
+
+        Returns the Persian reply that ends the chat turn, or None when the
+        text is not a workflow request. Prompts and results follow as events.
+        """
         intent = parse_workflow_intent(text)
         if intent is None:
-            return False
+            return None
         if isinstance(intent, WorkflowClarification):
             self._finish(request_id, "clarification", "refused", intent.question, "clarification needed")
-            return True
+            return intent.question
         if self._paused():
-            self._finish(request_id, "workflow", "stopped", "کرونوس متوقف است؛ کاری شروع نشد.", "runtime paused")
-            return True
+            message = "کرونوس متوقف است؛ کاری شروع نشد."
+            self._finish(request_id, "workflow", "stopped", message, "runtime paused")
+            return message
         if isinstance(intent, TelegramDownloadIntent):
             try:
                 request = TelegramDownloadRequest(intent.contact)
             except ValueError as error:
-                self._finish(request_id, "telegram", "refused", "نام مخاطب معتبر نیست.", str(error))
-                return True
+                message = "نام مخاطب معتبر نیست."
+                self._finish(request_id, "telegram", "refused", message, str(error))
+                return message
             self._prompt(PendingWorkflowStep(
                 request_id=request_id,
                 phase=PHASE_TELEGRAM_INSPECT,
                 telegram_request=request,
                 details={"contact": request.contact},
             ), f"پیدا کردن گفتگوی دقیق «{request.contact}» در تلگرام و خواندن پیام‌های اخیر آن، بدون ارسال پیام.")
-            return True
+            return "برای ادامه، درخواست تأیید را ببینید. بدون تأیید شما هیچ کاری در تلگرام انجام نمی‌شود."
         if isinstance(intent, PrintIntent):
+            if self._verify_secret is None:
+                # Printing needs the typed approval secret, and this process is
+                # not one of the reviewed paths allowed to check it. Refuse
+                # before showing a prompt that could never be approved.
+                message = (
+                    "چاپ به رمز تأیید نیاز دارد و این مسیر هنوز اجازهٔ بررسی رمز را ندارد؛ "
+                    "چیزی چاپ نشد."
+                )
+                self._finish(request_id, PHASE_PRINT, "refused", message, "typed-secret path unavailable")
+                return message
             self._run_async(lambda: self._prepare_print(intent, request_id))
-            return True
-        return False
+            return "فایل و چاپگر بررسی می‌شوند؛ پیش از چاپ، جزئیات برای تأیید نشان داده می‌شود."
+        return None
 
     # ----------------------------------------------------------- prompts
 
@@ -202,7 +218,7 @@ class AppWorkflowCoordinator:
         needed = _PERMISSION_FOR_PHASE[step.phase]
         if approved and needed is PermissionDecision.REQUIRE_TYPED_SECRET:
             try:
-                verified = bool(self._verify_secret(secret or ""))
+                verified = self._verify_secret is not None and bool(self._verify_secret(secret or ""))
             except Exception:  # noqa: BLE001 - locked or unavailable secret store
                 verified = False
             if not verified:
