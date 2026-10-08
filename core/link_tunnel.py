@@ -53,7 +53,7 @@ from typing import Callable
 
 from core.link_audit import AuditEvent
 from core.link_capability import LinkScope
-from core.link_devices import DeviceRecord
+from core.link_devices import DeviceRecord, DeviceStoreBusy, DeviceStoreCorrupt
 from core.link_relay_wire import (
     RelayHello,
     RelayStatus,
@@ -539,7 +539,11 @@ class RelayDialler:
     def eligible_record(self, device_id: str) -> DeviceRecord | None:
         """The device's record if it may be served remotely right now."""
 
-        record = self.server.registry.get(device_id)
+        try:
+            record = self.server.registry.get(device_id)
+        except (DeviceStoreCorrupt, DeviceStoreBusy):
+            # Unreadable means unknown, and unknown is not eligible.
+            return None
 
         if record is None or not record.remote_allowed(self.clock()):
             return None
@@ -548,10 +552,14 @@ class RelayDialler:
 
     def eligible_devices(self) -> tuple[str, ...]:
         now = self.clock()
+
+        try:
+            records = self.server.registry.all()
+        except (DeviceStoreCorrupt, DeviceStoreBusy):
+            return ()
+
         eligible = [
-            record.device_id
-            for record in self.server.registry.all()
-            if record.remote_allowed(now)
+            record.device_id for record in records if record.remote_allowed(now)
         ]
 
         return tuple(eligible[: self.settings.max_routes])

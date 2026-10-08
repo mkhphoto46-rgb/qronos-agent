@@ -392,13 +392,120 @@ class DeviceRecord:
         )
 
 
+class DeviceStoreBusy(Exception):
+    """Another process held the device file's lock for too long."""
+
+
+# How long a change waits for another process to finish its own. A change is a
+# read, one record and a file write, so anything near this is a stuck process.
+LOCK_TIMEOUT_SECONDS = 10.0
+
+
+def _try_lock(handle: object) -> None:
+    """Take an exclusive lock on byte 0 of an open file, or raise OSError."""
+
+    fileno = handle.fileno()  # type: ignore[attr-defined]
+
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)  # type: ignore[attr-defined]
+        msvcrt.locking(fileno, msvcrt.LK_NBLCK, 1)
+    else:  # pragma: no cover - POSIX
+        import fcntl
+
+        fcntl.flock(fileno, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle: object) -> None:
+    fileno = handle.fileno()  # type: ignore[attr-defined]
+
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)  # type: ignore[attr-defined]
+        msvcrt.locking(fileno, msvcrt.LK_UNLCK, 1)
+    else:  # pragma: no cover - POSIX
+        import fcntl
+
+        fcntl.flock(fileno, fcntl.LOCK_UN)
+
+
+class _FileLock:
+    """
+    An exclusive lock between processes, on a file beside the device file.
+
+    The lock file holds nothing; it exists to be locked. Waiting is bounded:
+    a process that cannot get the lock in ``LOCK_TIMEOUT_SECONDS`` raises
+    ``DeviceStoreBusy`` rather than hanging the desktop or a handshake.
+    """
+
+    def __init__(self, path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> None:
+        self.path = path
+        self.timeout = timeout
+        self._handle: object | None = None
+
+    def __enter__(self) -> _FileLock:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self.path, "a+b")
+        deadline = time.monotonic() + self.timeout
+
+        while True:
+            try:
+                _try_lock(handle)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise DeviceStoreBusy(
+                        f"{self.path} stayed locked by another process"
+                    ) from None
+
+                time.sleep(0.02)
+
+        self._handle = handle
+
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        handle, self._handle = self._handle, None
+
+        if handle is None:
+            return
+
+        try:
+            _unlock(handle)
+        except OSError:
+            pass
+        finally:
+            handle.close()  # type: ignore[attr-defined]
+
+
 class DeviceRegistry:
     """
     The paired devices, backed by one JSON file.
 
-    Reads are served from memory; every change is written through immediately.
-    A phone pairing or being revoked is rare and consequential, so there is no
-    value in batching it and real cost in losing it to a crash.
+    Every change is written through immediately. A phone pairing or being
+    revoked is rare and consequential, so there is no value in batching it and
+    real cost in losing it to a crash.
+
+    More than one process holds a registry for the same file — the link
+    service and whatever the user revokes a phone from — so neither may trust
+    its own memory:
+
+        Reads check the file first. If it has been replaced since it was last
+        read (a different modification time, size or file id), it is read
+        again. A ``stat`` per lookup is the cost, and it means a revocation
+        written by another process reaches the next handshake and, through the
+        server's per-request check, the next request of an open session.
+
+        Changes hold a lock shared between processes, re-read the file under
+        it, change one record and write the whole file back. Without the
+        re-read two processes would each write back their own stale copy and
+        the second would silently undo the first — a revocation lost that way
+        is a revoked phone working again.
+
+    A file that disappears reads as no devices, which is the safe direction.
     """
 
     def __init__(
@@ -411,17 +518,65 @@ class DeviceRegistry:
         self.path = None if path is None else Path(path)
         self.clock: Clock = clock if clock is not None else time.time
 
-        # The link server's session threads, the relay dialler and the desktop
-        # all reach this registry. Each change is a read-modify-write of one
-        # record plus a file write, so changes are serialised; single lookups
-        # stay lock-free, which a dictionary read allows.
+        # Threads within this process: the link server's session threads, the
+        # relay dialler and the desktop. Reentrant, because a change can be
+        # made of smaller changes.
         self._lock = threading.RLock()
+        self._file_lock = (
+            None
+            if self.path is None
+            else _FileLock(self.path.with_suffix(self.path.suffix + ".lock"))
+        )
+        self._changing_depth = 0
+        self._signature: tuple[int, int, int] | None = None
         self._records: dict[str, DeviceRecord] = self._load()
 
     # ------------------------------------------------------------- persistence
 
+    def _stat_signature(self) -> tuple[int, int, int] | None:
+        assert self.path is not None
+
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+
+        return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+    def _refresh(self) -> None:
+        """Re-read the file if another process has replaced it."""
+
+        if self.path is None:
+            return
+
+        if self._stat_signature() == self._signature:
+            return
+
+        with self._lock:
+            if self._stat_signature() != self._signature:
+                self._records = self._load()
+
+    def _changing(self) -> _Changing:
+        return _Changing(self)
+
     def _load(self) -> dict[str, DeviceRecord]:
-        if self.path is None or not self.path.exists():
+        if self.path is None:
+            return {}
+
+        # Stat before reading. If the file is replaced in between, the
+        # signature kept is the older one and the next lookup reads again,
+        # which costs a read and is never stale.
+        #
+        # The signature is recorded only once the file has been read
+        # successfully. Recording it first meant a file that failed to parse
+        # was remembered as read, and every later lookup went on serving the
+        # records from before it — a revocation hidden behind a corrupt write
+        # would have been ignored. Now every lookup retries, and fails, until
+        # the file is readable again.
+        signature = self._stat_signature()
+
+        if signature is None:
+            self._signature = None
             return {}
 
         try:
@@ -447,6 +602,8 @@ class DeviceRegistry:
 
             record = DeviceRecord.from_json(entry)
             records[record.device_id] = record
+
+        self._signature = signature
 
         return records
 
@@ -493,18 +650,22 @@ class DeviceRegistry:
             # rather than a truncated one. The Windows access-control list is
             # carried across by the rename, and the POSIX mode with it.
             os.replace(temporary, self.path)
+            self._signature = self._stat_signature()
         finally:
             temporary.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ queries
 
     def __len__(self) -> int:
+        self._refresh()
         return len(self._records)
 
     def get(self, device_id: str) -> DeviceRecord | None:
+        self._refresh()
         return self._records.get(device_id)
 
     def all(self) -> tuple[DeviceRecord, ...]:
+        self._refresh()
         return tuple(
             sorted(self._records.values(), key=lambda r: r.created_at)
         )
@@ -529,7 +690,7 @@ class DeviceRegistry:
         if not is_valid_device_id(device_id):
             return None
 
-        record = self._records.get(device_id)
+        record = self.get(device_id)
 
         if record is None or not record.can_authenticate:
             return None
@@ -546,7 +707,7 @@ class DeviceRegistry:
     ) -> DeviceRecord:
         """Mint a new pending device with a fresh key."""
 
-        with self._lock:
+        with self._changing():
             device_id = new_device_id()
 
             while device_id in self._records:  # pragma: no cover - 2**64 odds
@@ -568,7 +729,7 @@ class DeviceRegistry:
             return record
 
     def _update(self, device_id: str, **changes: object) -> DeviceRecord:
-        with self._lock:
+        with self._changing():
             record = self._records.get(device_id)
 
             if record is None:
@@ -588,7 +749,7 @@ class DeviceRegistry:
         again, deliberately, at the PC.
         """
 
-        with self._lock:
+        with self._changing():
             record = self._records.get(device_id)
 
             if record is None:
@@ -650,7 +811,7 @@ class DeviceRegistry:
                 device_id, remote_enabled=False, remote_expires_at=None
             )
 
-        with self._lock:
+        with self._changing():
             record = self._records.get(device_id)
 
             if record is None:
@@ -688,12 +849,56 @@ class DeviceRegistry:
     def remove(self, device_id: str) -> None:
         """Forget a device entirely. Pairing again produces a new identity."""
 
-        with self._lock:
+        with self._changing():
             if device_id not in self._records:
                 raise UnknownDevice(device_id)
 
             del self._records[device_id]
             self._save()
+
+
+class _Changing:
+    """
+    One change to the registry: thread lock, process lock, fresh read.
+
+    Reentrant within a thread, because ``activate`` is built on ``_update``;
+    only the outermost level takes the process lock and re-reads the file.
+    """
+
+    def __init__(self, registry: DeviceRegistry) -> None:
+        self.registry = registry
+
+    def __enter__(self) -> _Changing:
+        registry = self.registry
+        registry._lock.acquire()
+
+        try:
+            if registry._changing_depth == 0 and registry._file_lock is not None:
+                registry._file_lock.__enter__()
+
+                try:
+                    registry._records = registry._load()
+                except BaseException:
+                    registry._file_lock.__exit__(None, None, None)
+                    raise
+
+            registry._changing_depth += 1
+        except BaseException:
+            registry._lock.release()
+            raise
+
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        registry = self.registry
+
+        try:
+            registry._changing_depth -= 1
+
+            if registry._changing_depth == 0 and registry._file_lock is not None:
+                registry._file_lock.__exit__(*exc)
+        finally:
+            registry._lock.release()
 
 
 def main() -> None:

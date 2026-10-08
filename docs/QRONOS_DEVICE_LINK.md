@@ -225,6 +225,17 @@ Two rules:
 
 Records redact the key in `repr`, so a stray debug print cannot leak it.
 
+**More than one process uses the file** — the link service, and whatever the
+user revokes a phone from — so no registry trusts its own memory. Every lookup
+checks whether the file has been replaced (modification time, size, file id)
+and re-reads it if so; every change takes a lock shared between processes,
+re-reads the file under it, and writes it back whole. A revocation written by
+another process therefore reaches the next handshake and the next request of
+an open session, and two processes changing the file at once cannot undo each
+other. A file that cannot be read fails closed: handshakes are refused and open
+sessions end until it is readable again. Tested with separate Python processes
+on a disposable file.
+
 ### 4.4 Capability model
 
 This is the part Layer 2 depends on, and the reason to build it now.

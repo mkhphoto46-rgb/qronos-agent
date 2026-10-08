@@ -94,6 +94,8 @@ from core.link_devices import (
     DeviceRecord,
     DeviceRegistry,
     DeviceStatus,
+    DeviceStoreBusy,
+    DeviceStoreCorrupt,
     is_valid_device_id,
 )
 from core.link_pairing import DEFAULT_PORT, PairingRefusal, PairingService
@@ -835,7 +837,10 @@ class LinkServer:
 
             return None
 
-        record = self.registry.get(identity)
+        try:
+            record = self.registry.get(identity)
+        except (DeviceStoreCorrupt, DeviceStoreBusy):
+            record = None
 
         if record is None or not record.can_authenticate:
             self.audit.record(
@@ -864,7 +869,10 @@ class LinkServer:
 
                 return None
 
-            record = self._complete_pairing(record, peer, scope)
+            try:
+                record = self._complete_pairing(record, peer, scope)
+            except (DeviceStoreCorrupt, DeviceStoreBusy):
+                record = None
 
             if record is None:
                 return None
@@ -884,7 +892,20 @@ class LinkServer:
 
             return None
         else:
-            record = self.registry.touch(record.device_id)
+            try:
+                record = self.registry.touch(record.device_id)
+            except (DeviceStoreCorrupt, DeviceStoreBusy):
+                # The record was read a moment ago but cannot be written now.
+                # Not a state to start a session in.
+                self.audit.record(
+                    AuditEvent.HANDSHAKE_REFUSED,
+                    device_id=identity,
+                    peer=peer,
+                    scope=scope,
+                    reason=RejectReason.BAD_KEY_OR_UNKNOWN_DEVICE,
+                )
+
+                return None
 
         budget = (
             RequestBudget(
@@ -969,7 +990,13 @@ class LinkServer:
         moment ago apply to the very next request.
         """
 
-        record = self.registry.get(session.device.device_id)
+        try:
+            record = self.registry.get(session.device.device_id)
+        except (DeviceStoreCorrupt, DeviceStoreBusy):
+            # The registry is shared with other processes. If it cannot be
+            # read now, nobody can say this device is still trusted, so the
+            # session ends rather than carrying on from a stale copy.
+            return SessionRule.REVOKED
 
         if record is None or record.status is not DeviceStatus.ACTIVE:
             return SessionRule.REVOKED
