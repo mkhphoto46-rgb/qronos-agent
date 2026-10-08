@@ -429,6 +429,58 @@ def test_closing_cancels_a_send_that_is_waiting_on_a_full_buffer(server):
 
 
 @windows_only
+def test_a_short_send_behind_a_blocked_send_keeps_its_own_deadline(server):
+    idle, writer = idle_and_writer(server())
+    text = "x" * (MAX_MESSAGE_BYTES - 40)
+
+    def flood():
+        while True:
+            writer.send("note", timeout=5, text=text)
+
+    first = Peer(flood)
+    first.start()
+    try:
+        time.sleep(0.8)  # the first send now holds the channel, waiting on a full buffer
+        assert first.is_alive()
+        started = time.monotonic()
+        with pytest.raises(ChannelTimeout, match="nothing was written"):
+            bounded(lambda: writer.send("note", timeout=0.2, text="short"), 1.5)
+        assert time.monotonic() - started < 1.0
+        assert first.is_alive()  # the short send's timeout did not break the channel
+    finally:
+        writer.close()
+        first.join(2.0)
+        idle.close()
+    assert not first.is_alive()
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), True, "1", None, ipc.MAX_TIMEOUT_SECONDS + 1])
+def test_every_channel_timeout_must_be_a_finite_number_of_seconds(bad):
+    with pytest.raises(ValueError):
+        ipc._deadline(bad)
+    assert ipc._deadline(-1) <= time.monotonic()  # a passed deadline is no time at all
+
+
+@windows_only
+@pytest.mark.parametrize("bad", [float("inf"), float("nan")])
+def test_channel_calls_refuse_an_unending_timeout(server, bad):
+    srv = server()
+    with pytest.raises(ValueError):
+        srv.accept(bad, expected_pid=ME)
+    with pytest.raises(ValueError):
+        connect(srv.address, srv.key, DOWN, UP, expected_server_pid=ME, timeout=bad)
+    idle, writer = idle_and_writer(srv)
+    try:
+        with pytest.raises(ValueError):
+            writer.send("note", timeout=bad, text="x")
+        with pytest.raises(ValueError):
+            writer.receive(bad)
+    finally:
+        idle.close()
+        writer.close()
+
+
+@windows_only
 def test_closing_is_prompt_while_the_peer_stalls(server):
     srv = server()
     holder = {}
@@ -515,9 +567,9 @@ def test_a_peer_process_that_stops_reading_cannot_hang_send_or_close():
         _winapi.CloseHandle(handle)
 
     assert not hung, f"the driver outlived its hard timeout: {lines}"
-    assert left_running == 0 and len(peers) == 2
+    assert left_running == 0 and len(peers) == 3
     report = json.loads(lines[-1])
-    repeated, closing = report["repeated"], report["close"]
+    repeated, closing, serialized = report["repeated"], report["close"], report["serialized"]
 
     # The buffer filled, then a send kept its 1 s deadline and broke the channel.
     assert repeated["sent_before_block"] >= 1 and repeated["timed_out"]
@@ -527,4 +579,9 @@ def test_a_peer_process_that_stops_reading_cannot_hang_send_or_close():
     # Close returned at once and woke a send waiting on its 3 s deadline early.
     assert closing["close_seconds"] < 0.5 and closing["sender_finished"]
     assert closing["result"] == "error" and closing["sender_seconds"] < 2.5
+
+    # A 0.2 s send behind a blocked 5 s send kept its own deadline.
+    assert serialized["result"] == "timeout" and 0.15 <= serialized["short_seconds"] < 1.0
+    assert serialized["first_still_waiting"]
+    assert serialized["first_finished"] and serialized["first_released_seconds"] < 2.0
     assert all(peer["exited"] for peer in report["peers"])

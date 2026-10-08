@@ -40,7 +40,10 @@ deadline:
     completed when the deadline passes, it is cancelled (``CancelIoEx``), the
     cancellation is collected, the channel is closed as broken — a cancelled
     write may have left a partial message — and ``ChannelTimeout`` is raised.
-    Closing never waits on a send.
+    Waiting for an earlier send's turn counts against the same deadline (a
+    send that times out there wrote nothing and leaves the channel open).
+    Closing never waits on a send. Every timeout must be a finite number of
+    seconds; infinity, NaN and non-numbers are refused.
 
     **Closed messages.** One JSON object per message, at most
     ``MAX_MESSAGE_BYTES``, with a ``kind`` from a closed table and exactly
@@ -53,6 +56,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -71,6 +75,8 @@ PROTOCOL_VERSION = 1
 #: a send — that is what the send deadline is for.
 MAX_MESSAGE_BYTES = 4096
 DEFAULT_SEND_TIMEOUT_SECONDS = 5.0
+#: Longest wait any channel call accepts; also keeps millisecond waits in range.
+MAX_TIMEOUT_SECONDS = 3600.0
 KEY_BYTES = 32
 HANDSHAKE_BYTES = 128
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -93,6 +99,10 @@ class ChannelError(RuntimeError):
 
 class ChannelTimeout(ChannelError):
     """The peer did not answer within the deadline."""
+
+
+class _NothingWritten(ChannelTimeout):
+    """Out of time before any byte was written; the channel is still whole."""
 
 
 class PeerRejected(ChannelError):
@@ -217,6 +227,22 @@ def _require_key(key: object) -> bytes:
     return key
 
 
+def _deadline(timeout: object) -> float:
+    """
+    The deadline ``timeout`` seconds from now.
+
+    The timeout must be a real, finite number of seconds no larger than
+    ``MAX_TIMEOUT_SECONDS``: infinity, NaN, booleans and other types are
+    refused rather than turned into a wait without an end. A negative value
+    (a deadline already passed) means no time at all.
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
+            or not math.isfinite(timeout) or timeout > MAX_TIMEOUT_SECONDS:
+        raise ValueError(f"A channel timeout must be a finite number of seconds up to {MAX_TIMEOUT_SECONDS:g}.")
+
+    return time.monotonic() + max(0.0, float(timeout))
+
+
 def _remaining(deadline: float) -> float:
     return deadline - time.monotonic()
 
@@ -257,7 +283,7 @@ def _send_raw(connection, data: bytes, deadline: float, register: Optional[Calla
     remaining_ms = int(_remaining(deadline) * 1000)
 
     if remaining_ms <= 0:
-        raise ChannelTimeout("No time left to send.")
+        raise _NothingWritten("No time left to send; nothing was written.")
 
     try:
         overlapped, error = _winapi.WriteFile(handle, data, overlapped=True)
@@ -386,12 +412,22 @@ class Channel:
         return self._connection
 
     def send(self, kind: str, timeout: float = DEFAULT_SEND_TIMEOUT_SECONDS, **fields: Any) -> None:
-        """Send one message within ``timeout``; a timed-out channel is closed."""
+        """
+        Send one message within ``timeout``.
+
+        The whole call shares the one deadline, including waiting for an
+        earlier send on this channel to finish. A send that runs out of time
+        while waiting its turn has written nothing and leaves the channel
+        open; one whose write timed out closes it.
+        """
+        deadline = _deadline(timeout)
         self._send.validate({"kind": kind, **fields})
         data = encode_message(kind, fields)
-        deadline = time.monotonic() + max(0.0, timeout)
 
-        with self._send_lock:
+        if not self._send_lock.acquire(timeout=max(0.0, _remaining(deadline))):
+            raise _NothingWritten("An earlier send still holds the channel; nothing was written.")
+
+        try:
             with self._state_lock:
                 if self._closed:
                     raise ChannelError("The channel is closed.")
@@ -399,6 +435,8 @@ class Channel:
 
             try:
                 _send_raw(self._connection, data, deadline, self._register)
+            except _NothingWritten:
+                raise
             except ChannelTimeout:
                 # A cancelled write may have left part of a message in the
                 # pipe; nothing more may be sent or trusted on this channel.
@@ -412,6 +450,8 @@ class Channel:
 
                 if release:
                     self._release()
+        finally:
+            self._send_lock.release()
 
     def _register(self, overlapped) -> bool:
         with self._state_lock:
@@ -421,7 +461,7 @@ class Channel:
             return True
 
     def receive(self, timeout: float) -> dict:
-        data = _receive_raw(self._connection, time.monotonic() + max(0.0, timeout), MAX_MESSAGE_BYTES)
+        data = _receive_raw(self._connection, _deadline(timeout), MAX_MESSAGE_BYTES)
         return decode_message(data, self._receive)
 
     def close(self) -> None:
@@ -480,7 +520,7 @@ class ChannelServer:
         from it, and waiting continues until the deadline. ``peer_pid`` stands
         in for the Win32 query in tests.
         """
-        deadline = time.monotonic() + max(0.0, timeout)
+        deadline = _deadline(timeout)
 
         while True:
             connection = self._accept_raw(_remaining(deadline))
@@ -577,7 +617,7 @@ def connect(
     _require_sessions_supported()
     address = require_local_address(address)
     key = _require_key(key)
-    deadline = time.monotonic() + max(0.0, timeout)
+    deadline = _deadline(timeout)
     connection = _open_pipe(address, deadline)
 
     if expected_server_pid is None:

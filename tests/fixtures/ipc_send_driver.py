@@ -99,12 +99,47 @@ def close_during_send(peers):
     return outcome
 
 
+def short_send_behind_a_blocked_one(peers):
+    """A 0.2 s send queued behind a send that is waiting on a full buffer."""
+    server, channel = session(peers)
+    outcome: dict[str, object] = {}
+
+    def blocked_sender():
+        try:
+            for _ in range(64):
+                channel.send("note", timeout=5.0, text=TEXT)
+        except ChannelError:
+            pass
+
+    sender = threading.Thread(target=blocked_sender, daemon=True)
+    sender.start()
+    time.sleep(0.8)  # the first sender now holds the channel, waiting on a full buffer
+    started = time.monotonic()
+    try:
+        channel.send("note", timeout=0.2, text="short")
+        outcome["result"] = "sent"
+    except ChannelTimeout:
+        outcome["result"] = "timeout"
+    except ChannelError:
+        outcome["result"] = "error"
+    outcome["short_seconds"] = time.monotonic() - started
+    outcome["first_still_waiting"] = sender.is_alive()
+    started = time.monotonic()
+    channel.close()
+    sender.join(10)
+    outcome["first_released_seconds"] = time.monotonic() - started
+    outcome["first_finished"] = not sender.is_alive()
+    server.close()
+    return outcome
+
+
 def main() -> int:
     peers: list[subprocess.Popen] = []
     result: dict[str, object] = {"driver_pid": os.getpid()}
     try:
         result["repeated"] = repeated_sends(peers)
         result["close"] = close_during_send(peers)
+        result["serialized"] = short_send_behind_a_blocked_one(peers)
     finally:
         for peer in peers:
             try:

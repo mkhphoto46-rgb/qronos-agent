@@ -58,7 +58,13 @@ All waits in the channel have deadlines.
   it for at most the time left. A write still pending at the deadline is
   cancelled, the cancellation is collected, and `ChannelTimeout` is raised.
   The channel is then closed as broken, because a cancelled write may have
-  left a partial message, so further sends are refused at once.
+  left a partial message, so further sends are refused at once. Waiting
+  for an earlier send on the same channel to finish counts against the same
+  deadline. A send that runs out of time there has written nothing and
+  leaves the channel open.
+- **Finite timeouts.** Every channel timeout (`send`, `receive`, `accept`,
+  `connect`) must be a finite number of seconds up to 3600. Infinity, NaN,
+  booleans and other types are refused with `ValueError`.
 - **Prompt close.** `Channel.close` never waits on a send. If a send is
   pending, close cancels that write. The sending thread wakes at once with
   `ChannelError` and releases the pipe handle as it leaves, so the handle is
@@ -174,7 +180,8 @@ in production yet.
   oversized payload; a full-size send to a non-reader; repeated sends to a
   peer that stopped reading (they time out within the deadline, and the
   channel is then refused); close cancelling a send that is waiting on a full
-  buffer; and prompt close. Each wait runs on a watchdog thread and must
+  buffer; a short send queued behind a blocked one keeping its own deadline;
+  refused non-finite timeouts; and prompt close. Each wait runs on a watchdog thread and must
   finish within its bound. The same scenarios also run across real processes:
   `tests/fixtures/ipc_send_driver.py` serves channels to disposable peer
   children (`tests/fixtures/ipc_peer_child.py`) that authenticate and then
