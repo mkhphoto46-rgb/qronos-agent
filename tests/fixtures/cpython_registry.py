@@ -75,6 +75,7 @@ class RegistryBuilder:
         return {
             "schema": 1,
             "comment": "Synthetic registry for tests.",
+            "packagingTarget": "synthetic-3.13.13",
             "texts": {text_id: self.text_record(text_id) for text_id in TEXTS},
             "components": {
                 "zlib@1.3.1": {"name": "zlib", "version": "1.3.1", "attribution": ["(C) 1995-2024 Example Authors"],

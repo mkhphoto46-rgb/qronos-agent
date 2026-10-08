@@ -23,7 +23,10 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import re
+import sys
+import sysconfig
 from typing import Iterable, Mapping
 
 REGISTRY_FILE = Path(__file__).with_name("cpython_notice_registry.json")
@@ -64,7 +67,22 @@ _TREE_KEYS = {"source", "excludes", "files", "treeSha256", "components"}
 
 
 class CPythonNoticeError(ValueError):
-    """The bundled CPython runtime cannot be matched to audited notices."""
+    """The CPython notice registry or its texts are invalid."""
+
+
+class UnsupportedCPythonBuild(CPythonNoticeError):
+    """The interpreter or a bundled CPython file is not an audited build.
+
+    This is a support failure (unknown version, build or bytes), distinct from
+    the owner rights review that every audited build still needs.
+    """
+
+
+RIGHTS_REVIEW_NOTE = (
+    "Matching an audited interpreter build establishes which upstream texts ship with the bundled "
+    "CPython files. It is not a licence or redistribution clearance: the unresolved component terms "
+    "and the Microsoft runtime files still need owner review."
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +101,7 @@ class Registry:
     components: Mapping[str, dict]
     interpreters: tuple[dict, ...]
     text_root: Path
+    packaging_target: str  # interpreter id that release runtime builds must use
 
 
 @dataclass(frozen=True)
@@ -106,6 +125,10 @@ class CPythonPlan:
 
 def _fail(message: str) -> None:
     raise CPythonNoticeError(message)
+
+
+def _unsupported(message: str) -> None:
+    raise UnsupportedCPythonBuild(f"Unsupported CPython build: {message}")
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -198,7 +221,8 @@ def load_registry(path: Path = REGISTRY_FILE, text_root: Path = TEXT_ROOT) -> Re
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise CPythonNoticeError(f"The CPython notice registry cannot be read: {error}") from error
-    if not isinstance(raw, dict) or set(raw) != {"schema", "comment", "texts", "components", "interpreters"} or raw["schema"] != SCHEMA:
+    if not isinstance(raw, dict) or set(raw) != {"schema", "comment", "packagingTarget", "texts", "components", "interpreters"} \
+            or raw["schema"] != SCHEMA:
         _fail("The CPython notice registry has an unsupported shape or schema.")
     texts, components, interpreters = raw["texts"], raw["components"], raw["interpreters"]
     if not isinstance(texts, dict) or not isinstance(components, dict) or not isinstance(interpreters, list) or not interpreters:
@@ -276,6 +300,8 @@ def load_registry(path: Path = REGISTRY_FILE, text_root: Path = TEXT_ROOT) -> Re
         ids.add(record["id"])
     if set(components) - used_components:
         _fail(f"Components no interpreter uses: {sorted(set(components) - used_components)}")
+    if raw["packagingTarget"] not in ids:
+        _fail("The registry packaging target must name an audited interpreter record.")
     extra = sorted(
         path.relative_to(text_root).as_posix()
         for path in text_root.rglob("*")
@@ -283,7 +309,8 @@ def load_registry(path: Path = REGISTRY_FILE, text_root: Path = TEXT_ROOT) -> Re
     )
     if extra:
         _fail(f"Unregistered files in the CPython text folder: {extra}")
-    return Registry(texts=texts, components=components, interpreters=tuple(interpreters), text_root=text_root)
+    return Registry(texts=texts, components=components, interpreters=tuple(interpreters), text_root=text_root,
+                    packaging_target=raw["packagingTarget"])
 
 
 def _validate_interpreter(record: object, components: Mapping[str, dict]) -> set[str]:
@@ -373,7 +400,7 @@ def find_interpreter(registry: Registry, interpreter: Interpreter) -> dict:
         if (record["version"], record["platform"], record["build"]) == (interpreter.version, interpreter.platform, interpreter.build):
             return record
     audited = ", ".join(f"{r['version']} {r['platform']} ({r['build']})" for r in registry.interpreters)
-    _fail(
+    _unsupported(
         f"CPython {interpreter.version} {interpreter.platform} ({interpreter.build}) is not an audited interpreter, "
         f"so its bundled components and notices cannot be determined. Audited builds: {audited}. "
         "Add a reviewed registry record before packaging with it."
@@ -385,20 +412,20 @@ def verify_interpreter(record: dict, base: Path) -> None:
     """The build interpreter's own files must be the audited bytes."""
     licence = base / "LICENSE.txt"
     if not licence.is_file():
-        _fail("The build interpreter has no LICENSE.txt.")
+        _unsupported("the build interpreter has no LICENSE.txt.")
     _require_regular(licence)
     if _sha256_file(licence) != record["licenseFile"]["sha256"]:
-        _fail(f"The build interpreter's LICENSE.txt differs from audited {record['id']}.")
+        _unsupported(f"the build interpreter's LICENSE.txt differs from audited {record['id']}.")
     core = f"python{record['version'].split('.')[0]}{record['version'].split('.')[1]}.dll"
     for path, entry in record["files"].items():
         installed = base.joinpath(*path.split("/"))
         if not installed.exists() and not installed.is_symlink():
             if PurePosixPath(path).name == core:
-                _fail(f"The build interpreter has no {core}.")
+                _unsupported(f"the build interpreter has no {core}.")
             continue  # an optional feature that is not installed
         _require_regular(installed)
         if not installed.is_file() or _sha256_file(installed) != entry["sha256"]:
-            _fail(f"Build interpreter file {path} differs from audited {record['id']}.")
+            _unsupported(f"build interpreter file {path} differs from audited {record['id']}.")
 
 
 def tree_digest(directory: Path, excludes: Iterable[str] = ()) -> tuple[int, str]:
@@ -461,12 +488,12 @@ def plan_cpython_notices(
         if path.is_file() and root.lower().endswith(_NATIVE):
             match = by_name.get(root.casefold())
             if match is None:
-                _fail(f"Bundled CPython binary {root} is not part of audited {record['id']}.")
+                _unsupported(f"bundled CPython binary {root} is not part of audited {record['id']}.")
             audited_path, entry = match
             if "microsoftRuntime" in entry:
                 _fail(f"Bundled {root} is a Microsoft runtime file and must not be attributed to CPython.")
             if path.stat().st_size != entry["size"] or _sha256_file(path) != entry["sha256"]:
-                _fail(f"Bundled CPython binary {root} differs from audited {record['id']} ({audited_path}).")
+                _unsupported(f"bundled CPython binary {root} differs from audited {record['id']} ({audited_path}).")
             binaries.append({"path": root, "interpreterPath": audited_path, "sha256": entry["sha256"],
                              "components": list(entry["components"])})
             for key in entry["components"]:
@@ -475,8 +502,8 @@ def plan_cpython_notices(
             tree = record["dataTrees"][root]
             count, digest = tree_digest(path)
             if (count, digest) != (tree["files"], tree["treeSha256"]):
-                _fail(
-                    f"Bundled data folder {root} ({count} files) does not match audited {record['id']} "
+                _unsupported(
+                    f"bundled data folder {root} ({count} files) does not match audited {record['id']} "
                     f"{tree['source']} ({tree['files']} files)."
                 )
             trees.append({"path": root, "interpreterPath": tree["source"], "files": count, "treeSha256": digest,
@@ -484,14 +511,14 @@ def plan_cpython_notices(
             for key in tree["components"]:
                 selected.setdefault(key, set()).add(root)
         elif path.is_dir() and root in TCL_TK_DATA_ROOTS:
-            _fail(f"Bundled Tcl/Tk data folder {root} is not an audited data tree of {record['id']}.")
+            _unsupported(f"bundled Tcl/Tk data folder {root} is not an audited data tree of {record['id']}.")
         elif path.is_dir():
             native = [
                 name for _, _, names in os.walk(path, followlinks=False) for name in names
                 if name.lower().endswith(_NATIVE + (".so", ".exe"))
             ]
             if native:
-                _fail(f"Bundled CPython folder {root} contains native code that no audited record covers.")
+                _unsupported(f"bundled CPython folder {root} contains native code that no audited record covers.")
             python_roots.append(root)
         else:
             python_roots.append(root)  # e.g. base_library.zip: Python code under the core texts
@@ -528,6 +555,8 @@ def plan_cpython_notices(
         components.append(item)
     inventory = {
         "interpreter": {key: record[key] for key in ("id", "version", "platform", "build", "sourceTag", "sourceCommit", "layout", "provenance")},
+        "support": {"status": "audited-build", "record": record["id"], "packagingTarget": record["id"] == registry.packaging_target},
+        "rightsReview": {"status": "owner-review-required", "note": RIGHTS_REVIEW_NOTE},
         "binaries": binaries,
         "dataTrees": trees,
         "pythonRoots": sorted(python_roots),
@@ -544,3 +573,45 @@ def microsoft_identity(record: dict, bundled: Path) -> str | None:
             if bundled.is_file() and _sha256_file(bundled) == entry["sha256"]:
                 return path
     return None
+
+
+# ---------------------------------------------------------------- packaging
+
+
+def current_interpreter() -> Interpreter:
+    """Identity of the running interpreter (its base installation, not a venv)."""
+    return Interpreter(
+        version=".".join(map(str, sys.version_info[:3])),
+        platform=sysconfig.get_platform() if sys.implementation.name == "cpython" else sys.implementation.name,
+        build=platform.python_build()[0],
+        base=Path(sys.base_prefix),
+    )
+
+
+def packaging_identity(registry: Registry, interpreter: Interpreter, *, allow_audited: bool = False) -> dict:
+    """Check that a runtime build may use this interpreter and describe it for the manifest.
+
+    Release builds must use the registry's packaging target. Another audited
+    build (for example 3.13.13 for a local development bundle) is accepted only
+    when ``allow_audited`` is set, and is recorded as not the target. Anything
+    else is an unsupported build. Neither outcome is a rights decision.
+    """
+    record = find_interpreter(registry, interpreter)
+    verify_interpreter(record, interpreter.base)
+    target = next(item for item in registry.interpreters if item["id"] == registry.packaging_target)
+    is_target = record["id"] == target["id"]
+    if not is_target and not allow_audited:
+        _unsupported(
+            f"CPython {record['version']} ({record['build']}) is audited but is not the supported packaging target "
+            f"CPython {target['version']} {target['platform']} ({target['build']}). Build with the target interpreter, "
+            "or explicitly allow another audited interpreter for a non-release development bundle."
+        )
+    return {
+        "implementation": record["implementation"],
+        "version": record["version"],
+        "platform": record["platform"],
+        "build": record["build"],
+        "sourceCommit": record["sourceCommit"],
+        "auditedRecord": record["id"],
+        "packagingTarget": is_target,
+    }

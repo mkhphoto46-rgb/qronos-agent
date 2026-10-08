@@ -161,6 +161,22 @@ Anything else stops the build with the exact item that did not match:
 - an unknown binary;
 - a Tcl/Tk data folder without an audited tree.
 
+The registry also names the packaging target:
+
+- **Target:** CPython 3.14.8 win-amd64 (`tags/v3.14.8:8e6e75d`) from the
+  official python.org installer. `build_runtime` checks the interpreter before
+  PyInstaller starts. It refuses any build that is not audited, or whose files
+  differ from the audited bytes. Each refusal starts with
+  `Unsupported CPython build:`, which separates a support failure from the
+  rights review described below.
+- **Other audited builds:** a development bundle can use another audited build,
+  such as 3.13.13, only with the explicit `--allow-audited-interpreter` option.
+- **Manifest record:** `runtime-manifest.json` records the interpreter's
+  version, build tag, source commit, audited record and whether it was the
+  packaging target. The bundle's `inventory.json` records the same support
+  status. It also marks the rights review as `owner-review-required`, because
+  matching an audited build is not a licence or redistribution clearance.
+
 To support a new interpreter build, audit it the same way and add a reviewed
 record. The development-only assembler that produced the current records and
 texts is kept outside the repository with the scratch evidence. The registry

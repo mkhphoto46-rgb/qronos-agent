@@ -11,7 +11,14 @@ import sysconfig
 import pytest
 
 from build_support import build_runtime, cpython_notices
-from build_support.cpython_notices import CPythonNoticeError, Interpreter, load_registry, plan_cpython_notices
+from build_support.cpython_notices import (
+    CPythonNoticeError,
+    Interpreter,
+    UnsupportedCPythonBuild,
+    load_registry,
+    packaging_identity,
+    plan_cpython_notices,
+)
 from build_support.runtime_notices import NOTICE_DIRECTORY, NoticeCopy, NoticePlan, write_runtime_notices
 from tests.fixtures.cpython_registry import BUILD, PLATFORM, VERSION, RegistryBuilder
 
@@ -189,7 +196,7 @@ def test_plan_copies_component_texts_bound_to_the_bundled_binaries(setup):
 
 
 def test_unknown_interpreter_lists_the_audited_builds(setup):
-    with pytest.raises(CPythonNoticeError, match=r"3\.14\.9 win-amd64 .*not an audited interpreter.*Audited builds: 3\.13\.13"):
+    with pytest.raises(UnsupportedCPythonBuild, match=r"3\.14\.9 win-amd64 .*not an audited interpreter.*Audited builds: 3\.13\.13"):
         plan_cpython_notices(setup.load(), Interpreter("3.14.9", PLATFORM, "tags/v3.14.9:abcdef0", setup.python),
                              bundle_internal=setup.internal, cpython_roots=(), archive_names=(), notice_root=NOTICE_DIRECTORY)
 
@@ -218,6 +225,85 @@ def test_microsoft_file_is_never_attributed_to_cpython(setup):
     (setup.internal / "vcruntime140.dll").write_bytes(b"ms")
     with pytest.raises(CPythonNoticeError, match="Microsoft runtime file"):
         setup.plan(setup.load(raw), roots=("python313.dll", "vcruntime140.dll"))
+
+
+# ------------------------------------------------------- packaging target
+
+
+def _second_audited_record(setup: Setup) -> dict:
+    """The fixture registry plus a second audited build that is not the target."""
+    raw = setup.variant()
+    other = dict(raw["interpreters"][0], id="synthetic-3.13.12", version="3.13.12", build="tags/v3.13.12:01104ce")
+    raw["interpreters"].append(other)
+    return raw
+
+
+def test_packaging_target_is_recorded_as_the_target(setup):
+    identity = packaging_identity(setup.load(), Interpreter(VERSION, PLATFORM, BUILD, setup.python))
+    assert identity == {"implementation": "CPython", "version": VERSION, "platform": PLATFORM, "build": BUILD,
+                        "sourceCommit": setup.raw["interpreters"][0]["sourceCommit"],
+                        "auditedRecord": "synthetic-3.13.13", "packagingTarget": True}
+
+
+def test_audited_non_target_interpreter_needs_an_explicit_opt_in(setup):
+    registry = setup.load(_second_audited_record(setup))
+    interpreter = Interpreter("3.13.12", PLATFORM, "tags/v3.13.12:01104ce", setup.python)
+    with pytest.raises(UnsupportedCPythonBuild, match="audited but is not the supported packaging target CPython 3.13.13"):
+        packaging_identity(registry, interpreter)
+    identity = packaging_identity(registry, interpreter, allow_audited=True)
+    assert identity["auditedRecord"] == "synthetic-3.13.12" and identity["packagingTarget"] is False
+
+
+def test_unaudited_interpreter_is_refused_even_with_the_opt_in(setup):
+    with pytest.raises(UnsupportedCPythonBuild, match="not an audited interpreter"):
+        packaging_identity(setup.load(), Interpreter("3.14.9", PLATFORM, "tags/v3.14.9:abcdef0", setup.python), allow_audited=True)
+
+
+def test_packaging_target_with_changed_bytes_is_refused(setup):
+    (setup.python / "DLLs" / "_bz2.pyd").write_bytes(b"patched")
+    with pytest.raises(UnsupportedCPythonBuild, match="DLLs/_bz2.pyd differs"):
+        packaging_identity(setup.load(), Interpreter(VERSION, PLATFORM, BUILD, setup.python))
+
+
+def test_registry_packaging_target_must_be_an_audited_record(setup):
+    raw = setup.variant()
+    raw["packagingTarget"] = "cpython-3.15.0"
+    with pytest.raises(CPythonNoticeError, match="packaging target must name an audited interpreter"):
+        setup.load(raw)
+
+
+def test_unsupported_build_is_distinct_from_the_rights_review(setup):
+    plan = setup.plan()
+    assert plan.inventory["support"]["status"] == "audited-build"
+    assert plan.inventory["rightsReview"]["status"] == "owner-review-required"
+    assert issubclass(UnsupportedCPythonBuild, CPythonNoticeError)
+    with pytest.raises(CPythonNoticeError) as registry_error:
+        setup.load({**setup.variant(), "schema": 2})
+    assert not isinstance(registry_error.value, UnsupportedCPythonBuild)
+
+
+def test_committed_packaging_target_is_the_audited_3_14_8_installer_build():
+    registry = load_registry()
+    target = next(record for record in registry.interpreters if record["id"] == registry.packaging_target)
+    assert (target["version"], target["platform"], target["build"]) == ("3.14.8", "win-amd64", "tags/v3.14.8:8e6e75d")
+
+
+def test_runtime_manifest_records_the_interpreter_identity(tmp_path):
+    bundle = tmp_path / "bundle"
+    executable = "qronos-runtime.exe" if os.name == "nt" else "qronos-runtime"
+    bundle.mkdir()
+    (bundle / executable).write_bytes(b"exe")
+    version = ".".join(map(str, sys.version_info[:3]))
+    identity = {"implementation": "CPython", "version": version, "platform": "win-amd64", "build": f"tags/v{version}:0000000",
+                "sourceCommit": "0" * 40, "auditedRecord": "record", "packagingTarget": False}
+    manifest = json.loads(build_runtime.write_manifest(bundle, identity).read_text(encoding="utf-8"))
+    assert manifest["python"] == identity and manifest["pythonVersion"] == version
+    build_runtime.verify_manifest(bundle)
+    for broken in ({**identity, "packagingTarget": "yes"}, {**identity, "version": "0.0.1"}, {**identity, "extra": "x"}):
+        raw = dict(manifest, python=broken)
+        (bundle / "runtime-manifest.json").write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(ValueError, match="interpreter identity"):
+            build_runtime.verify_manifest(bundle)
 
 
 # ---------------------------------------------------- output and manifest

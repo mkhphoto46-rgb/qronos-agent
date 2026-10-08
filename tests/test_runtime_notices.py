@@ -203,6 +203,9 @@ def test_inventory_separates_cpython_microsoft_and_project_owned_pieces(fixture)
         "zlib@1.3.1": ["python313.dll"],
     }
     assert cpython["pythonRoots"] == ["base_library.zip"]
+    assert cpython["support"] == {"status": "audited-build", "record": "synthetic-3.13.13", "packagingTarget": True}
+    assert cpython["rightsReview"]["status"] == "owner-review-required"
+    assert "not a licence or redistribution clearance" in cpython["rightsReview"]["note"]
     assert "third-party-notices/python/cpython-3.13.13/LICENSE.txt" in cpython["notices"]
     assert "third-party-notices/python/cpython-3.13.13/components/zlib-1.3.1/LICENSE" in cpython["notices"]
     assert inventory["microsoftRuntime"]["files"] == [{
@@ -233,31 +236,31 @@ def test_bundled_cpython_binary_copies_every_text_of_its_audited_components(fixt
 
 def test_unaudited_interpreter_build_fails_closed(fixture):
     for options in ({"python_version": "3.13.14"}, {"python_build": "tags/v3.13.13:deadbee"}, {"python_platform": "linux-x86_64"}):
-        with pytest.raises(NoticeError, match="not an audited interpreter"):
+        with pytest.raises(NoticeError, match="Unsupported CPython build: CPython .* is not an audited interpreter"):
             fixture.plan(**options)
 
 
 def test_build_interpreter_with_changed_bytes_fails(fixture):
     (fixture.python / "DLLs" / "_ssl.pyd").write_bytes(b"patched extension")
-    with pytest.raises(NoticeError, match=r"Build interpreter file DLLs/_ssl.pyd differs"):
+    with pytest.raises(NoticeError, match=r"Unsupported CPython build: build interpreter file DLLs/_ssl.pyd differs"):
         fixture.plan()
 
 
 def test_changed_interpreter_license_fails(fixture):
     (fixture.python / "LICENSE.txt").write_text("Different license text\n", encoding="utf-8")
-    with pytest.raises(NoticeError, match="LICENSE.txt differs"):
+    with pytest.raises(NoticeError, match="Unsupported CPython build: .*LICENSE.txt differs"):
         fixture.plan()
 
 
 def test_bundled_cpython_binary_with_other_bytes_fails(fixture):
     fixture.add_bundle_file("_bz2.pyd", b"rebuilt bz2 extension")
-    with pytest.raises(NoticeError, match=r"Bundled CPython binary _bz2.pyd differs"):
+    with pytest.raises(NoticeError, match=r"Unsupported CPython build: bundled CPython binary _bz2.pyd differs"):
         fixture.plan()
 
 
 def test_bundled_cpython_binary_missing_from_the_audit_fails(fixture):
     fixture.add_bundle_file("unicodedata.pyd", b"unicode data")
-    with pytest.raises(NoticeError, match="unicodedata.pyd is not part of audited"):
+    with pytest.raises(NoticeError, match="Unsupported CPython build: bundled CPython binary unicodedata.pyd is not part of audited"):
         fixture.plan()
 
 
@@ -277,7 +280,7 @@ def test_tcl_data_differing_from_the_audited_tree_fails(fixture, change):
         fixture.add_bundle_file("_tcl_data/license.terms", b"tcl terms\n")
     if change == "extra":
         fixture.add_bundle_file("_tcl_data/extra.tcl", b"# extra\n")
-    with pytest.raises(NoticeError, match="Bundled data folder _tcl_data"):
+    with pytest.raises(NoticeError, match="Unsupported CPython build: bundled data folder _tcl_data"):
         fixture.plan()
 
 

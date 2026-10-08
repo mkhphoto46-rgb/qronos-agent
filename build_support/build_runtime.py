@@ -18,11 +18,13 @@ import subprocess
 import sys
 import sysconfig
 
+from build_support import cpython_notices
 from build_support.runtime_notices import collect_runtime_notices, prune_portaudio
 
 
 ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_VERSION = 1
+_PYTHON_KEYS = {"implementation", "version", "platform", "build", "sourceCommit", "auditedRecord", "packagingTarget"}
 
 
 def hash_file(path: Path) -> str:
@@ -60,7 +62,21 @@ def bundle_files(bundle: Path) -> tuple[Path, ...]:
     return tuple(sorted(files))
 
 
-def write_manifest(bundle: Path) -> Path:
+def packaging_python(*, allow_audited_interpreter: bool = False) -> dict:
+    """The audited identity of the build interpreter, refused before any build work.
+
+    Release bundles must use the CPython packaging target named in the
+    registry; another audited interpreter needs an explicit opt-in and is
+    recorded as not the target.
+    """
+    return cpython_notices.packaging_identity(
+        cpython_notices.load_registry(),
+        cpython_notices.current_interpreter(),
+        allow_audited=allow_audited_interpreter,
+    )
+
+
+def write_manifest(bundle: Path, python: dict | None = None) -> Path:
     executable = "qronos-runtime.exe" if os.name == "nt" else "qronos-runtime"
     if not (bundle / executable).is_file():
         raise ValueError("The standalone runtime executable is missing.")
@@ -69,13 +85,26 @@ def write_manifest(bundle: Path) -> Path:
         relative = path.relative_to(bundle).as_posix()
         entries.append({"path": relative, "size": path.stat().st_size, "sha256": hash_file(path)})
     manifest = bundle / "runtime-manifest.json"
-    manifest.write_text(json.dumps({
+    content = {
         "protocolVersion": PROTOCOL_VERSION,
         "executable": executable,
         "pythonVersion": ".".join(map(str, sys.version_info[:3])),
-        "files": entries,
-    }, indent=2) + "\n", encoding="utf-8")
+    }
+    if python is not None:
+        _check_python_identity(python, content["pythonVersion"])
+        content["python"] = dict(sorted(python.items()))
+    content["files"] = entries
+    manifest.write_text(json.dumps(content, indent=2) + "\n", encoding="utf-8")
     return manifest
+
+
+def _check_python_identity(python: object, version: object) -> None:
+    if not isinstance(python, dict) or set(python) != _PYTHON_KEYS or type(python["packagingTarget"]) is not bool:
+        raise ValueError("Invalid runtime manifest interpreter identity.")
+    if not all(isinstance(python[key], str) and python[key] for key in _PYTHON_KEYS - {"packagingTarget"}):
+        raise ValueError("Invalid runtime manifest interpreter identity.")
+    if python["version"] != version:
+        raise ValueError("The runtime manifest interpreter identity does not match its Python version.")
 
 
 def verify_manifest(bundle: Path) -> None:
@@ -84,6 +113,8 @@ def verify_manifest(bundle: Path) -> None:
     if not isinstance(raw, dict) or raw.get("protocolVersion") != PROTOCOL_VERSION:
         raise ValueError("Unsupported bundled runtime protocol.")
     expected_executable = "qronos-runtime.exe" if os.name == "nt" else "qronos-runtime"
+    if "python" in raw:
+        _check_python_identity(raw["python"], raw.get("pythonVersion"))
     entries = raw.get("files")
     if raw.get("executable") != expected_executable or not isinstance(entries, list) or not entries:
         raise ValueError("The runtime manifest does not describe the complete bundle.")
@@ -114,7 +145,7 @@ def verify_manifest(bundle: Path) -> None:
         raise ValueError("The runtime manifest does not describe the complete bundle.")
 
 
-def build(destination: Path) -> Path:
+def build(destination: Path, *, allow_audited_interpreter: bool = False) -> Path:
     destination = destination.resolve()
     if destination == ROOT or destination in ROOT.parents:
         raise ValueError("The runtime destination must not replace the source checkout.")
@@ -125,6 +156,9 @@ def build(destination: Path) -> Path:
     # before any PyInstaller work starts.
     if os.name == "nt" and sysconfig.get_platform() != "win-amd64":
         raise ValueError("The packaged Windows backend supports x64 builds only.")
+    # The interpreter must be an audited CPython build (the packaging target
+    # unless explicitly allowed otherwise) before anything is created.
+    python = packaging_python(allow_audited_interpreter=allow_audited_interpreter)
     # Separate per-build analysis directories prevent stale spec/data reuse.
     destination.mkdir(parents=True, exist_ok=True)
     work = destination / "build-metadata"
@@ -167,7 +201,7 @@ def build(destination: Path) -> Path:
     if os.name == "nt":
         pruned = prune_portaudio(bundle)
     collect_runtime_notices(bundle, pruned=pruned)
-    write_manifest(bundle)
+    write_manifest(bundle, python)
     verify_manifest(bundle)
     # Use a separate disposable profile; never import the developer's user data.
     environment.update({
@@ -190,12 +224,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destination", type=Path, default=ROOT / "runtime" / "package")
     parser.add_argument("--verify", type=Path, help="Verify an existing standalone bundle instead of building.")
+    parser.add_argument(
+        "--allow-audited-interpreter", action="store_true",
+        help="Development bundles only: accept an audited CPython build that is not the packaging target.",
+    )
     args = parser.parse_args()
     if args.verify:
         verify_manifest(args.verify.resolve())
         print("Runtime bundle integrity verified.")
     else:
-        print(build(args.destination))
+        print(build(args.destination, allow_audited_interpreter=args.allow_audited_interpreter))
     return 0
 
 

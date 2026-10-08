@@ -119,10 +119,31 @@ def test_build_prunes_and_collects_notices_before_writing_the_manifest(tmp_path,
     monkeypatch.setattr(build_runtime.sysconfig, "get_platform", lambda: "win-amd64")
     monkeypatch.setattr(build_runtime, "prune_portaudio", lambda bundle: calls.append("prune") or ("removed.dll",))
     monkeypatch.setattr(build_runtime, "collect_runtime_notices", lambda bundle, pruned: calls.append(("notices", pruned)))
-    monkeypatch.setattr(build_runtime, "write_manifest", lambda bundle: calls.append("manifest"))
+    monkeypatch.setattr(build_runtime, "write_manifest", lambda bundle, python: calls.append(("manifest", python)))
     monkeypatch.setattr(build_runtime, "verify_manifest", lambda bundle: calls.append("verify"))
+    monkeypatch.setattr(build_runtime, "packaging_python",
+                        lambda allow_audited_interpreter: calls.append(("python", allow_audited_interpreter)) or {"auditedRecord": "target"})
     build_runtime.build(tmp_path / "out")
-    assert calls == ["pyinstaller", "prune", ("notices", ("removed.dll",)), "manifest", "verify", "self-check"]
+    assert calls == [("python", False), "pyinstaller", "prune", ("notices", ("removed.dll",)),
+                     ("manifest", {"auditedRecord": "target"}), "verify", "self-check"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The packaged backend is built for Windows.")
+def test_build_refuses_an_unsupported_interpreter_before_pyinstaller_starts(tmp_path, monkeypatch):
+    from build_support import build_runtime
+    from build_support.cpython_notices import UnsupportedCPythonBuild
+    calls = []
+    monkeypatch.setattr(build_runtime.subprocess, "run", lambda command, **_options: calls.append("pyinstaller"))
+    monkeypatch.setattr(build_runtime.sysconfig, "get_platform", lambda: "win-amd64")
+
+    def refuse(allow_audited_interpreter):
+        raise UnsupportedCPythonBuild("Unsupported CPython build: not the packaging target")
+
+    monkeypatch.setattr(build_runtime, "packaging_python", refuse)
+    with pytest.raises(ValueError, match="Unsupported CPython build"):
+        build_runtime.build(tmp_path / "out")
+    assert calls == []
+    assert not (tmp_path / "out").exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="The packaged backend is built for Windows.")
