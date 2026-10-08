@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
+from pathlib import Path
 
 import pytest
 
@@ -60,6 +61,11 @@ class FakeSpooler:
         self.controls: list[tuple[str, int, int]] = []
         self.unavailable = 0
         self.after_submit = None  # callable mutating queue on next jobs() call
+        # Jobs the change-notification watcher reports, including ones that
+        # already left the queue.
+        self.notified: dict[str, list[PrintJobState]] = {}
+        self.watchers: list["FakeWatcher"] = []
+        self.watch_available = True
 
     def printers(self):
         if self.unavailable:
@@ -83,6 +89,43 @@ class FakeSpooler:
     def current_user(self):
         return "Test User"
 
+    def watch(self, printer):
+        if not self.watch_available:
+            raise SpoolerUnavailable("notifications unavailable")
+        watcher = FakeWatcher(self, printer)
+        self.watchers.append(watcher)
+        return watcher
+
+
+class FakeWatcher:
+    """Test boundary standing in for printer change notifications."""
+
+    def __init__(self, spooler, printer) -> None:
+        self.spooler, self.printer, self.closed = spooler, printer, False
+
+    def seen_jobs(self):
+        return tuple(self.spooler.notified.get(self.printer, []))
+
+    def close(self):
+        self.closed = True
+
+
+class FakeHandler:
+    """Test boundary standing in for the started print handler process."""
+
+    def __init__(self, done=True, code=0) -> None:
+        self.done, self.code, self.closed, self.polls = done, code, False, 0
+
+    def finished(self):
+        self.polls += 1
+        return self.done
+
+    def exit_code(self):
+        return self.code
+
+    def close(self):
+        self.closed = True
+
 
 class FakeSubmitter:
     """Test boundary standing in for the Windows printto handler."""
@@ -97,20 +140,25 @@ class FakeSubmitter:
     def handler_for(self, path):
         return self.handler
 
-    def submit(self, path, printer):
+    def start(self, path, printer):
         self.submissions.append((path.name, printer))
         if self.effect == "raise":
             raise OSError("handler crashed")
         if self.effect == "not_started":
             raise PrintNotSubmitted("ShellExecuteEx refused")
+        job = PrintJobState(41, path.name, "test user", self.job_status, 0, 2)
         if self.effect == "job":
-            self.spooler.queue.setdefault(printer, []).append(
-                PrintJobState(41, path.name, "test user", self.job_status, 0, 2))
+            self.spooler.queue.setdefault(printer, []).append(job)
+            self.spooler.notified.setdefault(printer, []).append(job)
+        if self.effect == "fast":
+            # Printed and gone from the queue before Qronos could poll it.
+            self.spooler.notified.setdefault(printer, []).append(replace(job, status=JOB_STATUS_PRINTED))
         if self.effect == "two":
             for job_id in (41, 42):
                 self.spooler.queue.setdefault(printer, []).append(
                     PrintJobState(job_id, path.name, "Test User", 0, 0, 2))
-        return 0
+        self.handler_process = FakeHandler(done=getattr(self, "handler_done", True))
+        return self.handler_process
 
 
 @pytest.fixture
@@ -302,14 +350,14 @@ def test_other_users_or_old_jobs_do_not_count_as_ours(setup):
     def someone_else(spooler_):
         spooler_.queue["Office Laser"].append(PrintJobState(50, "report.pdf", "Another User", 0, 0, 1))
 
-    original = submitter.submit
+    original = submitter.start
 
     def submit_then_foreign_job(path, printer):
         result = original(path, printer)
         spooler.after_submit = someone_else
         return result
 
-    submitter.submit = submit_then_foreign_job
+    submitter.start = submit_then_foreign_job
     assert submit(workflow, prepared).outcome == "uncertain"
 
 
@@ -337,14 +385,14 @@ def test_errored_job_is_never_restarted_and_needs_a_person(setup):
     prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
     # Printer problems are checked again just before submission, so the paper
     # runs out only after the job was accepted.
-    original = submitter.submit
+    original = submitter.start
 
     def submit_then_paper_out(path, printer):
         result = original(path, printer)
         spooler.printer_list[0] = replace(spooler_printer, status=PRINTER_STATUS_PAPER_OUT)
         return result
 
-    submitter.submit = submit_then_paper_out
+    submitter.start = submit_then_paper_out
     report = submit(workflow, prepared)
     assert report.outcome == "needs_attention"
     assert "out of paper" in report.detail
@@ -415,14 +463,14 @@ def test_an_expired_printing_grant_submits_nothing(setup, monkeypatch):
 def test_a_queue_failure_after_submission_is_uncertain_not_raised(setup):
     workflow, spooler, submitter, document, journal, _ = setup
     prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
-    original = submitter.submit
+    original = submitter.start
 
     def submit_then_break(path, printer):
         result = original(path, printer)
         spooler.jobs = lambda printer: (_ for _ in ()).throw(RuntimeError("spooler crashed"))
         return result
 
-    submitter.submit = submit_then_break
+    submitter.start = submit_then_break
     report = submit(workflow, prepared)
     assert report.outcome == "uncertain"
     assert journal.get(operation_key("print-approval-1", prepared.digest)).state is SideEffectState.UNCERTAIN
@@ -436,3 +484,143 @@ def test_a_failure_while_following_a_confirmed_job_reports_submitted(setup, monk
     report = submit(workflow, prepared)
     assert report.outcome == "submitted" and report.result["jobId"] == 41
     assert journal.get(operation_key("print-approval-1", prepared.digest)).state is SideEffectState.CONFIRMED
+
+
+# ------------------------------------------------ non-blocking submission (P1)
+
+
+def test_a_job_that_printed_before_any_poll_is_confirmed_through_notifications(setup):
+    workflow, spooler, submitter, document, journal, _ = setup
+    submitter.effect = "fast"
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    report = submit(workflow, prepared)
+    assert report.outcome == "succeeded" and report.result["jobId"] == 41
+    assert len(submitter.submissions) == 1
+    assert all(watcher.closed for watcher in spooler.watchers)
+
+
+def test_without_notifications_a_vanished_fast_job_is_uncertain_not_reprinted(setup):
+    workflow, spooler, submitter, document, journal, _ = setup
+    spooler.watch_available = False
+    submitter.effect = "fast"
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    assert submit(workflow, prepared).outcome == "uncertain"
+    assert len(submitter.submissions) == 1
+
+
+def test_stop_while_a_handler_stays_open_returns_promptly_and_never_kills_it(setup):
+    workflow, spooler, submitter, document, journal, clock = setup
+    submitter.effect = "nothing"
+    submitter.handler_done = False
+    token = CancellationToken()
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    started_at = clock.now
+    original = submitter.start
+
+    def start_then_stop(path, printer):
+        handler = original(path, printer)
+        token.cancel()
+        return handler
+
+    submitter.start = start_then_stop
+    report = submit(workflow, prepared, token=token)
+    assert report.outcome == "uncertain" and "Stopped while waiting" in report.detail
+    assert clock.now - started_at < 1.0, "Stop is observed within one short polling slice"
+    assert submitter.handler_process.closed and submitter.handler_process.done is False
+    assert all(watcher.closed for watcher in spooler.watchers)
+    assert journal.get(operation_key("print-approval-1", prepared.digest)).state is SideEffectState.UNCERTAIN
+
+
+def test_a_handler_that_never_prints_is_bounded_by_the_appear_timeout(setup):
+    workflow, spooler, submitter, document, journal, clock = setup
+    submitter.effect = "nothing"
+    submitter.handler_done = False
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    started_at = clock.now
+    assert submit(workflow, prepared).outcome == "uncertain"
+    assert 5.0 <= clock.now - started_at <= 5.5
+    assert submitter.handler_process.polls > 10, "the handler is polled, never waited on"
+
+
+def test_a_handler_that_exits_without_a_job_stops_waiting_after_the_grace_period(setup):
+    from core.print_workflow import HANDLER_EXIT_GRACE
+
+    workflow, spooler, submitter, document, journal, clock = setup
+    workflow._appear_timeout = 60.0
+    submitter.effect = "nothing"
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    started_at = clock.now
+    assert submit(workflow, prepared).outcome == "uncertain"
+    assert clock.now - started_at <= HANDLER_EXIT_GRACE + 0.5
+
+
+@pytest.mark.parametrize("name", ['Office "Laser"', 'Office Laser"'])
+def test_printer_names_with_quotes_are_refused_not_stripped(name):
+    with pytest.raises(ValueError, match="double quote"):
+        PrintRequest(Path("D:/report.pdf"), name)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ShellExecuteEx is a Windows facility.")
+def test_shell_submitter_refuses_quoted_printer_names_before_launching(tmp_path):
+    from core.print_workflow import ShellPrintToSubmitter
+
+    with pytest.raises(PrintNotSubmitted, match="double quote"):
+        ShellPrintToSubmitter().start(tmp_path / "never-launched.pdf", 'Office "Laser"')
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Printer notification structures are Windows layouts.")
+def test_notification_blocks_are_parsed_into_jobs():
+    import ctypes
+    from core import print_workflow as pw
+
+    strings = {
+        pw.JOB_NOTIFY_FIELD_DOCUMENT: ctypes.create_unicode_buffer("report.pdf"),
+        pw.JOB_NOTIFY_FIELD_USER_NAME: ctypes.create_unicode_buffer("Test User"),
+    }
+    count = 4
+
+    class Block(ctypes.Structure):
+        _fields_ = [
+            ("Version", ctypes.c_uint32), ("Flags", ctypes.c_uint32), ("Count", ctypes.c_uint32),
+            ("aData", pw._PRINTER_NOTIFY_INFO_DATA * count),
+        ]
+
+    block = Block(2, pw.PRINTER_NOTIFY_INFO_DISCARDED, count)
+    for index, field in enumerate((pw.JOB_NOTIFY_FIELD_DOCUMENT, pw.JOB_NOTIFY_FIELD_USER_NAME)):
+        entry = block.aData[index]
+        entry.Type, entry.Field, entry.Id = pw.JOB_NOTIFY_TYPE, field, 7
+        entry.NotifyData.Data.cbBuf = ctypes.sizeof(strings[field])
+        entry.NotifyData.Data.pBuf = ctypes.cast(strings[field], ctypes.c_void_p)
+    status = block.aData[2]
+    status.Type, status.Field, status.Id = pw.JOB_NOTIFY_TYPE, pw.JOB_NOTIFY_FIELD_STATUS, 7
+    status.NotifyData.adwData[0] = JOB_STATUS_PRINTED
+    other = block.aData[3]
+    other.Type, other.Field, other.Id = 0x00, pw.JOB_NOTIFY_FIELD_STATUS, 99  # a printer-type entry
+    discarded, jobs = pw.parse_notify_info(ctypes.addressof(block))
+    assert discarded is True
+    assert jobs == {7: {"document": "report.pdf", "user": "Test User", "status": JOB_STATUS_PRINTED}}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Process handles are a Windows facility.")
+def test_handler_process_is_polled_without_waiting():
+    import ctypes
+    import subprocess
+    import sys
+    import time
+    from ctypes import wintypes
+    from core.print_workflow import WinHandlerProcess
+
+    child = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(1.0)"])
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, child.pid)  # SYNCHRONIZE | QUERY_LIMITED
+    process = WinHandlerProcess(handle, kernel32)
+    try:
+        started = time.monotonic()
+        assert process.finished() is False
+        assert time.monotonic() - started < 0.2
+        child.wait(timeout=30)
+        assert process.finished() is True and process.exit_code() == 0
+    finally:
+        process.close()

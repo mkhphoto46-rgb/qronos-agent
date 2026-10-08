@@ -74,7 +74,8 @@ PRINTABLE_EXTENSIONS = frozenset({
 MAX_PRINT_BYTES = 512 * 1024 * 1024
 DEFAULT_APPEAR_TIMEOUT = 45.0
 DEFAULT_MONITOR_TIMEOUT = 120.0
-DEFAULT_POLL_SECONDS = 0.25
+DEFAULT_POLL_SECONDS = 0.1
+HANDLER_EXIT_GRACE = 5.0
 SPOOLER_QUERY_ATTEMPTS = 3
 
 # Printer status bits (PRINTER_INFO_2.Status) and attribute bits.
@@ -172,17 +173,42 @@ class PrintJobState:
     total_pages: int
 
 
+class JobWatcher(Protocol):
+    """Jobs added to one printer since the watcher was created.
+
+    Created before submission so a job that prints and leaves the queue
+    before the first poll is still seen (Windows printer change
+    notifications report it with its document, user and status).
+    """
+
+    def seen_jobs(self) -> tuple[PrintJobState, ...]: ...
+    def close(self) -> None: ...
+
+
 class Spooler(Protocol):
     def printers(self) -> tuple[PrinterState, ...]: ...
     def jobs(self, printer: str) -> tuple[PrintJobState, ...]: ...
     def control_job(self, printer: str, job_id: int, command: int) -> None: ...
     def current_user(self) -> str: ...
+    def watch(self, printer: str) -> JobWatcher: ...
+
+
+class HandlerProcess(Protocol):
+    """The started print handler. Polled, never waited on and never killed."""
+
+    def finished(self) -> bool: ...
+    def exit_code(self) -> int | None: ...
+    def close(self) -> None: ...
 
 
 class PrintSubmitter(Protocol):
     def handler_for(self, path: Path) -> str | None: ...
-    def submit(self, path: Path, printer: str) -> int | None:
-        """Start the registered printto handler once; returns its process exit code if known."""
+    def start(self, path: Path, printer: str) -> HandlerProcess:
+        """Start the registered printto handler once and return immediately.
+
+        Raises PrintNotSubmitted only when Windows reports a documented
+        failure before anything was launched.
+        """
         ...
 
 
@@ -199,6 +225,9 @@ class PrintRequest:
         name = str(self.printer or "").strip()
         if not name or len(name) > 220 or any(ord(ch) < 32 for ch in name):
             raise ValueError("A print request needs one exact printer name.")
+        if '"' in name:
+            # Never strip it: a stripped name could be a different printer.
+            raise ValueError("A printer name with a double quote cannot be passed safely.")
         object.__setattr__(self, "printer", name)
         if int(self.copies) != self.copies or int(self.copies) < 1:
             raise ValueError("Copies must be a positive whole number.")
@@ -378,32 +407,58 @@ class PrintWorkflow:
 
         user = self._spooler.current_user()
         before = {job.job_id for job in self._query(self._spooler.jobs, printer.name)}
+        try:
+            watcher = self._spooler.watch(printer.name)
+        except SpoolerUnavailable:
+            watcher = None  # queue polling alone; a very fast job may then be uncertain
         op = operation_key(approval.approval_id, prepared.digest)
         content = content_key("print", prepared.sha256, printer.name.casefold())
         guard.checkpoint("submit")
-        if not grant.active():
-            raise WorkflowStopped("grant_expired", "The printing permission expired before submission.")
-        self._journal.begin(op, content, f"print {prepared.file_path.name} on {printer.name}")
         try:
-            guard.checkpoint("submit")
-            exit_code = self._submitter.submit(prepared.file_path, printer.name)
-        except (WorkflowStopped, PrintNotSubmitted) as not_started:
-            self._journal.settle(op, SideEffectState.NOT_SUBMITTED, str(not_started))
+            if not grant.active():
+                raise WorkflowStopped("grant_expired", "The printing permission expired before submission.")
+            self._journal.begin(op, content, f"print {prepared.file_path.name} on {printer.name}")
+        except BaseException:
+            if watcher is not None:
+                watcher.close()
             raise
-        except Exception as error:  # noqa: BLE001 - the handler may have run
-            self._journal.settle(op, SideEffectState.UNCERTAIN, type(error).__name__)
-            return self._report("uncertain", (
-                "Windows was asked to print but the result could not be confirmed. "
-                "Qronos will not print this file again; check the printer queue."
-            ), guard)
-
+        handler = None
+        exit_code = None
         try:
-            job = self._await_job(printer.name, prepared.file_path.name, user, before, token)
-        except Exception as error:  # noqa: BLE001 - the handler may already have printed
-            self._journal.settle_if_unresolved(op, SideEffectState.UNCERTAIN, type(error).__name__)
+            try:
+                guard.checkpoint("submit")
+                handler = self._submitter.start(prepared.file_path, printer.name)
+            except (WorkflowStopped, PrintNotSubmitted) as not_started:
+                self._journal.settle(op, SideEffectState.NOT_SUBMITTED, str(not_started))
+                raise
+            except Exception as error:  # noqa: BLE001 - the handler may have run
+                self._journal.settle(op, SideEffectState.UNCERTAIN, type(error).__name__)
+                return self._report("uncertain", (
+                    "Windows was asked to print but the result could not be confirmed. "
+                    "Qronos will not print this file again; check the printer queue."
+                ), guard)
+            try:
+                job = self._await_job(
+                    printer.name, prepared.file_path.name, user, before, token, watcher, handler,
+                )
+            except Exception as error:  # noqa: BLE001 - the handler may already have printed
+                self._journal.settle_if_unresolved(op, SideEffectState.UNCERTAIN, type(error).__name__)
+                return self._report("uncertain", (
+                    "Windows was asked to print but the queue could not be checked. "
+                    "Qronos will not print this file again; check the printer."
+                ), guard)
+            if handler.finished():
+                exit_code = handler.exit_code()
+        finally:
+            if handler is not None:
+                handler.close()
+            if watcher is not None:
+                watcher.close()
+        if job == "stopped":
+            self._journal.settle(op, SideEffectState.UNCERTAIN, "stopped while waiting for the job")
             return self._report("uncertain", (
-                "Windows was asked to print but the queue could not be checked. "
-                "Qronos will not print this file again; check the printer."
+                "Stopped while waiting for the print job. The print handler may still print; "
+                "Qronos will not print this file again. Check the printer queue."
             ), guard)
         if job is None:
             self._journal.settle(op, SideEffectState.UNCERTAIN, "no matching job seen")
@@ -426,15 +481,26 @@ class PrintWorkflow:
                 f"({type(error).__name__}). Qronos will not print it again."
             ), guard, {"jobId": job.job_id, "printer": printer.name})
 
-    def _await_job(self, printer, file_name, user, before, token):
+    def _await_job(self, printer, file_name, user, before, token, watcher, handler):
+        """Find our one new job while the handler runs, in short cancellable slices.
+
+        Sources: the change-notification watcher (catches jobs that finish
+        before any poll) and the live queue. The handler is only polled.
+        """
         deadline = self._clock() + self._appear_timeout
+        handler_done_at = None
         while True:
+            found: dict[int, PrintJobState] = {}
+            if watcher is not None:
+                for job in watcher.seen_jobs():
+                    found[job.job_id] = job
             try:
-                jobs = self._query(self._spooler.jobs, printer)
-            except WorkflowRefused:
-                jobs = ()
+                for job in self._spooler.jobs(printer):
+                    found[job.job_id] = job  # the live queue has the latest fields
+            except SpoolerUnavailable:
+                pass
             new = [
-                job for job in jobs
+                job for job in found.values()
                 if job.job_id not in before
                 and job.user.casefold() == user.casefold()
                 and _document_matches(job.document, file_name)
@@ -443,12 +509,19 @@ class PrintWorkflow:
                 return new[0]
             if len(new) > 1:
                 return "several"
-            if self._clock() >= deadline:
+            now = self._clock()
+            if handler_done_at is None and handler.finished():
+                handler_done_at = now
+            # Once the handler has exited, a job that has not appeared within a
+            # short grace period will not appear.
+            if now >= deadline or (
+                handler_done_at is not None and now >= handler_done_at + HANDLER_EXIT_GRACE
+            ):
                 return None
             try:
                 self._sleep(token, self._poll)
             except ActionCancelled:
-                return None
+                return "stopped"
 
     def _monitor(self, printer: str, job: PrintJobState, token, guard) -> WorkflowReport:
         """Follow our one job; bounded own-job recovery; never resubmit."""
@@ -655,6 +728,9 @@ class WinSpooler:
         finally:
             self._winspool.ClosePrinter(handle)
 
+    def watch(self, printer: str) -> "WinJobWatcher":
+        return WinJobWatcher(self, printer)
+
     def current_user(self) -> str:
         size = wintypes.DWORD(257)
         buffer = ctypes.create_unicode_buffer(size.value)
@@ -688,13 +764,12 @@ ASSOCSTR_EXECUTABLE = 2
 class ShellPrintToSubmitter:
     """Hand one file to its registered Windows "printto" handler for one printer."""
 
-    def __init__(self, *, handler_timeout: float = 120.0) -> None:
+    def __init__(self) -> None:
         if os.name != "nt":
             raise PrintNotSubmitted("Printing through the Windows shell needs Windows.")
         self._shell32 = ctypes.WinDLL("shell32", use_last_error=True)
         self._shlwapi = ctypes.WinDLL("shlwapi", use_last_error=True)
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._timeout = float(handler_timeout)
 
     def handler_for(self, path: Path) -> str | None:
         function = self._shlwapi.AssocQueryStringW
@@ -713,28 +788,223 @@ class ShellPrintToSubmitter:
             return None
         return executable
 
-    def submit(self, path: Path, printer: str) -> int | None:
+    def start(self, path: Path, printer: str) -> "WinHandlerProcess":
+        if '"' in printer:
+            raise PrintNotSubmitted("A printer name with a double quote cannot be passed safely.")
         info = _SHELLEXECUTEINFOW()
         info.cbSize = ctypes.sizeof(info)
         info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI
         info.lpVerb = "printto"
         info.lpFile = str(path)
-        info.lpParameters = '"' + printer.replace('"', "") + '"'
+        info.lpParameters = '"' + printer + '"'
         info.nShow = SW_SHOWMINNOACTIVE
         execute = self._shell32.ShellExecuteExW
         execute.argtypes = [ctypes.POINTER(_SHELLEXECUTEINFOW)]
         execute.restype = wintypes.BOOL
         if not execute(ctypes.byref(info)):
-            raise PrintNotSubmitted(f"Windows could not start the print handler ({ctypes.get_last_error()}).")
-        if not info.hProcess:
+            error = ctypes.get_last_error()
+            if error in _PRE_LAUNCH_ERRORS:
+                raise PrintNotSubmitted(f"Windows could not start the print handler ({error}).")
+            # DDE and other failures can happen after the handler started.
+            raise OSError(f"ShellExecuteEx failed after possibly starting the handler ({error}).")
+        return WinHandlerProcess(int(info.hProcess or 0), self._kernel32)
+
+
+# ShellExecuteEx errors that mean nothing was launched: file/path not found,
+# access denied, out of memory, bad format, no association, cancelled.
+_PRE_LAUNCH_ERRORS = frozenset({2, 3, 5, 8, 11, 1155, 1223})
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 0x102
+
+
+class WinHandlerProcess:
+    """A started handler process, polled with zero-timeout waits.
+
+    ``close`` releases only Qronos's handle: the user's application keeps
+    running and finishes printing on its own.
+    """
+
+    def __init__(self, handle: int, kernel32) -> None:
+        self._handle = int(handle)
+        self._kernel32 = kernel32
+        self._kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self._kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        self._kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        self._kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def finished(self) -> bool:
+        if not self._handle:
+            # Started through DDE or an existing instance: no process to watch.
+            return True
+        return self._kernel32.WaitForSingleObject(self._handle, 0) == WAIT_OBJECT_0
+
+    def exit_code(self) -> int | None:
+        if not self._handle:
             return None
-        try:
-            waited = self._kernel32.WaitForSingleObject(info.hProcess, int(self._timeout * 1000))
-            if waited != 0:
-                return None
-            code = wintypes.DWORD()
-            if self._kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code)):
-                return int(code.value)
-            return None
-        finally:
-            self._kernel32.CloseHandle(info.hProcess)
+        code = wintypes.DWORD()
+        if self._kernel32.GetExitCodeProcess(self._handle, ctypes.byref(code)):
+            return int(code.value)
+        return None
+
+    def close(self) -> None:
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = 0
+
+
+# ----------------------------------------------- printer change notifications
+
+JOB_NOTIFY_TYPE = 0x01
+JOB_NOTIFY_FIELD_USER_NAME = 0x03
+JOB_NOTIFY_FIELD_STATUS = 0x0A
+JOB_NOTIFY_FIELD_DOCUMENT = 0x0D
+JOB_NOTIFY_FIELD_TOTAL_PAGES = 0x14
+JOB_NOTIFY_FIELD_PAGES_PRINTED = 0x15
+PRINTER_CHANGE_JOB = 0x0000FF00
+PRINTER_NOTIFY_OPTIONS_REFRESH = 0x01
+PRINTER_NOTIFY_INFO_DISCARDED = 0x01
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+class _PRINTER_NOTIFY_OPTIONS_TYPE(ctypes.Structure):
+    _fields_ = [
+        ("Type", wintypes.WORD), ("Reserved0", wintypes.WORD), ("Reserved1", wintypes.DWORD),
+        ("Reserved2", wintypes.DWORD), ("Count", wintypes.DWORD), ("pFields", ctypes.POINTER(wintypes.WORD)),
+    ]
+
+
+class _PRINTER_NOTIFY_OPTIONS(ctypes.Structure):
+    _fields_ = [
+        ("Version", wintypes.DWORD), ("Flags", wintypes.DWORD), ("Count", wintypes.DWORD),
+        ("pTypes", ctypes.POINTER(_PRINTER_NOTIFY_OPTIONS_TYPE)),
+    ]
+
+
+class _NOTIFY_DATA(ctypes.Structure):
+    _fields_ = [("cbBuf", wintypes.DWORD), ("pBuf", ctypes.c_void_p)]
+
+
+class _NOTIFY_UNION(ctypes.Union):
+    _fields_ = [("adwData", wintypes.DWORD * 2), ("Data", _NOTIFY_DATA)]
+
+
+class _PRINTER_NOTIFY_INFO_DATA(ctypes.Structure):
+    _fields_ = [
+        ("Type", wintypes.WORD), ("Field", wintypes.WORD), ("Reserved", wintypes.DWORD),
+        ("Id", wintypes.DWORD), ("NotifyData", _NOTIFY_UNION),
+    ]
+
+
+class _PRINTER_NOTIFY_INFO(ctypes.Structure):
+    _fields_ = [
+        ("Version", wintypes.DWORD), ("Flags", wintypes.DWORD), ("Count", wintypes.DWORD),
+        ("aData", _PRINTER_NOTIFY_INFO_DATA * 1),
+    ]
+
+
+_STRING_FIELDS = {JOB_NOTIFY_FIELD_USER_NAME: "user", JOB_NOTIFY_FIELD_DOCUMENT: "document"}
+_NUMBER_FIELDS = {
+    JOB_NOTIFY_FIELD_STATUS: "status",
+    JOB_NOTIFY_FIELD_TOTAL_PAGES: "total_pages",
+    JOB_NOTIFY_FIELD_PAGES_PRINTED: "pages_printed",
+}
+
+
+def parse_notify_info(address: int) -> tuple[bool, dict[int, dict[str, object]]]:
+    """Read a PRINTER_NOTIFY_INFO block: (discarded, {job id: fields})."""
+    info = _PRINTER_NOTIFY_INFO.from_address(address)
+    entries = (_PRINTER_NOTIFY_INFO_DATA * int(info.Count)).from_address(
+        address + _PRINTER_NOTIFY_INFO.aData.offset
+    )
+    jobs: dict[int, dict[str, object]] = {}
+    for item in entries:
+        if item.Type != JOB_NOTIFY_TYPE:
+            continue
+        fields = jobs.setdefault(int(item.Id), {})
+        if item.Field in _STRING_FIELDS:
+            data = item.NotifyData.Data
+            text = ctypes.wstring_at(data.pBuf, max(0, int(data.cbBuf) // 2)).split("\x00", 1)[0] if data.pBuf else ""
+            fields[_STRING_FIELDS[item.Field]] = text
+        elif item.Field in _NUMBER_FIELDS:
+            fields[_NUMBER_FIELDS[item.Field]] = int(item.NotifyData.adwData[0])
+    return bool(info.Flags & PRINTER_NOTIFY_INFO_DISCARDED), jobs
+
+
+class WinJobWatcher:
+    """Collect every job added to one printer, through printer change notifications."""
+
+    _FIELDS = (
+        JOB_NOTIFY_FIELD_USER_NAME, JOB_NOTIFY_FIELD_DOCUMENT, JOB_NOTIFY_FIELD_STATUS,
+        JOB_NOTIFY_FIELD_TOTAL_PAGES, JOB_NOTIFY_FIELD_PAGES_PRINTED,
+    )
+
+    def __init__(self, spooler: "WinSpooler", printer: str) -> None:
+        self._winspool = spooler._winspool
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        w = self._winspool
+        w.FindFirstPrinterChangeNotification.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+        w.FindFirstPrinterChangeNotification.restype = wintypes.HANDLE
+        w.FindNextPrinterChangeNotification.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+        ]
+        w.FindNextPrinterChangeNotification.restype = wintypes.BOOL
+        w.FreePrinterNotifyInfo.argtypes = [ctypes.c_void_p]
+        w.FreePrinterNotifyInfo.restype = wintypes.BOOL
+        w.FindClosePrinterChangeNotification.argtypes = [wintypes.HANDLE]
+        w.FindClosePrinterChangeNotification.restype = wintypes.BOOL
+        self._kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self._kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        self._jobs: dict[int, dict[str, object]] = {}
+        self._fields = (wintypes.WORD * len(self._FIELDS))(*self._FIELDS)
+        self._type = _PRINTER_NOTIFY_OPTIONS_TYPE(JOB_NOTIFY_TYPE, 0, 0, 0, len(self._FIELDS), self._fields)
+        self._options = _PRINTER_NOTIFY_OPTIONS(2, 0, 1, ctypes.pointer(self._type))
+        self._printer = spooler._open(printer)
+        self._change = w.FindFirstPrinterChangeNotification(
+            self._printer, PRINTER_CHANGE_JOB, 0, ctypes.byref(self._options),
+        )
+        if not self._change or self._change == _INVALID_HANDLE:
+            spooler._winspool.ClosePrinter(self._printer)
+            self._printer = None
+            raise SpoolerUnavailable(f"Printer change notifications are unavailable ({ctypes.get_last_error()}).")
+
+    def _drain(self) -> None:
+        refresh = False
+        while self._change and self._kernel32.WaitForSingleObject(self._change, 0) == WAIT_OBJECT_0:
+            changed = wintypes.DWORD()
+            info = ctypes.c_void_p()
+            options = None
+            if refresh:
+                options = _PRINTER_NOTIFY_OPTIONS(2, PRINTER_NOTIFY_OPTIONS_REFRESH, 1, ctypes.pointer(self._type))
+            if not self._winspool.FindNextPrinterChangeNotification(
+                self._change, ctypes.byref(changed), ctypes.byref(options) if options else None, ctypes.byref(info),
+            ):
+                raise SpoolerUnavailable(f"Reading printer notifications failed ({ctypes.get_last_error()}).")
+            if info.value:
+                try:
+                    discarded, jobs = parse_notify_info(info.value)
+                finally:
+                    self._winspool.FreePrinterNotifyInfo(info)
+                for job_id, fields in jobs.items():
+                    self._jobs.setdefault(job_id, {}).update(fields)
+                refresh = discarded
+
+    def seen_jobs(self) -> tuple[PrintJobState, ...]:
+        self._drain()
+        return tuple(
+            PrintJobState(
+                job_id=job_id, document=str(fields.get("document", "")), user=str(fields.get("user", "")),
+                status=int(fields.get("status", 0)), pages_printed=int(fields.get("pages_printed", 0)),
+                total_pages=int(fields.get("total_pages", 0)),
+            )
+            for job_id, fields in sorted(self._jobs.items())
+        )
+
+    def close(self) -> None:
+        if self._change:
+            self._winspool.FindClosePrinterChangeNotification(self._change)
+            self._change = None
+        if self._printer:
+            self._winspool.ClosePrinter(self._printer)
+            self._printer = None
