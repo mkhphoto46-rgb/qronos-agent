@@ -265,3 +265,185 @@ def test_corrupt_journal_fails_closed(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     with pytest.raises(Exception):
         SideEffectJournal(path).begin("op", "content")
+
+
+# ------------------------------------------------- journal concurrency (W1)
+
+import json as _json
+import subprocess
+import sys
+import textwrap
+import threading
+from pathlib import Path
+
+from core.app_workflow import JournalUnavailable
+from core.json_store import JsonStore
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_two_journal_objects_cannot_both_begin_the_same_content(tmp_path, monkeypatch):
+    path = tmp_path / "side-effects.json"
+    first, second = SideEffectJournal(path), SideEffectJournal(path)
+    content = content_key("print", "sha", "printer")
+    barrier = threading.Barrier(2, timeout=1.0)
+    real_load = JsonStore.load_payload
+
+    def slow_load(self, default=None):
+        payload = real_load(self, default)
+        try:
+            barrier.wait()  # the old code let both read the pre-begin state here
+        except threading.BrokenBarrierError:
+            pass
+        return payload
+
+    monkeypatch.setattr(JsonStore, "load_payload", slow_load)
+    results = {}
+
+    def attempt(name, journal, op):
+        try:
+            journal.begin(op, content)
+            results[name] = "begun"
+        except DuplicateSideEffect:
+            results[name] = "refused"
+
+    threads = [threading.Thread(target=attempt, args=("a", first, "op-1")),
+               threading.Thread(target=attempt, args=("b", second, "op-2"))]
+    [thread.start() for thread in threads]
+    [thread.join() for thread in threads]
+    monkeypatch.setattr(JsonStore, "load_payload", real_load)
+    assert sorted(results.values()) == ["begun", "refused"]
+    assert len(SideEffectJournal(path).unresolved_for(content)) == 1
+
+
+_CHILD = textwrap.dedent("""
+    import sys, time
+    sys.path.insert(0, sys.argv[1])
+    from core.app_workflow import SideEffectJournal, DuplicateSideEffect
+    path, op, content, go = sys.argv[2:6]
+    import os
+    while not os.path.exists(go):
+        time.sleep(0.001)
+    try:
+        SideEffectJournal(path).begin(op, content)
+        print("BEGUN")
+    except DuplicateSideEffect:
+        print("REFUSED")
+    except Exception as error:
+        print("ERROR " + type(error).__name__ + " " + str(error)[:120])
+""")
+
+
+def test_separate_processes_begin_one_content_exactly_once(tmp_path):
+    for round_number in range(6):
+        folder = tmp_path / f"round-{round_number}"
+        folder.mkdir()
+        path, go = folder / "side-effects.json", folder / "go"
+        content = content_key("print", "file-sha", "printer")
+        children = [
+            subprocess.Popen(
+                [sys.executable, "-I", "-c", _CHILD, str(ROOT), str(path), f"op-{index}", content, str(go)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for index in range(3)
+        ]
+        go.write_text("go", encoding="utf-8")
+        outputs = sorted(child.communicate(timeout=60)[0].strip() for child in children)
+        assert outputs == ["BEGUN", "REFUSED", "REFUSED"], outputs
+        assert len(SideEffectJournal(path).unresolved_for(content)) == 1
+
+
+def test_lock_held_by_another_process_times_out_without_writing(tmp_path):
+    path = tmp_path / "side-effects.json"
+    SideEffectJournal(path).begin("op-0", "content-0")
+    holder = subprocess.Popen(
+        [sys.executable, "-I", "-c", textwrap.dedent("""
+            import sys, time
+            sys.path.insert(0, sys.argv[1])
+            from core.app_workflow import SideEffectJournal
+            with SideEffectJournal(sys.argv[2])._locked():
+                print("HELD", flush=True)
+                time.sleep(4)
+        """), str(ROOT), str(path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "HELD"
+        with pytest.raises(JournalUnavailable, match="Another Qronos process"):
+            SideEffectJournal(path, lock_timeout=0.3).begin("op-1", "content-1")
+    finally:
+        holder.wait(timeout=30)
+    assert SideEffectJournal(path).get("op-1") is None
+
+
+@pytest.mark.parametrize("entries", [
+    [],
+    {"x": 5},
+    {"x": {"contentKey": "c"}},
+    {"x": {"contentKey": "c", "state": "bogus"}},
+    {"x": {"state": "uncertain"}},
+    {"x": {"contentKey": "", "state": "uncertain"}},
+    {"x": {"contentKey": "c", "state": "uncertain", "updatedAt": "yesterday"}},
+])
+def test_malformed_journal_entries_refuse_instead_of_reading_empty(tmp_path, entries):
+    path = tmp_path / "side-effects.json"
+    path.write_text(_json.dumps({"schemaVersion": 1, "payload": {"entries": entries}}), encoding="utf-8")
+    with pytest.raises(JournalUnavailable):
+        SideEffectJournal(path).begin("op-new", "c")
+
+
+def test_truncated_or_newer_journal_refuses(tmp_path):
+    path = tmp_path / "side-effects.json"
+    path.write_text('{"schemaVersion": 1, "payload": {"entries": {', encoding="utf-8")
+    with pytest.raises(JournalUnavailable):
+        SideEffectJournal(path).begin("op", "c")
+    path.write_text(_json.dumps({"schemaVersion": 99, "payload": {"entries": {}}}), encoding="utf-8")
+    with pytest.raises(JournalUnavailable):
+        SideEffectJournal(path).begin("op", "c")
+
+
+def test_a_journal_that_disappears_after_use_is_not_treated_as_empty(tmp_path):
+    path = tmp_path / "side-effects.json"
+    journal = SideEffectJournal(path)
+    journal.begin("op-a", "content")
+    journal.settle("op-a", SideEffectState.UNCERTAIN)
+    path.unlink()
+    with pytest.raises(JournalUnavailable, match="missing"):
+        SideEffectJournal(path).begin("op-b", "content")
+
+
+def test_journal_requires_a_durable_path():
+    with pytest.raises(ValueError):
+        SideEffectJournal(None)
+    with pytest.raises(ValueError):
+        SideEffectJournal("  ")
+
+
+def test_settled_attempts_are_never_evicted(tmp_path):
+    path = tmp_path / "side-effects.json"
+    entries = {
+        f"op-{index}": {"contentKey": f"c-{index}", "state": "confirmed", "detail": "", "updatedAt": float(index)}
+        for index in range(3000)
+    }
+    path.write_text(_json.dumps({"schemaVersion": 1, "payload": {"entries": entries}}), encoding="utf-8")
+    journal = SideEffectJournal(path)
+    journal.begin("op-new", "c-new")
+    with pytest.raises(DuplicateSideEffect):
+        journal.begin("op-0", "c-0")
+    stored = _json.loads(path.read_text(encoding="utf-8"))["payload"]["entries"]
+    assert len(stored) == 3001 and "op-0" in stored
+
+
+def test_journal_in_a_linked_folder_is_refused(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(real, target_is_directory=True)
+    except OSError:
+        if sys.platform != "win32":
+            pytest.skip("Directory links are unavailable here.")
+        import _winapi
+        _winapi.CreateJunction(str(real), str(linked))
+    with pytest.raises(JournalUnavailable, match="link"):
+        SideEffectJournal(linked / "side-effects.json").begin("op", "c")

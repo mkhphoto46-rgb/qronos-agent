@@ -32,21 +32,24 @@ own observations and actions.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+import errno
 import hashlib
 import json
 import math
+import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from core.action_cancellation import (
     ActionCancelled,
     CancellationToken,
 )
-from core.json_store import JsonStore
+from core.json_store import JsonStore, MigrationMissing, StoreCorrupt, StoreTooNew
 from core.window_binding import (
     WindowBinder,
     WindowBinding,
@@ -356,7 +359,68 @@ class SideEffectState(str, Enum):
 
 _UNRESOLVED = {SideEffectState.SUBMITTING, SideEffectState.UNCERTAIN}
 _JOURNAL_VERSION = 1
-_MAX_JOURNAL_ENTRIES = 2048
+_JOURNAL_LOCK_TIMEOUT_SECONDS = 10.0
+_JOURNAL_LOCK_POLL_SECONDS = 0.01
+# errno values msvcrt.locking uses for "range already locked".
+_LOCK_HELD_ERRNOS = frozenset({errno.EACCES, getattr(errno, "EDEADLK", 36), getattr(errno, "EDEADLOCK", 36)})
+
+
+class JournalUnavailable(WorkflowError):
+    """The side-effect journal is busy, damaged or missing; nothing was done."""
+
+
+# One lock per journal file for every journal object in this process. The OS
+# lock below excludes other processes; this one excludes other threads (an OS
+# byte-range lock taken twice by one process is not a reliable exclusion).
+_PROCESS_LOCKS: dict[str, threading.Lock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def _process_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(str(path))
+    with _PROCESS_LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(key, threading.Lock())
+
+
+def _is_link(path: Path) -> bool:
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    return path.is_symlink() or bool(attributes & 0x400)
+
+
+def _try_os_lock(fd: int) -> bool:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in _LOCK_HELD_ERRNOS:
+                return False
+            raise
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _os_unlock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -370,45 +434,128 @@ class SideEffectEntry:
 
 class SideEffectJournal:
     """
-    Durable, single-shot record of external side effects.
+    Durable, single-shot record of external side effects, shared safely by
+    threads and processes.
 
     ``operation_key`` identifies one approved attempt (approval identity plus
-    plan digest); it can be begun once, ever. ``content_key`` identifies what
-    the side effect does (for example the file hash and printer); while any
-    attempt for that content is SUBMITTING or UNCERTAIN, a new attempt for the
-    same content is refused so an unclear print or download is not repeated.
+    plan digest); it can be begun once, ever: entries are never evicted.
+    ``content_key`` identifies what the side effect does (for example the file
+    hash and printer); while any attempt for that content is SUBMITTING or
+    UNCERTAIN, a new attempt for the same content is refused so an unclear
+    print or download is not repeated.
+
+    Every read-modify-write runs under a process-wide lock for the journal
+    path and an operating-system lock on a persistent ``<journal>.lock`` file
+    (LockFile through msvcrt on Windows, flock on POSIX), waited for at most
+    ``_JOURNAL_LOCK_TIMEOUT_SECONDS``. An owner that dies releases the OS lock
+    with its handle, so nothing is ever declared stale.
+
+    The journal must be a real durable file. A damaged journal, any malformed
+    entry, or a journal that disappeared after it was first written is refused
+    with :class:`JournalUnavailable` instead of being read as empty, because
+    an empty journal would allow repeats of everything it recorded.
     """
 
     def __init__(
         self,
-        path: str | Path | None,
+        path: str | Path,
         *,
         clock: Callable[[], float] = time.time,
+        lock_timeout: float = _JOURNAL_LOCK_TIMEOUT_SECONDS,
     ) -> None:
-        self._store = JsonStore(path, _JOURNAL_VERSION)
+        if path is None or not str(path).strip():
+            raise ValueError("A side-effect journal needs a durable file path.")
+        resolved = Path(path).absolute()
+        self._path = resolved
+        self._lock_path = resolved.with_name(resolved.name + ".lock")
+        self._marker_path = resolved.with_name(resolved.name + ".created")
+        self._store = JsonStore(resolved, _JOURNAL_VERSION)
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock_timeout = float(lock_timeout)
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    # ----------------------------------------------------------- locking
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        lock = _process_lock(self._path)
+        if not lock.acquire(timeout=self._lock_timeout):
+            raise JournalUnavailable("The side-effect journal is busy; nothing was done. Try again.")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            for item in (self._path.parent, self._path, self._lock_path, self._marker_path):
+                if _is_link(item):
+                    raise JournalUnavailable("The side-effect journal location is a link; nothing was done.")
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+            try:
+                fd = os.open(self._lock_path, flags, 0o600)
+            except OSError as error:
+                raise JournalUnavailable("The side-effect journal lock could not be opened.") from error
+            try:
+                deadline = time.monotonic() + self._lock_timeout
+                while True:
+                    try:
+                        acquired = _try_os_lock(fd)
+                    except OSError as error:
+                        raise JournalUnavailable("The side-effect journal lock could not be taken.") from error
+                    if acquired:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise JournalUnavailable(
+                            "Another Qronos process is using the side-effect journal; nothing was done. Try again."
+                        )
+                    time.sleep(_JOURNAL_LOCK_POLL_SECONDS)
+                try:
+                    yield
+                finally:
+                    try:
+                        _os_unlock(fd)
+                    except OSError:
+                        pass  # closing the handle releases the lock regardless
+            finally:
+                os.close(fd)
+        finally:
+            lock.release()
+
+    # ----------------------------------------------------------- storage
 
     def _load(self) -> dict[str, dict[str, Any]]:
-        payload = self._store.load_payload({"entries": {}})
-        entries = payload.get("entries", {})
+        if not self._path.exists():
+            if self._marker_path.exists():
+                raise JournalUnavailable(
+                    "The side-effect journal is missing although it was in use; earlier "
+                    "unconfirmed actions cannot be checked, so nothing was done."
+                )
+            return {}
+        try:
+            payload = self._store.load_payload()
+        except (StoreCorrupt, StoreTooNew, MigrationMissing, OSError, UnicodeDecodeError) as error:
+            raise JournalUnavailable(
+                "The side-effect journal cannot be read; nothing was done."
+            ) from error
+        entries = payload.get("entries")
         if not isinstance(entries, dict):
-            raise WorkflowError("The side-effect journal is malformed.")
+            raise JournalUnavailable("The side-effect journal is malformed; nothing was done.")
+        for key, value in entries.items():
+            if not (
+                isinstance(key, str) and key
+                and isinstance(value, dict)
+                and isinstance(value.get("contentKey"), str) and value["contentKey"]
+                and value.get("state") in _STATE_VALUES
+                and isinstance(value.get("detail", ""), str)
+                and isinstance(value.get("updatedAt", 0.0), (int, float))
+                and not isinstance(value.get("updatedAt", 0.0), bool)
+            ):
+                raise JournalUnavailable("The side-effect journal has a damaged entry; nothing was done.")
         return entries
 
     def _save(self, entries: dict[str, dict[str, Any]]) -> None:
-        if len(entries) > _MAX_JOURNAL_ENTRIES:
-            # Drop the oldest settled entries; unresolved ones are never dropped.
-            settled = sorted(
-                (
-                    (value.get("updatedAt", 0.0), key)
-                    for key, value in entries.items()
-                    if SideEffectState(value["state"]) not in _UNRESOLVED
-                ),
-            )
-            for _, key in settled[: len(entries) - _MAX_JOURNAL_ENTRIES]:
-                entries.pop(key, None)
         self._store.save({"entries": entries})
+        if not self._marker_path.exists():
+            self._marker_path.write_text("1\n", encoding="utf-8")
 
     @staticmethod
     def _entry(key: str, value: Mapping[str, Any]) -> SideEffectEntry:
@@ -420,33 +567,37 @@ class SideEffectJournal:
             updated_at=float(value.get("updatedAt", 0.0)),
         )
 
+    # ---------------------------------------------------------- queries
+
     def get(self, operation_key: str) -> SideEffectEntry | None:
-        with self._lock:
+        with self._locked():
             value = self._load().get(operation_key)
             return None if value is None else self._entry(operation_key, value)
 
     def unresolved_for(self, content_key: str) -> tuple[SideEffectEntry, ...]:
-        with self._lock:
+        with self._locked():
             return tuple(
                 self._entry(key, value)
                 for key, value in sorted(self._load().items())
-                if value.get("contentKey") == content_key
+                if value["contentKey"] == content_key
                 and SideEffectState(value["state"]) in _UNRESOLVED
             )
+
+    # ---------------------------------------------------------- changes
 
     def begin(self, operation_key: str, content_key: str, detail: str = "") -> None:
         """Record SUBMITTING durably, or refuse a repeat."""
         if not operation_key or not content_key:
             raise ValueError("Side effects need operation and content keys.")
-        with self._lock:
+        with self._locked():
             entries = self._load()
             if operation_key in entries:
                 raise DuplicateSideEffect(
                     "This approved action was already attempted; it is not repeated."
                 )
-            for key, value in entries.items():
+            for value in entries.values():
                 if (
-                    value.get("contentKey") == content_key
+                    value["contentKey"] == content_key
                     and SideEffectState(value["state"]) in _UNRESOLVED
                 ):
                     raise DuplicateSideEffect(
@@ -464,7 +615,9 @@ class SideEffectJournal:
     def settle(self, operation_key: str, state: SideEffectState, detail: str = "") -> None:
         if state is SideEffectState.SUBMITTING:
             raise ValueError("SUBMITTING is recorded by begin().")
-        with self._lock:
+        if state is SideEffectState.ACKNOWLEDGED:
+            raise ValueError("Use acknowledge() to release an uncertain outcome.")
+        with self._locked():
             entries = self._load()
             value = entries.get(operation_key)
             if value is None:
@@ -472,8 +625,6 @@ class SideEffectJournal:
             current = SideEffectState(value["state"])
             if current not in _UNRESOLVED:
                 raise WorkflowError("This side effect is already settled.")
-            if state is SideEffectState.ACKNOWLEDGED:
-                raise ValueError("Use acknowledge() to release an uncertain outcome.")
             if current is SideEffectState.UNCERTAIN and state is not SideEffectState.CONFIRMED:
                 # Later evidence may confirm an unclear outcome, but nothing may
                 # turn "it might have happened" into "it did not happen".
@@ -485,7 +636,7 @@ class SideEffectJournal:
 
     def acknowledge(self, operation_key: str, detail: str = "") -> None:
         """A person checked an uncertain outcome; the content may be tried again."""
-        with self._lock:
+        with self._locked():
             entries = self._load()
             value = entries.get(operation_key)
             if value is None or SideEffectState(value["state"]) is not SideEffectState.UNCERTAIN:
@@ -494,6 +645,9 @@ class SideEffectJournal:
             value["detail"] = detail[:500]
             value["updatedAt"] = float(self._clock())
             self._save(entries)
+
+
+_STATE_VALUES = frozenset(state.value for state in SideEffectState)
 
 
 def operation_key(approval_id: str, digest: str) -> str:
