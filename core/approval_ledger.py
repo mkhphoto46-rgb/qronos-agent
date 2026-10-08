@@ -52,6 +52,9 @@ class ApprovalKind(Enum):
     PAINT_UNDO = "paint_undo"
     SCREEN_READ = "screen_read"
     FILE_ACTION = "file_action"
+    # One step of an application workflow (Telegram inspect/download, print).
+    # The payload names the exact workflow phase and plan it approves.
+    APP_WORKFLOW = "app_workflow"
 
 
 class StaleApproval(LookupError):
