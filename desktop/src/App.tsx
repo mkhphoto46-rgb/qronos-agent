@@ -26,6 +26,11 @@ import {
 } from "./conversationStore";
 import { useLibraryStore } from "./libraryStore";
 import {
+  WorkflowApprovalController,
+  applyWorkflowEvent,
+  createWorkflowApprovalController,
+} from "./appWorkflowApproval";
+import {
   ScreenApprovalController,
   applyScreenApprovalEvent,
   createScreenApprovalController,
@@ -49,6 +54,7 @@ import CrossViewParticleTransition from "./components/CrossViewParticleTransitio
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
 import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
+import AppWorkflowDialog from "./components/AppWorkflowDialog";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
 import type { OrbState } from "./components/OrbState";
@@ -267,6 +273,42 @@ function App() {
       void screenApproval.answer(approvalId, approved);
     },
     [screenApproval],
+  );
+
+  // Telegram / print / browser workflow steps: one app-native prompt at a
+  // time, answered only with the step's single-use backend actionToken.
+  const workflowApprovalRef =
+    useRef<WorkflowApprovalController | null>(null);
+
+  if (workflowApprovalRef.current === null) {
+    workflowApprovalRef.current = createWorkflowApprovalController(
+      invoke,
+      (error) => {
+        console.error(
+          "[Qronos Workflow Approval] decision not confirmed:",
+          error,
+        );
+      },
+    );
+  }
+
+  const workflowApproval = workflowApprovalRef.current;
+
+  const workflowApprovalView = useSyncExternalStore(
+    workflowApproval.subscribe,
+    workflowApproval.getSnapshot,
+  );
+
+  useEffect(() => {
+    // Unmount drops every prompt without answering.
+    return () => workflowApproval.clear();
+  }, [workflowApproval]);
+
+  const answerWorkflowApproval = useCallback(
+    (actionToken: string, approved: boolean, secret?: string) => {
+      void workflowApproval.answer(actionToken, approved, secret);
+    },
+    [workflowApproval],
   );
 
   const [
@@ -1296,6 +1338,15 @@ function App() {
             if (screenApprovalRef.current !== null) {
               applyScreenApprovalEvent(
                 screenApprovalRef.current,
+                event.payload.eventType,
+                event.payload.message,
+              );
+            }
+
+            // Telegram / print / browser workflow prompts and results.
+            if (workflowApprovalRef.current !== null) {
+              applyWorkflowEvent(
+                workflowApprovalRef.current,
                 event.payload.eventType,
                 event.payload.message,
               );
@@ -2588,6 +2639,12 @@ function App() {
       <ScreenApprovalDialog
         view={screenApprovalView}
         onAnswer={answerScreenApproval}
+      />
+
+      <AppWorkflowDialog
+        view={workflowApprovalView}
+        onAnswer={answerWorkflowApproval}
+        onDismissResult={workflowApproval.dismissResult}
       />
 
       {pendingFileApproval && (
