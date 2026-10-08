@@ -20,6 +20,7 @@ import pytest
 
 from build_support import build_desktop
 from build_support import desktop_installer_verify as installer_verify
+from build_support import install_manifest
 from build_support import desktop_prerequisites as prerequisites
 from build_support.desktop_prerequisites import EMBEDDED_PATH, PrerequisiteError
 
@@ -529,12 +530,15 @@ def test_the_install_and_app_data_folders_are_not_the_user_data_folder():
     assert 'local.join("Qronos")' in backend_rs and '/ "Qronos"' in config_py  # the data folder name
     assert config["productName"].casefold() != "qronos" and config["identifier"].casefold() != "qronos"
     build_desktop.check_tauri_config(config)
-    hook = prerequisites.HOOK_PATH.read_text(encoding="utf-8")
-    assert "UNINSTALL" not in hook
-    # The only removals: the hook's own temporary payload, and $INSTDIR when it is still empty.
-    removals = [line.strip() for line in hook.splitlines()
-                if line.strip().lower().startswith(("rmdir", "delete"))]
-    assert set(removals) == {'RMDir "$INSTDIR"', 'Delete "$PLUGINSDIR\\${QRONOS_WEBVIEW2_FILE}"'}
+    # Nothing in the hooks removes recursively or by wildcard. The only removals are the
+    # hook's own temporary payload, files and folders the previous installation's
+    # manifest lists, the manifest itself and the install folder when it is empty.
+    hooks = (prerequisites.HOOK_PATH.read_text(encoding="utf-8")
+             + (prerequisites.HOOK_PATH.parent / "qronos-install-root.nsh").read_text(encoding="utf-8"))
+    removals = {line.strip() for line in hooks.splitlines() if line.strip().lower().startswith(("rmdir", "delete"))}
+    assert removals == {'RMDir "$INSTDIR"', 'Delete "$PLUGINSDIR\\${QRONOS_WEBVIEW2_FILE}"',
+                        'Delete "$INSTDIR\\$QronosPath"', 'RMDir "$INSTDIR\\$QronosPath"',
+                        'Delete "$INSTDIR\\${QRONOS_MANIFEST}"'}
 
 
 # ----------------------------------------------------------- wiring
@@ -550,6 +554,7 @@ class FakeBuild:
         self.mode = mode
         self.overlays: list[dict] = []
         self.records: list[dict] = []
+        self.install_manifests: list = []
 
     def run(self, command, **kwargs):
         self.calls.append("tauri")
@@ -571,6 +576,8 @@ class FakeBuild:
 def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
     backend = tmp_path / "qronos-runtime"
     backend.mkdir(exist_ok=True)
+    (backend / "runtime-manifest.json").write_text(json.dumps({"files": [{"path": "qronos-runtime.exe"}]}),
+                                                   encoding="utf-8")
     monkeypatch.setattr(build_desktop, "DESKTOP_BUILDS_ROOT", tmp_path / "runtime/package/desktop-builds")
     monkeypatch.setattr(build_desktop, "verify_installer",
                         lambda path, pin: fake.calls.append("prerequisite") or {"sha256": pin["sha256"]})
@@ -585,6 +592,8 @@ def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
         fake.calls.append("notices")
         out_dir.mkdir()
         (out_dir / "THIRD_PARTY_NOTICES-desktop.txt").write_text("notices", encoding="utf-8")
+        (out_dir / "third-party-manifest-desktop.json").write_text(
+            json.dumps({"files": [{"path": "THIRD_PARTY_NOTICES-desktop.txt"}]}), encoding="utf-8")
 
     monkeypatch.setattr(build_desktop, "collect_desktop_notices", collect)
     monkeypatch.setattr(build_desktop, "verify_notice_output", lambda path: fake.calls.append("notices-verified"))
@@ -601,8 +610,12 @@ def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
         return destination
 
     monkeypatch.setattr(build_desktop, "extract_installer", extract)
-    monkeypatch.setattr(build_desktop, "verify_extracted",
-                        lambda root, pin: fake.calls.append("extracted-verified") or {"root": root})
+    def verify_extracted(root, pin, install_manifest=None):
+        fake.calls.append("extracted-verified")
+        fake.install_manifests.append(install_manifest)
+        return {"root": root}
+
+    monkeypatch.setattr(build_desktop, "verify_extracted", verify_extracted)
 
     def record(**kwargs):
         fake.calls.append("provenance")
@@ -639,6 +652,13 @@ def test_a_build_verifies_the_prerequisite_first_and_the_installer_last(tmp_path
     assert resources[(first["work"] / "notices").as_posix() + "/"] == "third-party-notices/"
     wrapper = Path(overlay["bundle"]["windows"]["nsis"]["installerHooks"])
     assert wrapper.parent == first["work"]
+    ownership = first["work"] / "qronos-install-manifest.txt"
+    assert resources[ownership.as_posix()] == "qronos-install-manifest.txt"
+    assert fake.install_manifests[0] == ownership.read_bytes()
+    assert install_manifest.parse(ownership.read_bytes())[0] == [
+        "qronos-desktop.exe", "qronos-install-manifest.txt", "qronos-runtime\\qronos-runtime.exe",
+        "qronos-runtime\\runtime-manifest.json", "third-party-notices\\third-party-manifest-desktop.json",
+        "third-party-notices\\THIRD_PARTY_NOTICES-desktop.txt", "uninstall.exe"]  # case-insensitive order
     assert str(build_desktop.CACHE_DIR / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe") in \
         wrapper.read_text(encoding="utf-8")
 
@@ -705,7 +725,7 @@ def test_an_extraction_failure_quarantines_the_installer(tmp_path, monkeypatch):
     fake = FakeBuild(tmp_path, committed_pin())
     backend = wire(tmp_path, monkeypatch, fake)
 
-    def refuse(root, pin):
+    def refuse(root, pin, install_manifest=None):
         raise PrerequisiteError("qronos-runtime does not match its manifest")
 
     monkeypatch.setattr(build_desktop, "verify_extracted", refuse)
@@ -779,6 +799,8 @@ def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
                                   "registry+https://github.com/rust-lang/crates.io-index", "sum", package.resolve())
     files = notices.check_coverage([component], {})
     notices.write_notices([component], files, {}, root / "third-party-notices", notices.WINDOWS_TARGET, ())
+    install_manifest.write(root, install_manifest.payload_files(runtime, root / "third-party-notices",
+                                                                "qronos-desktop"))
     return root, pin
 
 

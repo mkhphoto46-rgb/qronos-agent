@@ -23,6 +23,7 @@
 
 !include "LogicLib.nsh"
 !include "x64.nsh"
+!include "${__FILEDIR__}\qronos-install-root.nsh"
 
 !define QRONOS_WEBVIEW2_APPID "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 !define QRONOS_WEBVIEW2_FILE "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
@@ -50,6 +51,17 @@
 ; folder, so it is removed again, but only if it is still empty (RMDir without
 ; /r never deletes files). A probe harness can define QRONOS_PROBE_RESULT to
 ; also record the message in a file; the installer never defines it.
+; Refuses before anything was installed into a folder that is not Qronos's own;
+; nothing is removed.
+!macro QRONOS_REFUSE MESSAGE
+  !ifdef QRONOS_PROBE_RESULT
+    FileOpen $R7 "${QRONOS_PROBE_RESULT}" w
+    FileWrite $R7 "${MESSAGE}"
+    FileClose $R7
+  !endif
+  Abort "${MESSAGE}"
+!macroend
+
 !macro QRONOS_FAIL MESSAGE
   !ifdef QRONOS_PROBE_RESULT
     FileOpen $R7 "${QRONOS_PROBE_RESULT}" w
@@ -85,6 +97,11 @@
   Push $R7
   Push $R8
   Push $R9
+  ; The install folder must be Qronos's own before anything is installed.
+  Call QronosCheckInstallRoot
+  ${If} $QronosMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
+  ${EndIf}
   !insertmacro QRONOS_WEBVIEW2_VERSION_TO_R9
   ${If} $R9 == ""
     ${IfNot} ${IsNativeAMD64}
@@ -101,7 +118,26 @@
   ${Else}
     DetailPrint "Microsoft Edge WebView2 Runtime $R9 is already installed."
   ${EndIf}
+  ; Replace, never mix: remove exactly the previous installation's listed files,
+  ; once Qronos is not running, before the new files are copied.
+  !ifmacrodef CheckIfAppIsRunning
+    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !endif
+  Call QronosRemoveOwnedPayload
+  ${If} $QronosMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
+  ${EndIf}
   Pop $R9
   Pop $R8
   Pop $R7
+!macroend
+
+; After Tauri's own uninstall steps: remove whatever the installation's file list
+; still names, and the install folder when it is empty. Unlisted files stay.
+!macro NSIS_HOOK_POSTUNINSTALL
+  Call un.QronosRemoveOwnedPayload
+  ${If} $QronosMessage != ""
+    DetailPrint "$QronosMessage"
+  ${EndIf}
+  RMDir "$INSTDIR"
 !macroend

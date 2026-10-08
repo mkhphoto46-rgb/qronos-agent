@@ -17,11 +17,13 @@ builder's statement and is labelled as such.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from build_support import install_manifest as ownership
 from build_support.build_runtime import verify_manifest
 from build_support.desktop_notices import MANIFEST as NOTICE_MANIFEST, NoticeError, verify_notice_output
 from build_support.desktop_prerequisites import (
@@ -34,7 +36,7 @@ PLUGINS_DIR = "$PLUGINSDIR"
 MAIN_EXECUTABLE = "qronos-desktop.exe"
 #: Everything an extracted Qronos installer may contain at its top level.
 EXPECTED_TOP_LEVEL = frozenset({PLUGINS_DIR, MAIN_EXECUTABLE, "uninstall.exe", "qronos-runtime",
-                                "third-party-notices"})
+                                "third-party-notices", ownership.FILE_NAME})
 
 
 def extract_installer(setup: Path, seven_zip: Path, destination: Path,
@@ -48,8 +50,13 @@ def extract_installer(setup: Path, seven_zip: Path, destination: Path,
     return destination
 
 
-def verify_extracted(root: Path, pin: dict[str, Any]) -> dict[str, Any]:
-    """Byte-level checks of an extracted installer; returns the evidence."""
+def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | None = None) -> dict[str, Any]:
+    """Byte-level checks of an extracted installer; returns the evidence.
+
+    With ``install_manifest`` (the ownership manifest the build generated), the
+    shipped manifest must be exactly those bytes and must list exactly the files
+    the installer contains.
+    """
     top_level = sorted(entry.name for entry in root.iterdir())
     unexpected = sorted(set(top_level) - EXPECTED_TOP_LEVEL)
     if unexpected:
@@ -80,7 +87,16 @@ def verify_extracted(root: Path, pin: dict[str, Any]) -> dict[str, Any]:
     except (NoticeError, OSError, ValueError) as error:
         raise PrerequisiteError(f"The installer's third-party-notices do not match their manifest: {error}") from error
     runtime_manifest = runtime / "runtime-manifest.json"
+    shipped = (root / ownership.FILE_NAME).read_bytes()
+    if install_manifest is not None and shipped != install_manifest:
+        raise PrerequisiteError("The installer's install manifest is not the one this build generated.")
+    try:
+        owned_files = ownership.verify_installed_tree(root, shipped)
+    except ownership.InstallManifestError as error:
+        raise PrerequisiteError(str(error)) from error
     return {
+        "installManifestSha256": hashlib.sha256(shipped).hexdigest(),
+        "ownedFiles": owned_files,
         "topLevel": top_level,
         "plugins": sorted(entry.name for entry in plugins.iterdir()),
         "webview2Installer": {"path": f"{PLUGINS_DIR}/{pin['fileName']}", "bytes": pin["bytes"],

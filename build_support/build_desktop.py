@@ -31,6 +31,7 @@ from build_support.desktop_notices import (
     collect_desktop_notices,
     verify_notice_output,
 )
+from build_support import install_manifest
 from build_support.desktop_installer_verify import (
     extract_installer,
     provenance_record,
@@ -195,12 +196,16 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     collect_desktop_notices(notices)
     verify_notice_output(notices)
     wrapper = write_hook_wrapper(work, installer, pin)
+    # Every file this installation will own, so a later upgrade or uninstall removes
+    # exactly these and never a user's file (installer-hooks/qronos-install-root.nsh).
+    ownership = install_manifest.write(work, install_manifest.payload_files(backend, notices, config["productName"]))
     overlay = work / "tauri-overlay.json"
     overlay.write_text(json.dumps({
         "bundle": {
             "resources": {
                 backend.as_posix() + "/": "qronos-runtime/",
                 notices.as_posix() + "/": NOTICE_RESOURCE_TARGET,
+                ownership.as_posix(): install_manifest.FILE_NAME,
             },
             "windows": {"nsis": {"installerHooks": str(wrapper)}},
         },
@@ -243,7 +248,8 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
         embedded = extract_and_hash_payload(kept, seven_zip, work / "payload")
         if embedded != pin["sha256"]:
             raise PrerequisiteError(f"The embedded WebView2 installer SHA-256 {embedded} does not match the pin.")
-        extracted = verify_extracted(extract_installer(kept, seven_zip, work / "x"), pin)
+        extracted = verify_extracted(extract_installer(kept, seven_zip, work / "x"), pin,
+                                     install_manifest=ownership.read_bytes())
         record = provenance_record(setup=kept, root=ROOT, pin=pin, extracted=extracted,
                                    backend_source=backend_source, purpose=purpose, tauri_cli=_tauri_cli_version())
         write_record(work / "installer-provenance.json", record)

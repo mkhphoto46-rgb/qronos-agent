@@ -218,18 +218,78 @@ the Qronos source. None of this has been run on a real machine.
 
 - **Uninstalling keeps Qronos user data.** Removing it is a manual step, which
   privacy-sensitive users need to be told about.
-- **Upgrading:** running a newer installer offers to uninstall the old version
-  first, which is the default choice. If the user declines, files that the new
-  version no longer ships stay in the program folder. The desktop's startup
-  check only confirms the runtime executable, its folder and protocol version,
-  not the full manifest, so such leftovers are not detected.
 - **The same or an older version:** the installer warns and asks; downgrading
   is possible.
-- **Guard:** `build_desktop` refuses a configuration that would move user data
-  into a folder the installer or uninstaller manages. That is a `productName`
-  of "Qronos", which would make the per-user install folder
-  `%LOCALAPPDATA%\Qronos`, or an identifier of "Qronos", which "Delete the
-  application data" would remove.
+- **Build-time guard:** `build_desktop` refuses a configuration that would put
+  user data into a folder the installer or uninstaller manages:
+  - a `productName` that is, or that Windows resolves to, "Qronos" (for
+    example `Qronos.` or `QRONOS~1`), which would make the per-user install
+    folder `%LOCALAPPDATA%\Qronos`;
+  - such an identifier, which "Delete the application data" would remove.
+
+**What the installer enforces**
+
+Every installation carries `qronos-install-manifest.txt`. It lists every file
+the installer puts in the program folder, plus the folders, deepest first.
+`build_desktop` generates it from the runtime and notice manifests. After
+building, it checks that the extracted installer holds exactly the listed
+files.
+
+The installer hook (`installer-hooks/qronos-install-root.nsh`) then enforces
+the following before anything is installed.
+
+- **The install folder must be Qronos's own.** It is compared in its canonical
+  Windows form, so trailing dots or spaces and 8.3 short names cannot slip
+  past. The installer refuses a folder that:
+  - is, sits inside, or contains `%LOCALAPPDATA%\Qronos`;
+  - is, sits inside, or contains `Documents\Qronos` or `Documents\Qronos Files`;
+  - is, sits inside, or contains the `com.qronos.agent` app-data folders;
+  - is, sits inside, or contains `%USERPROFILE%\.ollama`, or the
+    `QRONOS_DATA_ROOT` or `OLLAMA_MODELS` folders;
+  - is the user profile, Documents, Desktop, AppData, `Programs`, Windows or
+    Program Files folder itself;
+  - is a drive's top folder, a drive-relative path, a network share or a
+    device name such as `CON` or `NUL.txt`;
+  - is a junction;
+  - already contains files and has no valid Qronos manifest.
+
+  NSIS itself removes `:` from the install path, so alternate data streams
+  cannot be named.
+- **Replace, never mix.** On an upgrade or reinstall, once Qronos is not
+  running, the hook deletes exactly the files the previous installation's
+  manifest lists. It then removes listed folders that are left empty, and
+  only then are the new files copied. A file that an older version had and the
+  new version does not cannot linger. Files the manifest does not list, such
+  as a user's own, are never touched.
+- **Fail closed.** The removal stops before deleting anything when the manifest:
+  - has any line that is not a plain relative path (with `..`, `:`, `/`, a
+    drive or a leading backslash);
+  - has a header that is not Qronos's;
+  - lists a folder that is a junction.
+
+  If a listed file cannot be deleted, for example because Qronos is still
+  running, the installation stops and the manifest is kept, so running the
+  installer again finishes the job.
+- **Uninstalling** runs the same removal after Tauri's own steps, then removes
+  the program folder only if it is empty.
+
+These rules are exercised by `tests/test_desktop_install_root.py`. It compiles
+the real hook functions into a throwaway probe and runs them against
+disposable fixture folders, standing in for the user's profile, AppData and
+Documents. It never runs the Qronos installer or reads real user folders.
+
+**Limits**
+- An installation from before this manifest existed, such as the 7584 review
+  build, has no manifest. Its folder is refused as "not a Qronos installation"
+  unless Tauri's "uninstall first" choice has emptied it. Uninstall such a
+  build first.
+- The desktop's startup check still confirms only the runtime executable, its
+  folder and protocol version, not every file in the runtime manifest.
+  Stopping at startup when there are stray runtime files belongs to the
+  desktop runtime code, which another worker owns.
+- `CheckIfAppIsRunning` from Tauri's template is used before the removal. It is
+  absent in the probe harness, so the "Qronos is running" path is covered only
+  by a file held open during a probe run, not by a real running app.
 
 ## Updates and rollback
 
