@@ -42,6 +42,8 @@ EXECUTOR_MODULES: tuple[str, ...] = (
     "core.telegram_workflow",
     "core.print_workflow",
     "core.browser_research",
+    # Performs one exact approved typed action, re-asking the gate first.
+    "core.action_broker",
 )
 
 # The one sanctioned route to performing an action.
@@ -85,6 +87,20 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Explorer on a direct Library UI request. It mutates no files: every "
         "Library rename/copy/move/delete goes through core.library_executor, "
         "which reaches the gate."
+    ),
+    "core.supervisor": (
+        "Starts, watches and stops only the bundled Qronos runtime child it "
+        "supervises, with fixed arguments; holds a per-session named mutex. "
+        "It performs no user action and owns no audio, UI or dialog."
+    ),
+    "core.pipe_peer": (
+        "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "
+        "ctypes only to read which process is on the other end of a Qronos pipe."
+    ),
+    "core.uac_launch": (
+        "Starts only the bundled Qronos executable as the Action Broker through "
+        "ShellExecuteExW 'runas', i.e. the normal UAC prompt the user can decline; "
+        "the handle is used only to read its id, wait and read its exit code."
     ),
     "core.windows_power_status": (
         "Calls GetSystemPowerStatus through ctypes only to read whether Windows "
