@@ -86,6 +86,10 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Library rename/copy/move/delete goes through core.library_executor, "
         "which reaches the gate."
     ),
+    "core.pipe_peer": (
+        "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "
+        "ctypes only to read which process is on the other end of a Qronos pipe."
+    ),
     "core.windows_power_status": (
         "Calls GetSystemPowerStatus through ctypes only to read whether Windows "
         "battery saver is on; it fills a structure it owns and changes nothing."
