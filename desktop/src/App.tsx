@@ -311,6 +311,17 @@ function App() {
     [workflowApproval],
   );
 
+  const openWorkflowRecovery = useCallback(() => {
+    void workflowApproval.openRecovery();
+  }, [workflowApproval]);
+
+  const acknowledgeWorkflowAttempt = useCallback(
+    (operationKey: string) => {
+      void workflowApproval.acknowledge(operationKey);
+    },
+    [workflowApproval],
+  );
+
   const [
     fileApprovalSubmitting,
     setFileApprovalSubmitting,
@@ -2645,6 +2656,9 @@ function App() {
         view={workflowApprovalView}
         onAnswer={answerWorkflowApproval}
         onDismissResult={workflowApproval.dismissResult}
+        onOpenRecovery={openWorkflowRecovery}
+        onAcknowledge={acknowledgeWorkflowAttempt}
+        onCloseRecovery={workflowApproval.closeRecovery}
       />
 
       {pendingFileApproval && (

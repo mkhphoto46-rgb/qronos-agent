@@ -32,6 +32,45 @@ const MAX_TEXT = 2000;
 const MAX_DETAIL_TEXT = 1000;
 
 export const APP_WORKFLOW_DECISION_ACTION = "qronos.app_workflow_decision";
+/** Lists attempts with an unclear outcome; with `acknowledge`, releases one. */
+export const APP_WORKFLOW_UNCERTAIN_ACTION = "qronos.app_workflow_uncertain";
+
+const OPERATION_KEY = /^[0-9a-f]{64}$/;
+
+/** An approved attempt whose outcome is unknown; it blocks a repeat until checked. */
+export type UncertainAttempt = { operationKey: string; detail: string; updatedAt: number };
+
+export type UncertainList = { available: boolean; attempts: UncertainAttempt[]; message: string };
+
+export type RecoveryView = UncertainList & { busy: boolean; unconfirmed: boolean };
+
+/** Parse `app_workflow_uncertain`; null when anything is off. */
+export function parseUncertainList(message: string): UncertainList | null {
+  const record = parseObject(message);
+  if (record === null || typeof record.available !== "boolean" || !Array.isArray(record.attempts)) {
+    return null;
+  }
+  if (record.attempts.length > 100) return null;
+  const attempts: UncertainAttempt[] = [];
+  for (const item of record.attempts) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+    const entry = item as Record<string, unknown>;
+    const detail = boundedText(entry.detail ?? "", 500);
+    if (
+      typeof entry.operationKey !== "string" ||
+      !OPERATION_KEY.test(entry.operationKey) ||
+      detail === null ||
+      typeof entry.updatedAt !== "number" ||
+      !Number.isFinite(entry.updatedAt)
+    ) {
+      return null;
+    }
+    attempts.push({ operationKey: entry.operationKey, detail, updatedAt: entry.updatedAt });
+  }
+  const text = boundedText(record.message ?? "", MAX_TEXT);
+  if (text === null) return null;
+  return { available: record.available, attempts, message: text };
+}
 
 export type DetailValue = string | number | boolean | string[];
 
@@ -235,9 +274,11 @@ export type WorkflowApprovalView = {
   unconfirmed: boolean;
   secretRejected: boolean;
   result: WorkflowResult | null;
+  recovery: RecoveryView | null;
 };
 
 type Send = (prompt: WorkflowPrompt, approved: boolean, secret?: string) => Promise<void>;
+type SendRecovery = (acknowledge?: string) => Promise<void>;
 
 export class WorkflowApprovalController {
   private queue: WorkflowPrompt[] = [];
@@ -246,12 +287,17 @@ export class WorkflowApprovalController {
   private unconfirmed = false;
   private secretRejected = false;
   private result: WorkflowResult | null = null;
+  private recovery: RecoveryView | null = null;
   private listeners = new Set<() => void>();
   private view: WorkflowApprovalView = {
-    prompt: null, submitting: false, unconfirmed: false, secretRejected: false, result: null,
+    prompt: null, submitting: false, unconfirmed: false, secretRejected: false, result: null, recovery: null,
   };
 
-  constructor(private readonly send: Send, private readonly onError: (error: unknown) => void) {}
+  constructor(
+    private readonly send: Send,
+    private readonly onError: (error: unknown) => void,
+    private readonly sendRecovery: SendRecovery = async () => {},
+  ) {}
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -268,6 +314,7 @@ export class WorkflowApprovalController {
       unconfirmed: prompt !== null && this.unconfirmed,
       secretRejected: prompt !== null && this.secretRejected,
       result: this.result,
+      recovery: this.recovery,
     };
     for (const listener of this.listeners) listener();
   }
@@ -318,8 +365,54 @@ export class WorkflowApprovalController {
     this.queue = [];
     this.resetDisplayedState();
     this.result = null;
+    this.recovery = null;
     this.publish();
   }
+
+  // ------------------------------------------------ unclear outcomes
+
+  private async requestRecovery(acknowledge?: string): Promise<void> {
+    if (this.recovery?.busy) return;
+    this.recovery = {
+      available: this.recovery?.available ?? true,
+      attempts: this.recovery?.attempts ?? [],
+      message: "",
+      busy: true,
+      unconfirmed: false,
+    };
+    this.publish();
+    try {
+      await this.sendRecovery(acknowledge);
+    } catch (error) {
+      if (this.recovery) {
+        this.recovery = { ...this.recovery, busy: false, unconfirmed: true };
+        this.publish();
+      }
+      this.onError(error);
+    }
+  }
+
+  /** Ask the runtime which attempts need a person's check. */
+  openRecovery = (): Promise<void> => this.requestRecovery();
+
+  /** The person checked this attempt; the runtime releases it and re-lists. */
+  acknowledge = (operationKey: string): Promise<void> => {
+    if (!this.recovery || !this.recovery.attempts.some((item) => item.operationKey === operationKey)) {
+      return Promise.resolve();
+    }
+    return this.requestRecovery(operationKey);
+  };
+
+  recoveryList(list: UncertainList): void {
+    if (this.recovery === null) return; // only answers a request from this window
+    this.recovery = { ...list, busy: false, unconfirmed: false };
+    this.publish();
+  }
+
+  closeRecovery = (): void => {
+    this.recovery = null;
+    this.publish();
+  };
 
   async answer(actionToken: string, approved: boolean, secret?: string): Promise<void> {
     const prompt = this.queue[0];
@@ -356,10 +449,19 @@ export function createWorkflowApprovalController(
   invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>,
   onError: (error: unknown) => void,
 ): WorkflowApprovalController {
-  return new WorkflowApprovalController(async (prompt, approved, secret) => {
-    const action = decisionAction(prompt, approved, secret);
-    await invoke("send_runtime_action", { actionId: action.actionId, data: action.data });
-  }, onError);
+  return new WorkflowApprovalController(
+    async (prompt, approved, secret) => {
+      const action = decisionAction(prompt, approved, secret);
+      await invoke("send_runtime_action", { actionId: action.actionId, data: action.data });
+    },
+    onError,
+    async (acknowledge) => {
+      await invoke("send_runtime_action", {
+        actionId: APP_WORKFLOW_UNCERTAIN_ACTION,
+        data: acknowledge === undefined ? {} : { acknowledge },
+      });
+    },
+  );
 }
 
 /** Route one runtime event; true when it was a workflow event. */
@@ -389,9 +491,19 @@ export function applyWorkflowEvent(
       if (result !== null) controller.finished(result);
       return true;
     }
+    case "app_workflow_uncertain": {
+      const list = parseUncertainList(message);
+      if (list !== null) controller.recoveryList(list);
+      return true;
+    }
     default:
       return false;
   }
+}
+
+/** Outcomes after which the person may need to release a blocked attempt. */
+export function outcomeNeedsCheck(outcome: string): boolean {
+  return outcome === "uncertain" || outcome === "needs_attention";
 }
 
 export function outcomeTitle(outcome: string): string {
