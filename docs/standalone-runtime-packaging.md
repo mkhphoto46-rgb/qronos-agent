@@ -8,20 +8,42 @@ builds retain the source-checkout development path.
 
 ## Build on Windows
 
-Install Python 3.14, Node.js 24 and the Rust/MSVC prerequisites described in
-the existing desktop documentation. Open PowerShell in the Qronos repository
-folder. These commands create a separate build environment, install the
-pinned dependencies, build the backend, exercise its services with a new
-temporary profile, and then build the NSIS installer:
+Install CPython 3.14.8 for Windows x64 from the official python.org
+installer, Node.js 24 and the Rust/MSVC prerequisites described in the
+existing desktop documentation. Release builds of the backend accept only
+CPython 3.14.8 with the exact audited files of that installer. Any other
+version, including a later 3.14 release or a portable/embeddable package, is
+refused before the build starts (see "CPython components" below). CPython
+3.13.13 is also audited and stays usable for local development bundles, but
+only with the explicit `--allow-audited-interpreter` option. Such a bundle's
+manifest records that it was not built with the packaging target.
+
+Open PowerShell in the Qronos repository folder. These commands create a
+separate build environment, install the pinned dependencies, build the
+backend and exercise its services with a new temporary profile:
 
 ```powershell
 py -3.14 -m venv .venv-build
+.\.venv-build\Scripts\python.exe --version
 .\.venv-build\Scripts\python.exe -m pip install -r requirements.txt -r requirements-build.txt
 Set-Location desktop
 npm ci --no-audit --no-fund
 Set-Location ..
 .\.venv-build\Scripts\python.exe -m build_support.build_runtime --destination runtime/package
 .\.venv-build\Scripts\python.exe -m build_support.smoke_runtime --executable runtime/package/qronos-runtime/qronos-runtime.exe --profile runtime/smoke-profile
+```
+
+The `--version` line must print `Python 3.14.8`. If `py -3.14` selects another
+3.14 release, use the full path of the 3.14.8 `python.exe` instead.
+
+Before building the installer for the first time, prepare the pinned WebView2
+prerequisite and 7-Zip on the build machine as described in
+`docs/offline-windows-installer.md`. That one-time preparation is a
+development download on the build machine. The finished installer carries
+its own copy of WebView2, runs it only when WebView2 is missing, and downloads
+nothing on the user's machine. Then build the NSIS installer:
+
+```powershell
 .\.venv-build\Scripts\python.exe -m build_support.build_desktop --backend runtime/package/qronos-runtime
 ```
 
