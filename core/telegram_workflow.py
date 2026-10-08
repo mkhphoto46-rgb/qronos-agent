@@ -68,12 +68,13 @@ from core.app_workflow import (
     WorkflowStopped,
     ApprovalMismatch,
     content_key,
+    grant_for,
     operation_key,
     plan_digest,
 )
 from core.persian_text import normalise
 from core.window_binding import WindowBinder, WindowBinding
-from security.gate import ActionGrant, ActionGrantUnavailable, evaluate, issue_grant
+from security.gate import ActionGrant
 from security.permissions import ActionCategory, PermissionDecision
 
 
@@ -83,15 +84,6 @@ MAX_INSPECTED_MESSAGES = 60
 MAX_CONTACT_NAME = 128
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 180.0
 DEFAULT_POLL_SECONDS = 1.0
-
-# Strength order for consent tiers: a stronger answer covers a weaker need.
-_DECISION_RANK = {
-    PermissionDecision.ALLOW: 0,
-    PermissionDecision.REQUIRE_VOICE_CONFIRMATION: 1,
-    PermissionDecision.REQUIRE_UI_CONFIRMATION: 2,
-    PermissionDecision.REQUIRE_TYPED_SECRET: 3,
-}
-
 
 class TelegramActionNotStarted(WorkflowRefused):
     """The UI refused before Windows was asked to act; nothing happened."""
@@ -187,25 +179,6 @@ class PreparedTelegramDownload:
 
 
 # ----------------------------------------------------------------- grants
-
-
-def grant_for(request: ActionRequest, approved: PermissionDecision) -> ActionGrant:
-    """Issue a grant when the person's answer is at least as strong as needed."""
-    verdict = evaluate(request)
-    if verdict.refused:
-        raise WorkflowRefused(verdict.reason)
-    if verdict.allowed:
-        return issue_grant(request, verdict)
-    needed = _DECISION_RANK.get(verdict.decision)
-    given = _DECISION_RANK.get(approved)
-    if needed is None or given is None or given < needed:
-        raise ApprovalMismatch(
-            f"This step needs {verdict.decision.value}; the answer was {approved.value}."
-        )
-    try:
-        return issue_grant(request, verdict, approval=verdict.decision)
-    except ActionGrantUnavailable as error:
-        raise WorkflowRefused(str(error)) from error
 
 
 def _gui_request(contact: str, purpose: str) -> ActionRequest:

@@ -53,6 +53,8 @@ from core.window_binding import (
     WindowBindingStale,
     WindowSnapshot,
 )
+from core.actions import ActionRequest
+from security.gate import ActionGrant, ActionGrantUnavailable, evaluate, issue_grant
 from security.permissions import PermissionDecision
 
 
@@ -210,6 +212,34 @@ class WorkflowApproval:
                 )
         elif self.evidence_identity_token is not None:
             raise ApprovalMismatch("The approval names a window this step does not use.")
+
+
+# Strength order for consent tiers: a stronger answer covers a weaker need.
+_DECISION_RANK = {
+    PermissionDecision.ALLOW: 0,
+    PermissionDecision.REQUIRE_VOICE_CONFIRMATION: 1,
+    PermissionDecision.REQUIRE_UI_CONFIRMATION: 2,
+    PermissionDecision.REQUIRE_TYPED_SECRET: 3,
+}
+
+
+def grant_for(request: ActionRequest, approved: PermissionDecision) -> ActionGrant:
+    """Issue a grant when the person's answer is at least as strong as needed."""
+    verdict = evaluate(request)
+    if verdict.refused:
+        raise WorkflowRefused(verdict.reason)
+    if verdict.allowed:
+        return issue_grant(request, verdict)
+    needed = _DECISION_RANK.get(verdict.decision)
+    given = _DECISION_RANK.get(approved)
+    if needed is None or given is None or given < needed:
+        raise ApprovalMismatch(
+            f"This step needs {verdict.decision.value}; the answer was {approved.value}."
+        )
+    try:
+        return issue_grant(request, verdict, approval=verdict.decision)
+    except ActionGrantUnavailable as error:
+        raise WorkflowRefused(str(error)) from error
 
 
 # ------------------------------------------------------------------ guard
