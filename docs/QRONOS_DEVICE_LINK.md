@@ -5,7 +5,7 @@
 | Layer | Name | State |
 |---|---|---|
 | Layer 1 | Local Link — phone and PC on the same network | Implemented; verified on Windows 11 |
-| Layer 2 | Relay Link — phone reaches the PC over the internet | PC-side transport, self-hostable relay and the Android protocol core implemented and tested on loopback with real outer TLS (§5.3, §5.4, §5.8). Android app source not compiled (no SDK); no iOS. No relay deployed; not wired into the desktop; no phone has used it |
+| Layer 2 | Relay Link — phone reaches the PC over the internet | PC-side transport, self-hostable relay and the Android protocol core implemented and tested on loopback with real outer TLS (§5.3, §5.4, §5.8). Android app compiled and packaged unsigned without the SDK, never run; no iOS. No relay deployed; not wired into the desktop; no phone has used it |
 
 Layer 1 ships first and is useful on its own. Layer 2 is a transport change on
 top of it, not a redesign. The point of this document is to make that true: the
@@ -760,7 +760,7 @@ cross-process checks are the backstop, not the path.
 | Part | State |
 |---|---|
 | Protocol core, Kotlin (`mobile/android/linkcore`) | Compiled and unit-tested here (kotlinc 2.4.21 and the committed Gradle build); interoperates with the real PC server directly and through the real relay |
-| Android app (`mobile/android/app`) | Source written; **not compiled** — the Android SDK needs a licence acceptance that was not given. Gradle (AGP 9.4.1) evaluated the module and stopped at "SDK location not found" |
+| Android app (`mobile/android/app`) | Compiled against the Android 16 API and packaged as an **unsigned** APK without the Android SDK (aapt2 9.4.1, AOSP-built `android-all`, D8 9.4.28; `mobile/android/tools/check_without_sdk.py`). Not built through Gradle — that needs the SDK licence, which was not accepted — and never run on a phone or emulator |
 | iOS | Not implemented, not supported |
 
 One finding changes §4's "the reference client is the specification the phone
