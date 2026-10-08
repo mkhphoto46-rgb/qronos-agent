@@ -134,8 +134,16 @@ volume. An unreadable signal is recorded as unknown rather than guessed.
 - **Sustained monitor.** Running on battery and a low drive count as load,
   with the same dwell and hysteresis as CPU and GPU. Queued work waits for the
   charger, but "run anyway" can still lift that. Battery saver counts too when
-  a reader supplies it. By default it is reported as unknown, because reading
-  it needs a Win32 call that has not yet been reviewed as system access.
+  Windows reports it (read-only `GetSystemPowerStatus`, in
+  `core/windows_power_status.py`); otherwise it is reported as unknown.
+- **Drive contention.** Free space alone misses a creator workload that
+  saturates a drive with plenty of room left. The sentinel therefore also
+  measures the mean time per completed read or write since the previous
+  reading, from the operating system's I/O counters. At 50 ms or more over
+  at least ten operations a second, the drive counts as load (politeness
+  only), with the same dwell and hysteresis. There is no invented "busy
+  percent". The counters are system-wide, so a Qronos model load counts too;
+  its short burst stays below the dwell.
 - **Foreground model loads.** A battery at or below 20%, or a drive under 5 GiB
   free, is high pressure. A battery at or below 10%, or under 2 GiB free, is
   critical. The existing CPU and GPU thresholds are unchanged.

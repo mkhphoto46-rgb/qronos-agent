@@ -118,6 +118,11 @@ class LoadSample:
     #: Free space on the tightest watched volume, in MiB.
     disk_free_mb: Optional[int] = None
 
+    #: Mean time per completed drive operation since the previous reading.
+    #: None when idle or not measured; ``disk_io_unknown`` says which.
+    disk_io_latency_ms: Optional[float] = None
+    disk_io_unknown: bool = False
+
     #: The signal was asked for and could not be read. Recorded rather than
     #: guessed: an unreadable battery is not an empty one.
     power_unknown: bool = False
@@ -551,7 +556,7 @@ class SustainedLoadMonitor:
         except Exception:
             # The readers never raise; anything reaching here is unexpected,
             # and a sampler that dies takes the queue with it.
-            return {**fields, "power_unknown": True, "disk_unknown": True}
+            return {**fields, "power_unknown": True, "disk_unknown": True, "disk_io_unknown": True}
 
         power = reading.power
 
@@ -565,6 +570,10 @@ class SustainedLoadMonitor:
             "battery_percent": power.battery_percent,
             "battery_saver": power.battery_saver,
             "disk_free_mb": reading.disk_free_mb,
+            "disk_io_latency_ms": (
+                None if reading.disk_activity is None else reading.disk_activity.latency_ms
+            ),
+            "disk_io_unknown": reading.disk_io_unknown,
             "power_unknown": reading.power_unknown,
             "disk_unknown": reading.disk_unknown,
         }

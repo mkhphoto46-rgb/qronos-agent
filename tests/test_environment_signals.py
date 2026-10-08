@@ -178,6 +178,7 @@ def test_reader_takes_a_fresh_reading_every_call(tmp_path):
         battery=lambda: SimpleNamespace(percent=next(levels), power_plugged=False),
         saver=no_saver,
         disk_usage=usage(50_000),
+        disk_activity=lambda: env.DiskActivityReading(available=False),
     )
     assert [reader().power.battery_percent for _ in range(3)] == [90.0, 60.0, 12.0]
 
@@ -186,7 +187,10 @@ def test_reader_survives_a_failing_path_resolver():
     def broken():
         raise RuntimeError("config unavailable")
 
-    reading = EnvironmentReader(watch_paths=broken, battery=lambda: None, saver=no_saver)()
+    reading = EnvironmentReader(
+        watch_paths=broken, battery=lambda: None, saver=no_saver,
+        disk_activity=lambda: env.DiskActivityReading(available=False),
+    )()
     assert reading.disks == () and reading.disk_unknown and not reading.power_unknown
 
 
