@@ -23,6 +23,11 @@ SERVICES = {
     "permissions": "core.permissions_cli",
     "audio": "core.audio_output_cli",
     "doctor": "core.runtime_preflight",
+    # Lifecycle only: keeps the user runtime alive; no audio, UI or dialogs.
+    "supervisor": "core.supervisor",
+    # One exact approved typed action per launch; started through UAC by the
+    # runtime when needed. Refuses everything while no action is registered.
+    "action-broker": "core.action_broker",
 }
 
 
