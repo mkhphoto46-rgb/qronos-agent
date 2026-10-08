@@ -15,7 +15,7 @@ device, model, screen, audio, printer, GPU or phone was used.
 
 | Area | Accepted source | What it is | What it is not |
 |---|---|---|---|
-| Installer update/ownership repairs | chain through `d19cbda` (PR #62 head `1f9e4ee`) | Owned-file manifest, link-safe removal, install root resolved before overlap checks | No current-head NSIS build has been reviewed; clean-machine upgrade/uninstall is deferred |
+| Installer update/ownership repairs | chain through `d19cbda` (PR #62 head `1f9e4ee`) | Owned-file manifest, link-safe removal, install root resolved before overlap checks | No current full installer build has been reviewed; clean-machine upgrade/uninstall is deferred |
 | Authenticated update helper (A8) | `core/local_update.py`, `core/ed25519.py` | Offline verification of owner-signed manifests and a locked, typed store | A library only. It has no update UI, no launch/restart flow, no store-migration architecture and no runtime, desktop or installer caller. Shipped trust is empty, and the owner signing key is a gate |
 | Runtime resource signals (B3) | `5868262` + `bf76118` (PR #63 head `53efed8`) | Bounded resource signals | — |
 | Supervisor and Elevated Action Broker (D8) | `3a2bacf`..`4b8252e`; composition `0308669` | Supervisor, broker and a named-pipe channel with deadline-bounded sends and finite timeouts | `PRODUCTION_ACTIONS` is empty and no product caller or launcher is wired. It elevates nothing today |
@@ -33,7 +33,7 @@ device, model, screen, audio, printer, GPU or phone was used.
 | `test_security_monitor.py` + `test_link_security_integration.py` | `25c9946` | 50 passed, 21 subtests | reviewer |
 | Network inventory + live-device gate + `test_supervisor_ipc.py` | `0308669` | 175 passed | reviewer |
 | IPC + gate + inventory | `0308669` | 125 passed, 60 subtests | Root (not rerun) |
-| E2 desktop tests; Vite build | `0308669` | 98 passed; build passed | Root (not rerun) |
+| E2 desktop tests; Vite build | `25c9946` | 98 passed; build passed | Root (not rerun) |
 | Installer independent harness; installer tests | `d19cbda` | 64/64; 278 passed | reviewer (round 2) |
 | B3 / L4+D9 / D8 / E2 Python, desktop, cargo `--offline` | accepted SHAs above | 66 / 97 / 153 / 213, 29, 36 passed | reviewer (round 2) |
 
@@ -58,8 +58,10 @@ was run in this wrap-up.
     that does not exist.
   - Marking `core.supervisor_ipc` pending reports that it has landed.
   - The marker becomes empty only where Link and D8 are composed together.
-- `config/brains.json` is `4f4bcc3c` on every snapshot, so models, settings,
-  offline rules and `code_analysis` permissions are unchanged.
+- `config/brains.json` is `4f4bcc3c` on every snapshot: specified models and
+  generation settings are unchanged. The paired Device Link and local-pipe
+  grants are recorded in the audited network inventory. The existing
+  `code_analysis` permission policy is preserved.
 
 ## Work still left
 
