@@ -37,7 +37,12 @@ A claimed identity that was not proved - the device id offered in a failed
 handshake - is never anybody's principal.
 
 State is bounded (a fixed number of tracked principals, each window no longer
-than its threshold) and nothing in it is secret: device ids, addresses and
+than its threshold) and nothing in it is secret. The bound is segregated: LAN
+addresses are untrusted and cheap to invent, so they live in a table of their
+own, and filling that table can only ever push out other LAN entries - never
+the relay's, a device's or the system's counters or throttles (review finding
+D9-1: a shared table let a churn of ~1,030 LAN addresses lift a device's and
+the relay's active throttles early). Nothing in either table is secret: device ids, addresses and
 reasons, never keys, route tokens or request contents. Containment and
 quarantine are latched and persisted, so a restart does not quietly undo
 them; only the user, at the PC, resets them. An unreadable state file reads
@@ -64,9 +69,30 @@ from core.append_only_log import AppendOnlyLog
 
 STATE_VERSION = 1
 
-# Principals followed at once. A source cycling addresses makes new ones; the
-# least recently seen is forgotten first, which at worst forgives it early.
-MAX_TRACKED = 1024
+# Principals followed at once, in two tables that never evict each other.
+#
+# LAN addresses are untrusted and anyone on the network can invent more; when
+# their table is full, an expired LAN throttle goes first, then the least
+# recently seen LAN entry - which at worst forgives a LAN address early and
+# never touches anything else.
+MAX_LAN_TRACKED = 1024
+
+# The relay, the system and authenticated devices (two scopes each). None of
+# these can be multiplied by an outsider - a device exists only after pairing
+# at the PC - so this table is not reachable by churn at all; its bound is a
+# backstop, and even then expired throttles go first.
+MAX_OTHER_TRACKED = 256
+
+# The total hard bound on tracked windows, and separately on throttles.
+MAX_TRACKED = MAX_LAN_TRACKED + MAX_OTHER_TRACKED
+
+_LAN = "lan"
+_OTHER = "other"
+_CAPS = {_LAN: MAX_LAN_TRACKED, _OTHER: MAX_OTHER_TRACKED}
+
+
+def _segment(principal: Principal) -> str:
+    return _LAN if principal.kind is PrincipalKind.LAN_PEER else _OTHER
 
 # A throttled LAN address may still try once per this long, so a phone that
 # shares the address with whatever earned the throttle is slowed, not shut out.
@@ -318,8 +344,13 @@ class SecurityMonitor:
         self.incidents = IncidentLog(None if incident_path is None else Path(incident_path))
 
         self._lock = threading.RLock()
-        self._windows: OrderedDict[tuple[Principal, SignalKind], deque[float]] = OrderedDict()
-        self._throttles: OrderedDict[Principal, _Throttle] = OrderedDict()
+        # Segregated by _segment(): LAN churn can only evict LAN entries.
+        self._windows: dict[str, OrderedDict[tuple[Principal, SignalKind], deque[float]]] = {
+            _LAN: OrderedDict(), _OTHER: OrderedDict(),
+        }
+        self._throttles: dict[str, OrderedDict[Principal, _Throttle]] = {
+            _LAN: OrderedDict(), _OTHER: OrderedDict(),
+        }
 
         self.contained = False
         self.contained_reason = ""
@@ -436,13 +467,14 @@ class SecurityMonitor:
         now = self.clock()
 
         with self._lock:
-            throttle = self._throttles.get(principal)
+            table = self._throttles[_segment(principal)]
+            throttle = table.get(principal)
 
             if throttle is None:
                 return True
 
             if now >= throttle.until:
-                del self._throttles[principal]
+                del table[principal]
 
                 return True
 
@@ -457,7 +489,7 @@ class SecurityMonitor:
         now = self.clock()
 
         with self._lock:
-            throttle = self._throttles.get(principal)
+            throttle = self._throttles[_segment(principal)].get(principal)
 
             return throttle is not None and now < throttle.until
 
@@ -483,16 +515,18 @@ class SecurityMonitor:
         escalate: list[tuple[list, str]] = []
 
         with self._lock:
+            segment = _segment(principal)
+            windows = self._windows[segment]
             key = (principal, signal)
-            window = self._windows.pop(key, None)
+            window = windows.pop(key, None)
 
             if window is None:
                 window = deque(maxlen=max(1, policy.threshold))
 
-            self._windows[key] = window
+            windows[key] = window
 
-            while len(self._windows) > MAX_TRACKED:
-                self._windows.popitem(last=False)
+            while len(windows) > _CAPS[segment]:
+                windows.popitem(last=False)
 
             while window and now - window[0] > policy.window:
                 window.popleft()
@@ -507,14 +541,13 @@ class SecurityMonitor:
 
             if policy.response is Response.THROTTLE:
                 until = now + policy.duration
-                current = self._throttles.pop(principal, None)
-                self._throttles[principal] = _Throttle(
+                throttles = self._throttles[segment]
+                current = throttles.pop(principal, None)
+                throttles[principal] = _Throttle(
                     until=max(until, current.until if current else 0.0),
                     next_attempt=now + LAN_RETRY_INTERVAL_SECONDS,
                 )
-
-                while len(self._throttles) > MAX_TRACKED:
-                    self._throttles.popitem(last=False)
+                self._bound_throttles(segment, now)
 
                 self._record(Response.THROTTLE, signal, principal, policy.duration)
 
@@ -526,6 +559,25 @@ class SecurityMonitor:
             self._call(callbacks, reason)
 
         return decision
+
+    def _bound_throttles(self, segment: str, now: float) -> None:
+        """
+        Keep one segment's throttles within its cap, touching no other segment.
+
+        Expired throttles are dropped first. Only if every throttle in the
+        segment is still running is the oldest of them forgiven - and for the
+        LAN segment that is a LAN address, never a device or the relay.
+        """
+
+        throttles = self._throttles[segment]
+
+        while len(throttles) > _CAPS[segment]:
+            expired = next((p for p, t in throttles.items() if now >= t.until), None)
+
+            if expired is not None:
+                del throttles[expired]
+            else:
+                throttles.popitem(last=False)
 
     def _contain_locked(self, signal: SignalKind, principal: Principal, escalate: list) -> Decision:
         if self.contained or self.quarantined:
@@ -589,8 +641,8 @@ class SecurityMonitor:
             self.contained_reason = ""
             self.quarantined = False
             self.quarantine_reason = ""
-            self._throttles.clear()
-            self._windows.clear()
+            for table in (*self._throttles.values(), *self._windows.values()):
+                table.clear()
             self.incidents.append({"at": round(self.wall(), 3), "response": "reset", "by": "console"})
             self._save()
 
@@ -609,7 +661,10 @@ class SecurityMonitor:
                 "quarantined": self.quarantined,
                 "quarantine_reason": self.quarantine_reason,
                 "throttled": sorted(
-                    p.describe() for p, t in self._throttles.items() if now < t.until
+                    p.describe()
+                    for table in self._throttles.values()
+                    for p, t in table.items()
+                    if now < t.until
                 ),
-                "tracked": len(self._windows),
+                "tracked": sum(len(table) for table in self._windows.values()),
             }
