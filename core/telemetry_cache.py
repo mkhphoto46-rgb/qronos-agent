@@ -33,7 +33,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Callable, Optional, Protocol
 
 from core.resource_guard import (
     GpuStatus,
@@ -42,6 +42,9 @@ from core.resource_guard import (
     read_system_status,
     read_system_status_since_last_call,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from core.environment_signals import EnvironmentReading
 
 
 class Clock(Protocol):
@@ -78,6 +81,12 @@ class Snapshot:
     # being served again. A caller showing numbers to a person may want to say
     # so; one making a decision generally should not care.
     stale: bool = False
+
+    # Power and disk, read fresh when the snapshot is prepared for a pressure
+    # decision (core/resource_context.py). Never cached: a battery reading
+    # from thirty seconds ago does not authorize a model load now. None when
+    # nobody asked for it.
+    environment: Optional["EnvironmentReading"] = None
 
     def age(self, now: float) -> float:
         return max(0.0, now - self.taken_at)

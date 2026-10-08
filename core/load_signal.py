@@ -41,6 +41,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Deque, Optional, Protocol
 
+from core.environment_signals import (
+    DEFAULT_ENVIRONMENT_THRESHOLDS,
+    EnvironmentReading,
+    EnvironmentThresholds,
+    environment_decision,
+)
 from core.resource_guard import (
     GpuStatus,
     SystemStatus,
@@ -66,6 +72,9 @@ GpuReader = Callable[[], Optional[GpuStatus]]
 
 #: How much VRAM Qronos itself is holding, in MiB. See ``own_vram_mb`` below.
 OwnUsageReader = Callable[[], int]
+
+#: One fresh power-and-disk reading. See ``core/environment_signals.py``.
+EnvironmentReader = Callable[[], EnvironmentReading]
 
 
 class LoadLevel(Enum):
@@ -97,6 +106,42 @@ class LoadSample:
     #: from the figures above. Kept for the audit trail and the UI.
     own_vram_mb: int = 0
 
+    #: Power and disk, judged separately so the CPU/GPU verdict above keeps
+    #: exactly its existing thresholds. ALLOW when nothing was read.
+    environment_decision: ResourceDecision = ResourceDecision.ALLOW
+
+    #: Running from the battery. None when not known.
+    on_battery: Optional[bool] = None
+    battery_percent: Optional[float] = None
+    battery_saver: Optional[bool] = None
+
+    #: Free space on the tightest watched volume, in MiB.
+    disk_free_mb: Optional[int] = None
+
+    #: The signal was asked for and could not be read. Recorded rather than
+    #: guessed: an unreadable battery is not an empty one.
+    power_unknown: bool = False
+    disk_unknown: bool = False
+
+    #: How far other applications' graphics memory has grown since Qronos
+    #: took its current GPU reservation, in MiB. None without a reservation
+    #: or without a baseline to compare against.
+    external_vram_growth_mb: Optional[int] = None
+
+    @property
+    def physical_vram_free_mb(self) -> Optional[int]:
+        """
+        What is actually free on the card right now.
+
+        ``vram_free_mb`` is computed with Qronos's own share taken off the used
+        figure, which is right for judging *external* pressure and wrong for
+        asking whether another model fits: memory Qronos holds is not free.
+        """
+        if self.vram_free_mb is None:
+            return None
+
+        return max(0, self.vram_free_mb - max(0, self.own_vram_mb))
+
     @property
     def loaded(self) -> bool:
         """
@@ -105,9 +150,13 @@ class LoadSample:
         Anything the resource policy would not wave through counts. WARN is
         deliberately included: the policy grants on WARN because one warm
         reading is not a reason to refuse, but a window that is *mostly* WARN
-        is precisely the sustained pressure this module is looking for.
+        is precisely the sustained pressure this module is looking for. Power
+        and disk count the same way.
         """
-        return self.decision is not ResourceDecision.ALLOW
+        return (
+            self.decision is not ResourceDecision.ALLOW
+            or self.environment_decision is not ResourceDecision.ALLOW
+        )
 
 
 @dataclass(frozen=True)
@@ -234,10 +283,20 @@ class SustainedLoadMonitor:
         read_gpu: GpuReader | None = None,
         own_vram_mb: OwnUsageReader | None = None,
         thresholds: ResourceThresholds = DEFAULT_THRESHOLDS,
+        read_environment: EnvironmentReader | None = None,
+        environment_thresholds: EnvironmentThresholds = DEFAULT_ENVIRONMENT_THRESHOLDS,
+        external_vram_growth_mb: Callable[[], Optional[int]] | None = None,
     ) -> None:
         self.config = config
         self.clock: Clock = clock or time.time
         self.thresholds = thresholds
+
+        # Power and disk. None means this monitor does not watch them (the
+        # tests that predate them, and harnesses); the production monitor in
+        # core/resource_context.py always does.
+        self._read_environment = read_environment
+        self.environment_thresholds = environment_thresholds
+        self._external_vram_growth_mb = external_vram_growth_mb
 
         # The cheap reader, not the blocking one. read_system_status() sleeps
         # for 500 ms inside psutil on every call, which is unacceptable for
@@ -447,8 +506,10 @@ class SustainedLoadMonitor:
     ) -> LoadSample:
         own_mb = max(0, self._own_vram_mb())
         adjusted = self._without_own_usage(gpu, own_mb)
+        environment = self._environment_fields()
 
         return LoadSample(
+            **environment,
             at=self.clock(),
             decision=evaluate_resources(
                 system=system,
@@ -469,6 +530,44 @@ class SustainedLoadMonitor:
             ),
             own_vram_mb=own_mb,
         )
+
+    def _environment_fields(self) -> dict:
+        """Power, disk and external VRAM growth for one sample, read fresh."""
+        fields: dict = {}
+
+        if self._external_vram_growth_mb is not None:
+            try:
+                growth = self._external_vram_growth_mb()
+            except Exception:
+                growth = None
+
+            fields["external_vram_growth_mb"] = growth
+
+        if self._read_environment is None:
+            return fields
+
+        try:
+            reading = self._read_environment()
+        except Exception:
+            # The readers never raise; anything reaching here is unexpected,
+            # and a sampler that dies takes the queue with it.
+            return {**fields, "power_unknown": True, "disk_unknown": True}
+
+        power = reading.power
+
+        return {
+            **fields,
+            "environment_decision": environment_decision(
+                reading,
+                self.environment_thresholds,
+            ),
+            "on_battery": power.on_battery if power.available else None,
+            "battery_percent": power.battery_percent,
+            "battery_saver": power.battery_saver,
+            "disk_free_mb": reading.disk_free_mb,
+            "power_unknown": reading.power_unknown,
+            "disk_unknown": reading.disk_unknown,
+        }
 
     @staticmethod
     def _without_own_usage(
