@@ -390,7 +390,9 @@ class AppWorkflowCoordinator:
                 self._finish(request_id, PHASE_PRINT, "refused",
                              "چاپگر پیش‌فرضی پیدا نشد. نام دقیق چاپگر را بگویید.", "no default printer")
                 return
-            prepared = self._print().prepare(PrintRequest(path, printer, copies=intent.copies))
+            prepared = self._print().prepare(PrintRequest(
+                path, printer, copies=intent.copies, color=intent.color, pages=intent.pages,
+            ))
         except WorkflowError as error:
             self._finish(request_id, PHASE_PRINT, "refused", _refusal_fa(error), str(error))
             return
@@ -408,15 +410,16 @@ class AppWorkflowCoordinator:
                 "size": prepared.size,
                 "sha256": prepared.sha256,
                 "printer": prepared.printer.name + default_note,
-                "copies": 1,
-                "color": "پیش‌فرض چاپگر",
-                "pages": "همه صفحه‌ها",
+                "copies": prepared.options.copies,
+                "color": _COLOR_FA[prepared.options.color],
+                "pages": _pages_fa(prepared.options.describe_pages()),
                 "handler": prepared.handler,
                 "warnings": list(prepared.warnings),
             },
         ), (
-            f"فایل «{prepared.file_path.name}» یک بار با چاپگر «{prepared.printer.name}»{default_note} "
-            "چاپ شود؟ (یک نسخه، رنگ پیش‌فرض چاپگر، همه صفحه‌ها) برای تأیید، رمز تأیید را وارد کنید."
+            f"فایل «{prepared.file_path.name}» با چاپگر «{prepared.printer.name}»{default_note} "
+            f"چاپ شود؟ ({prepared.options.copies} نسخه، {_COLOR_FA[prepared.options.color]}، "
+            f"{_pages_fa(prepared.options.describe_pages())}) برای تأیید، رمز تأیید را وارد کنید."
         ))
 
     def _print_submit(self, step: PendingWorkflowStep, approval) -> None:
@@ -505,6 +508,13 @@ class AppWorkflowCoordinator:
             "detail": detail,
             "result": result or {},
         }))
+
+
+_COLOR_FA = {"default": "رنگ پیش‌فرض چاپگر", "color": "رنگی", "monochrome": "سیاه و سفید"}
+
+
+def _pages_fa(description: str) -> str:
+    return "همه صفحه‌ها" if description == "all" else f"صفحه‌های {description}"
 
 
 def _refusal_fa(error: Exception) -> str:

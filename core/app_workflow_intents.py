@@ -33,6 +33,8 @@ class PrintIntent:
     file_reference: str
     printer: str | None  # None: the person did not name one; the default must be confirmed
     copies: int = 1
+    color: str = "default"  # "default", "color" or "monochrome"
+    pages: str = "all"      # "all" or ranges such as "1-3,5"
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,35 @@ def _telegram(raw: str) -> WorkflowIntent:
     )
 
 
+_MONOCHROME = re.compile(
+    r"(?:(?:\bin\s+)?\bblack\s*(?:and|&)\s*white\b|\bmonochrome\b|\bgr[ae]yscale\b|سیاه\s*(?:و\s*)?\u200c?سفید|تک\u200c?رنگ)",
+    re.IGNORECASE,
+)
+_COLOUR = re.compile(r"(?:\bin\s+colou?r\b|\bcolou?r\b|رنگی)", re.IGNORECASE)
+_EN_PAGES = re.compile(
+    r"\bpages?\s+(\d{1,4})(?:\s*(?:-|to|through)\s*(\d{1,4}))?", re.IGNORECASE,
+)
+_FA_PAGES = re.compile(r"صفحه(?:\u200c?های|\s+های)?\s+(\d{1,4})(?:\s*(?:تا|-)\s*(\d{1,4}))?")
+
+
+def _options(raw: str) -> tuple[str, str, str] | WorkflowClarification:
+    """(text without option phrases, colour, pages) or a clarification."""
+    monochrome = _MONOCHROME.search(raw)
+    text = _MONOCHROME.sub(" ", raw)
+    colour = _COLOUR.search(text)
+    if monochrome and colour:
+        return WorkflowClarification("هم رنگی و هم سیاه‌وسفید گفته شد؛ یکی را انتخاب کنید.")
+    text = _COLOUR.sub(" ", text)
+    ranges = []
+    for pattern in (_EN_PAGES, _FA_PAGES):
+        for match in pattern.finditer(text):
+            start, end = match.group(1), match.group(2) or match.group(1)
+            ranges.append(f"{start}-{end}" if start != end else start)
+        text = pattern.sub(" ", text)
+    color = "monochrome" if monochrome else "color" if colour else "default"
+    return " ".join(text.split()), color, (",".join(ranges) if ranges else "all")
+
+
 def _copies(raw: str) -> int | None:
     match = _COPIES.search(raw)
     if not match:
@@ -141,6 +172,10 @@ def _copies(raw: str) -> int | None:
 
 def _print(raw: str) -> WorkflowIntent:
     copies = _copies(raw)
+    parsed_options = _options(raw)
+    if isinstance(parsed_options, WorkflowClarification):
+        return parsed_options
+    raw, color, pages = parsed_options
     quoted = [_clean(item) for item in _QUOTED.findall(raw) if _clean(item)]
     file_reference = printer = None
     if len(quoted) == 2:
@@ -173,4 +208,4 @@ def _print(raw: str) -> WorkflowIntent:
         return WorkflowClarification("کدام فایل را چاپ کنم؟ نام یا مسیر دقیق آن را بگویید.")
     if copies is None:
         return WorkflowClarification("تعداد نسخه‌ها را با عدد بگویید.")
-    return PrintIntent(file_reference=file_reference, printer=printer, copies=copies)
+    return PrintIntent(file_reference=file_reference, printer=printer, copies=copies, color=color, pages=pages)

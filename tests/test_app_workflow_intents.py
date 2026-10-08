@@ -68,3 +68,21 @@ def test_print_without_a_file_asks_which_file(text):
 ])
 def test_unrelated_sentences_are_not_workflows(text):
     assert parse_workflow_intent(text) is None
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("print report.pdf pages 1-3 in black and white on Office Laser",
+     PrintIntent("report.pdf", "Office Laser", color="monochrome", pages="1-3")),
+    ("فایل report.pdf را صفحه ۲ تا ۴ رنگی با چاپگر «Office Laser» چاپ کن",
+     PrintIntent("report.pdf", "Office Laser", color="color", pages="2-4")),
+    ("print report.pdf page 5 in colour", PrintIntent("report.pdf", None, color="color", pages="5")),
+    ("فایل گزارش را سیاه و سفید دو نسخه چاپ کن", PrintIntent("گزارش", None, copies=2, color="monochrome")),
+    ("print notes.txt pages 2-3 on Office Laser", PrintIntent("notes.txt", "Office Laser", pages="2-3")),
+])
+def test_print_options_are_extracted_and_removed_from_the_file_name(text, expected):
+    assert parse_workflow_intent(text) == expected
+
+
+def test_contradictory_colour_requests_ask_instead_of_guessing():
+    result = parse_workflow_intent("print report.pdf in colour and black and white")
+    assert isinstance(result, WorkflowClarification) and "رنگی" in result.question

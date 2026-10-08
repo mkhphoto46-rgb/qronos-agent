@@ -288,3 +288,20 @@ def test_a_page_on_another_host_is_reported_uncertain_without_its_text(tmp_path)
 def test_without_a_browser_workflow_navigation_is_not_captured(tmp_path):
     h = Harness(tmp_path)
     assert h.coordinator.try_begin("open https://example.org/docs", "w1") is None
+
+
+def test_print_options_from_the_request_are_shown_for_approval_and_applied(tmp_path):
+    from tests.test_print_workflow import FakeRenderer
+
+    h = Harness(tmp_path)
+    renderer = FakeRenderer(h.spooler)
+    h.printer._renderer = renderer
+    h.coordinator.try_begin("print report.pdf pages 1-2 in black and white 2 copies on Office Laser", "p1")
+    prompt = h.last("app_workflow_approval_required")
+    assert prompt["details"]["copies"] == 2
+    assert prompt["details"]["color"] == "سیاه و سفید"
+    assert prompt["details"]["pages"] == "صفحه‌های 1-2"
+    assert "2 نسخه" in prompt["message"]
+    h.coordinator.resolve(prompt["actionToken"], approved=True, secret=SECRET)
+    assert h.last("app_workflow_finished")["outcome"] == "succeeded"
+    assert renderer.started == [("report.pdf", "Office Laser", {"copies": 2, "color": "monochrome", "pages": "1-2"})]
