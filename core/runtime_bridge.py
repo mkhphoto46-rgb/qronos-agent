@@ -10132,10 +10132,22 @@ def _link_device_name(data: dict[str, Any]) -> str:
 
     value = value.strip()
 
-    if len(value) > 40 or any(not character.isprintable() for character in value):
+    if len(value) > 40 or any(_refused_name_character(character) for character in value):
         raise LinkRequestError("invalid_request")
 
     return value
+
+
+def _refused_name_character(character: str) -> bool:
+    """Control, line-break and bidi-override characters; Persian joiners are fine."""
+    code = ord(character)
+    return (
+        code < 0x20
+        or 0x7F <= code <= 0x9F
+        or code in (0x2028, 0x2029)
+        or 0x202A <= code <= 0x202E
+        or 0x2066 <= code <= 0x2069
+    )
 
 
 def handle_link_action(

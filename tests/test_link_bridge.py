@@ -300,6 +300,8 @@ def test_the_bridge_starts_the_link_after_runtime_ready_without_preparing_voice(
     ("qronos.link_pair_open", {"requestNonce": "short", "name": "x"}),
     ("qronos.link_pair_open", {"requestNonce": NONCE, "name": "x" * 41}),
     ("qronos.link_pair_open", {"requestNonce": NONCE, "name": "bad\u0007name"}),
+    ("qronos.link_pair_open", {"requestNonce": NONCE, "name": "evil" + chr(0x202E) + "gpj.exe"}),
+    ("qronos.link_pair_open", {"requestNonce": NONCE, "name": "two" + chr(0x2028) + "lines"}),
     ("qronos.link_pair_open", {"requestNonce": NONCE, "name": 5}),
     ("qronos.link_pair_open", {"requestNonce": NONCE, "extra": True}),
     ("qronos.link_revoke", {"deviceId": "ABCDEF0123456789"}),
@@ -325,6 +327,15 @@ def test_malformed_requests_are_refused_before_anything_happens(bridge, action, 
     assert bridge.last("link_error") == {"action": action, "code": "invalid_request"}
     bridge.action("qronos.link_devices", {})
     assert bridge.last("link_devices") == before
+
+
+def test_a_persian_name_with_a_zero_width_non_joiner_is_accepted(bridge):
+    bridge.enable()
+    bridge.runtime.start_device_link()
+    name = "گوشی" + chr(0x200C) + "ها"
+    bridge.action("qronos.link_pair_open", {"requestNonce": NONCE, "name": name})
+    assert bridge.last("link_error") is None
+    assert bridge.last("link_devices")[0]["name"] == name
 
 
 def test_remote_access_cannot_be_switched_on_or_a_relay_set_before_the_wan_gate(bridge, tmp_path):
