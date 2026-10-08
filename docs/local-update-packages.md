@@ -106,7 +106,11 @@ The store refuses:
 - an update folder, staging folder or any folder above them that is a link or
   junction;
 - a state file that names files the store did not create, or that is not
-  strictly typed and bounded (at most 256 KiB, 50 history entries);
+  strictly typed and bounded (at most 256 KiB, 50 history entries). Every
+  field's type is checked first: `schema` must be the integer 1, not `true`
+  or `1.0`, and a list or object where a string belongs is refused. The file
+  is read with a hard bound of 256 KiB + 1 byte, not after a size check, and
+  only through a handle to the same plain, single-link file that was checked;
 - any destination file, state file or lock file that is a link, is not a
   regular file or has another hard link. Such a file is never written
   through.

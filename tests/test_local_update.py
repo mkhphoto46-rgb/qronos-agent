@@ -562,25 +562,81 @@ def _too_long_history(state: dict) -> None:
     state["history"] = state["history"] * 51
 
 
-@pytest.mark.parametrize("damage", [
-    lambda s: s.update(phase="staged"),          # phase without a staged record
-    lambda s: s.update(history="many"),
-    lambda s: s.update(history=[{"kind": "upgrade"}]),
-    lambda s: s.update(securityFloor=7),
-    lambda s: s.update(extra=True),
-    _too_long_history,
-])
-def test_a_malformed_state_file_is_refused(tmp_path, damage):
+def full_state(tmp_path: Path) -> tuple[LocalUpdateStore, dict]:
+    """A store whose state has a staged record, a previous record and one history entry."""
     store, manifest, installer, keys = stage_fixture(tmp_path)
     store.stage(manifest, installer, keys, "0.1.0", 3)
     store.confirm("0.2.0")
+    store.stage(manifest, installer, keys, "0.2.0", 3)  # a repair: staged again
     state = json.loads(store.state_path.read_text(encoding="utf-8"))
+    assert state["staged"] and state["previous"] and len(state["history"]) == 1
+    return store, state
+
+
+def _set(*path_and_value):
+    *path, value = path_and_value
+
+    def damage(state: dict) -> None:
+        target = state
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+    return damage
+
+
+# Wrong values, and above all wrong TYPES in every field: lists and dicts are unhashable
+# and used to escape as TypeError from a frozenset membership test.
+STATE_DAMAGE = {
+    "phase without a staged record": _set("staged", None),
+    "history not a list": _set("history", "many"),
+    "history entry missing fields": _set("history", [{"kind": "upgrade"}]),
+    "too long history": _too_long_history,
+    "unknown field": _set("extra", True),
+    "schema True": _set("schema", True),
+    "schema 1.0": _set("schema", 1.0),
+    "schema '1'": _set("schema", "1"),
+    "schema 2": _set("schema", 2),
+    "phase list": _set("phase", ["staged"]),
+    "phase dict": _set("phase", {"staged": 1}),
+    "phase unknown": _set("phase", "installing"),
+    "floor number": _set("securityFloor", 7),
+    "floor list": _set("securityFloor", ["0.2.0"]),
+    "staged list": _set("staged", ["record"]),
+    "staged kind list": _set("staged", "kind", ["upgrade"]),
+    "staged kind dict": _set("staged", "kind", {"upgrade": True}),
+    "staged kind unknown": _set("staged", "kind", "downgrade"),
+    "staged version list": _set("staged", "version", ["0.2.0"]),
+    "staged floor dict": _set("staged", "securityFloor", {}),
+    "staged sha list": _set("staged", "packageSha256", ["0" * 64]),
+    "staged key id number": _set("staged", "keyId", 7),
+    "staged package file list": _set("staged", "packageFile", ["x.exe"]),
+    "staged manifest file dict": _set("staged", "manifestFile", {}),
+    "staged package name list": _set("staged", "packageName", []),
+    "staged bytes True": _set("staged", "packageBytes", True),
+    "staged bytes float": _set("staged", "packageBytes", 5.0),
+    "staged bytes string": _set("staged", "packageBytes", "5"),
+    "previous kind list": _set("previous", "kind", ["repair"]),
+    "history kind dict": _set("history", 0, "kind", {"upgrade": 1}),
+    "history from list": _set("history", 0, "fromVersion", ["0.1.0"]),
+    "history entry list": _set("history", 0, ["upgrade"]),
+}
+
+
+@pytest.mark.parametrize("damage", STATE_DAMAGE.values(), ids=STATE_DAMAGE.keys())
+def test_a_malformed_state_file_is_refused(tmp_path, damage):
+    store, state = full_state(tmp_path)
     damage(state)
     store.state_path.write_text(json.dumps(state), encoding="utf-8")
 
-    with pytest.raises(UpdateError) as refused:
+    with pytest.raises(UpdateError) as refused:  # a TypeError here would fail the test
         store.state()
-    assert refused.value.code in ("store", "invalid_version")
+    assert refused.value.code == "store"
+
+
+def test_the_full_state_used_for_damage_is_itself_accepted(tmp_path):
+    store, state = full_state(tmp_path)
+    store.state_path.write_text(json.dumps(state), encoding="utf-8")
+    assert store.state() == state
 
 
 def test_an_oversized_state_file_is_refused(tmp_path):
@@ -590,6 +646,80 @@ def test_an_oversized_state_file_is_refused(tmp_path):
 
     with pytest.raises(UpdateError, match="too large"):
         store.state()
+
+
+def test_the_state_file_is_read_with_a_hard_bound_whatever_its_size(tmp_path, monkeypatch):
+    """No stat-then-read: a file that grows after any size check is still read at most limit + 1 bytes."""
+    store, *_ = stage_fixture(tmp_path)
+    store.root.mkdir(parents=True)
+    store.state_path.write_bytes(b" " * (4 * 1024 * 1024))
+    requested = []
+    real_fdopen = os.fdopen
+
+    class Spy:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.stream.close()
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size=-1):
+            requested.append(size)
+            return self.stream.read(size)
+
+    monkeypatch.setattr(local_update.os, "fdopen", lambda *a, **k: Spy(real_fdopen(*a, **k)))
+    with pytest.raises(UpdateError, match="too large"):
+        store.state()
+    assert requested == [256 * 1024 + 1]
+
+
+def _swap_state_on_open(store: LocalUpdateStore, monkeypatch, times: int) -> list:
+    """Replace the state file by a different file right before the store opens it."""
+    real_open = os.open
+    swaps = []
+
+    def swapping_open(path, *args, **kwargs):
+        if Path(path) == store.state_path and len(swaps) < times:
+            replacement = store.root / f"replacement-{len(swaps)}"
+            replacement.write_bytes(store.state_path.read_bytes())
+            os.replace(replacement, store.state_path)
+            swaps.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(local_update.os, "open", swapping_open)
+    return swaps
+
+
+def test_a_state_file_replaced_between_check_and_open_is_checked_again(tmp_path, monkeypatch):
+    store, state = full_state(tmp_path)
+    swaps = _swap_state_on_open(store, monkeypatch, times=1)
+
+    assert store.state() == state  # an ordinary atomic save in between: the new file is checked and read
+    assert len(swaps) == 1
+
+
+def test_a_state_file_that_keeps_being_replaced_is_not_read(tmp_path, monkeypatch):
+    store, _ = full_state(tmp_path)
+    _swap_state_on_open(store, monkeypatch, times=99)
+
+    with pytest.raises(UpdateError) as refused:
+        store.state()
+    assert refused.value.code == "busy"
+
+
+def test_an_oversized_manifest_is_refused_by_a_bounded_read(tmp_path):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    manifest.write_bytes(manifest.read_bytes() + b" " * (64 * 1024))
+
+    with pytest.raises(UpdateError, match="too large"):
+        store.stage(manifest, installer, keys, "0.1.0", 3)
+    assert not store.root.exists()
 
 
 def test_history_is_capped(tmp_path):

@@ -295,9 +295,12 @@ def _is_link(path: Path) -> bool:
 def _read_chosen_file(path: Path, limit: int, what: str) -> bytes:
     if _is_link(path) or not path.is_file():
         raise UpdateError("not_a_file", f"The chosen {what} is missing, not a regular file or a link.")
-    if path.stat().st_size > limit:
+    # At most limit + 1 bytes are read, whatever size was reported or however the file grows.
+    with open(path, "rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
         raise UpdateError("malformed", f"The chosen {what} is too large.")
-    return path.read_bytes()
+    return data
 
 
 def _hash_package(path: Path) -> tuple[int, str]:
@@ -381,33 +384,52 @@ def _unsafe_file(path: Path) -> str | None:
     return None
 
 
+def _state_error() -> UpdateError:
+    return UpdateError("store", "The update state file is not understood; nothing was changed.")
+
+
+def _matches(pattern: re.Pattern[str], value: Any) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _check_version(value: Any) -> None:
+    try:
+        parse_version(value)
+    except UpdateError:
+        raise _state_error() from None
+
+
+# Every field's type is checked before any membership test, comparison or pattern, so a
+# list, dict, number or boolean in the wrong place is an UpdateError, never a TypeError.
 def _check_record(record: Any, fields: frozenset[str]) -> None:
     if not isinstance(record, dict) or set(record) != fields:
-        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
-    if record["kind"] not in _KINDS or not isinstance(record["packageSha256"], str) \
-            or not _SHA256.fullmatch(record["packageSha256"]) \
-            or not isinstance(record["keyId"], str) or not _KEY_ID.fullmatch(record["keyId"]):
-        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
+        raise _state_error()
+    if not isinstance(record["kind"], str) or record["kind"] not in _KINDS \
+            or not _matches(_SHA256, record["packageSha256"]) or not _matches(_KEY_ID, record["keyId"]):
+        raise _state_error()
     for name in ("version", "fromVersion") + (("securityFloor",) if "securityFloor" in record else ()):
-        parse_version(record[name])
+        _check_version(record[name])
     if fields == _RECORD_FIELDS:
         digest = record["packageSha256"]
-        if record["packageFile"] != f"{digest}.exe" or record["manifestFile"] != f"{digest}.json" \
-                or not isinstance(record["packageName"], str) or not _PACKAGE_NAME.fullmatch(record["packageName"]) \
+        if not isinstance(record["packageFile"], str) or record["packageFile"] != f"{digest}.exe" \
+                or not isinstance(record["manifestFile"], str) or record["manifestFile"] != f"{digest}.json" \
+                or not _matches(_PACKAGE_NAME, record["packageName"]) \
                 or type(record["packageBytes"]) is not int or not 0 < record["packageBytes"] <= _MAX_PACKAGE_BYTES:
             raise UpdateError("store", "The update state names a file this store did not create.")
 
 
 def _check_state(state: Any) -> dict[str, Any]:
     """A strictly typed, bounded state document, or UpdateError."""
-    if not isinstance(state, dict) or set(state) != _STATE_FIELDS or state["schema"] != 1 \
-            or state["phase"] not in _PHASES or not isinstance(state["history"], list) \
-            or len(state["history"]) > _HISTORY_LIMIT:
-        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
+    if not isinstance(state, dict) or set(state) != _STATE_FIELDS:
+        raise _state_error()
+    if type(state["schema"]) is not int or state["schema"] != 1 \
+            or not isinstance(state["phase"], str) or state["phase"] not in _PHASES \
+            or not isinstance(state["history"], list) or len(state["history"]) > _HISTORY_LIMIT:
+        raise _state_error()
     if state["securityFloor"] is not None:
-        parse_version(state["securityFloor"])
+        _check_version(state["securityFloor"])
     if (state["phase"] == "idle") != (state["staged"] is None):
-        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
+        raise _state_error()
     for name in ("staged", "previous"):
         if state[name] is not None:
             _check_record(state[name], _RECORD_FIELDS)
@@ -537,16 +559,43 @@ class LocalUpdateStore:
         if not os.path.lexists(self.state_path):
             return {"schema": 1, "phase": "idle", "securityFloor": None, "staged": None, "previous": None,
                     "history": []}
-        problem = _unsafe_file(self.state_path)
-        if problem:
-            raise UpdateError("store", f"The update state file {problem}; nothing was changed.")
-        if self.state_path.stat().st_size > _STATE_FILE_LIMIT:
-            raise UpdateError("store", "The update state file is too large; nothing was changed.")
+        data = self._read_state_bytes()
         try:
-            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            state = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise UpdateError("store", "The update state file is not understood; nothing was changed.") from error
+            raise _state_error() from error
         return _check_state(state)
+
+    def _read_state_bytes(self) -> bytes:
+        """The state file's bytes: this store's own plain file, read with a hard bound.
+
+        The handle that is read must be the very file checked by lstat (same file id,
+        a regular file with one link), so a file swapped for a link between the check
+        and the open is not read. A swap by an ordinary atomic save is retried.
+        """
+        for _ in range(3):
+            problem = _unsafe_file(self.state_path)
+            if problem:
+                raise UpdateError("store", f"The update state file {problem}; nothing was changed.")
+            try:
+                checked = os.lstat(self.state_path)
+                handle = os.open(self.state_path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                                 | getattr(os, "O_NOINHERIT", 0))
+            except OSError as error:
+                raise UpdateError("store", "The update state file could not be read; nothing was changed.") \
+                    from error
+            with os.fdopen(handle, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+                    continue
+                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                    raise UpdateError("store", "The update state file is not this store's own file; "
+                                               "nothing was changed.")
+                data = stream.read(_STATE_FILE_LIMIT + 1)
+            if len(data) > _STATE_FILE_LIMIT:
+                raise UpdateError("store", "The update state file is too large; nothing was changed.")
+            return data
+        raise UpdateError("busy", "The update state file kept changing while it was read; try again.")
 
     def state(self) -> dict[str, Any]:
         self._check_folders()
