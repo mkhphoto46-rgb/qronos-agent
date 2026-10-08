@@ -1029,10 +1029,14 @@ class QueueScheduler:
             except KeyError:
                 task = None
 
-            if entry is not None and result.outcome is not WorkOutcome.DEFERRED:
-                # Finished, failed or cancelled before the stop took effect:
-                # what it did stands, and nothing is left to requeue.
-                entry.preempted = None
+            # A safety stop is consumed exactly once, whatever the outcome:
+            # attributed if the work went back in line, and otherwise simply
+            # dropped (it finished, failed or was cancelled before the stop
+            # took effect, and what it did stands). Nothing stale is left for
+            # the next run to be misattributed to.
+            pending = None
+            if entry is not None:
+                pending, entry.preempted = entry.preempted, None
 
             if entry is None or task is None:
                 summary = ""
@@ -1041,12 +1045,11 @@ class QueueScheduler:
                 # announced; what is new is only that the machine is free.
                 entry.finished_at = self.clock()
                 summary = task.summary
-            elif result.outcome is WorkOutcome.DEFERRED and entry.preempted is not None:
+            elif result.outcome is WorkOutcome.DEFERRED and pending is not None:
                 # Stopped by the safety floor rather than by its own choice.
                 # Not the task's fault, so the attempt does not count, and the
                 # floor's resume lines apply before it may start again.
-                verdict = entry.preempted
-                entry.preempted = None
+                verdict = pending
                 self.queue.requeue(task_id, count_attempt=False)
                 hold_reason = HoldReason.SAFETY_FLOOR
                 entry.started_at = None
@@ -1154,45 +1157,77 @@ class QueueScheduler:
         self._running_refused = True
         stopped: list[_Entry] = []
         unstoppable: list[_Entry] = []
+        cannot_stop = (
+            " This task cannot be stopped safely while it runs, so it is left "
+            "to finish."
+        )
 
         for entry in running:
-            if entry.preempted is not None:
-                continue  # already asked to stop; waiting for it to return
-
             stop = getattr(entry.work, "pause", None)
 
-            if not callable(stop):
-                if entry.task_id not in self._unstoppable_notified:
-                    self._unstoppable_notified.add(entry.task_id)
-                    unstoppable.append(entry)
-                continue
+            with self._lock:
+                if entry.preempted is not None:
+                    continue  # already asked to stop; waiting for it to return
 
-            if stop() is False:
-                continue  # committed its answer; it finishes as it is
+                if not callable(stop):
+                    if entry.task_id not in self._unstoppable_notified:
+                        self._unstoppable_notified.add(entry.task_id)
+                        entry.detail = verdict.message() + cannot_stop
+                        unstoppable.append(entry)
+                    continue
 
-            stopped.append(entry)
-
-        with self._lock:
-            for entry in stopped:
+                # Attribute the stop BEFORE asking for it. A pause that reports
+                # its deferral inline, or a worker fast enough to beat this
+                # thread, must find the safety verdict already in place.
+                previous = (entry.hold, entry.detail)
                 entry.preempted = verdict
                 entry.hold = HoldReason.SAFETY_FLOOR
                 entry.detail = verdict.message()
 
-            for entry in unstoppable:
-                entry.detail = (
-                    verdict.message()
-                    + " This task cannot be stopped safely while it runs, so "
-                    "it is left to finish."
-                )
+            raised = False
+            try:
+                accepted = stop()
+            except Exception:
+                raised, accepted = True, None
 
-            if stopped or unstoppable:
+            with self._lock:
+                still_pending = entry.preempted is verdict
+
+                if not raised and accepted is False:
+                    # Committed its answer; it finishes as it is. Withdraw the
+                    # attribution unless its outcome already consumed it.
+                    if still_pending:
+                        entry.preempted = None
+                        entry.hold, entry.detail = previous
+                    continue
+
+                if raised:
+                    # The pause itself failed. The tick goes on; the work is
+                    # left to finish and the user is told once per breach.
+                    if still_pending:
+                        entry.preempted = None
+                        entry.hold = previous[0]
+                    if entry.task_id not in self._unstoppable_notified:
+                        self._unstoppable_notified.add(entry.task_id)
+                        entry.detail = verdict.message() + cannot_stop
+                        unstoppable.append(entry)
+                    continue
+
+            stopped.append(entry)
+
+        if stopped or unstoppable:
+            with self._lock:
                 self._bump()
 
         for entry in stopped + unstoppable:
+            try:
+                summary = self.queue.get(entry.task_id).summary
+            except KeyError:
+                continue
             self._emit(
                 QueueEventType.HOLD_STATE,
                 task_id=entry.task_id,
-                summary=self.queue.get(entry.task_id).summary,
+                summary=summary,
                 reason=HoldReason.SAFETY_FLOOR,
                 detail=entry.detail,
                 floor=verdict,

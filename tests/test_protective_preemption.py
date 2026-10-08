@@ -206,3 +206,150 @@ def test_work_that_already_committed_its_answer_finishes():
 def test_preemption_needs_at_least_one_reading():
     with pytest.raises(ValueError):
         SchedulerConfig(preempt_after_samples=0)
+
+
+# ------------------------------------- B3-1 / B3-2: pause races and failures
+
+
+class InlineReportingWork(PausableWork):
+    """pause() closes the run and reports DEFERRED before returning, as a synchronous worker can."""
+
+    def __init__(self, outcome=WorkOutcome.DEFERRED, answer=True):
+        super().__init__()
+        self.scheduler = None
+        self.task_id = None
+        self.outcome = outcome
+        self.answer = answer
+
+    def pause(self):
+        self.pauses += 1
+        self.scheduler.report_outcome(self.task_id, WorkResult(self.outcome, "paused", hold=HoldReason.PAUSED))
+        return self.answer
+
+
+def inline_started(scheduler, work):
+    work.scheduler = scheduler
+    task_id = started(scheduler, work)
+    work.task_id = task_id
+    return task_id
+
+
+def breach(scheduler, machine):
+    machine.sample = reading(on_battery=True, battery_percent=8.0)
+    scheduler.tick()
+    scheduler.tick()
+
+
+def test_an_inline_reported_pause_is_attributed_to_the_floor_exactly_once():
+    clock = FakeClock()
+    machine = Machine(clock)
+    scheduler, _ = a_scheduler(clock, machine)
+    work = InlineReportingWork()
+    task_id = inline_started(scheduler, work)
+    breach(scheduler, machine)
+
+    task = scheduler.queue.get(task_id)
+    assert work.pauses == 1 and task.state is TaskState.QUEUED and task.attempts == 0
+    assert scheduler.view().tasks[0]["heldReason"] == HoldReason.SAFETY_FLOOR.value
+    assert scheduler._entries[task_id].preempted is None  # consumed, nothing stale
+
+    machine.sample = reading(on_battery=True, battery_percent=12.0)
+    scheduler.tick()
+    assert scheduler.queue.get(task_id).state is TaskState.QUEUED  # resume line (15%) applies
+
+
+def test_after_an_inline_stop_an_ordinary_deferral_is_not_misattributed():
+    clock = FakeClock()
+    machine = Machine(clock)
+    scheduler, _ = a_scheduler(clock, machine)
+    work = InlineReportingWork()
+    task_id = inline_started(scheduler, work)
+    breach(scheduler, machine)
+
+    machine.sample = reading()
+    clock.advance(60)
+    scheduler.tick()
+    assert scheduler.queue.get(task_id).state is TaskState.RUNNING
+    scheduler.report_outcome(task_id, WorkResult(WorkOutcome.DEFERRED, "busy", hold=HoldReason.SUSTAINED_LOAD))
+    task = scheduler.queue.get(task_id)
+    assert task.attempts == 1
+    assert scheduler.view().tasks[0]["heldReason"] == HoldReason.SUSTAINED_LOAD.value
+
+
+def test_an_ordinary_deferral_without_a_breach_still_counts():
+    clock = FakeClock()
+    machine = Machine(clock)
+    scheduler, _ = a_scheduler(clock, machine)
+    task_id = started(scheduler, PausableWork())
+    scheduler.report_outcome(task_id, WorkResult(WorkOutcome.DEFERRED, "busy", hold=HoldReason.SUSTAINED_LOAD))
+    assert scheduler.queue.get(task_id).attempts == 1
+    assert scheduler.view().tasks[0]["heldReason"] == HoldReason.SUSTAINED_LOAD.value
+
+
+class RaisingPauseWork(PausableWork):
+    def pause(self) -> bool:
+        self.pauses += 1
+        raise RuntimeError("pause failed inside the work")
+
+
+def test_a_raising_pause_is_contained_reported_once_and_leaves_nothing_pending():
+    clock = FakeClock()
+    machine = Machine(clock)
+    scheduler, events = a_scheduler(clock, machine)
+    other = PausableWork()
+    bad = RaisingPauseWork()
+    bad_id = started(scheduler, bad)
+    machine.sample = reading(on_battery=True, battery_percent=8.0)
+    for _ in range(4):
+        scheduler.tick()  # must not raise
+    assert bad.pauses >= 1
+    assert scheduler.queue.get(bad_id).state is TaskState.RUNNING
+    assert scheduler._entries[bad_id].preempted is None
+    notices = [e for e in events if e.event is QueueEventType.HOLD_STATE and e.task_id == bad_id]
+    assert len(notices) == 1 and "cannot be stopped safely" in notices[0].detail
+    scheduler.report_outcome(bad_id, WorkResult(WorkOutcome.DONE))
+    assert scheduler.queue.get(bad_id).state is TaskState.DONE
+    assert other.pauses == 0
+
+
+def test_a_pause_refused_after_an_inline_finish_keeps_the_finish():
+    clock = FakeClock()
+    machine = Machine(clock)
+    scheduler, _ = a_scheduler(clock, machine)
+    work = InlineReportingWork(outcome=WorkOutcome.DONE, answer=False)
+    task_id = inline_started(scheduler, work)
+    breach(scheduler, machine)
+    assert scheduler.queue.get(task_id).state is TaskState.DONE
+    assert scheduler._entries[task_id].preempted is None
+
+
+def test_a_cancel_while_the_stop_is_pending_stays_cancelled_and_clean():
+    clock = FakeClock()
+    machine = Machine(clock)
+    scheduler, _ = a_scheduler(clock, machine)
+    work = PausableWork()
+    task_id = started(scheduler, work)
+    breach(scheduler, machine)
+    assert scheduler._entries[task_id].preempted is not None  # pending, awaiting the work
+    assert scheduler.cancel(task_id)
+    scheduler.report_outcome(task_id, WorkResult(WorkOutcome.DEFERRED, "paused", hold=HoldReason.PAUSED))
+    assert scheduler.queue.get(task_id).state is TaskState.CANCELLED
+    assert scheduler._entries[task_id].preempted is None
+
+
+class NoneReturningPause(PausableWork):
+    def pause(self):
+        self.pauses += 1
+        return None  # no answer is not a refusal
+
+
+def test_a_pause_without_an_answer_is_treated_as_accepted():
+    clock = FakeClock()
+    machine = Machine(clock)
+    scheduler, _ = a_scheduler(clock, machine)
+    work = NoneReturningPause()
+    task_id = started(scheduler, work)
+    breach(scheduler, machine)
+    assert scheduler._entries[task_id].preempted is not None
+    scheduler.report_outcome(task_id, WorkResult(WorkOutcome.DEFERRED, "paused"))
+    assert scheduler.queue.get(task_id).attempts == 0
