@@ -419,7 +419,11 @@ def test_spooler_queries_retry_a_bounded_number_of_times(setup):
     assert submitter.submissions == []
 
 
-@pytest.mark.skipif(os.name != "nt", reason="The print spooler is a Windows facility.")
+@pytest.mark.skipif(
+    os.name != "nt" or os.environ.get("QRONOS_LIVE_DEVICE_TESTS") != "1",
+    reason="Reads this computer's real printer list; live device checks are opt-in "
+           "(QRONOS_LIVE_DEVICE_TESTS=1) and deferred in this phase.",
+)
 def test_windows_spooler_reads_printers_without_side_effects():
     from core.print_workflow import WinSpooler
 
