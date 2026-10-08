@@ -656,6 +656,104 @@ class AccessibilityActionExecutor:
             element=current,
         )
 
+    # ------------------------------------------------ exact RuntimeId paths
+    #
+    # For app adapters that select one element by their own exact rules (an
+    # exact contact name, the download control inside one verified message).
+    # No locator and no model take part: the caller's element is re-read by
+    # RuntimeId and must still have the same name, role and control type. All
+    # other guards are the same as invoke_target.
+
+    def _current_exact(
+        self,
+        binding: WindowBinding,
+        expected: ActionableUiElement,
+    ) -> ActionableUiElement:
+        self._checkpoint()
+        self.binder.revalidate(binding, require_foreground=False, require_same_layout=False)
+        current = self.lookup_runtime_fn(binding.hwnd, expected.runtime_id)
+        if current is None:
+            raise AccessibilityTargetStale("The exact UIA element disappeared before acting.")
+        if current.runtime_id != expected.runtime_id:
+            raise AccessibilityTargetStale("The exact UIA element's RuntimeId changed.")
+        if current.role != expected.role:
+            raise AccessibilityTargetStale("The exact UIA element's role changed.")
+        if current.name.strip().casefold() != expected.name.strip().casefold():
+            raise AccessibilityTargetStale("The exact UIA element's name changed.")
+        if current.control_type.strip().casefold() != expected.control_type.strip().casefold():
+            raise AccessibilityTargetStale("The exact UIA element's control type changed.")
+        if not current.enabled:
+            raise AccessibilityActionError("The exact UIA element is disabled.")
+        return current
+
+    def invoke_exact_element(
+        self,
+        binding: WindowBinding,
+        expected: ActionableUiElement,
+        *,
+        grant: ActionGrant,
+    ) -> AccessibilityInvokeRun:
+        """Invoke one caller-selected element by RuntimeId (no locator, no model)."""
+        current = self._current_exact(binding, expected)
+        if not current.invoke_pattern:
+            raise AccessibilityActionError("The exact UIA element does not expose InvokePattern.")
+        authorization = BoundGuiAuthorization.bind(
+            grant, binding, allowed_runtime_ids=(current.runtime_id,),
+        )
+        authorization.require_for(binding, current.runtime_id)
+        self.binder.revalidate(binding, require_foreground=False, require_same_layout=False)
+        self._checkpoint()
+        receipt = self.invoke_fn(
+            binding.hwnd, current.runtime_id,
+            binding=binding, authorization=authorization, binder=self.binder,
+        )
+        if receipt.runtime_id != current.runtime_id:
+            raise AccessibilityTargetStale("Invoke receipt belongs to a different RuntimeId.")
+        self.binder.revalidate(binding, require_foreground=False, require_same_layout=False)
+        authorization.require_for(binding, receipt.runtime_id)
+        return AccessibilityInvokeRun(
+            target=AccessibilityTarget(
+                candidate_id=current.runtime_id,
+                confidence=1.0,
+                element=current,
+                selection_source="exact_runtime_id",
+            ),
+            element=current,
+        )
+
+    def set_exact_text_value(
+        self,
+        binding: WindowBinding,
+        expected: ActionableUiElement,
+        text: str,
+        *,
+        grant: ActionGrant,
+    ) -> ActionableUiElement:
+        """Set the ValuePattern text of one caller-selected editable element."""
+        value = str(text)
+        if not value:
+            raise ValueError("text must not be empty.")
+        # Typing changes what the window shows, so it follows the same
+        # foreground + input-authorization rules as restore_text_value.
+        BoundInputAuthorization.bind(grant, binding)
+        self._acquire_foreground(binding)
+        self.binder.revalidate(binding, require_foreground=True, require_same_layout=True)
+        current = self._current_exact(binding, expected)
+        if current.role != "text_input" or not current.value_pattern or current.value_read_only is not False:
+            raise AccessibilityActionError("The exact UIA element is not an editable text field.")
+        input_authorization = BoundInputAuthorization.bind(grant, binding)
+        input_authorization.require_for(binding)
+        self._checkpoint()
+        return self.set_value_fn(
+            binding.hwnd, current.runtime_id, value,
+            binding=binding,
+            authorization=BoundGuiAuthorization.bind(
+                grant, binding, allowed_runtime_ids=(current.runtime_id,),
+            ),
+            input_authorization=input_authorization,
+            binder=self.binder,
+        )
+
     def click_target(
         self,
         binding: WindowBinding,

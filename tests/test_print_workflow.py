@@ -398,3 +398,15 @@ def test_file_reached_through_a_linked_folder_is_refused(setup, tmp_path):
     with pytest.raises(WorkflowRefused, match="is a link"):
         workflow.prepare(PrintRequest(linked / "report.pdf", "Office Laser"))
     assert submitter.submissions == []
+
+
+def test_an_expired_printing_grant_submits_nothing(setup, monkeypatch):
+    from security.gate import ActionGrant
+
+    workflow, _, submitter, document, journal, _ = setup
+    prepared = workflow.prepare(PrintRequest(document, "Office Laser"))
+    monkeypatch.setattr(ActionGrant, "active", lambda self: False)
+    with pytest.raises(WorkflowStopped):
+        submit(workflow, prepared)
+    assert submitter.submissions == []
+    assert journal.get(operation_key("print-approval-1", prepared.digest)) is None

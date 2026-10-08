@@ -64,6 +64,7 @@ from core.app_workflow import (
     operation_key,
     plan_digest,
 )
+from security.gate import ActionGrant
 from security.permissions import ActionCategory, PermissionDecision
 
 
@@ -351,7 +352,7 @@ class PrintWorkflow:
         approval_valid: Callable[[], bool],
     ) -> WorkflowReport:
         approval.require_for(plan=prepared.plan, required=PermissionDecision.REQUIRE_TYPED_SECRET)
-        grant_for(
+        grant: ActionGrant = grant_for(
             ActionRequest(
                 category=ActionCategory.DEVICE_CONTROL,
                 target=f"printer:{prepared.printer.name}",
@@ -380,6 +381,8 @@ class PrintWorkflow:
         op = operation_key(approval.approval_id, prepared.digest)
         content = content_key("print", prepared.sha256, printer.name.casefold())
         guard.checkpoint("submit")
+        if not grant.active():
+            raise WorkflowStopped("grant_expired", "The printing permission expired before submission.")
         self._journal.begin(op, content, f"print {prepared.file_path.name} on {printer.name}")
         try:
             guard.checkpoint("submit")

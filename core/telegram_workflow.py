@@ -591,11 +591,14 @@ class UiaTelegramUi:
     """
     Telegram for Windows through Windows UI Automation on one verified window.
 
-    Reading uses ``actionable_elements_in_window``. Acting uses the
-    gate-authorized exact-RuntimeId actuators (``set_value_runtime_id`` for the
-    search query, ``invoke_runtime_id`` for opening a chat and starting a
-    download), each with a semantic authorization narrowed to the single
-    element being acted on.
+    Reading uses ``actionable_elements_in_window``. Acting goes only through
+    the reviewed :class:`core.accessibility_action_executor.AccessibilityActionExecutor`
+    exact-RuntimeId paths (``set_exact_text_value`` for the search query,
+    ``invoke_exact_element`` for opening a chat and starting a download): the
+    element this adapter selected by its own exact rules is re-read by
+    RuntimeId, must keep its name, role and control type, and is acted on with
+    an authorization narrowed to that single element. No locator or model
+    chooses anything.
     """
 
     def __init__(
@@ -603,32 +606,34 @@ class UiaTelegramUi:
         *,
         binder: WindowBinder,
         target_fn: Callable[[], object],
+        actuator,
         elements_fn: Callable[[int], Sequence[object]] | None = None,
-        set_value_fn: Callable[..., object] | None = None,
-        invoke_fn: Callable[..., object] | None = None,
         settle_seconds: float = 0.6,
     ) -> None:
-        from core import windows_accessibility, windows_accessibility_mutation
+        from core import windows_accessibility
 
         self._binder = binder
         self._target_fn = target_fn
+        self._actuator = actuator
         self._elements = elements_fn or (
             lambda hwnd: windows_accessibility.actionable_elements_in_window(hwnd, max_elements=2048)
         )
-        self._set_value = set_value_fn or windows_accessibility_mutation.set_value_runtime_id
-        self._invoke = invoke_fn or windows_accessibility_mutation.invoke_runtime_id
         self._settle = float(settle_seconds)
+        self._by_id: dict[str, object] = {}
 
     def bind(self) -> WindowBinding:
         return self._binder.bind(self._target_fn())
 
-    def _authorize(self, grant: ActionGrant, binding: WindowBinding, runtime_id: str):
-        from core.gui_authorization import BoundGuiAuthorization
-
-        return BoundGuiAuthorization.bind(grant, binding, allowed_runtime_ids=(runtime_id,))
-
     def _read(self, binding: WindowBinding):
-        return tuple(self._elements(binding.hwnd))
+        elements = tuple(self._elements(binding.hwnd))
+        self._by_id = {item.runtime_id: item for item in elements if item.runtime_id}
+        return elements
+
+    def _element(self, runtime_id: str):
+        element = self._by_id.get(runtime_id)
+        if element is None:
+            raise TelegramActionNotStarted("The selected Telegram control is no longer shown.")
+        return element
 
     def search_contacts(self, binding, query, *, grant):
         fields = [
@@ -639,11 +644,7 @@ class UiaTelegramUi:
             raise TelegramActionNotStarted(
                 "Telegram's search field could not be identified uniquely; nothing was typed."
             )
-        field_id = fields[0].runtime_id
-        self._set_value(
-            binding.hwnd, field_id, query,
-            binding=binding, authorization=self._authorize(grant, binding, field_id), binder=self._binder,
-        )
+        self._actuator.set_exact_text_value(binding, fields[0], query, grant=grant)
         time.sleep(self._settle)
         field_bottom = fields[0].bottom
         return tuple(
@@ -653,11 +654,7 @@ class UiaTelegramUi:
         )
 
     def open_chat(self, binding, candidate, *, grant):
-        self._invoke(
-            binding.hwnd, candidate.element_id,
-            binding=binding, authorization=self._authorize(grant, binding, candidate.element_id),
-            binder=self._binder,
-        )
+        self._actuator.invoke_exact_element(binding, self._element(candidate.element_id), grant=grant)
         time.sleep(self._settle)
 
     def chat_title(self, binding) -> str:
@@ -711,9 +708,5 @@ class UiaTelegramUi:
     def start_download(self, binding, message, *, grant):
         if not message.download_element_id:
             raise TelegramActionNotStarted("The message has no download control.")
-        self._invoke(
-            binding.hwnd, message.download_element_id,
-            binding=binding,
-            authorization=self._authorize(grant, binding, message.download_element_id),
-            binder=self._binder,
-        )
+        element = self._element(message.download_element_id)
+        self._actuator.invoke_exact_element(binding, element, grant=grant)

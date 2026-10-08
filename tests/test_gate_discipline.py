@@ -38,6 +38,9 @@ EXECUTOR_MODULES: tuple[str, ...] = (
     "core.computer_executor",
     "core.screen_capture",
     "core.library_executor",
+    # Application workflows: every side effect needs a gate grant.
+    "core.telegram_workflow",
+    "core.print_workflow",
 )
 
 # The one sanctioned route to performing an action.
@@ -134,6 +137,11 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     ),
     "core.windows_ocr": (
         "Runs PowerShell to reach Windows' text recogniser, which only reads."
+    ),
+    "core.visible_browser": (
+        "Starts the user's default browser with one URL re-validated by "
+        "core.link_policy, as an argument list without a shell; it decides no "
+        "permission itself and is used only by gated flows (Library open_link)."
     ),
 }
 

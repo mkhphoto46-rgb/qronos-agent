@@ -376,14 +376,34 @@ def uia(elements, calls):
         snapshot_fn=lambda hwnd: state["window"],
     )
 
-    def set_value(hwnd, runtime_id, value, *, binding, authorization, binder):
+    from core.accessibility_action_executor import AccessibilityActionExecutor
+    from core.accessibility_targeting import AccessibilityTargetLocator
+    from core.windows_accessibility_mutation import UiInvokeReceipt
+
+    by_id = {item.runtime_id: item for item in elements}
+
+    # Only the native calls are test boundaries; the reviewed executor and its
+    # identity, authorization and cancellation guards are real.
+    def set_value(hwnd, runtime_id, value, *, binding, authorization, binder, input_authorization=None):
+        assert input_authorization is not None, "typing needs an input authorization"
         calls.append(("set", runtime_id, value, tuple(sorted(authorization.allowed_runtime_ids))))
+        return by_id[runtime_id]
 
     def invoke(hwnd, runtime_id, *, binding, authorization, binder):
         calls.append(("invoke", runtime_id, tuple(sorted(authorization.allowed_runtime_ids))))
+        return UiInvokeReceipt(runtime_id=runtime_id)
 
-    ui = UiaTelegramUi(binder=binder, target_fn=lambda: TARGET, elements_fn=lambda hwnd: elements,
-                       set_value_fn=set_value, invoke_fn=invoke, settle_seconds=0)
+    class ForegroundOnly:
+        def acquire_foreground(self, binding, **_options):
+            calls.append(("foreground",))
+
+    actuator = AccessibilityActionExecutor(
+        binder, ForegroundOnly(), AccessibilityTargetLocator(None, enumerate_fn=lambda hwnd: tuple(elements)),
+        set_value_fn=set_value, invoke_fn=invoke,
+        lookup_runtime_fn=lambda hwnd, runtime_id: by_id.get(runtime_id),
+    )
+    ui = UiaTelegramUi(binder=binder, target_fn=lambda: TARGET, actuator=actuator,
+                       elements_fn=lambda hwnd: elements, settle_seconds=0)
     return ui, binder
 
 
@@ -406,7 +426,7 @@ def test_uia_search_types_only_into_the_single_search_field():
     ui, binder = uia(elements, calls)
     binding = ui.bind()
     found = ui.search_contacts(binding, "Sara Ahmadi", grant=gui_grant())
-    assert calls == [("set", "s", "Sara Ahmadi", ("s",))]
+    assert calls == [("foreground",), ("set", "s", "Sara Ahmadi", ("s",))], "typing happens only after the window is in front"
     assert [item.display_name for item in found] == ["Sara Ahmadi", "Sara Ahmadi Work"]
 
 
@@ -446,3 +466,24 @@ def test_uia_messages_read_direction_attachment_and_download_control():
     )
     ui.start_download(binding, older, grant=gui_grant())
     assert calls == [("invoke", "dl", ("dl",))]
+
+
+def test_uia_actions_refuse_an_element_whose_identity_changed():
+    from core.accessibility_action_executor import AccessibilityTargetStale
+
+    calls = []
+    elements = [
+        element("chat1", "Sara Ahmadi", "ControlType.ListItem", 0, 60, width=300),
+        element("hdr", "Sara Ahmadi", "ControlType.Text", 320, 5, width=200, focusable=False),
+        element("in", "report.pdf 2.0 KB", "ControlType.ListItem", 330, 400, width=300, height=60),
+        element("dl", "Download", "ControlType.Button", 340, 410, width=30, height=30, invoke_pattern=True),
+    ]
+    ui, _ = uia(elements, calls)
+    binding = ui.bind()
+    newest = ui.recent_messages(binding, limit=10)[0]
+    # Same RuntimeId, but the control now says something else.
+    elements[3] = element("dl", "Cancel", "ControlType.Button", 340, 410, width=30, height=30, invoke_pattern=True)
+    ui._actuator.lookup_runtime_fn = lambda hwnd, runtime_id: {e.runtime_id: e for e in elements}.get(runtime_id)
+    with pytest.raises(AccessibilityTargetStale):
+        ui.start_download(binding, newest, grant=gui_grant())
+    assert not any(call[0] == "invoke" for call in calls)
