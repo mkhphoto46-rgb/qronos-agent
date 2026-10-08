@@ -157,6 +157,11 @@ class VisibleBrowserLauncher:
         self._timeout = float(visible_timeout)
 
     def __call__(self, url: str) -> None:
+        """The Library BrowserLauncher contract."""
+        self.launch(url)
+
+    def launch(self, url: str) -> BrowserIdentity:
+        """Open one URL; return the browser that is now showing it in front."""
         try:
             checked = validate_web_url(url)
         except UnsafeLink as error:
@@ -179,7 +184,7 @@ class VisibleBrowserLauncher:
         deadline = self._clock() + self._timeout
         while True:
             if self._visible(browser.process_name):
-                return
+                return browser
             if self._clock() >= deadline:
                 raise BrowserVisibilityUnconfirmed(
                     "The browser was asked to open the link, but no visible browser window "

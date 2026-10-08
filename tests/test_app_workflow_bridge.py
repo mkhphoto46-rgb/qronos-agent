@@ -160,7 +160,21 @@ def test_unknown_or_forged_tokens_are_stale(h):
     assert h.last("app_workflow_stale")["reason"] in {"unknown_or_used", "unknown"}
 
 
-def test_production_wiring_refuses_printing_until_a_secret_checking_path_exists(tmp_path, monkeypatch):
+@pytest.fixture
+def temporary_data_root(tmp_path, monkeypatch):
+    """Production wiring under test writes its journal lock here, never the checkout."""
+    from dataclasses import replace
+    import core.runtime_bridge as runtime_bridge
+
+    root = tmp_path / "qronos-data"
+    monkeypatch.setattr(
+        runtime_bridge, "CONFIG",
+        replace(runtime_bridge.CONFIG, paths=replace(runtime_bridge.CONFIG.paths, data=root)),
+    )
+    return root
+
+
+def test_production_wiring_refuses_printing_until_a_secret_checking_path_exists(temporary_data_root, monkeypatch):
     """The runtime bridge may not reach the approval secret store, so a print
     request is refused before any prompt or spooler access."""
     events = []
@@ -182,15 +196,24 @@ def test_production_wiring_refuses_printing_until_a_secret_checking_path_exists(
     assert finished["outcome"] == "refused" and "رمز تأیید" in finished["message"]
 
 
-def test_production_wiring_uses_one_durable_journal_under_the_qronos_state_root():
-    from pathlib import Path
-    from core.config import CONFIG
-
+def test_production_wiring_uses_one_durable_journal_under_the_qronos_state_root(temporary_data_root):
     runtime = QronosRuntime(notify=lambda *args: None)
     runtime.action_audit = ActionAuditLog(path=None)
     coordinator = runtime._ensure_app_workflows()
     assert runtime._ensure_app_workflows() is coordinator
     journal = runtime._app_workflow_journal
-    assert journal.path == (Path(CONFIG.paths.data) / "workflows" / "side-effects.json").absolute()
-    assert journal.path.is_absolute()
-    assert not journal.path.exists(), "nothing is written until a side effect is begun"
+    assert journal.path == (temporary_data_root / "workflows" / "side-effects.json").absolute()
+    assert not journal.path.exists(), "nothing is recorded until a side effect is begun"
+
+
+def test_production_wiring_routes_web_navigation_to_an_approval_prompt(temporary_data_root):
+    events = []
+    runtime = QronosRuntime(notify=lambda event, status, message: events.append((event, message)))
+    runtime.task_router = TaskRouter()
+    runtime.orchestrator = object()
+    runtime.conversation_history = _FakeHistory()
+    runtime.action_audit = ActionAuditLog(path=None)
+    runtime.run_text_turn("open https://example.org/docs", "req-w")
+    prompt = [json.loads(message) for event, message in events if event == "app_workflow_approval_required"][-1]
+    assert prompt["phase"] == "browser_navigate" and prompt["details"]["url"] == "https://example.org/docs"
+    assert runtime._begin_text_app_workflow("search my files for the report", "req-x", time.perf_counter()) is False

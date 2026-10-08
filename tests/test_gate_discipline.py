@@ -41,6 +41,7 @@ EXECUTOR_MODULES: tuple[str, ...] = (
     # Application workflows: every side effect needs a gate grant.
     "core.telegram_workflow",
     "core.print_workflow",
+    "core.browser_research",
 )
 
 # The one sanctioned route to performing an action.

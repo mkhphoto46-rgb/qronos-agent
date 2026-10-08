@@ -3342,6 +3342,22 @@ class QronosRuntime:
                 folder=LocalDownloadFolder(folder),
             )
 
+        def browser_workflow():
+            from core.browser_research import (
+                BrowserResearchWorkflow,
+                UiaPageReader,
+                foreground_window_snapshot,
+            )
+            from core.visible_browser import VisibleBrowserLauncher
+            from core.window_binding import WindowBinder
+
+            return BrowserResearchWorkflow(
+                launcher=VisibleBrowserLauncher(),
+                reader=UiaPageReader(),
+                binder=WindowBinder(),
+                foreground_fn=foreground_window_snapshot,
+            )
+
         def print_workflow() -> PrintWorkflow:
             return PrintWorkflow(spooler=WinSpooler(), submitter=ShellPrintToSubmitter(), journal=journal)
 
@@ -3366,14 +3382,16 @@ class QronosRuntime:
             paused=lambda: self.runtime_paused,
             audit=self.action_audit,
             journal=journal,
+            browser_workflow=browser_workflow,
         )
         return self._app_workflows
 
     def _begin_text_app_workflow(self, text: str, request_id: str, started_at: float) -> bool:
         """Route a Telegram-download or print request to its approval flow."""
         from core.app_workflow_intents import parse_workflow_intent
+        from core.browser_research import plan_navigation
 
-        if parse_workflow_intent(text) is None:
+        if parse_workflow_intent(text) is None and plan_navigation(text) is None:
             return False
         if self._computer_actions.stopped_since_turn_start():
             self._finish_text_file_action(

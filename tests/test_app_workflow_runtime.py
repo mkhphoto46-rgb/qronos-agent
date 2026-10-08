@@ -224,3 +224,67 @@ def test_uncertain_attempts_are_listed_and_released_only_by_a_person(tmp_path):
     coordinator.report_uncertain(acknowledge="op-1")
     assert events[-1][1]["attempts"] == []
     assert journal.get("op-1").state is SideEffectState.ACKNOWLEDGED
+
+
+# ------------------------------------------------------------- browser phase
+
+
+def browser_harness(tmp_path, pages):
+    from tests.test_browser_research import make
+
+    harness = Harness(tmp_path)
+    workflow, launcher, reader, _ = make(pages)
+    harness.coordinator._browser = lambda: workflow
+    harness.launcher = launcher
+    return harness
+
+
+def test_web_search_opens_only_after_approval_and_returns_untrusted_page_text(tmp_path):
+    from tests.test_browser_research import PAGE
+    from dataclasses import replace as _replace
+
+    page = _replace(PAGE, url="https://duckduckgo.com/?q=solar", text="x" * 9000)
+    h = browser_harness(tmp_path, [page])
+    reply = h.coordinator.try_begin("search the web for solar panels", "w1")
+    assert "تأیید" in reply
+    prompt = h.last("app_workflow_approval_required")
+    assert prompt["phase"] == "browser_navigate" and prompt["permission"] == "require_voice_confirmation"
+    assert prompt["details"]["url"] == "https://duckduckgo.com/?q=solar+panels"
+    assert h.launcher.opened == []
+    h.coordinator.resolve(prompt["actionToken"], approved=True)
+    finished = h.last("app_workflow_finished")
+    assert finished["outcome"] == "succeeded" and finished["result"]["untrusted"] is True
+    assert len(finished["result"]["text"]) == 6000 and finished["result"]["truncated"] is True
+    assert h.launcher.opened == ["https://duckduckgo.com/?q=solar+panels"]
+    events = [(r.event, r.decision or r.outcome) for r in h.audit.records() if r.category == "browser_navigation"]
+    assert (AuditEvent.APPROVED, "require_voice_confirmation") in events
+    assert (AuditEvent.COMPLETED, "succeeded") in events
+
+
+def test_declined_or_revoked_navigation_opens_nothing(tmp_path):
+    from tests.test_browser_research import PAGE
+
+    h = browser_harness(tmp_path, [PAGE])
+    h.coordinator.try_begin("open https://example.org/docs", "w1")
+    h.coordinator.resolve(h.last("app_workflow_approval_required")["actionToken"], approved=False)
+    h.coordinator.try_begin("open https://example.org/docs", "w2")
+    token = h.last("app_workflow_approval_required")["actionToken"]
+    h.coordinator.discard(CANCEL_REASON_PAUSE)
+    h.coordinator.resolve(token, approved=True)
+    assert h.launcher.opened == []
+
+
+def test_a_page_on_another_host_is_reported_uncertain_without_its_text(tmp_path):
+    from tests.test_browser_research import PAGE
+    from dataclasses import replace as _replace
+
+    h = browser_harness(tmp_path, [_replace(PAGE, url="https://other.example.net/")] * 20)
+    h.coordinator.try_begin("open https://example.org/docs", "w1")
+    h.coordinator.resolve(h.last("app_workflow_approval_required")["actionToken"], approved=True)
+    finished = h.last("app_workflow_finished")
+    assert finished["outcome"] == "uncertain" and "text" not in finished["result"]
+
+
+def test_without_a_browser_workflow_navigation_is_not_captured(tmp_path):
+    h = Harness(tmp_path)
+    assert h.coordinator.try_begin("open https://example.org/docs", "w1") is None

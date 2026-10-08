@@ -43,6 +43,7 @@ from core.app_workflow import (
     WorkflowRefused,
     WorkflowReport,
     WorkflowStopped,
+    plan_digest,
 )
 from core.app_workflow_intents import (
     PrintIntent,
@@ -51,6 +52,12 @@ from core.app_workflow_intents import (
     parse_workflow_intent,
 )
 from core.approval_ledger import ApprovalKind, ApprovalLedger, StaleApproval
+from core.browser_research import (
+    BrowserNavigation,
+    BrowserResearchWorkflow,
+    NavigationClarification,
+    plan_navigation,
+)
 from core.print_workflow import PreparedPrint, PrintRequest, PrintWorkflow
 from core.telegram_workflow import (
     PreparedTelegramDownload,
@@ -67,11 +74,16 @@ APP_WORKFLOW_UNCERTAIN_ACTION = "qronos.app_workflow_uncertain"
 PHASE_TELEGRAM_INSPECT = "telegram_inspect"
 PHASE_TELEGRAM_DOWNLOAD = "telegram_download"
 PHASE_PRINT = "print"
+PHASE_BROWSER = "browser_navigate"
+# Page text shown in the result event is bounded; it is untrusted content.
+MAX_EVENT_PAGE_CHARS = 6000
+MAX_EVENT_LINKS = 20
 
 _PERMISSION_FOR_PHASE = {
     PHASE_TELEGRAM_INSPECT: PermissionDecision.REQUIRE_VOICE_CONFIRMATION,
     PHASE_TELEGRAM_DOWNLOAD: PermissionDecision.REQUIRE_UI_CONFIRMATION,
     PHASE_PRINT: PermissionDecision.REQUIRE_TYPED_SECRET,
+    PHASE_BROWSER: PermissionDecision.REQUIRE_VOICE_CONFIRMATION,
 }
 
 # Persian outcome headlines shown to the person.
@@ -93,6 +105,7 @@ class PendingWorkflowStep:
     telegram_request: TelegramDownloadRequest | None = None
     telegram_prepared: PreparedTelegramDownload | None = None
     print_prepared: PreparedPrint | None = None
+    navigation: BrowserNavigation | None = None
     details: dict = field(default_factory=dict)
     audit_request: ActionRequest | None = None
 
@@ -121,7 +134,9 @@ class AppWorkflowCoordinator:
         run_async: Callable[[Callable[[], None]], None] = _start_thread,
         audit: ActionAuditLog | None = None,
         journal: SideEffectJournal | None = None,
+        browser_workflow: Callable[[], BrowserResearchWorkflow] | None = None,
     ) -> None:
+        self._browser = browser_workflow
         self._audit = audit
         self._journal = journal
         self._ledger = ledger
@@ -146,7 +161,7 @@ class AppWorkflowCoordinator:
         """
         intent = parse_workflow_intent(text)
         if intent is None:
-            return None
+            return self._try_begin_navigation(text, request_id)
         if isinstance(intent, WorkflowClarification):
             self._finish(request_id, "clarification", "refused", intent.question, "clarification needed")
             return intent.question
@@ -182,6 +197,30 @@ class AppWorkflowCoordinator:
             self._run_async(lambda: self._prepare_print(intent, request_id))
             return "فایل و چاپگر بررسی می‌شوند؛ پیش از چاپ، جزئیات برای تأیید نشان داده می‌شود."
         return None
+
+    def _try_begin_navigation(self, text: str, request_id: str) -> str | None:
+        navigation = plan_navigation(text)
+        if navigation is None or self._browser is None:
+            return None
+        if isinstance(navigation, NavigationClarification):
+            self._finish(request_id, PHASE_BROWSER, "refused", navigation.question, "clarification needed")
+            return navigation.question
+        if self._paused():
+            message = "کرونوس متوقف است؛ کاری شروع نشد."
+            self._finish(request_id, PHASE_BROWSER, "stopped", message, "runtime paused")
+            return message
+        what = (
+            f"جستجوی «{navigation.query}» در مرورگر شما"
+            if navigation.kind == "search"
+            else "باز کردن این نشانی در مرورگر شما"
+        )
+        self._prompt(PendingWorkflowStep(
+            request_id=request_id,
+            phase=PHASE_BROWSER,
+            navigation=navigation,
+            details={"url": navigation.url, "kind": navigation.kind, "query": navigation.query},
+        ), f"{what}: {navigation.url} — سپس متن همان صفحهٔ باز را می‌خوانم. چیزی ارسال یا کلیک نمی‌شود.")
+        return "برای ادامه، درخواست تأیید را ببینید. بدون تأیید شما هیچ صفحه‌ای باز نمی‌شود."
 
     # ----------------------------------------------------------- prompts
 
@@ -251,6 +290,8 @@ class AppWorkflowCoordinator:
             self._run_async(lambda: self._telegram_download(step, approval))
         elif step.phase == PHASE_PRINT:
             self._run_async(lambda: self._print_submit(step, approval))
+        elif step.phase == PHASE_BROWSER:
+            self._run_async(lambda: self._browser_navigate(step, approval))
 
     def _open_step(self, token: str) -> PendingWorkflowStep | None:
         for ticket in self._ledger.open_tickets():
@@ -392,6 +433,34 @@ class AppWorkflowCoordinator:
 
         self._execute(step, "qronos-print", run)
 
+    def _browser_navigate(self, step: PendingWorkflowStep, approval) -> None:
+        approval_id, decision = approval
+        navigation = step.navigation
+
+        def run(token):
+            report = self._browser().run(
+                navigation,
+                WorkflowApproval(approval_id=approval_id, plan_digest=plan_digest(navigation.plan), decision=decision),
+                token=token, approval_valid=self._approval_valid,
+            )
+            if report.outcome != "succeeded":
+                self._report(step, report)
+                return
+            page = report.result
+            result = {
+                "url": page["url"],
+                "title": page["title"],
+                # Untrusted page content: shown to the person, never acted on.
+                "text": str(page["text"])[:MAX_EVENT_PAGE_CHARS],
+                "links": list(page["links"])[:MAX_EVENT_LINKS],
+                "truncated": bool(page["truncated"]) or len(str(page["text"])) > MAX_EVENT_PAGE_CHARS,
+                "untrusted": True,
+            }
+            self._finish_step(step, "succeeded", f"صفحه در مرورگر باز شد: {page['title'] or page['url']}",
+                              report.detail, result)
+
+        self._execute(step, "qronos-browser-navigate", run)
+
     def _execute(self, step: PendingWorkflowStep, label: str, run) -> None:
         try:
             with self._actions.begin(label) as token:
@@ -460,6 +529,13 @@ _AUDIT_OUTCOME = {
 
 def _audit_request(step: PendingWorkflowStep) -> ActionRequest:
     """The typed action a prompt asks about, for the audit trail."""
+    if step.phase == PHASE_BROWSER:
+        return ActionRequest(
+            category=ActionCategory.BROWSER_NAVIGATION,
+            target=step.navigation.url,
+            summary="Open one exact page in the visible browser and read what it shows.",
+            parameters={"kind": step.navigation.kind, "query": step.navigation.query},
+        )
     if step.phase == PHASE_TELEGRAM_INSPECT:
         return ActionRequest(
             category=ActionCategory.GUI_AUTOMATION,
