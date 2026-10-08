@@ -68,7 +68,10 @@
     FileWrite $R7 "${MESSAGE}"
     FileClose $R7
   !endif
-  SetOutPath "$TEMP"  ; $INSTDIR is the current directory, which Windows will not remove
+  ; $INSTDIR is the process's current directory, which Windows will not remove.
+  ; Only the current directory is moved: a SetOutPath here would make archive
+  ; readers such as 7-Zip place every later File instruction under $TEMP.
+  System::Call 'kernel32::SetCurrentDirectoryW(w "$TEMP")'
   RMDir "$INSTDIR"
   Abort "${MESSAGE}"
 !macroend

@@ -1005,3 +1005,12 @@ def test_the_hook_clears_errors_and_the_exit_code_before_running_the_installer()
     # The registry is checked again after the installer reports success.
     assert preinstall.index("QRONOS_WEBVIEW2_RUN_INSTALLER") < preinstall.rindex("QRONOS_WEBVIEW2_VERSION_TO_R9")
     assert "Abort" not in preinstall.replace("!insertmacro QRONOS_FAIL", "")  # every stop goes through QRONOS_FAIL
+
+
+def test_the_hooks_never_change_the_output_path():
+    """A SetOutPath in a hook makes archive readers (7-Zip) place every later File instruction under
+    that path; a packaging-check build at 0fc6fca was refused for exactly this ("$TEMP" at the top)."""
+    for hook in (prerequisites.HOOK_PATH, prerequisites.HOOK_PATH.parent / "qronos-install-root.nsh"):
+        instructions = [line.strip() for line in hook.read_text(encoding="utf-8").splitlines()
+                        if line.strip() and not line.strip().startswith(";")]
+        assert not [line for line in instructions if line.lower().startswith("setoutpath")], hook.name
