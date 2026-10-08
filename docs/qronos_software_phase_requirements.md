@@ -54,7 +54,7 @@ an item to a document does not change its key.
 | A2 | Bounded desktop↔service IPC (IPC doc) | V | Suite + private-pipe test | — |
 | A3 | Backend third-party notices (PR #54) | P | pip packages and PortAudio are covered. Interpreter-bundled native components (OpenSSL, SQLite, Tcl/Tk, zlib, XZ, Expat, mpdecimal, HACL\*, libb2, mimalloc) have no matched full texts. Integration evidence marks them `namedInLicenseText:false` | runtime worker |
 | A4 | Desktop npm/Rust notices (PR #55) | P | 5 npm + 254 Rust packages, 485 files, offline dry run. Extraction from a fresh NSIS installer is not verified | installer worker |
-| A5 | Offline install when WebView2 is absent (offline-first rule) | M | `tauri.conf.json` has no `webviewInstallMode`, so Tauri's default download bootstrapper needs internet | installer worker |
+| A5 | Offline install when WebView2 is absent (offline-first rule) | P | Installer `ecfaeaa`/`89d047b` (pending integration): `webviewInstallMode` skip plus an NSIS hook that embeds a pinned, hash- and signature-verified x64 Evergreen Standalone Installer (154.0.4258.62). The hook compiles in a probe script; no full current-head NSIS build exists yet. Clean-machine install: D | installer worker |
 | A6 | Fresh installer from reviewed current source, with provenance | M | None since `7584bb5` | installer worker, then Root |
 | A7 | Safe upgrade/uninstall that preserves user data | M | Behaviour is not specified or tested. The storage-lock protocol change requires closing older instances | installer worker |
 | A8 | Authenticated update and rollback | M + G | No update channel in the source. A signing key is an owner gate | installer worker / owner |
@@ -97,8 +97,8 @@ an item to a document does not change its key.
 | D2 | Typed action contract, scoped single-use approvals, audit, honest undo | V | Approval ledger, action audit, undo journal; suite | — |
 | D3 | Fresh window/process/screenshot binding; coordinates expire on change; postconditions | M | Roadmap Stage 4B; `computer_control_implementation_status.md` item 3 | workflows worker |
 | D4 | Native Paint drawing | M | Deliberately disabled: `_default_gui_action` raises "grounding" (`tests/test_offline_network_policy.py`). Undo exists only for a verified drawing | workflows worker |
-| D5 | Telegram: exact contact → newest incoming attachment → one verified download | M | Not implemented | workflows worker |
-| D6 | Print one exact file → one verified spool job, bounded non-duplicating recovery | M | Not implemented | workflows worker |
+| D5 | Telegram: exact contact → newest incoming attachment → one verified download | P | `core/telegram_workflow.py` (`12b4536`) and intents (`d5b2ddf`) exist with fake-UI tests. Not imported by the runtime, approval ledger or desktop, so no user can reach it. Journal defects W1–W6 are open | workflows worker |
+| D6 | Print one exact file → one verified spool job, bounded non-duplicating recovery | P | `core/print_workflow.py` (`15a6234`) exists with fake-spooler tests; not wired. The native submitter waits up to 120 s without cancellation (P1) | workflows worker |
 | D7 | Visible, permission-gated, audited browser workflow (the only public-internet route) | M | User-supplied browser source not in repo; legacy HTTP transport refuses (`core/web_providers.py`); `core/web_worker.py` is unregistered; saved links offer Copy only | workflows worker (report missing source to Root) |
 | D8 | Elevated Action Broker / supervisor split (architecture) | M | Absent; no worker assigned | unassigned |
 | D9 | Deterministic Security Monitor (reject/throttle/contain/safe-shutdown) | M | Absent. Required before Layer 2 remote access is enabled for users | unassigned (link-adjacent) |
@@ -133,7 +133,7 @@ an item to a document does not change its key.
 
 | # | Requirement | Key | Evidence / gap |
 |---|---|---|---|
-| F1 | No undeclared direct-network path in product modules | P | Inventory test exists, but reproduced gaps — see R1 |
+| F1 | No undeclared direct-network path in product modules | V (pending integration) | R1 repaired in `52b5303`: per-module exact family grants, aliases, dynamic imports, asyncio/native/COM/subprocess/script probes |
 | F2 | No cloud inference, telemetry, silent downloads | V | Model-download refusal and loopback tests; offline policy tests |
 | F3 | Device Link is the only WAN exception; no direct Core web content | V (today) | Will need re-verification when E3/D7 land |
 | F4 | Product UI copy stays Persian | V | Desktop source |
@@ -170,7 +170,7 @@ them; this report does not edit shared docs.
 
 ## Independent review findings (current base)
 
-**R1 — the offline network-import guard misses real egress paths.**
+**R1 — the offline network-import guard misses real egress paths. Repaired by this worker in `52b5303`; pending integration.**
 - Location: `tests/test_offline_network_policy.py`,
   `test_product_network_imports_require_an_explicit_reviewed_exception`.
   `risky_roots` covers `requests`, `socket`, `aiohttp`, `httpx`,
@@ -195,7 +195,7 @@ them; this report does not edit shared docs.
     `bitsadmin`, `certutil`, or PowerShell web cmdlets
   - keep per-module reviewed exceptions
 
-**R2 — the production CSP allows the Vite dev origin (low).**
+**R2 — the production CSP allows the Vite dev origin (low). Fixed by installer `8b00f95` (`devCsp`), verified against locked tauri-codegen 2.6.3; pending integration.**
 - Location: `desktop/src-tauri/tauri.conf.json`, `connect-src` includes
   `ws://localhost:1420` and `http://localhost:1420`.
 - Impact: in a production webview, any local process listening on port
@@ -224,3 +224,29 @@ are in `work/opus-five-review-status.json`.
   - Malformed entries raise untyped errors, or stop blocking (fail open).
   - These must be fixed before the Telegram or printer executors use the
     journal.
+
+- **Installer `ecfaeaa`/`89d047b`/`8b00f95`:** independently verified the pinned
+  WebView2 file (size, SHA-256 and `WinVerifyTrust`), the locked Tauri NSIS
+  template (hook placement, the `NSISdl` downloader) and the `devCsp` fix.
+  Open findings (status JSON I1–I4):
+  - a failed post-build check leaves the unverified installer at Tauri's
+    normal output path
+  - the recorded signer thumbprint is never checked
+  - the doc claims the build downloads nothing, but the locked bundler
+    fetches the NSIS toolset when it is absent
+  - the hook's `ExecWait` launch-failure path relies on a stale register
+- **Workflows `15a6234`/`d5b2ddf`:** the printer and intent parsers are
+  helper modules, not wired. `ShellPrintToSubmitter.submit` blocks up to
+  120 s with no cancellation, and a job that finishes during that wait is
+  reported as uncertain (P1). No W1–W6 repair has landed yet.
+
+### Unassigned software, to be assigned after current chunks
+
+These are missing software (M), not hardware tests:
+- power/battery resource signals (B3)
+- Elevated Action Broker / supervisor split (D8)
+- deterministic Security Monitor (D9)
+- runtime code-prohibition red-team (D10)
+- general activity/undo history UI (D11)
+- Device Hub (H1)
+- Wake-on-LAN (H3)
