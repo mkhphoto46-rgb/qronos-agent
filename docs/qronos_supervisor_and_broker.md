@@ -49,8 +49,20 @@ All waits in the channel have deadlines.
   pipes deliver whole messages. A read that `poll` cleared therefore completes
   at once. An oversized message is refused by its length without being read.
 - **Bounded messages.** Each message is a closed-schema JSON object of at most
-  4 KiB, below the 8 KiB pipe buffer, so a send never waits for a peer that
-  is not reading.
+  4 KiB. This only means one message fits an empty 8 KiB pipe buffer. It does
+  **not** bound a send. An earlier version of this document claimed it did;
+  that was wrong. Repeated sends to a peer that has stopped reading fill the
+  buffer, and multiprocessing's `send_bytes` would then wait forever.
+- **Bounded sends.** `Channel.send` takes a deadline
+  (`timeout`, default 5 s). It issues an overlapped `WriteFile` and waits on
+  it for at most the time left. A write still pending at the deadline is
+  cancelled, the cancellation is collected, and `ChannelTimeout` is raised.
+  The channel is then closed as broken, because a cancelled write may have
+  left a partial message, so further sends are refused at once.
+- **Prompt close.** `Channel.close` never waits on a send. If a send is
+  pending, close cancels that write. The sending thread wakes at once with
+  `ChannelError` and releases the pipe handle as it leaves, so the handle is
+  never closed under a write that still uses it.
 
 ## Supervisor
 
@@ -159,8 +171,16 @@ in production yet.
   identity; wrong, missing and unreadable peer identity; an impostor before
   the real peer; a peer that never authenticates; a garbled handshake; a
   server that never challenges; a busy pipe; a silent authenticated peer; an
-  oversized payload; a full-size send to a non-reader; and prompt close. Each
-  wait runs on a watchdog thread and must finish within its bound.
+  oversized payload; a full-size send to a non-reader; repeated sends to a
+  peer that stopped reading (they time out within the deadline, and the
+  channel is then refused); close cancelling a send that is waiting on a full
+  buffer; and prompt close. Each wait runs on a watchdog thread and must
+  finish within its bound. The same scenarios also run across real processes:
+  `tests/fixtures/ipc_send_driver.py` serves channels to disposable peer
+  children (`tests/fixtures/ipc_peer_child.py`) that authenticate and then
+  never read. The driver runs under a hard 60 s outer timeout. The test holds
+  a handle to every peer from the moment it is reported, then verifies each
+  peer has exited and terminates any that has not.
 - `tests/test_supervisor.py`: pure restart-budget rules, plus disposable
   normal-user children (`tests/fixtures/supervised_child.py`). These cover a
   healthy run with clean shutdown, a crash loop going `degraded`, a hung child

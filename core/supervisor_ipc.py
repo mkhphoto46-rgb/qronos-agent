@@ -32,10 +32,19 @@ deadline:
     has cleared completes at once: a partial payload cannot stall it, and an
     oversized message is refused by its length without being read.
 
-    **Closed, bounded messages.** One JSON object per message, at most
-    ``MAX_MESSAGE_BYTES`` (below the 8 KiB pipe buffer, so a send never
-    waits for a peer that is not reading), with a ``kind`` from a closed table
-    and exactly the fields that kind declares.
+    **Bounded sends.** ``multiprocessing``'s ``send_bytes`` waits for its
+    ``WriteFile`` with no timeout. One message below the 8 KiB pipe buffer
+    fits an empty buffer, but repeated sends to a peer that has stopped
+    reading fill it, and the next write then waits forever. So sends here use
+    the same overlapped ``WriteFile`` with a deadline: if the write has not
+    completed when the deadline passes, it is cancelled (``CancelIoEx``), the
+    cancellation is collected, the channel is closed as broken — a cancelled
+    write may have left a partial message — and ``ChannelTimeout`` is raised.
+    Closing never waits on a send.
+
+    **Closed messages.** One JSON object per message, at most
+    ``MAX_MESSAGE_BYTES``, with a ``kind`` from a closed table and exactly
+    the fields that kind declares.
 
 Nothing here runs a command, opens a dialog or touches a device.
 """
@@ -57,9 +66,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 PROTOCOL_VERSION = 1
-#: Below multiprocessing's 8 KiB pipe buffer, so a send completes without
-#: the peer reading. Every message this protocol has is far smaller.
+#: Every message this protocol has is far smaller. Being below the 8 KiB
+#: pipe buffer only means one message fits an empty buffer; it does NOT bound
+#: a send — that is what the send deadline is for.
 MAX_MESSAGE_BYTES = 4096
+DEFAULT_SEND_TIMEOUT_SECONDS = 5.0
 KEY_BYTES = 32
 HANDSHAKE_BYTES = 128
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -224,11 +235,58 @@ def _receive_raw(connection, deadline: float, limit: int) -> bytes:
         raise ChannelError("The peer is gone or sent an oversized message.") from error
 
 
-def _send_raw(connection, data: bytes) -> None:
+def _send_raw(connection, data: bytes, deadline: float, register: Optional[Callable[[object], bool]] = None) -> None:
+    """
+    Write one whole message within the deadline, or cancel it and fail.
+
+    Mirrors ``PipeConnection._send_bytes`` (overlapped ``WriteFile``, wait on
+    its event, collect the result) except that the wait is bounded. A write
+    that is still pending at the deadline is cancelled and its cancellation
+    collected before ``ChannelTimeout`` is raised; the caller must then treat
+    the channel as broken. ``register`` is handed a pending write so that a
+    concurrent close can cancel it; if it returns False the channel is already
+    closing and the write is cancelled here.
+    """
+    import _winapi
+
+    handle = getattr(connection, "_handle", None)
+
+    if not isinstance(handle, int) or handle <= 0:
+        raise ChannelError("The channel is closed.")
+
+    remaining_ms = int(_remaining(deadline) * 1000)
+
+    if remaining_ms <= 0:
+        raise ChannelTimeout("No time left to send.")
+
     try:
-        connection.send_bytes(data)
-    except (OSError, EOFError, ValueError) as error:
-        raise ChannelError("The peer is gone.") from error
+        overlapped, error = _winapi.WriteFile(handle, data, overlapped=True)
+    except OSError as failure:
+        raise ChannelError("The peer is gone.") from failure
+
+    try:
+        if error == _winapi.ERROR_IO_PENDING:
+            if register is not None and not register(overlapped):
+                overlapped.cancel()
+
+            waited = _winapi.WaitForMultipleObjects([overlapped.event], False, remaining_ms)
+
+            if waited != _winapi.WAIT_OBJECT_0:
+                overlapped.cancel()
+                try:
+                    overlapped.GetOverlappedResult(True)  # collect the cancellation
+                except OSError:
+                    pass
+                raise ChannelTimeout("The peer stopped reading; the send was cancelled.")
+
+        written, error = overlapped.GetOverlappedResult(True)
+    except ChannelTimeout:
+        raise
+    except OSError as failure:
+        raise ChannelError("The peer is gone.") from failure
+
+    if error != 0 or written != len(data):
+        raise ChannelError("The message was not written whole.")
 
 
 def _open_pipe(address: str, deadline: float):
@@ -277,7 +335,7 @@ def _tag(key: bytes, role: bytes, challenge: bytes) -> bytes:
 
 def _server_handshake(connection, key: bytes, deadline: float) -> None:
     challenge = secrets.token_bytes(32)
-    _send_raw(connection, _CHALLENGE + challenge)
+    _send_raw(connection, _CHALLENGE + challenge, deadline)
     reply = _receive_raw(connection, deadline, HANDSHAKE_BYTES)
 
     if len(reply) != len(_RESPONSE) + 64 or not reply.startswith(_RESPONSE):
@@ -288,7 +346,7 @@ def _server_handshake(connection, key: bytes, deadline: float) -> None:
     if not hmac.compare_digest(proof, _tag(key, b"client", challenge)):
         raise ChannelError("The peer failed authentication.")
 
-    _send_raw(connection, _CONFIRM + _tag(key, b"server", theirs))
+    _send_raw(connection, _CONFIRM + _tag(key, b"server", theirs), deadline)
 
 
 def _client_handshake(connection, key: bytes, deadline: float) -> None:
@@ -298,7 +356,7 @@ def _client_handshake(connection, key: bytes, deadline: float) -> None:
         raise ChannelError("The server failed authentication.")
 
     ours = secrets.token_bytes(32)
-    _send_raw(connection, _RESPONSE + _tag(key, b"client", challenge[len(_CHALLENGE):]) + ours)
+    _send_raw(connection, _RESPONSE + _tag(key, b"client", challenge[len(_CHALLENGE):]) + ours, deadline)
     confirm = _receive_raw(connection, deadline, HANDSHAKE_BYTES)
 
     if len(confirm) != len(_CONFIRM) + 32 or not confirm.startswith(_CONFIRM) \
@@ -317,30 +375,81 @@ class Channel:
         self._receive = receive
         self._send = send
         self._send_lock = threading.Lock()
+        # Guards _closed, _sending and _pending. Never held while waiting.
+        self._state_lock = threading.Lock()
         self._closed = False
+        self._sending = False
+        self._pending = None
 
     @property
     def connection(self):
         return self._connection
 
-    def send(self, kind: str, **fields: Any) -> None:
+    def send(self, kind: str, timeout: float = DEFAULT_SEND_TIMEOUT_SECONDS, **fields: Any) -> None:
+        """Send one message within ``timeout``; a timed-out channel is closed."""
         self._send.validate({"kind": kind, **fields})
         data = encode_message(kind, fields)
+        deadline = time.monotonic() + max(0.0, timeout)
 
         with self._send_lock:
-            _send_raw(self._connection, data)
+            with self._state_lock:
+                if self._closed:
+                    raise ChannelError("The channel is closed.")
+                self._sending = True
+
+            try:
+                _send_raw(self._connection, data, deadline, self._register)
+            except ChannelTimeout:
+                # A cancelled write may have left part of a message in the
+                # pipe; nothing more may be sent or trusted on this channel.
+                with self._state_lock:
+                    self._closed = True
+                raise
+            finally:
+                with self._state_lock:
+                    self._sending, self._pending = False, None
+                    release = self._closed
+
+                if release:
+                    self._release()
+
+    def _register(self, overlapped) -> bool:
+        with self._state_lock:
+            if self._closed:
+                return False
+            self._pending = overlapped
+            return True
 
     def receive(self, timeout: float) -> dict:
         data = _receive_raw(self._connection, time.monotonic() + max(0.0, timeout), MAX_MESSAGE_BYTES)
         return decode_message(data, self._receive)
 
     def close(self) -> None:
-        if not self._closed:
+        """
+        Close without waiting on a send.
+
+        With no send in progress the pipe is closed here. Otherwise the
+        pending write is cancelled and the sending thread, which wakes at
+        once, closes the pipe as it leaves — so the handle is never closed
+        under a write that still uses it.
+        """
+        with self._state_lock:
+            if self._closed:
+                return
             self._closed = True
-            try:
-                self._connection.close()
-            except OSError:
-                pass
+
+            if self._sending:
+                if self._pending is not None:
+                    self._pending.cancel()
+                return
+
+        self._release()
+
+    def _release(self) -> None:
+        try:
+            self._connection.close()
+        except OSError:
+            pass
 
 
 class ChannelServer:

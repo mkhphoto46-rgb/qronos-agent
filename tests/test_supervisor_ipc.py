@@ -9,11 +9,14 @@ to an unbounded read fails here instead of hanging the suite.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import threading
 import time
 from multiprocessing.connection import Client, Listener
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +34,7 @@ from core.supervisor_ipc import (
     new_key,
     require_local_address,
 )
+from tests.fixtures.child_python import child_python
 
 UP = MessageSchema({"hello": {"pid": "int", "protocol": "int"}, "note": {"text": "str"}})
 DOWN = MessageSchema({"welcome": {"ok": "bool"}})
@@ -74,8 +78,10 @@ def test_oversized_non_json_and_non_finite_messages_are_refused():
         decode_message(b'{"kind":"hello","pid":NaN,"protocol":1}', UP)
 
 
-def test_messages_fit_the_pipe_buffer_so_a_send_never_waits_for_the_reader():
-    assert MAX_MESSAGE_BYTES < 8192
+def test_one_message_fits_an_empty_pipe_buffer():
+    # Only the first send to an idle peer is helped by this; repeated sends
+    # are bounded by the send deadline (see the "peer stops reading" tests).
+    assert MAX_MESSAGE_BYTES < 8192 and ipc.DEFAULT_SEND_TIMEOUT_SECONDS > 0
 
 
 # --------------------------------------------------------------- addresses
@@ -363,6 +369,65 @@ def test_a_full_size_send_does_not_wait_for_a_peer_that_never_reads(server):
         holder["channel"].close()
 
 
+def idle_and_writer(srv):
+    """An accepted channel that never reads, and its authenticated peer that writes to it."""
+    holder = {}
+    peer = Peer(lambda: holder.setdefault("channel", connect(srv.address, srv.key, DOWN, UP, expected_server_pid=ME)))
+    peer.start()
+    idle = srv.accept(5, expected_pid=ME)
+    peer.join(5)
+    return idle, holder["channel"]
+
+
+@windows_only
+def test_repeated_sends_to_a_peer_that_stops_reading_time_out_and_close(server):
+    idle, writer = idle_and_writer(server())
+    text = "x" * (MAX_MESSAGE_BYTES - 40)
+    try:
+        def flood():
+            sent = 0
+            while True:
+                started = time.monotonic()
+                try:
+                    writer.send("note", timeout=0.5, text=text)  # the accepted side never reads
+                except ChannelTimeout:
+                    return sent, time.monotonic() - started
+                sent += 1
+
+        sent, waited = bounded(flood, 5)
+        assert sent >= 1 and 0.4 <= waited < 2.0  # the buffer filled, then the wait kept its deadline
+        with pytest.raises(ChannelError):
+            bounded(lambda: writer.send("note", timeout=0.5, text="after"), 1.0)  # broken, refused at once
+    finally:
+        idle.close()
+        writer.close()
+
+
+@windows_only
+def test_closing_cancels_a_send_that_is_waiting_on_a_full_buffer(server):
+    idle, writer = idle_and_writer(server())
+    text = "x" * (MAX_MESSAGE_BYTES - 40)
+
+    def flood():
+        while True:
+            writer.send("note", timeout=30, text=text)
+
+    sender = Peer(flood)
+    sender.start()
+    try:
+        time.sleep(1.0)  # well past the two messages the buffer holds
+        assert sender.is_alive()  # waiting on its 30 s deadline
+        started = time.monotonic()
+        bounded(writer.close, 1.0)
+        sender.join(2.0)
+        assert not sender.is_alive() and time.monotonic() - started < 2.0
+        assert isinstance(sender.error, ChannelError) and not isinstance(sender.error, ChannelTimeout)
+        assert writer.connection.closed  # released by the sender as it left
+    finally:
+        idle.close()
+        writer.close()
+
+
 @windows_only
 def test_closing_is_prompt_while_the_peer_stalls(server):
     srv = server()
@@ -397,3 +462,69 @@ def test_a_send_outside_the_schema_is_refused_before_it_leaves(server):
     finally:
         channel.close()
         holder["channel"].close()
+
+
+# ------------------------------------------- a separate process stops reading
+
+
+@windows_only
+def test_a_peer_process_that_stops_reading_cannot_hang_send_or_close():
+    """
+    The same scenarios across real processes, under a hard outer timeout.
+
+    tests/fixtures/ipc_send_driver.py serves channels to disposable peer
+    children (tests/fixtures/ipc_peer_child.py) that authenticate and then
+    never read. A handle to each peer is opened the moment the driver reports
+    it, so the cleanup check below is about that exact process even if the
+    driver itself hung and was killed.
+    """
+    import _winapi
+
+    driver_script = Path(__file__).with_name("fixtures") / "ipc_send_driver.py"
+    executable, environment = child_python()
+    driver = subprocess.Popen(
+        [executable, "-B", str(driver_script)], stdout=subprocess.PIPE, env=environment,
+    )
+    peers, lines = [], []
+
+    def read_driver():
+        for raw in driver.stdout:
+            line = raw.decode("utf-8", "replace").strip()
+            lines.append(line)
+            if line.startswith("PEER "):
+                access = 0x100000 | 0x1000 | 0x0001  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION | TERMINATE
+                peers.append(_winapi.OpenProcess(access, False, int(line.split()[1])))
+
+    reader = Peer(read_driver)
+    reader.start()
+    hung = False
+    try:
+        driver.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        hung = True
+        driver.kill()
+        driver.wait(10)
+    reader.join(10)
+
+    left_running = 0
+    for handle in peers:
+        if _winapi.WaitForSingleObject(handle, 10_000) != _winapi.WAIT_OBJECT_0:
+            left_running += 1
+            _winapi.TerminateProcess(handle, 1)
+            _winapi.WaitForSingleObject(handle, 10_000)
+        _winapi.CloseHandle(handle)
+
+    assert not hung, f"the driver outlived its hard timeout: {lines}"
+    assert left_running == 0 and len(peers) == 2
+    report = json.loads(lines[-1])
+    repeated, closing = report["repeated"], report["close"]
+
+    # The buffer filled, then a send kept its 1 s deadline and broke the channel.
+    assert repeated["sent_before_block"] >= 1 and repeated["timed_out"]
+    assert 0.9 <= repeated["blocked_send_seconds"] < 2.5
+    assert repeated["after_timeout"] == "refused"
+
+    # Close returned at once and woke a send waiting on its 3 s deadline early.
+    assert closing["close_seconds"] < 0.5 and closing["sender_finished"]
+    assert closing["result"] == "error" and closing["sender_seconds"] < 2.5
+    assert all(peer["exited"] for peer in report["peers"])
