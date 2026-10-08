@@ -22,6 +22,7 @@ from core.storage_locations import (
     change_storage_location,
     read_storage_state,
 )
+from core.visible_browser import VisibleBrowserLauncher
 
 # File mutations are two-phase: "prepare" validates one exact operation and
 # returns a single-use approval, "commit" runs only what that approval covers.
@@ -82,7 +83,9 @@ def run(
     if op=="open_folder": registry.open_folder(str(payload.get("id","")) or None); return {"ok":True}
     if op=="pick_folder": return {"ok":True,"path":_pick_folder()}
     if op in {"prepare","commit","cancel","delete_forever"} or op in _ONE_SHOT_MUTATIONS:
-        executor=executor or LibraryExecutor(registry,audit=ActionAuditLog(library_audit_path()))
+        # Saved links open only in the visible default browser, after the gated
+        # approval below (core.visible_browser re-validates the URL).
+        executor=executor or LibraryExecutor(registry,audit=ActionAuditLog(library_audit_path()),browser=VisibleBrowserLauncher())
         try:
             if op=="prepare":
                 return {"ok":True,"status":"awaiting_confirmation","approval":executor.prepare(

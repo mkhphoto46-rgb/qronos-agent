@@ -158,3 +158,32 @@ def test_library_gated_open_link_flow_uses_the_launcher_once_after_approval(tmp_
     with pytest.raises(LibraryActionRefused):
         executor.commit(approval["token"], operation="open_link")
     assert len(calls) == 1
+
+
+def test_library_cli_opens_saved_links_only_after_approval_in_the_visible_browser(tmp_path, monkeypatch, browser):
+    """The production Library CLI wiring: prepare opens nothing; commit starts the
+    default browser once with the exact saved URL. Only the native process start
+    and window check are replaced here."""
+    from core import library_cli, visible_browser
+    from core.artifact_registry import ArtifactRegistry
+    from core.artifact_service import ArtifactProducerRegistry
+
+    started = []
+    original_init = visible_browser.VisibleBrowserLauncher.__init__
+
+    def init(self, **kwargs):
+        kwargs.setdefault("handler_fn", lambda: str(browser))
+        kwargs.setdefault("popen_fn", lambda arguments, **options: started.append(arguments))
+        kwargs.setdefault("visible_fn", lambda name: True)
+        original_init(self, **kwargs)
+
+    monkeypatch.setattr(visible_browser.VisibleBrowserLauncher, "__init__", init)
+    registry = ArtifactRegistry(tmp_path / "db" / "library.sqlite3", tmp_path / "Artifacts")
+    item = ArtifactProducerRegistry(registry).register_link("https://example.org/saved", name="Saved")
+    monkeypatch.setattr(library_cli, "library_audit_path", lambda: tmp_path / "audit.jsonl")
+    prepared = library_cli.run("prepare", {"action": "open_link", "ids": [item.id]}, registry=registry)
+    assert prepared["ok"] and started == []
+    committed = library_cli.run("commit", {"action": "open_link", "token": prepared["approval"]["token"]},
+                                registry=registry)
+    assert committed["ok"], committed
+    assert started == [[str(browser), "https://example.org/saved"]]
