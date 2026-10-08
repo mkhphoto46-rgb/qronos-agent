@@ -746,3 +746,174 @@ def test_a_store_below_a_junctioned_ancestor_is_refused(tmp_path):
     with pytest.raises(UpdateError, match="above the update store"):
         store.stage(manifest, installer, keys, "0.1.0", 3)
     assert not (real / "Updates").exists()
+
+
+# ------------------------------------- concurrent readers and writers (I7-F1)
+#
+# On Windows a file that another handle has open without delete sharing cannot be
+# replaced: os.replace raises PermissionError. Store readers take the store lock, so
+# Qronos processes never collide; any other program holding a file open makes the
+# change a typed UpdateError("busy") after a bounded retry, never a raw OSError.
+
+
+def _temporaries(store: LocalUpdateStore) -> list[str]:
+    return [path.name for folder in (store.root, store.staged_dir) if folder.exists()
+            for path in folder.iterdir() if path.name.endswith(".tmp")]
+
+
+def test_a_program_holding_the_state_file_open_makes_a_save_busy_not_an_oserror(tmp_path):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+    before = store.state_path.read_bytes()
+    store.replace_timeout = 0.3
+
+    with open(store.state_path, "rb"):  # a reader outside Qronos: no delete sharing
+        with pytest.raises(UpdateError) as refused:
+            store.discard()
+
+    assert refused.value.code == "busy"
+    assert store.state_path.read_bytes() == before  # nothing changed, nothing claimed
+    assert store.state()["phase"] == "staged"
+    assert _temporaries(store) == []
+    store.discard()  # once the other program lets go, the same change succeeds
+    assert store.state()["phase"] == "idle"
+
+
+def test_a_short_lived_reader_is_waited_for(tmp_path):
+    import threading
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+    reader = open(store.state_path, "rb")
+    threading.Timer(0.3, reader.close).start()
+
+    store.discard()  # retried until the reader closed, well within replace_timeout
+
+    assert reader.closed and store.state()["phase"] == "idle"
+
+
+@pytest.mark.parametrize(("failure", "code"), [
+    (PermissionError(13, "in use"), "busy"),
+    (OSError(28, "no space left"), "store"),
+])
+def test_a_failed_replace_is_a_typed_refusal_and_changes_nothing(tmp_path, monkeypatch, failure, code):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+    before = store.state_path.read_bytes()
+    store.replace_timeout = 0.2
+    attempts = []
+
+    def failing_replace(source, destination):
+        attempts.append(destination)
+        raise failure
+
+    monkeypatch.setattr(local_update.os, "replace", failing_replace)
+    with pytest.raises(UpdateError) as refused:
+        store.discard()
+
+    assert refused.value.code == code
+    assert len(attempts) >= (2 if code == "busy" else 1) and (code == "busy" or len(attempts) == 1)
+    assert store.state_path.read_bytes() == before
+    assert _temporaries(store) == []
+
+
+def test_a_failed_write_is_a_typed_refusal_and_leaves_no_temporary(tmp_path, monkeypatch):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+
+    def failing_fsync(descriptor):
+        raise OSError(28, "no space left")
+
+    monkeypatch.setattr(local_update.os, "fsync", failing_fsync)
+    with pytest.raises(UpdateError) as refused:
+        store.stage(manifest, installer, keys, "0.1.0", 3)
+
+    assert refused.value.code == "store"
+    assert _temporaries(store) == [] and not store.state_path.exists()
+
+
+def test_reading_the_state_waits_for_the_store_lock(tmp_path):
+    """state() takes the writers' lock, so it never holds the file open during a save."""
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+    store.lock_timeout = 0.5
+    ready, release = tmp_path / "ready", tmp_path / "release"
+    source_root = Path(local_update.__file__).resolve().parent.parent
+    holder = subprocess.Popen([sys.executable, "-B", "-c", LOCK_HOLDER, str(source_root), str(store.root),
+                               str(ready), str(release)])
+    try:
+        deadline = time.time() + 30
+        while not ready.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert ready.exists()
+        with pytest.raises(UpdateError) as refused:
+            store.state()
+        assert refused.value.code == "busy"
+    finally:
+        release.write_text("go")
+        holder.wait(timeout=30)
+    assert store.state()["phase"] == "staged"
+
+
+def test_reading_a_store_that_does_not_exist_creates_nothing(tmp_path):
+    store, *_ = stage_fixture(tmp_path)
+    assert store.state()["phase"] == "idle"
+    assert not store.root.exists()
+
+
+STAGER = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from core import local_update
+public = bytes.fromhex(sys.argv[5])
+identifier = local_update.key_id(public)
+keys = {identifier: local_update.TrustedKey(identifier, public, "fixture owner", False)}
+store = local_update.LocalUpdateStore(Path(sys.argv[2]))
+go = Path(sys.argv[6])
+while not go.exists():
+    time.sleep(0.01)
+for _ in range(int(sys.argv[7])):
+    try:
+        if sys.argv[8] == "read":
+            store.state()
+            print("read", flush=True)
+            continue
+        store.stage(Path(sys.argv[3]), Path(sys.argv[4]), keys, "0.1.0", 3)
+        print("staged", flush=True)
+    except local_update.UpdateError as error:
+        print("UpdateError:" + error.code, flush=True)
+    except BaseException as error:
+        print("UNTYPED:" + type(error).__name__ + ":" + str(error).replace(chr(10), " "), flush=True)
+"""
+
+
+def test_concurrent_stagers_and_readers_get_typed_outcomes_and_leave_one_valid_state(tmp_path):
+    """Six real processes stage the same package eight times each while three others read
+    the state 150 times each, all at once. Before readers took the store lock, a reader
+    holding the state file open made a stager's os.replace raise PermissionError."""
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    public = next(iter(keys.values())).public_key
+    source_root = Path(local_update.__file__).resolve().parent.parent
+    go = tmp_path / "go"
+
+    def start(count: int, mode: str) -> subprocess.Popen:
+        return subprocess.Popen([sys.executable, "-B", "-c", STAGER, str(source_root), str(store.root), str(manifest),
+                                 str(installer), public.hex(), str(go), str(count), mode],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    processes = [start(8, "stage") for _ in range(6)] + [start(150, "read") for _ in range(3)]
+    go.write_text("go")
+    results = []
+    for process in processes:
+        output, errors = process.communicate(timeout=300)
+        assert process.returncode == 0, errors
+        results += output.split()
+
+    assert len(results) == 6 * 8 + 3 * 150
+    assert set(results) <= {"staged", "read", "UpdateError:busy"}, \
+        [r for r in results if r not in ("staged", "read")]
+    assert "staged" in results
+    state = store.state()
+    sha = hashlib.sha256(installer.read_bytes()).hexdigest()
+    assert state["phase"] == "staged" and state["staged"]["packageSha256"] == sha
+    assert sorted(path.name for path in store.staged_dir.iterdir()) == [f"{sha}.exe", f"{sha}.json"]
+    assert _temporaries(store) == []

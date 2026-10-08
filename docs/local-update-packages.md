@@ -121,6 +121,14 @@ How the store writes and serialises changes:
   atomic rename. A failed write leaves no temporary file behind.
 - Changes are serialised across processes by an exclusive lock on
   `update.lock`. A second process waiting longer than the timeout gets `busy`.
+  Reading the state takes the same lock: on Windows a file that is open
+  cannot be replaced, so a reader must not hold it during another process's
+  save. Reading a store that does not exist yet creates nothing.
+- If another program (not Qronos) has a destination file open, the rename
+  is retried for up to two seconds and then refused with `busy`. Any other
+  write error is refused with `store`. Either way nothing changes, the
+  temporary file is removed and the caller gets an `UpdateError`, never a
+  raw operating-system error and never a silent success.
 - If the security floor changes while a package is being checked, staging
   stops with `busy` rather than using the stale floor.
 

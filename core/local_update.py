@@ -454,6 +454,7 @@ class LocalUpdateStore:
     """
 
     lock_timeout = 10.0
+    replace_timeout = 2.0
 
     def __init__(self, root: Path) -> None:
         self.root = Path(os.path.abspath(root))
@@ -513,26 +514,55 @@ class LocalUpdateStore:
             os.close(handle)
 
     def _publish(self, directory: Path, name: str, write: Callable[[Any], None]) -> Path:
-        """Write a new file through an exclusive unpredictable temporary, then rename it into place."""
+        """Write a new file through an exclusive unpredictable temporary, then rename it into place.
+
+        Every failure is an UpdateError and leaves no temporary behind: "busy" when
+        Windows refuses the rename because another program has the destination open
+        (retried for replace_timeout seconds first), "store" for any other write error.
+        """
         final = directory / name
         problem = _unsafe_file(final)
         if problem:
             raise UpdateError("store", f"{name} {problem}; it is not this store's file and was not touched.")
-        handle, temporary = tempfile.mkstemp(prefix=".qronos-", suffix=".tmp", dir=directory)
+        try:
+            handle, temporary = tempfile.mkstemp(prefix=".qronos-", suffix=".tmp", dir=directory)
+        except OSError as error:
+            raise UpdateError("store", f"{name} could not be written; nothing was changed.") from error
         try:
             with os.fdopen(handle, "wb") as stream:
                 write(stream)
                 stream.flush()
                 os.fsync(stream.fileno())
-            problem = _unsafe_file(final)
-            if problem:
-                raise UpdateError("store", f"{name} {problem}; it is not this store's file and was not touched.")
-            os.replace(temporary, final)
+            deadline = time.monotonic() + self.replace_timeout
+            while True:
+                problem = _unsafe_file(final)
+                if problem:
+                    raise UpdateError("store", f"{name} {problem}; it is not this store's file and was not touched.")
+                try:
+                    os.replace(temporary, final)
+                    break
+                except PermissionError as error:
+                    # Another program (a reader outside the store lock, a scanner, a
+                    # running installer) has the destination open without delete sharing.
+                    if time.monotonic() >= deadline:
+                        raise UpdateError("busy", f"{name} is in use by another program; nothing was changed. "
+                                                  "Try again.") from error
+                    time.sleep(0.05)
+        except UpdateError:
+            self._discard_temporary(temporary)
+            raise
+        except OSError as error:
+            self._discard_temporary(temporary)
+            raise UpdateError("store", f"{name} could not be written; nothing was changed.") from error
         except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temporary)
+            self._discard_temporary(temporary)
             raise
         return final
+
+    @staticmethod
+    def _discard_temporary(temporary: str) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
 
     def _owned(self, name: str) -> Path:
         if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.(exe|json)", name):
@@ -551,7 +581,11 @@ class LocalUpdateStore:
             for name in (record["packageFile"], record["manifestFile"]):
                 path = self._owned(name)
                 if os.path.lexists(path):
-                    os.unlink(path)  # removes only this directory entry, never a link target
+                    try:
+                        os.unlink(path)  # removes only this directory entry, never a link target
+                    except OSError as error:
+                        raise UpdateError("busy", f"The staged file {name} is in use and could not be removed. "
+                                                  "Try again.") from error
 
     # -- state
 
@@ -598,8 +632,17 @@ class LocalUpdateStore:
         raise UpdateError("busy", "The update state file kept changing while it was read; try again.")
 
     def state(self) -> dict[str, Any]:
+        """The current state, read under the store lock.
+
+        On Windows a file that is open cannot be replaced, so an unlocked read could make
+        another process's save fail. Readers therefore take the same lock as writers. A
+        store that does not exist yet is not created by reading it.
+        """
         self._check_folders()
-        return self._read_state()
+        if not os.path.lexists(self.root):
+            return self._read_state()
+        with self._locked():
+            return self._read_state()
 
     def _save(self, state: dict[str, Any]) -> None:
         state["history"] = state["history"][-_HISTORY_LIMIT:]
