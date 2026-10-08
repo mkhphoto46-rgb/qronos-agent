@@ -468,6 +468,11 @@ def job_devmode(printer: str, options: PrintOptions) -> ctypes.Array:
         _winspool.ClosePrinter(handle)
 
 
+def _create_printer_dc(printer: str, devmode: ctypes.Array):
+    """A device context on the real printer, with this job's DEVMODE."""
+    return _gdi32.CreateDCW("WINSPOOL", printer, None, devmode)
+
+
 def apply_options_to_devmode(buffer: ctypes.Array, options: PrintOptions) -> None:
     """Write copies, collation and colour into a DEVMODEW buffer (offsets from wingdi.h)."""
     fields = ctypes.c_uint32.from_buffer(buffer, _DM_FIELDS)
@@ -661,7 +666,7 @@ class RendererSubmitter:
                 wanted = selected_pdf_pages(options, self._pdf.page_count(path))
                 pdf_pages = self._pdf.render(path, wanted, folder)
             devmode = job_devmode(printer, options)
-            hdc = _gdi32.CreateDCW("WINSPOOL", printer, None, devmode)
+            hdc = _create_printer_dc(printer, devmode)
             if not hdc:
                 raise RenderError("The printer device could not be created.")
             info = _DOCINFOW(ctypes.sizeof(_DOCINFOW), path.name, None, None, 0)

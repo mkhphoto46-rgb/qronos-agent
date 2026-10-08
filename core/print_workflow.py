@@ -875,16 +875,21 @@ class ShellPrintToSubmitter:
         info.lpFile = str(path)
         info.lpParameters = '"' + printer + '"'
         info.nShow = SW_SHOWMINNOACTIVE
-        execute = self._shell32.ShellExecuteExW
-        execute.argtypes = [ctypes.POINTER(_SHELLEXECUTEINFOW)]
-        execute.restype = wintypes.BOOL
-        if not execute(ctypes.byref(info)):
+        if not _shell_execute_printto(self._shell32, info):
             error = ctypes.get_last_error()
             if error in _PRE_LAUNCH_ERRORS:
                 raise PrintNotSubmitted(f"Windows could not start the print handler ({error}).")
             # DDE and other failures can happen after the handler started.
             raise OSError(f"ShellExecuteEx failed after possibly starting the handler ({error}).")
         return WinHandlerProcess(int(info.hProcess or 0), self._kernel32)
+
+
+def _shell_execute_printto(shell32, info: _SHELLEXECUTEINFOW) -> bool:
+    """Start the registered print handler: the one call that reaches a real printer."""
+    execute = shell32.ShellExecuteExW
+    execute.argtypes = [ctypes.POINTER(_SHELLEXECUTEINFOW)]
+    execute.restype = wintypes.BOOL
+    return bool(execute(ctypes.byref(info)))
 
 
 # ShellExecuteEx errors that mean nothing was launched: file/path not found,

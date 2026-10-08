@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.live_device import LiveDeviceBlocked, requires_live_device
 from core.action_cancellation import CancellationToken
 from core.app_workflow import (
     ApprovalMismatch,
@@ -419,12 +420,10 @@ def test_spooler_queries_retry_a_bounded_number_of_times(setup):
     assert submitter.submissions == []
 
 
-@pytest.mark.skipif(
-    os.name != "nt" or os.environ.get("QRONOS_LIVE_DEVICE_TESTS") != "1",
-    reason="Reads this computer's real printer list; live device checks are opt-in "
-           "(QRONOS_LIVE_DEVICE_TESTS=1) and deferred in this phase.",
-)
+@requires_live_device
+@pytest.mark.skipif(os.name != "nt", reason="Reads the Windows print spooler.")
 def test_windows_spooler_reads_printers_without_side_effects():
+    """Live acceptance: reads this computer's real printer list."""
     from core.print_workflow import WinSpooler
 
     spooler = WinSpooler()
@@ -570,6 +569,24 @@ def test_shell_submitter_refuses_quoted_printer_names_before_launching(tmp_path)
 
     with pytest.raises(PrintNotSubmitted, match="double quote"):
         ShellPrintToSubmitter().start(tmp_path / "never-launched.pdf", 'Office "Laser"')
+
+
+def test_software_tests_cannot_reach_a_real_printer(tmp_path):
+    """The live-device boundary covers every printer primitive (G1)."""
+    from core import print_renderer as pr
+    from core import print_workflow as pw
+    from core.print_renderer import PrintOptions
+
+    attempts = [
+        lambda: pw.WinSpooler(),
+        lambda: pw._shell_execute_printto(None, None),
+        lambda: pr.printer_capabilities("Office Laser"),
+        lambda: pr.job_devmode("Office Laser", PrintOptions()),
+        lambda: pr._create_printer_dc("Office Laser", None),
+    ]
+    for attempt in attempts:
+        with pytest.raises(LiveDeviceBlocked):
+            attempt()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Printer notification structures are Windows layouts.")

@@ -13,6 +13,8 @@ import pytest
 import core.audio_input as audio_input
 import core.audio_output as audio_output
 import core.computer_executor as computer_executor
+import core.print_renderer as print_renderer
+import core.print_workflow as print_workflow
 import core.screen_capture as screen_capture
 import core.window_binding as window_binding
 import core.windows_accessibility as accessibility_reader
@@ -46,6 +48,11 @@ LIVE_DEVICE_FUNCTIONS = (
     (audio_output, "_get_sounddevice", "opening the real audio output stack (speakers)"),
     (accessibility_reader, "_run_uia_script", "reading the real UI Automation tree"),
     (accessibility_reader, "focused_element", "reading the real focused UI element"),
+    (print_workflow, "WinSpooler", "reading or driving the real print spooler"),
+    (print_workflow, "_shell_execute_printto", "starting a real print handler"),
+    (print_renderer, "printer_capabilities", "reading a real printer's capabilities"),
+    (print_renderer, "job_devmode", "opening a real printer's settings"),
+    (print_renderer, "_create_printer_dc", "opening a real printer device context"),
 )
 # Child processes that read the GPU or run local inference.
 LIVE_DEVICE_EXECUTABLES = frozenset({
