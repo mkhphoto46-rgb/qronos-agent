@@ -211,6 +211,18 @@ def test_production_wiring_checks_the_profile_secret_with_the_shared_lockout(tem
     assert coordinator._verify_secret("correct horse battery") is True
 
 
+def test_the_telegram_destination_is_only_an_explicit_existing_absolute_folder(tmp_path, monkeypatch):
+    from core.runtime_bridge import _telegram_download_folder
+
+    monkeypatch.delenv("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", raising=False)
+    assert _telegram_download_folder() is None, "never guessed"
+    for value in ("relative\\downloads", str(tmp_path / "missing"), "   "):
+        monkeypatch.setenv("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", value)
+        assert _telegram_download_folder() is None, value
+    monkeypatch.setenv("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", str(tmp_path))
+    assert _telegram_download_folder() == tmp_path
+
+
 def test_production_wiring_uses_one_durable_journal_under_the_qronos_state_root(temporary_data_root):
     runtime = QronosRuntime(notify=lambda *args: None)
     runtime.action_audit = ActionAuditLog(path=None)

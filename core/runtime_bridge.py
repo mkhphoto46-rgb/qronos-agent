@@ -1296,8 +1296,8 @@ def _telegram_download_folder() -> Path | None:
     """The exact folder Telegram saves into, when configured.
 
     Telegram decides where a download is saved; Qronos verifies it there and
-    never searches elsewhere. Until the default folder can be named by the
-    product (pending Root review), the folder is configured explicitly.
+    never searches elsewhere. The folder is an explicit, absolute, existing
+    destination, shown in the download approval; Qronos never guesses it.
     """
     value = os.environ.get("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", "").strip()
     if not value:
