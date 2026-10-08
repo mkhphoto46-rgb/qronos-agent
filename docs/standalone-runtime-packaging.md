@@ -91,16 +91,104 @@ the remaining open points: the statically linked Microsoft C runtime, a
 Wine-derived constant with an informal BSD permission, and the fact that the
 binary was not rebuilt independently.
 
+### CPython components
+
+CPython's `LICENSE.txt` does not contain every third-party text that a
+Windows build compiles in or ships beside it. Examples are zlib or zlib-ng,
+Expat, mpdecimal, HACL*, mimalloc, libb2, libtommath and the Zstandard library,
+SQLite's public-domain dedication, and CPython's own `Doc/license.rst`
+acknowledgements. `build_support/cpython_notice_registry.json` describes each
+audited interpreter build:
+
+- **Identity.** Version, platform and build tag (for example
+  `tags/v3.13.13:01104ce`), the full source commit and the SHA-256 of its
+  `LICENSE.txt`.
+- **Native files.** Every `.dll` and `.pyd` that the official python.org
+  installer puts in the interpreter folder or `DLLs/`, with its size and
+  SHA-256, and the components compiled into it.
+- **Data trees.** For Tcl/Tk 8.6, the file count and digest of the `_tcl_data`,
+  `_tk_data` and `tcl8` folders PyInstaller copies from the interpreter's `tcl/`
+  tree. Tcl/Tk 9 (CPython 3.14) keeps its script library inside `tcl90.dll`
+  and `tcl9tk90.dll`, so those records have no data trees and the DLLs carry
+  the Tcl and Tk components.
+- **Module-bound components.** Components bound to frozen modules rather than
+  files, such as `ctypes.macholib`, which PyInstaller collects through
+  `ctypes.util`.
+- **Components.** Each component pins byte-exact upstream texts in
+  `build_support/cpython_notice_texts/` and gives each text a role:
+  - `license-text`: the licence itself.
+  - `terms-excerpt`: a verbatim source comment that carries the terms, such as
+    SQLite's dedication or the HACL* MIT header.
+  - `auxiliary`: README, AUTHORS or other attribution files.
+
+  A component also records the exact copyright lines (which must appear in its
+  own texts), its scope and any unresolved point.
+
+The audited builds are CPython 3.13.13, 3.14.7 and 3.14.8 for win-amd64, in the
+layout of the official python.org installer. That is also the layout
+`actions/setup-python` installs. For these builds, the registry's hashes were
+read from the official `core`, `exe`, `lib` and `tcltk` MSIs. Each text records
+the verified sources it came from:
+
+- a `cpython-source-deps` archive whose SHA-256 equals CPython's
+  `Misc/externals.spdx.json`;
+- a CPython source tarball verified by its python.org SHA-256 and Sigstore
+  identity;
+- an upstream repository file at a full commit;
+- for the Unicode License, which has no versioned URL, the retrieval date.
+
+At build time the collector checks the following before anything is written:
+
+- The build interpreter's version, platform and build tag must be one of the
+  audited records.
+- The interpreter's `LICENSE.txt` and installed native files must have the
+  audited bytes.
+- Every bundled CPython `.dll`/`.pyd` must equal the audited file with the same
+  name.
+- Every Tcl/Tk data folder must match its audited tree.
+- Any other CPython folder must contain no native code.
+
+The texts of every component bound to the bundled files and modules are then
+copied to `third-party-notices/python/cpython-<version>/components/`. They are
+listed in `inventory.json` with path, size, SHA-256, role and sources, and the
+runtime manifest seals them with the rest of the bundle.
+
+Anything else stops the build with the exact item that did not match:
+
+- an unknown interpreter, including a portable or embeddable package or a
+  later 3.14 release;
+- changed bytes;
+- an unknown binary;
+- a Tcl/Tk data folder without an audited tree.
+
+To support a new interpreter build, audit it the same way and add a reviewed
+record. The development-only assembler that produced the current records and
+texts is kept outside the repository with the scratch evidence. The registry
+loader itself refuses records that are inconsistent or unused, and texts whose
+bytes changed. The registry only applies to Windows frozen packaging. Linux
+unit tests exercise it with synthetic fixtures and never need a Windows
+interpreter.
+
+### Recorded rather than resolved
+
 Some items are recorded rather than resolved:
 
 - Microsoft runtime files (`vcruntime140*.dll`, `msvcp140*.dll`,
   `vcomp140.dll`, `ucrtbase.dll`, `api-ms-win-*.dll`) are listed with the
-  package that delivered them and marked `review-required`. Microsoft's
-  distributable-code terms are not reproduced.
-- CPython's `LICENSE.txt` is copied unchanged. For each bundled CPython
-  component (such as OpenSSL, SQLite, Tcl/Tk, zlib, XZ, Expat and mpdecimal)
-  the inventory records whether that text names it. Components it does not
-  name need review.
+  package that delivered them and marked `review-required`. The inventory notes
+  whether a bundled `vcruntime140*.dll` is byte-identical to the audited
+  interpreter's own copy. That is an identity fact, not a redistribution right.
+  Microsoft's distributable-code terms are not reproduced and remain an owner
+  gate.
+- Each CPython component's `unresolved` note is repeated in `inventory.json`
+  and `README.txt`. These notes cover:
+  - Zstandard's "BSD OR GPLv2" choice;
+  - HACL*'s MIT headers next to its Apache-2.0 repository licence;
+  - mimalloc's licence file, which comes from upstream because CPython omits it;
+  - macholib's "MIT or PSF" statement;
+  - the Unicode Character Database notice that CPython 3.13 does not document.
+
+  The build ships every text involved and makes none of these choices.
 - Qronos's own modules and configuration are listed as project-owned, with an
   unspecified license. Choosing that license is an owner decision.
 
