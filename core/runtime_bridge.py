@@ -201,6 +201,18 @@ class PendingPaintUndoAction:
 VOICE_PLAYBACK_STARTED_ACTION = "qronos.voice_playback_started"
 VOICE_PLAYBACK_COMPLETE_ACTION = "qronos.voice_playback_complete"
 STOP_RESPONSE_ACTION = "qronos.stop_response"
+# The desktop's Device Link page (docs/QRONOS_DEVICE_LINK.md 5.7).
+LINK_STATUS_ACTION = "qronos.link_status"
+LINK_DEVICES_ACTION = "qronos.link_devices"
+LINK_PAIR_OPEN_ACTION = "qronos.link_pair_open"
+LINK_PAIR_CANCEL_ACTION = "qronos.link_pair_cancel"
+LINK_REVOKE_ACTION = "qronos.link_revoke"
+LINK_REMOTE_ACTION = "qronos.link_remote"
+LINK_RELAY_SET_ACTION = "qronos.link_relay_set"
+LINK_ACTIONS = frozenset({
+    LINK_STATUS_ACTION, LINK_DEVICES_ACTION, LINK_PAIR_OPEN_ACTION, LINK_PAIR_CANCEL_ACTION,
+    LINK_REVOKE_ACTION, LINK_REMOTE_ACTION, LINK_RELAY_SET_ACTION,
+})
 
 # How long shutdown waits for cancelled GUI actions to release input state.
 COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS = 2.0
@@ -3263,6 +3275,95 @@ class QronosRuntime:
 
         if self.orchestrator is None:
             self.orchestrator = Orchestrator()
+
+    # ------------------------------------------------------------ device link
+
+    def _link_runtime_settings(self):
+        """The link's switches and files, read now (tests move CONFIG's roots)."""
+        from core.link_runtime import LinkRuntimeSettings
+
+        return LinkRuntimeSettings(
+            link_enabled=self.settings.get("link.enabled") is True,
+            # Off until the Link worker's WAN gate is accepted: no relay is
+            # dialled and no phone outside this network is served.
+            remote_access_enabled=False,
+            device_path=Path(CONFIG.paths.data) / "link_devices.json",
+            audit_path=Path(CONFIG.paths.logs) / "link_audit.jsonl",
+            relay_path=Path(CONFIG.paths.data) / "link_relay.json",
+        )
+
+    def _device_link(self):
+        """The one LinkRuntime, built on first use and never started here."""
+        link = getattr(self, "_link_runtime", None)
+
+        if link is None:
+            from core.link_runtime import LinkRuntime, runtime_services
+
+            # Phone questions reach only LinkRuntime's ToolFreeAsk over the
+            # orchestrator's prompt-only Fast-brain call: no router, workers,
+            # tools, file actions or queue.
+            link = LinkRuntime(self._link_runtime_settings(), services=runtime_services(self))
+            self._link_runtime = link
+
+        return link
+
+    def start_device_link(self) -> bool:
+        """Start the link when the user turned it on. Never raises.
+
+        Called once the bridge is ready, in text-only mode too: it needs the
+        text runtime, never the microphone or the wake model. Off means
+        nothing is built: no device file, listener, socket or thread.
+        """
+        settings = self._link_runtime_settings()
+
+        if not settings.link_enabled:
+            return False
+
+        try:
+            self._ensure_text_runtime()
+            link = self._device_link()
+            link.settings = settings
+            running = link.start()
+        except Exception as exc:  # the link must never stop the runtime
+            self._notify("link_error", "warning", json.dumps(
+                {"action": "start", "code": "failed", "detail": type(exc).__name__},
+            ))
+            return False
+
+        self._publish_link_status()
+        return running
+
+    def stop_device_link(self) -> None:
+        link = getattr(self, "_link_runtime", None)
+
+        if link is not None:
+            link.stop()
+
+    def apply_device_link_settings(self) -> None:
+        """After a settings reload: restart only when the link's own settings changed."""
+        wanted = self._link_runtime_settings()
+        link = getattr(self, "_link_runtime", None)
+
+        if link is None or link.settings == wanted:
+            if link is None and wanted.link_enabled:
+                self.start_device_link()
+            return
+
+        # Every open phone session ends here, before anything restarts.
+        link.stop()
+        link.settings = wanted
+
+        if wanted.link_enabled:
+            self.start_device_link()
+        else:
+            self._publish_link_status()
+
+    def _publish_link_status(self) -> None:
+        link = self._device_link()
+        self._notify("link_status", "ready", json.dumps(link.status(), ensure_ascii=True))
+        self._notify("link_devices", "ready", json.dumps(
+            [device.to_json() for device in link.devices()], ensure_ascii=True,
+        ))
 
     def _ensure_file_runtime(self) -> None:
         """Prepare only the trusted local file-action collaborators."""
@@ -9450,6 +9551,9 @@ class QronosRuntime:
         # exits. Daemon workers that do not finish in time are abandoned.
         # After close() nothing may run: the registry refuses new actions and
         # pending approvals are discarded so a late answer finds nothing.
+        # No phone request may arrive while the runtime shuts down.
+        if getattr(self, "_link_runtime", None) is not None:
+            self.stop_device_link()
         self._computer_actions.close()
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
@@ -9699,6 +9803,11 @@ def handle_action(
 
     if action_id == SETTINGS_RELOAD_ACTION:
         runtime.reload_settings()
+        runtime.apply_device_link_settings()
+        return
+
+    if action_id in LINK_ACTIONS:
+        handle_link_action(runtime, action_id, payload)
         return
 
     if action_id == INPUT_METER_START_ACTION:
@@ -9969,6 +10078,128 @@ def handle_action(
         "warning",
         f"Unsupported runtime action: {action_id}",
     )
+
+
+class LinkRequestError(Exception):
+    """A Device Link request refused before acting; ``code`` is all the desktop sees."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+_LINK_REQUEST_NONCE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+_LINK_DEVICE_ID = re.compile(r"^[0-9a-f]{16}$")
+_LINK_ACTION_KEYS = {
+    LINK_STATUS_ACTION: frozenset(),
+    LINK_DEVICES_ACTION: frozenset(),
+    LINK_PAIR_OPEN_ACTION: frozenset({"requestNonce", "name"}),
+    LINK_PAIR_CANCEL_ACTION: frozenset(),
+    LINK_REVOKE_ACTION: frozenset({"deviceId"}),
+    LINK_REMOTE_ACTION: frozenset({"deviceId", "enabled", "days"}),
+    LINK_RELAY_SET_ACTION: None,  # refused whole until the WAN gate is accepted
+}
+
+
+def _link_request(action_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data", {})
+
+    if not isinstance(data, dict):
+        raise LinkRequestError("invalid_request")
+
+    allowed = _LINK_ACTION_KEYS[action_id]
+
+    if allowed is not None and not set(data) <= allowed:
+        raise LinkRequestError("invalid_request")
+
+    return data
+
+
+def _link_device_id(data: dict[str, Any]) -> str:
+    value = data.get("deviceId")
+
+    if type(value) is not str or not _LINK_DEVICE_ID.match(value):
+        raise LinkRequestError("invalid_request")
+
+    return value
+
+
+def _link_device_name(data: dict[str, Any]) -> str:
+    value = data.get("name", "")
+
+    if type(value) is not str:
+        raise LinkRequestError("invalid_request")
+
+    value = value.strip()
+
+    if len(value) > 40 or any(not character.isprintable() for character in value):
+        raise LinkRequestError("invalid_request")
+
+    return value
+
+
+def handle_link_action(
+    runtime: QronosRuntime,
+    action_id: str,
+    payload: dict[str, Any],
+) -> None:
+    """The desktop's Device Link page: thin, validated calls on the one LinkRuntime.
+
+    Nothing is acted on until the request has exactly the expected shape. A
+    refusal is a typed ``link_error`` carrying a code, never the payload or an
+    exception's text. The pairing URI holds the new phone's key: it is sent
+    once, tagged with the requesting window's nonce, and never logged or kept.
+    """
+    try:
+        data = _link_request(action_id, payload)
+
+        if action_id == LINK_RELAY_SET_ACTION:
+            raise LinkRequestError("remote_unavailable")
+
+        link = runtime._device_link()
+
+        if action_id == LINK_PAIR_OPEN_ACTION:
+            nonce = data.get("requestNonce")
+
+            if type(nonce) is not str or not _LINK_REQUEST_NONCE.match(nonce):
+                raise LinkRequestError("invalid_request")
+
+            name = _link_device_name(data)
+
+            if not link.running:
+                raise LinkRequestError("not_running")
+
+            uri = link.open_pairing(name)
+            runtime._notify("link_pairing", "ready", json.dumps({"requestNonce": nonce, "uri": uri}))
+        elif action_id == LINK_PAIR_CANCEL_ACTION:
+            link.cancel_pairing()
+        elif action_id == LINK_REVOKE_ACTION:
+            # Works with the link off too: a lost phone is revoked at once.
+            link.revoke(_link_device_id(data))
+        elif action_id == LINK_REMOTE_ACTION:
+            device_id = _link_device_id(data)
+            enabled = data.get("enabled")
+            days = data.get("days")
+
+            if type(enabled) is not bool or days is not None:
+                raise LinkRequestError("invalid_request")
+
+            if enabled:
+                # Remote access needs the WAN gate; switching it off is always allowed.
+                raise LinkRequestError("remote_unavailable")
+
+            link.set_remote_access(device_id, False)
+    except LinkRequestError as refused:
+        runtime._notify("link_error", "warning", json.dumps({"action": action_id, "code": refused.code}))
+        return
+    except Exception as exc:  # noqa: BLE001 - typed for the desktop, details stay here
+        from core.link_devices import UnknownDevice
+
+        code = "unknown_device" if isinstance(exc, UnknownDevice) else "failed"
+        runtime._notify("link_error", "warning", json.dumps({"action": action_id, "code": code}))
+        return
+
+    runtime._publish_link_status()
 
 
 def handle_text_message(
@@ -10545,6 +10776,10 @@ def main() -> int:
         "ready",
         "Qronos runtime bridge is ready.",
     )
+
+    # Paired phones, when the user turned the link on. Text-only mode too;
+    # off by default, and then nothing is built.
+    runtime.start_device_link()
 
     try:
         for raw_line in sys.stdin:
