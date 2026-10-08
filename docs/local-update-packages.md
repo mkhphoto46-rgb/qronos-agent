@@ -103,8 +103,22 @@ copies, in its own folder only.
 4. **`discard()`** deletes only the store's own copies, by the names it recorded.
 
 The store refuses:
-- an update folder that is a junction;
-- a state file that names files the store did not create.
+- an update folder, staging folder or any folder above them that is a link or
+  junction;
+- a state file that names files the store did not create, or that is not
+  strictly typed and bounded (at most 256 KiB, 50 history entries);
+- any destination file, state file or lock file that is a link, is not a
+  regular file or has another hard link. Such a file is never written
+  through.
+
+How the store writes and serialises changes:
+- Every write goes to an exclusively created temporary file with an
+  unpredictable name in the store's own folder, and is published with an
+  atomic rename. A failed write leaves no temporary file behind.
+- Changes are serialised across processes by an exclusive lock on
+  `update.lock`. A second process waiting longer than the timeout gets `busy`.
+- If the security floor changes while a package is being checked, staging
+  stops with `busy` rather than using the stale floor.
 
 It never deletes anything else. User data, the Library and models are outside
 its folder.

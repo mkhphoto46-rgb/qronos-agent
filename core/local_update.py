@@ -30,14 +30,17 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import os
 import re
 import stat
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from core import ed25519
 
@@ -352,6 +355,66 @@ def verify_update(envelope: bytes, package: Path, keys: dict[str, TrustedKey],
 
 # ----------------------------------------------------------------- store
 
+_STATE_FILE_LIMIT = 256 * 1024
+_HISTORY_LIMIT = 50
+_KINDS = frozenset({"upgrade", "repair", "rollback"})
+_PHASES = frozenset({"idle", "staged", "handed_off"})
+_STATE_FIELDS = frozenset({"schema", "phase", "securityFloor", "staged", "previous", "history"})
+_RECORD_FIELDS = frozenset({"kind", "version", "packageSha256", "packageBytes", "packageName", "keyId",
+                            "securityFloor", "fromVersion", "packageFile", "manifestFile"})
+_HISTORY_FIELDS = frozenset({"kind", "fromVersion", "version", "packageSha256", "keyId"})
+
+
+def _unsafe_file(path: Path) -> str | None:
+    """Why an existing directory entry is not a plain file this store may replace, if it is not."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    attributes = getattr(info, "st_file_attributes", 0)
+    if stat.S_ISLNK(info.st_mode) or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        return "is a link"
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if info.st_nlink != 1:
+        return "has another hard link"
+    return None
+
+
+def _check_record(record: Any, fields: frozenset[str]) -> None:
+    if not isinstance(record, dict) or set(record) != fields:
+        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
+    if record["kind"] not in _KINDS or not isinstance(record["packageSha256"], str) \
+            or not _SHA256.fullmatch(record["packageSha256"]) \
+            or not isinstance(record["keyId"], str) or not _KEY_ID.fullmatch(record["keyId"]):
+        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
+    for name in ("version", "fromVersion") + (("securityFloor",) if "securityFloor" in record else ()):
+        parse_version(record[name])
+    if fields == _RECORD_FIELDS:
+        digest = record["packageSha256"]
+        if record["packageFile"] != f"{digest}.exe" or record["manifestFile"] != f"{digest}.json" \
+                or not isinstance(record["packageName"], str) or not _PACKAGE_NAME.fullmatch(record["packageName"]) \
+                or type(record["packageBytes"]) is not int or not 0 < record["packageBytes"] <= _MAX_PACKAGE_BYTES:
+            raise UpdateError("store", "The update state names a file this store did not create.")
+
+
+def _check_state(state: Any) -> dict[str, Any]:
+    """A strictly typed, bounded state document, or UpdateError."""
+    if not isinstance(state, dict) or set(state) != _STATE_FIELDS or state["schema"] != 1 \
+            or state["phase"] not in _PHASES or not isinstance(state["history"], list) \
+            or len(state["history"]) > _HISTORY_LIMIT:
+        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
+    if state["securityFloor"] is not None:
+        parse_version(state["securityFloor"])
+    if (state["phase"] == "idle") != (state["staged"] is None):
+        raise UpdateError("store", "The update state file is not understood; nothing was changed.")
+    for name in ("staged", "previous"):
+        if state[name] is not None:
+            _check_record(state[name], _RECORD_FIELDS)
+    for entry in state["history"]:
+        _check_record(entry, _HISTORY_FIELDS)
+    return state
+
 
 class LocalUpdateStore:
     """State and verified package copies under one folder this store owns.
@@ -359,48 +422,140 @@ class LocalUpdateStore:
     Phases: "idle" -> "staged" (verified copy in place) -> "handed_off" (given to the
     approved install step) -> back to "idle" once confirm() sees the new version
     running. A failed or abandoned install keeps the staged copy until discard().
+
+    File ownership: every write goes to an exclusively created temporary file with an
+    unpredictable name in the store's own folder and is published with an atomic
+    rename. A destination that is a link, a reparse point, not a regular file or has
+    another hard link is refused, never written through. The store folder, its staging
+    folder and every existing ancestor must not be links or junctions. Changes are
+    serialised across processes by an exclusive lock on ``update.lock``.
     """
 
+    lock_timeout = 10.0
+
     def __init__(self, root: Path) -> None:
-        self.root = root
-        self.state_path = root / "update-state.json"
-        self.staged_dir = root / "staged"
+        self.root = Path(os.path.abspath(root))
+        self.state_path = self.root / "update-state.json"
+        self.staged_dir = self.root / "staged"
+        self.lock_path = self.root / "update.lock"
 
-    # -- state
+    # -- folders, files and the lock
 
-    def _check_root(self) -> None:
+    def _check_folders(self) -> None:
+        for ancestor in reversed(self.root.parents):
+            if os.path.lexists(ancestor) and _is_link(ancestor):
+                raise UpdateError("store", f"A folder above the update store ({ancestor.name!r}) is a link.")
         for path in (self.root, self.staged_dir):
             if os.path.lexists(path) and (_is_link(path) or not path.is_dir()):
                 raise UpdateError("store", f"The update folder {path.name!r} is not a plain folder.")
 
-    def state(self) -> dict[str, Any]:
-        self._check_root()
-        if not self.state_path.exists():
-            return {"schema": 1, "phase": "idle", "securityFloor": None, "staged": None, "previous": None,
-                    "history": []}
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        if state.get("schema") != 1 or state.get("phase") not in ("idle", "staged", "handed_off"):
-            raise UpdateError("store", "The update state file is not understood; nothing was changed.")
-        return state
-
-    def _save(self, state: dict[str, Any]) -> None:
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        self._check_folders()
         self.root.mkdir(parents=True, exist_ok=True)
-        self._check_root()
-        temporary = self.root / "update-state.json.tmp"
-        temporary.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, self.state_path)
+        self._check_folders()
+        problem = _unsafe_file(self.lock_path)
+        if problem:
+            raise UpdateError("store", f"The update lock file {problem}; nothing was changed.")
+        handle = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+                         | getattr(os, "O_NOINHERIT", 0), 0o600)
+        try:
+            info = os.fstat(handle)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise UpdateError("store", "The update lock file is not this store's own file.")
+            deadline = time.monotonic() + self.lock_timeout
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle, msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise UpdateError("busy", "Another Qronos process is changing the update store.") from None
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(handle, 0, os.SEEK_SET)
+                    msvcrt.locking(handle, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            os.close(handle)
+
+    def _publish(self, directory: Path, name: str, write: Callable[[Any], None]) -> Path:
+        """Write a new file through an exclusive unpredictable temporary, then rename it into place."""
+        final = directory / name
+        problem = _unsafe_file(final)
+        if problem:
+            raise UpdateError("store", f"{name} {problem}; it is not this store's file and was not touched.")
+        handle, temporary = tempfile.mkstemp(prefix=".qronos-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                write(stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            problem = _unsafe_file(final)
+            if problem:
+                raise UpdateError("store", f"{name} {problem}; it is not this store's file and was not touched.")
+            os.replace(temporary, final)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
+        return final
 
     def _owned(self, name: str) -> Path:
-        if not re.fullmatch(r"[0-9a-f]{64}\.(exe|json)", name):
+        if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.(exe|json)", name):
             raise UpdateError("store", "The update state names a file this store did not create.")
         return self.staged_dir / name
+
+    def _owned_existing(self, name: str) -> Path:
+        path = self._owned(name)
+        problem = _unsafe_file(path)
+        if problem or not os.path.lexists(path):
+            raise UpdateError("store", f"The staged file {name} {problem or 'is missing'}.")
+        return path
 
     def _remove(self, record: dict[str, Any] | None) -> None:
         if record:
             for name in (record["packageFile"], record["manifestFile"]):
                 path = self._owned(name)
-                if path.exists() and not _is_link(path):
-                    path.unlink()
+                if os.path.lexists(path):
+                    os.unlink(path)  # removes only this directory entry, never a link target
+
+    # -- state
+
+    def _read_state(self) -> dict[str, Any]:
+        if not os.path.lexists(self.state_path):
+            return {"schema": 1, "phase": "idle", "securityFloor": None, "staged": None, "previous": None,
+                    "history": []}
+        problem = _unsafe_file(self.state_path)
+        if problem:
+            raise UpdateError("store", f"The update state file {problem}; nothing was changed.")
+        if self.state_path.stat().st_size > _STATE_FILE_LIMIT:
+            raise UpdateError("store", "The update state file is too large; nothing was changed.")
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError("store", "The update state file is not understood; nothing was changed.") from error
+        return _check_state(state)
+
+    def state(self) -> dict[str, Any]:
+        self._check_folders()
+        return self._read_state()
+
+    def _save(self, state: dict[str, Any]) -> None:
+        state["history"] = state["history"][-_HISTORY_LIMIT:]
+        data = (json.dumps(_check_state(state), indent=1, sort_keys=True) + "\n").encode("utf-8")
+        self._publish(self.root, self.state_path.name, lambda stream: stream.write(data))
 
     # -- operations
 
@@ -410,74 +565,86 @@ class LocalUpdateStore:
     def stage(self, manifest: Path, package: Path, keys: dict[str, TrustedKey], version: str,
               data_schema: int) -> VerifiedUpdate:
         """Verify user-chosen local files and keep a verified copy for the install step."""
-        state = self.state()
+        floor = self.state()["securityFloor"]
         envelope = _read_chosen_file(manifest, _MAX_ENVELOPE_BYTES, "update manifest")
-        update = verify_update(envelope, package, keys, InstalledState(version, data_schema,
-                                                                       state["securityFloor"]))
-        self.staged_dir.mkdir(parents=True, exist_ok=True)
-        self._check_root()
-        target = self._owned(f"{update.package_sha256}.exe")
-        partial = self.staged_dir / f"{update.package_sha256}.part"
-        digest = hashlib.sha256()
-        with open(package, "rb") as source, open(partial, "wb") as copy:
-            for chunk in iter(lambda: source.read(_READ_CHUNK), b""):
-                digest.update(chunk)
-                copy.write(chunk)
-        if digest.hexdigest() != update.package_sha256:
-            partial.unlink()
-            raise UpdateError("package_mismatch", "The chosen installer changed while it was being copied.")
-        os.replace(partial, target)
-        self._owned(f"{update.package_sha256}.json").write_bytes(envelope)
-        if state["staged"] and state["staged"]["packageSha256"] != update.package_sha256:
-            self._remove(state["staged"])
-        state.update(phase="staged", staged={
-            "kind": update.kind, "version": update.version, "packageSha256": update.package_sha256,
-            "packageBytes": update.package_bytes, "packageName": update.package_name, "keyId": update.key_id,
-            "securityFloor": update.payload["securityFloor"], "fromVersion": version,
-            "packageFile": target.name, "manifestFile": f"{update.package_sha256}.json"})
-        self._save(state)
+        update = verify_update(envelope, package, keys, InstalledState(version, data_schema, floor))
+        with self._locked():
+            state = self._read_state()
+            if state["securityFloor"] != floor:
+                raise UpdateError("busy", "The update state changed while the package was checked; try again.")
+            self.staged_dir.mkdir(exist_ok=True)
+            self._check_folders()
+
+            def copy(stream: Any) -> None:
+                digest = hashlib.sha256()
+                size = 0
+                with open(package, "rb") as source:
+                    for chunk in iter(lambda: source.read(_READ_CHUNK), b""):
+                        size += len(chunk)
+                        if size > update.package_bytes:
+                            break
+                        digest.update(chunk)
+                        stream.write(chunk)
+                if size != update.package_bytes or digest.hexdigest() != update.package_sha256:
+                    raise UpdateError("package_mismatch", "The chosen installer changed while it was being copied.")
+
+            target = self._publish(self.staged_dir, f"{update.package_sha256}.exe", copy)
+            self._publish(self.staged_dir, f"{update.package_sha256}.json", lambda stream: stream.write(envelope))
+            if state["staged"] and state["staged"]["packageSha256"] != update.package_sha256:
+                self._remove(state["staged"])
+            state.update(phase="staged", staged={
+                "kind": update.kind, "version": update.version, "packageSha256": update.package_sha256,
+                "packageBytes": update.package_bytes, "packageName": update.package_name, "keyId": update.key_id,
+                "securityFloor": update.payload["securityFloor"], "fromVersion": version,
+                "packageFile": target.name, "manifestFile": f"{update.package_sha256}.json"})
+            self._save(state)
         return update
 
     def handoff(self, keys: dict[str, TrustedKey], version: str, data_schema: int) -> Path:
         """The staged installer, re-verified now, for the user-approved install step."""
-        state = self.state()
-        staged = state["staged"]
-        if state["phase"] not in ("staged", "handed_off") or not staged:
-            raise UpdateError("store", "No verified update is staged.")
-        envelope = self._owned(staged["manifestFile"]).read_bytes()
-        package = self._owned(staged["packageFile"])
-        update = verify_update(envelope, package, keys, InstalledState(version, data_schema,
-                                                                       state["securityFloor"]))
-        if update.package_sha256 != staged["packageSha256"]:
-            raise UpdateError("package_mismatch", "The staged installer no longer matches its record.")
-        state["phase"] = "handed_off"
-        self._save(state)
+        with self._locked():
+            state = self._read_state()
+            staged = state["staged"]
+            if state["phase"] not in ("staged", "handed_off") or not staged:
+                raise UpdateError("store", "No verified update is staged.")
+            envelope = _read_chosen_file(self._owned_existing(staged["manifestFile"]), _MAX_ENVELOPE_BYTES,
+                                         "staged manifest")
+            package = self._owned_existing(staged["packageFile"])
+            if package.stat().st_size != staged["packageBytes"]:
+                raise UpdateError("package_mismatch", "The staged installer no longer matches its record.")
+            update = verify_update(envelope, package, keys, InstalledState(version, data_schema,
+                                                                           state["securityFloor"]))
+            if update.package_sha256 != staged["packageSha256"]:
+                raise UpdateError("package_mismatch", "The staged installer no longer matches its record.")
+            state["phase"] = "handed_off"
+            self._save(state)
         return package
 
     def confirm(self, version: str) -> str:
         """Called when Qronos starts: records a completed update. Returns what happened."""
-        state = self.state()
-        staged = state["staged"]
-        if state["phase"] == "idle" or not staged:
-            return "nothing staged"
-        if compare_versions(version, staged["version"]) != 0:
-            return "not applied"
-        floor = state["securityFloor"]
-        if floor is None or compare_versions(staged["securityFloor"], floor) > 0:
-            floor = staged["securityFloor"]
-        previous = state["previous"]
-        if previous and previous["packageSha256"] != staged["packageSha256"]:
-            self._remove(previous)
-        state.update(phase="idle", securityFloor=floor, previous=staged, staged=None,
-                     history=state["history"] + [{key: staged[key] for key in
-                                                   ("kind", "fromVersion", "version", "packageSha256", "keyId")}])
-        self._save(state)
+        with self._locked():
+            state = self._read_state()
+            staged = state["staged"]
+            if state["phase"] == "idle" or not staged:
+                return "nothing staged"
+            if compare_versions(version, staged["version"]) != 0:
+                return "not applied"
+            floor = state["securityFloor"]
+            if floor is None or compare_versions(staged["securityFloor"], floor) > 0:
+                floor = staged["securityFloor"]
+            previous = state["previous"]
+            if previous and previous["packageSha256"] != staged["packageSha256"]:
+                self._remove(previous)
+            state.update(phase="idle", securityFloor=floor, previous=staged, staged=None,
+                         history=state["history"] + [{key: staged[key] for key in _HISTORY_FIELDS}])
+            self._save(state)
         return staged["kind"]
 
     def discard(self) -> None:
         """Forget a staged update and delete only its own copies."""
-        state = self.state()
-        if state["staged"]:
-            self._remove(state["staged"])
-        state.update(phase="idle", staged=None)
-        self._save(state)
+        with self._locked():
+            state = self._read_state()
+            if state["staged"]:
+                self._remove(state["staged"])
+            state.update(phase="idle", staged=None)
+            self._save(state)

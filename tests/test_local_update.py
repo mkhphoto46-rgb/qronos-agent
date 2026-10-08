@@ -419,3 +419,200 @@ def test_an_injected_weak_key_cannot_validate_an_unsigned_payload(tmp_path):
     with pytest.raises(UpdateError) as refused:
         verify(forged_envelope(payload_for(installer), IDENTITY), installer, keys)
     assert refused.value.code == "weak_key"
+
+
+# --------------------------------------------- store file ownership (I7)
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+
+OUTSIDE = b"a file outside the update store that belongs to someone else"
+
+
+def outside_file(tmp_path: Path) -> Path:
+    path = tmp_path / "outside" / "precious.txt"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(OUTSIDE)
+    return path
+
+
+def planted(store: LocalUpdateStore, name: str, target: Path) -> Path:
+    """A hard link, planted in advance at a name inside the store, to a file outside it."""
+    folder = store.root if name.startswith("update-state") else store.staged_dir
+    folder.mkdir(parents=True, exist_ok=True)
+    os.link(target, folder / name)
+    return folder / name
+
+
+@pytest.mark.parametrize("name", ["{sha}.part", "update-state.json.tmp"])
+def test_hard_links_at_old_temporary_names_are_never_written_through(tmp_path, name):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    precious = outside_file(tmp_path)
+    sha = hashlib.sha256(installer.read_bytes()).hexdigest()
+    planted(store, name.format(sha=sha), precious)
+
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+
+    assert precious.read_bytes() == OUTSIDE
+    assert store.state()["phase"] == "staged"
+    assert not list(store.root.rglob(".qronos-*.tmp"))  # no temporary left behind
+
+
+@pytest.mark.parametrize("name", ["{sha}.json", "{sha}.exe", "update-state.json"])
+def test_a_hard_linked_destination_is_refused_and_untouched(tmp_path, name):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    precious = outside_file(tmp_path)
+    sha = hashlib.sha256(installer.read_bytes()).hexdigest()
+    planted(store, name.format(sha=sha), precious)
+
+    with pytest.raises(UpdateError) as refused:
+        store.stage(manifest, installer, keys, "0.1.0", 3)
+
+    assert refused.value.code == "store" and "hard link" in str(refused.value)
+    assert precious.read_bytes() == OUTSIDE
+    assert not list(store.root.rglob(".qronos-*.tmp"))
+
+
+def test_handoff_refuses_a_staged_file_that_gained_a_hard_link(tmp_path):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    update = store.stage(manifest, installer, keys, "0.1.0", 3)
+    os.link(store.staged_dir / f"{update.package_sha256}.exe", tmp_path / "second-name.exe")
+
+    with pytest.raises(UpdateError, match="hard link"):
+        store.handoff(keys, "0.1.0", 3)
+    assert store.state()["phase"] == "staged"
+
+
+def test_a_failed_copy_leaves_no_temporary_and_no_state(tmp_path, monkeypatch):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    real_verify = local_update.verify_update
+
+    def verify_then_change(*args, **kwargs):
+        update = real_verify(*args, **kwargs)
+        installer.write_bytes(installer.read_bytes()[:-1] + b"Z")  # swapped after the check
+        return update
+
+    monkeypatch.setattr(local_update, "verify_update", verify_then_change)
+
+    with pytest.raises(UpdateError) as refused:
+        store.stage(manifest, installer, keys, "0.1.0", 3)
+    assert refused.value.code == "package_mismatch"
+    assert not list(store.root.rglob(".qronos-*.tmp")) and not list(store.staged_dir.glob("*.exe"))
+    assert store.state()["phase"] == "idle"
+
+
+def test_a_concurrent_floor_change_is_detected(tmp_path, monkeypatch):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    other = LocalUpdateStore(store.root)
+    real_verify = local_update.verify_update
+
+    def verify_while_another_process_confirms(*args, **kwargs):
+        update = real_verify(*args, **kwargs)
+        state = other.state()
+        state["securityFloor"] = "0.1.9"
+        with other._locked():
+            other._save(state)
+        return update
+
+    monkeypatch.setattr(local_update, "verify_update", verify_while_another_process_confirms)
+
+    with pytest.raises(UpdateError) as refused:
+        store.stage(manifest, installer, keys, "0.1.0", 3)
+    assert refused.value.code == "busy"
+
+
+LOCK_HOLDER = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from core.local_update import LocalUpdateStore
+store = LocalUpdateStore(Path(sys.argv[2]))
+with store._locked():
+    Path(sys.argv[3]).write_text("held")
+    deadline = time.time() + 30
+    while not Path(sys.argv[4]).exists() and time.time() < deadline:
+        time.sleep(0.05)
+"""
+
+
+def test_another_process_holding_the_lock_makes_a_change_refuse_as_busy(tmp_path):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.lock_timeout = 0.5
+    ready, release = tmp_path / "ready", tmp_path / "release"
+    source_root = Path(local_update.__file__).resolve().parent.parent
+    holder = subprocess.Popen([sys.executable, "-B", "-c", LOCK_HOLDER, str(source_root), str(store.root),
+                               str(ready), str(release)])
+    try:
+        deadline = time.time() + 30
+        while not ready.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert ready.exists()
+        with pytest.raises(UpdateError) as refused:
+            store.stage(manifest, installer, keys, "0.1.0", 3)
+        assert refused.value.code == "busy"
+    finally:
+        release.write_text("go")
+        holder.wait(timeout=30)
+    store.stage(manifest, installer, keys, "0.1.0", 3)  # once released, it proceeds
+    assert store.state()["phase"] == "staged"
+
+
+def _too_long_history(state: dict) -> None:
+    state["history"] = state["history"] * 51
+
+
+@pytest.mark.parametrize("damage", [
+    lambda s: s.update(phase="staged"),          # phase without a staged record
+    lambda s: s.update(history="many"),
+    lambda s: s.update(history=[{"kind": "upgrade"}]),
+    lambda s: s.update(securityFloor=7),
+    lambda s: s.update(extra=True),
+    _too_long_history,
+])
+def test_a_malformed_state_file_is_refused(tmp_path, damage):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+    store.confirm("0.2.0")
+    state = json.loads(store.state_path.read_text(encoding="utf-8"))
+    damage(state)
+    store.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(UpdateError) as refused:
+        store.state()
+    assert refused.value.code in ("store", "invalid_version")
+
+
+def test_an_oversized_state_file_is_refused(tmp_path):
+    store, *_ = stage_fixture(tmp_path)
+    store.root.mkdir(parents=True)
+    store.state_path.write_text(" " * (256 * 1024 + 1), encoding="utf-8")
+
+    with pytest.raises(UpdateError, match="too large"):
+        store.state()
+
+
+def test_history_is_capped(tmp_path):
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+    store.confirm("0.2.0")
+    state = json.loads(store.state_path.read_text(encoding="utf-8"))
+    state["history"] = state["history"] * 50
+    store.state_path.write_text(json.dumps(state), encoding="utf-8")
+    store.stage(manifest, installer, keys, "0.2.0", 3)  # a repair of the same version
+
+    assert store.confirm("0.2.0") == "repair"
+    assert len(store.state()["history"]) == 50
+
+
+def test_a_store_below_a_junctioned_ancestor_is_refused(tmp_path):
+    winapi = pytest.importorskip("_winapi")
+    real = tmp_path / "real-data"
+    real.mkdir()
+    winapi.CreateJunction(str(real), str(tmp_path / "data-link"))
+    _, manifest, installer, keys = stage_fixture(tmp_path)
+    store = LocalUpdateStore(tmp_path / "data-link" / "Updates")
+
+    with pytest.raises(UpdateError, match="above the update store"):
+        store.stage(manifest, installer, keys, "0.1.0", 3)
+    assert not (real / "Updates").exists()
