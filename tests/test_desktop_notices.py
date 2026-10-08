@@ -11,12 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from build_support import build_desktop
 from build_support import desktop_notices as notices
 from build_support.desktop_notices import (
     Component,
@@ -926,93 +924,9 @@ def test_generation_is_deterministic_and_relative(tmp_path):
         (tmp_path / "alpha" / "LICENSE").read_bytes()
 
 
-# ------------------------------------------------- installer wiring (C3)
+# ------------------------------------------------- target binding (C3)
 
-
-def wire(tmp_path: Path, monkeypatch, collect, run) -> Path:
-    backend = tmp_path / "qronos-runtime"
-    backend.mkdir(exist_ok=True)
-    monkeypatch.setattr(build_desktop, "ROOT", tmp_path)
-    monkeypatch.setattr(build_desktop, "DESKTOP_NOTICES_ROOT", tmp_path / "runtime/package/desktop-notices")
-    monkeypatch.setattr(build_desktop, "verify_manifest", lambda path: None)
-    monkeypatch.setattr(build_desktop.shutil, "which", lambda name: "npm")
-    monkeypatch.setattr(build_desktop, "collect_desktop_notices", collect)
-    monkeypatch.setattr(build_desktop.subprocess, "run", run)
-    monkeypatch.delenv("CARGO_BUILD_TARGET", raising=False)
-    return backend
-
-
-def test_each_build_maps_a_new_verified_notice_directory(tmp_path, monkeypatch):
-    if os.name != "nt":
-        pytest.skip("The desktop installer is built on Windows only.")
-    calls: list[str] = []
-    configurations: list[dict] = []
-
-    def collect(out_dir):
-        calls.append("notices")
-        assert out_dir.is_dir() and not any(out_dir.iterdir())  # new and empty
-        (out_dir / "LICENSE").write_text(LICENCE, encoding="utf-8")
-
-    def run(command, **kwargs):
-        calls.append("tauri")
-        configuration = Path(command[command.index("--config") + 1])
-        configurations.append(json.loads(configuration.read_text(encoding="utf-8")))
-        return subprocess.CompletedProcess(command, 0)
-
-    backend = wire(tmp_path, monkeypatch, collect, run)
-    monkeypatch.setattr(build_desktop, "verify_notice_output", lambda path: calls.append("verified"))
-
-    build_desktop.build(backend)
-    build_desktop.build(backend)
-
-    assert calls == ["notices", "verified", "tauri"] * 2
-    mapped = []
-    for configuration in configurations:
-        resources = configuration["bundle"]["resources"]
-        assert resources[backend.resolve().as_posix() + "/"] == "qronos-runtime/"
-        (notice_dir,) = [key for key, value in resources.items() if value == notices.NOTICE_RESOURCE_TARGET]
-        mapped.append(Path(notice_dir.rstrip("/")))
-    assert mapped[0] != mapped[1]
-    for directory in mapped:  # both stay as evidence; nothing was deleted
-        assert directory.parent == tmp_path / "runtime/package/desktop-notices"
-        assert (directory / "LICENSE").is_file()
-
-
-def test_incomplete_notices_stop_the_installer_build(tmp_path, monkeypatch):
-    if os.name != "nt":
-        pytest.skip("The desktop installer is built on Windows only.")
-
-    def collect(out_dir):
-        raise NoticeError("incomplete")
-
-    def run(command, **kwargs):
-        raise AssertionError("tauri build must not start")
-
-    backend = wire(tmp_path, monkeypatch, collect, run)
-
-    with pytest.raises(NoticeError):
-        build_desktop.build(backend)
-
-
-@pytest.mark.parametrize(("bundles", "machine", "target"), [
-    ("deb", "AMD64", None), ("appimage", "AMD64", None), ("app", "AMD64", None), ("dmg", "AMD64", None),
-    ("nsis", "ARM64", None), ("nsis", "AMD64", "aarch64-pc-windows-msvc"),
-])
-def test_a_non_windows_x64_installer_is_refused_before_collecting(tmp_path, monkeypatch, bundles, machine, target):
-    def collect(out_dir):
-        raise AssertionError("Windows notices must not be collected for another target")
-
-    def run(command, **kwargs):
-        raise AssertionError("tauri build must not start")
-
-    backend = wire(tmp_path, monkeypatch, collect, run)
-    monkeypatch.setattr(build_desktop.platform, "machine", lambda: machine)
-    if target:
-        monkeypatch.setenv("CARGO_BUILD_TARGET", target)
-
-    with pytest.raises(ValueError, match="x86_64-pc-windows-msvc"):
-        build_desktop.build(backend, bundles=bundles)
-    assert not (tmp_path / "runtime").exists()
+# Installer wiring and Windows x64 bundle refusal are covered in test_desktop_installer.py.
 
 
 def test_the_collector_refuses_another_target(tmp_path):

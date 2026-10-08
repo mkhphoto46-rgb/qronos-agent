@@ -1,0 +1,180 @@
+# Offline Windows installer: the WebView2 prerequisite
+
+The Qronos desktop app draws its window with Microsoft Edge WebView2. Windows 11
+and most up-to-date Windows 10 machines already have the WebView2 Runtime. A
+clean or long-offline Windows 10 machine may not.
+
+Before this change, the installer used Tauri's default `downloadBootstrapper`
+mode. On a machine without WebView2, that mode downloads a small Microsoft
+bootstrapper during installation, which then downloads the runtime. With no
+internet connection, the installation stopped.
+
+The installer now carries the WebView2 Runtime inside it and installs it only
+when it is missing. Nothing is downloaded, either while building or while
+installing.
+
+This is technical packaging. It does not grant permission to redistribute
+Microsoft software, and it does not sign the Qronos installer. Both are owner
+decisions, listed at the end.
+
+## Why this approach
+
+These findings come from the locked tools: `@tauri-apps/cli` 2.11.4, which is
+built with `tauri-bundler` 2.9.4, and `tauri` 2.11.5.
+
+| Tauri `webviewInstallMode` | What the locked code does | Usable here? |
+| --- | --- | --- |
+| `downloadBootstrapper` (default) | Downloads Microsoft's bootstrapper at install time; offline installs abort | No |
+| `embedBootstrapper` | Embeds the bootstrapper, which still downloads the runtime | No |
+| `offlineInstaller` | Contacts Microsoft's moving `fwlink` address on every build and embeds whatever version it finds, with no hash or version pin. The updater variant of an installer silently switches to the download bootstrapper. | No pinned provenance |
+| `fixedRuntime` | Ships a fixed runtime copy beside the app. It never receives WebView2 security updates. Per-user installs need extra file permissions for the browser sandbox. | Possible, harder to keep secure |
+| `skip` plus a Qronos NSIS hook | Embeds an exact, verified copy of Microsoft's Evergreen Standalone Installer. It runs only when WebView2 is missing. Once installed, Microsoft keeps the runtime updated whenever the machine is online. | **Chosen** |
+
+Microsoft documents the Evergreen Standalone Installer as the way to deploy
+WebView2 without internet access:
+https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+
+## What is pinned
+
+`build_support/webview2_prerequisite.json` records the exact file:
+
+- **File:** `MicrosoftEdgeWebView2RuntimeInstallerX64.exe`, x64 only, for
+  `x86_64-pc-windows-msvc`.
+- **Size and hash:** 212,358,352 bytes, SHA-256
+  `ac22ecdc19c5b88b87f3fa752c00da9541653a8f5c0c5fc4a3b2b6ebe6591f69`.
+- **Download address:** Microsoft's own delivery URL for that file. It was
+  resolved from the official `fwlink` on 2026-10-08.
+- **Runtime version:** the installer's internal offline manifest declares
+  WebView2 Runtime **154.0.4258.62** for app ID
+  `{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`. The outer file version
+  (1.3.275.13) belongs to the Microsoft Edge Update setup program, not to the
+  runtime.
+- **Signature:** an Authenticode signature by Microsoft Corporation, issued by
+  Microsoft Code Signing PCA 2024. `signtool verify /pa` confirmed it on
+  2026-10-08.
+
+The large file itself is not stored in Git. Each developer downloads it once
+into the ignored `.cache/wv2/` folder.
+
+## One-time preparation
+
+1. Open **PowerShell**.
+2. Go to the Qronos repository folder, for example:
+
+   ```powershell
+   Set-Location "C:\path\to\Qronos"
+   ```
+
+3. Create the cache folder and download the pinned file. This is the only step
+   that uses the internet:
+
+   ```powershell
+   New-Item -ItemType Directory -Force .cache\wv2 | Out-Null
+   curl.exe -L -o .cache\wv2\MicrosoftEdgeWebView2RuntimeInstallerX64.exe "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/18c66e75-0385-4019-be3f-3f4a2bb867d5/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+   ```
+
+4. Check the file. This runs offline:
+
+   ```powershell
+   .\.venv-build\Scripts\python.exe -m build_support.desktop_prerequisites
+   ```
+
+   Success prints one line of JSON containing `"authenticode": "valid (WinVerifyTrust)"`
+   and the SHA-256 above. Anything else ends with an error message and exit
+   code 2. Do not build with that file. If Microsoft no longer serves the pinned
+   address, the pin has to be reviewed and replaced; never edit the hash to
+   match a different file.
+
+5. Install **7-Zip** from https://www.7-zip.org/ if it is not installed. The
+   build uses it only to read the finished installer, not to install anything.
+   If `7z.exe` is not in `C:\Program Files\7-Zip`, set the `QRONOS_7ZIP`
+   environment variable to its full path.
+
+## Building
+
+Follow `standalone-runtime-packaging.md` to build and smoke-test the backend.
+Then build the installer, preferably with a short Cargo build folder, because
+long folder paths have hit the Windows path-length limit:
+
+```powershell
+.\.venv-build\Scripts\python.exe -m build_support.build_desktop --backend runtime/package/qronos-runtime --target-dir C:\qb\t
+```
+
+The command prints the installer path and the verified prerequisite when it
+succeeds.
+
+`build_support.build_desktop` checks the following, and stops with an error at
+the first failure.
+
+**Before building**
+- The installer type is NSIS, on Windows x64. MSI and non-Windows bundles are
+  refused, because only the NSIS hook carries the offline prerequisite.
+- `tauri.conf.json` uses `webviewInstallMode: skip` and the Qronos hook.
+- No updater artifacts and no minimum WebView2 version are configured. Either
+  would make the installer contact Microsoft.
+- The cached WebView2 installer has the pinned size and SHA-256, a valid
+  signature checked offline, and no link in its path.
+- 7-Zip is available and the backend manifest verifies.
+
+**During the build**
+- It creates a new folder under `runtime/package/desktop-builds/` (ignored by
+  Git) with the third-party notices, the generated hook wrapper and the Tauri
+  overlay. Nothing is deleted or overwritten.
+
+**After building**
+- Tauri's generated `installer.nsi` defines no WebView2 download or embed mode
+  and no minimum version, and it includes this build's hook.
+- The installer contains the WebView2 installer exactly once, at
+  `$PLUGINSDIR\MicrosoftEdgeWebView2RuntimeInstallerX64.exe`.
+- The installer contains no NSIS download plug-in (`NSISdl.dll`, `INetC.dll`).
+  The previous review installer contained `NSISdl.dll`.
+- The embedded file, extracted again, has exactly the pinned SHA-256.
+
+A plain `npm run tauri build` fails on purpose with *"Qronos installers must be
+built with build_support.build_desktop"*. It can therefore never produce an
+installer without the prerequisite.
+
+## What the installer does
+
+The hook is `desktop/src-tauri/installer-hooks/webview2-offline.nsh`. Before it
+copies Qronos files, it reads the WebView2 version from the registry, using
+Microsoft's documented keys: per-machine, then per-user. `0.0.0.0` counts as
+missing.
+
+- **If WebView2 is present:** nothing happens.
+- **If it is missing on an x64 machine:** the hook unpacks the embedded
+  installer into the installer's temporary folder and runs it with
+  `/silent /install`. It then checks the registry again.
+- **If it is missing on another kind of machine:** installation stops with a
+  clear message.
+
+A failed or unregistered runtime install stops the Qronos installation; it does
+not leave a half-working app. Uninstalling Qronos does not remove WebView2,
+because other applications share it.
+
+## Not yet verified on a real machine
+
+These checks need a clean Windows virtual machine, and they wait until live
+acceptance testing is allowed:
+
+1. Installing offline on Windows 10 x64 with no WebView2 Runtime. The runtime
+   should install, and Qronos should open.
+2. The same as a standard (non-administrator) user. Microsoft's package asks for
+   administrator rights where it can (`needsadmin="prefers"`); whether a
+   per-user install happens silently has not been observed.
+3. Installing on a machine that already has WebView2. Nothing should be
+   reinstalled.
+4. An ARM64 machine without WebView2. The refusal message should appear.
+5. A Windows SmartScreen warning is expected while the Qronos installer is
+   unsigned.
+
+## Owner decisions still open
+
+- **Redistribution:** Microsoft's terms for redistributing the WebView2 Runtime
+  and its standalone installer have not been reviewed or accepted.
+- **Signing:** the Qronos installer is unsigned. Public release needs an
+  Authenticode certificate and a signing step.
+- **Keeping the pin current:** the pinned runtime ages. Installed copies update
+  themselves when online; fresh offline installs get 154.0.4258.62 until the pin
+  is replaced in a reviewed change.
+- **Installer size:** the installer grows by about 212 MB.
