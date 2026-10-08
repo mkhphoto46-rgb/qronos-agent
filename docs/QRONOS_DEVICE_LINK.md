@@ -666,6 +666,65 @@ Whisper and Chatterbox runtimes is part of the runtime contract in §5.8; it is
 not done here, and nothing in this protocol has run against a real microphone,
 model or phone.
 
+### 5.8 Runtime contract (`core/link_runtime.py`) — wiring requested, not applied
+
+`LinkRuntime` is the one object the Qronos runtime holds for the link. It owns
+the registry, audit log, server, pairing window and relay dialler, and offers
+only the actions the desktop needs. It is tested on its own (pairing, device
+list, revocation ending sessions, remote opt-in through the fake relay, relay
+settings). It is **not yet constructed by the runtime**; the shared files are
+owned elsewhere, so the wiring below is a request to Root, not a change made.
+
+Construction, in `QronosRuntime.__init__`:
+
+```python
+self.link = LinkRuntime(
+    LinkRuntimeSettings.from_config(
+        link_enabled=<user's link switch>,             # default off
+        remote_access_enabled=<user's remote switch>,  # default off
+    ),
+    services=LinkServices(
+        status=<() -> dict: resource/storage summary, no content>,
+        remote_chat=<(messages) -> str: BrainRuntime.chat with the existing
+                     Fast model and settings; no router, orchestrator, tools
+                     or queue>,
+        transcribe=<(wav_path, language) -> str: the existing speech runtime>,
+        speak=<(text) -> wav_path: the existing voice runtime's speak_to_file(text).audio_path>,
+        # local_ask: leave unset until an assistant path with on-screen
+        # approval and LinkOrigin propagation exists; local phones then get
+        # the same answer-only path.
+    ),
+)
+```
+
+Lifecycle: `self.link.start()` once the runtime is prepared (it returns False
+and does nothing when the link is off); `self.link.stop()` at the start of
+`_close`, before computer actions close, so no phone request can arrive
+during shutdown. A settings reload that changes either switch calls
+`self.link.restart()` with new settings.
+
+Threading and load: the link calls `remote_chat`, `transcribe` and `speak` on
+its own session threads. They must be thread-safe, must respect the runtime's
+foreground lifecycle and resource governor, and when the runtime is busy or
+paused must raise `LinkOperationError("busy", ...)` rather than queue: a
+remote question must never wait in, or be replayed from, the persistent queue.
+
+Desktop actions (through `handle_action`), each a thin call on `self.link`:
+
+| Action | Payload | Call | Event back |
+|---|---|---|---|
+| `link_status` | — | `status()` | link status (no keys, no phone addresses) |
+| `link_pair_open` | `name` | `open_pairing(name)` | the `qronos://pair` URI, **shown as a QR code only — never logged, stored or forwarded** |
+| `link_pair_cancel` | — | `cancel_pairing()` | status |
+| `link_devices` | — | `devices()` | `DeviceView` list, no keys |
+| `link_revoke` | `device_id` | `revoke(id)` | updated device |
+| `link_remote` | `device_id`, `enabled`, `days` | `set_remote_access(...)` | updated device |
+| `link_relay_set` | `host`, `port`, `server_name?`, `ca_file?` or empty to clear | `set_relay_endpoint(...)` | status |
+
+Revocation and opt-in changes must go through these calls, not through a
+registry of the desktop's own, so open sessions end at once; the registry's
+cross-process checks are the backstop, not the path.
+
 ### 5.6 Must be measured before Layer 2 is relied on
 
 The code exists now; these questions are still open, and code does not answer

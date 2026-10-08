@@ -363,6 +363,11 @@ def question_answerer(
                 "Qronos cannot answer questions from the phone yet.",
             )
 
+        if isinstance(ask, ToolFreeAsk):
+            # Answer-only on the local network too, until the assistant's own
+            # path with on-screen approval is wired to the link.
+            return ask(question, emit, origin)
+
         return ask(question, emit)
 
     return answer
