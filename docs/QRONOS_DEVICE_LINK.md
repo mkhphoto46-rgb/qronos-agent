@@ -708,7 +708,7 @@ runtime already has, with its existing models and settings:
 
 | Service | Existing call | Not used |
 |---|---|---|
-| remote chat (the only remote answer path, wrapped in `ToolFreeAsk`) | `orchestrator.answer_web_prompt(prompt)` — the Fast brain behind the orchestrator's resource and activity guard, prompt only | `execute_plan`, workers, tools, the queue |
+| remote chat (the only remote answer path, wrapped in `ToolFreeAsk`) | `orchestrator.answer_chat_only(messages)` — the Fast brain under its configured profile (today num_predict 256, keep_alive 60s, its model and context) with the same resource and activity admission as a Fast turn; an admission refusal is answered `busy` | `execute_plan`, workers, tools, the queue, user memory, and `answer_web_prompt`, whose web-research overrides (768 / "0") are not the Fast profile (review finding L4) |
 | speech-to-text | `speech_runtime.transcribe_file(path, language)` | — |
 | text-to-speech | `voice_output.speak_to_file(text).audio_path` | — |
 

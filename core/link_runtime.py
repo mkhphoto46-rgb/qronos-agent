@@ -214,28 +214,23 @@ class DeviceView:
 # ------------------------------------------------------------ runtime glue
 
 
-def chat_prompt(messages: list[dict[str, str]]) -> str:
+def brain_messages(messages: list[dict[str, str]]) -> list[Any]:
     """
-    The remote chat's messages as one prompt for a prompt-only brain call.
+    The remote chat's messages as the brain's own message type.
 
-    The runtime's guarded Fast-brain call takes a single prompt. The system
-    rules come first and are labelled, then the question, so the rule that
-    the remote answer can do nothing is in front of the model every time.
+    Only system and user roles are passed on; anything else a caller might
+    put in is dropped rather than guessed at.
     """
 
-    parts = []
+    from core.brain_runtime import BrainMessage, BrainMessageRole
 
-    for message in messages:
-        role = message.get("role", "user")
-        content = str(message.get("content", "")).strip()
+    roles = {"system": BrainMessageRole.SYSTEM, "user": BrainMessageRole.USER}
 
-        if not content:
-            continue
-
-        label = "Instructions" if role == "system" else "Question"
-        parts.append(f"{label}:\n{content}")
-
-    return "\n\n".join(parts) + "\n\nAnswer:"
+    return [
+        BrainMessage(role=roles[message["role"]], content=str(message.get("content", "")).strip())
+        for message in messages
+        if message.get("role") in roles and str(message.get("content", "")).strip()
+    ]
 
 
 def _refuse_if_busy(runtime: Any) -> None:
@@ -258,10 +253,13 @@ def runtime_services(runtime: Any) -> LinkServices:
     module does not import the runtime bridge. Only calls that already exist
     are used, with their existing models and settings:
 
-        remote_chat  ``runtime.orchestrator.answer_web_prompt(prompt)`` - the
-                     Fast brain behind the orchestrator's resource and activity
-                     guard, prompt only. It is not ``execute_plan``: no
-                     planner, no workers, no tools, no queue.
+        remote_chat  ``runtime.orchestrator.answer_chat_only(messages)`` - the
+                     Fast brain under its configured profile (model, context,
+                     num_predict, keep-alive) and the same resource and
+                     activity admission as a Fast turn. It is not
+                     ``execute_plan``: no planner, no workers, no tools, no
+                     queue. Not ``answer_web_prompt`` either, whose web-research
+                     overrides are not the Fast profile (review finding L4).
         transcribe   ``runtime.speech_runtime.transcribe_file(path, language)``
         speak        ``runtime.voice_output.speak_to_file(text).audio_path``
 
@@ -277,7 +275,18 @@ def runtime_services(runtime: Any) -> LinkServices:
         if orchestrator is None:
             raise LinkOperationError("busy", "Qronos is still starting on the computer.")
 
-        return str(orchestrator.answer_web_prompt(chat_prompt(messages)))
+        answer = getattr(orchestrator, "answer_chat_only", None)
+
+        if answer is None:
+            # An older runtime without the chat-only call is not served with a
+            # different profile instead.
+            raise LinkOperationError("not_configured", "Remote questions are not available on this build.")
+
+        try:
+            return str(answer(brain_messages(messages)))
+        except RuntimeError as exc:
+            # Admission refused (resources or activity): say busy, never queue.
+            raise LinkOperationError("busy", "Qronos is busy on the computer. Try again shortly.") from exc
 
     def transcribe(wav_path: Path, language: str) -> str:
         _refuse_if_busy(runtime)

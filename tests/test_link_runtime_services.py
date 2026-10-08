@@ -16,7 +16,8 @@ import unittest
 from pathlib import Path
 
 from core.link_handlers import REMOTE_ACTION_REFUSAL, REMOTE_SYSTEM_PROMPT, default_handlers, ToolFreeAsk
-from core.link_runtime import chat_prompt, runtime_services
+from core.brain_runtime import BrainMessageRole
+from core.link_runtime import brain_messages, runtime_services
 from core.link_server import LinkSettings
 from tests.fixtures.link_remote_rig import RemoteRig
 
@@ -27,11 +28,19 @@ class Forbidden(AssertionError):
 
 class StandInOrchestrator:
     def __init__(self) -> None:
-        self.prompts: list[str] = []
+        self.prompts: list[list] = []
+        self.refuse = False
+
+    def answer_chat_only(self, messages):
+        if self.refuse:
+            raise RuntimeError("resource admission refused")
+
+        self.prompts.append(list(messages))
+        return "پاسخ کوتاه"
 
     def answer_web_prompt(self, prompt: str) -> str:
-        self.prompts.append(prompt)
-        return "پاسخ کوتاه"
+        # The web-research profile is not the Fast profile (review finding L4).
+        raise Forbidden("the remote path used the web-research overrides")
 
     def execute_plan(self, *args, **kwargs):
         raise Forbidden("the remote path reached the planner")
@@ -76,17 +85,20 @@ class StandInRuntime:
         self.runtime_paused = False
 
 
-class TestPrompt(unittest.TestCase):
-    def test_the_rules_come_before_the_question(self) -> None:
-        prompt = chat_prompt(
+class TestMessages(unittest.TestCase):
+    def test_the_rules_come_before_the_question_as_brain_messages(self) -> None:
+        messages = brain_messages(
             [
                 {"role": "system", "content": REMOTE_SYSTEM_PROMPT},
                 {"role": "user", "content": "پایتخت فرانسه کجاست"},
+                {"role": "assistant", "content": "not passed on"},
+                {"role": "user", "content": "   "},
             ]
         )
 
-        self.assertLess(prompt.index(REMOTE_SYSTEM_PROMPT), prompt.index("پایتخت فرانسه کجاست"))
-        self.assertTrue(prompt.endswith("Answer:"))
+        self.assertEqual([m.role for m in messages], [BrainMessageRole.SYSTEM, BrainMessageRole.USER])
+        self.assertEqual(messages[0].content, REMOTE_SYSTEM_PROMPT)
+        self.assertEqual(messages[1].content, "پایتخت فرانسه کجاست")
 
 
 class ServicesTestCase(unittest.TestCase):
@@ -117,7 +129,7 @@ class TestRemoteAskThroughTheRuntime(ServicesTestCase):
         self.assertEqual(response.result["answer"], "پاسخ کوتاه")
         self.assertEqual(response.result["performed_actions"], [])
         self.assertEqual(len(self.runtime.orchestrator.prompts), 1)
-        self.assertIn(REMOTE_SYSTEM_PROMPT, self.runtime.orchestrator.prompts[0])
+        self.assertEqual(self.runtime.orchestrator.prompts[0][0].content, REMOTE_SYSTEM_PROMPT)
 
     def test_action_requests_reach_nothing_in_the_runtime(self) -> None:
         with self.rig.phone(self.record) as phone:
@@ -147,6 +159,26 @@ class TestRemoteAskThroughTheRuntime(ServicesTestCase):
 
         with self.rig.phone(self.record) as phone:
             self.assertEqual(phone.call("ask", question="سلام").code, "busy")
+
+
+class TestAdmission(ServicesTestCase):
+    def test_a_refused_admission_is_busy_not_queued(self) -> None:
+        self.runtime.orchestrator.refuse = True
+
+        with self.rig.phone(self.record) as phone:
+            self.assertEqual(phone.call("ask", question="سلام").code, "busy")
+
+        self.assertEqual(self.runtime.orchestrator.prompts, [])
+
+    def test_a_runtime_without_the_chat_only_call_is_not_served_another_profile(self) -> None:
+        class Old:
+            def answer_web_prompt(self, prompt):
+                raise Forbidden("fell back to the web-research profile")
+
+        self.runtime.orchestrator = Old()
+
+        with self.rig.phone(self.record) as phone:
+            self.assertEqual(phone.call("ask", question="سلام").code, "not_configured")
 
 
 class TestVoiceThroughTheRuntime(ServicesTestCase):
