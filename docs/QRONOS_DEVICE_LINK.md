@@ -760,7 +760,7 @@ cross-process checks are the backstop, not the path.
 | Part | State |
 |---|---|
 | Protocol core, Kotlin (`mobile/android/linkcore`) | Compiled and unit-tested here (kotlinc 2.4.21 and the committed Gradle build); interoperates with the real PC server directly and through the real relay |
-| Android app (`mobile/android/app`) | Compiled against the Android 16 API and packaged as an **unsigned** APK without the Android SDK (aapt2 9.4.1, AOSP-built `android-all`, D8 9.4.28; `mobile/android/tools/check_without_sdk.py`). Not built through Gradle — that needs the SDK licence, which was not accepted — and never run on a phone or emulator |
+| Android app (`mobile/android/app`) | Compiled against the Android 16 API and packaged as an **unsigned** APK without the Android SDK (aapt2 9.4.1, AOSP-built `android-all`, D8 9.4.28; `mobile/android/buildcheck/check_without_sdk.py`). Not built through Gradle — that needs the SDK licence, which was not accepted — and never run on a phone or emulator |
 | iOS | Not implemented, not supported |
 
 One finding changes §4's "the reference client is the specification the phone

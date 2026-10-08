@@ -11,7 +11,7 @@ keeps no project data — not the answers, not the transcripts, not the audio.
 |---|---|---|
 | `android/linkcore` — protocol core in Kotlin (frames, pairing code, relay hello, TLS 1.3 PSK client, command ids and retry, push-to-talk upload) | Implemented | Compiled with kotlinc 2.4.21 and through the committed Gradle build (Gradle 9.8.1, AGP 9.4.1 plugin resolved); 10 JUnit tests pass against vectors generated from the PC's Python code |
 | Interoperability with the real PC link server | Verified on loopback | `linkcore/interop/run_interop.py`: Kotlin + BouncyCastle client against `core/link_server.py` (Python ssl/OpenSSL) directly and through the real relay with its outer TLS verified against a pinned throwaway CA — TLS 1.3 PSK handshake, Persian round trip, remote ceiling, action refusal, push-to-talk with spoken reply, a dropped connection retried without running the command twice; a wrong key and a revoked device are refused |
-| `android/app` — the Android application (Persian RTL UI, deep-link pairing, Keystore-sealed key, Wi-Fi binding, relay fallback, push-to-talk, reply playback) | **Compiled and packaged as an unsigned APK without the Android SDK; not built through Gradle; never run** | `android/tools/check_without_sdk.py`: resources compiled and linked by aapt2 9.4.1 against the Android 16 (API 36) framework from Robolectric's AOSP-built `android-all` jar, the Kotlin compiled against that API with no errors or warnings, dexed by D8 9.4.28 for minSdk 26. `aapt2 dump badging` shows `app.qronos.remote` 0.1.0, min 26 / target 36, exactly four permissions, label «کرونوس». The Gradle route still needs the Android SDK, whose licence was not accepted: AGP 9.4.1 evaluated the module and stopped at "SDK location not found" |
+| `android/app` — the Android application (Persian RTL UI, deep-link pairing, Keystore-sealed key, Wi-Fi binding, relay fallback, push-to-talk, reply playback) | **Compiled and packaged as an unsigned APK without the Android SDK; not built through Gradle; never run** | `android/buildcheck/check_without_sdk.py`: resources compiled and linked by aapt2 9.4.1 against the Android 16 (API 36) framework from Robolectric's AOSP-built `android-all` jar, the Kotlin compiled against that API with no errors or warnings, dexed by D8 9.4.28 for minSdk 26. `aapt2 dump badging` shows `app.qronos.remote` 0.1.0, min 26 / target 36, exactly four permissions, label «کرونوس». The Gradle route still needs the Android SDK, whose licence was not accepted: AGP 9.4.1 evaluated the module and stopped at "SDK location not found" |
 | iOS | **Not implemented, not supported** | No macOS/Xcode here. Apple's documentation for `sec_protocol_options_add_pre_shared_key` does not say it supports TLS 1.3 external PSKs, which the PC requires; that has to be settled on a Mac before any iOS work |
 
 Nothing here has run on a phone. Pairing from a real camera app, Wi-Fi binding
@@ -74,7 +74,7 @@ Without the SDK, as evidence (every tool open-source, no licence to accept;
 the list and versions are in the script's docstring):
 
 ```sh
-python mobile/android/tools/check_without_sdk.py --jdk <jdk> --kotlinc <kotlinc home> \
+python mobile/android/buildcheck/check_without_sdk.py --jdk <jdk> --kotlinc <kotlinc home> \
     --aapt2 <aapt2> --android-all <android-all jar> --r8 <r8 jar> --maven <jar dir> --out <empty dir>
 ```
 
