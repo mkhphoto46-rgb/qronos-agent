@@ -75,10 +75,10 @@ Every resource is bounded (`RelayLimits` in `qronos_relay/server.py`):
 
 | Limit | Default |
 |---|---|
-| Connections in total / per source address | 1024 / 32 |
+| Connections in total / per source address, counted from accept - before any TLS work, so unfinished handshakes count | 1024 / 32 |
 | Routes with a parked PC | 4096 |
 | PCs parked per route | 2 |
-| Time to send the 37-byte hello | 10 s |
+| Time to finish the TLS handshake / then to send the 37-byte hello | 10 s / 10 s |
 | Time a phone waits for its PC to park | 10 s |
 | Keepalive to a parked PC | every 25 s |
 | Time a PC may stay parked before it must dial again | 15 min |

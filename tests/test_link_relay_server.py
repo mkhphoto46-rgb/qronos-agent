@@ -329,10 +329,37 @@ class TestRelayProtocol(RelayTestCase):
 
     def test_one_address_cannot_take_every_connection(self) -> None:
         held = [self.connect() for _ in range(self.limits.max_per_address)]
-        extra = self.connect()
 
-        self.assertEqual(self.status(extra), core_wire.RelayStatus.OVER_CAPACITY.value)
+        # Refused before any TLS work, so the client's handshake fails.
+        with self.assertRaises((ssl.SSLError, OSError)):
+            connect_relay(self.relay.endpoint, timeout=5)
+
         self.assertEqual(len(held), self.limits.max_per_address)
+        self.assertTrue(wait_for(lambda: self.relay.stats().get("refused_capacity", 0) == 1))
+
+    def test_unfinished_handshakes_count_against_the_limit(self) -> None:
+        # Plain TCP connections that never start TLS hold slots as soon as they
+        # are accepted; the relay does not finish handshakes before counting.
+        silent = []
+
+        for _ in range(self.limits.max_per_address):
+            conn = socket.create_connection(("127.0.0.1", self.relay.port), timeout=5)
+            self.addCleanup(conn.close)
+            silent.append(conn)
+
+        self.assertTrue(wait_for(lambda: self.relay.stats()["connections"] == self.limits.max_per_address))
+
+        with self.assertRaises((ssl.SSLError, OSError)):
+            connect_relay(self.relay.endpoint, timeout=5)
+
+        # And a silent one is let go when the handshake time runs out.
+        self.assertTrue(
+            wait_for(
+                lambda: self.relay.stats().get("refused_tls", 0) == self.limits.max_per_address,
+                timeout=5,
+            )
+        )
+        self.assertEqual(self.relay.stats()["connections"], 0)
 
     def test_a_joined_pair_that_goes_idle_is_closed(self) -> None:
         host = self.park()

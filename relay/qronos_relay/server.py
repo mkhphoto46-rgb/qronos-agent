@@ -17,8 +17,10 @@ The relay is untrusted by design, which shapes what it does keep:
 
 Everything is bounded, because a relay on the internet is attacked by default:
 
-    connections in total and per source address, routes, hosts parked per
-    route, the time to send a hello, the time a phone waits for its PC, the
+    connections in total and per source address - counted from the moment
+    the TCP connection is accepted, before any TLS work, so half-finished
+    handshakes are inside the limits too - routes, hosts parked per route, the
+    time to finish the TLS handshake and send a hello, the time a phone waits for its PC, the
     time a PC may stay parked, idle and total time for a joined pair, and the
     bytes in flight (one chunk per direction, with back-pressure).
 
@@ -107,12 +109,14 @@ class RelayServer:
     # ------------------------------------------------------------- lifecycle
 
     async def start(self, host: str, port: int) -> tuple[str, int]:
+        # Plain TCP first; TLS starts in _handle once the connection has been
+        # counted. With ssl= here, asyncio would finish every handshake before
+        # the limits were consulted, so an attacker could hold any number of
+        # handshakes open at once.
         self._server = await asyncio.start_server(
             self._handle,
             host,
             port,
-            ssl=self.ssl_context,
-            ssl_handshake_timeout=self.limits.hello_timeout,
             limit=self.limits.chunk * 2,
         )
         address = self._server.sockets[0].getsockname()
@@ -161,8 +165,10 @@ class RelayServer:
             self._connections >= self.limits.max_connections
             or self._per_address[address] >= self.limits.max_per_address
         ):
+            # Refused before any TLS work: closing costs nothing, and a status
+            # byte would need a handshake first.
             self.counts["refused_capacity"] += 1
-            await self._finish(writer, Status.OVER_CAPACITY)
+            await self._close(writer)
 
             return
 
@@ -171,6 +177,16 @@ class RelayServer:
         self._writers.add(writer)
 
         try:
+            try:
+                await writer.start_tls(
+                    self.ssl_context,
+                    ssl_handshake_timeout=self.limits.hello_timeout,
+                )
+            except (ConnectionError, OSError, ssl.SSLError, asyncio.TimeoutError):
+                self.counts["refused_tls"] += 1
+
+                return
+
             await self._serve(reader, writer)
         except (ConnectionError, OSError, asyncio.IncompleteReadError, ssl.SSLError):
             pass
