@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No cleartext anywhere. The link to the PC is TLS 1.3 with the pairing
+     key; the relay connection is certificate TLS verified against the system
+     store or the relay's own CA handed over by the PC. User-installed CAs are
+     not trusted, so a CA added to the phone cannot impersonate the relay. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

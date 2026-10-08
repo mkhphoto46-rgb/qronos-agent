@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Qronos remote control for Android.
+
+    Permissions are the minimum the link needs, and nothing here declares a
+    VpnService or BIND_VPN_SERVICE: the app never takes the phone's VPN slot.
+    The relay path is an ordinary TLS connection that rides inside whatever
+    VPN the user runs; the local path asks Android for the Wi-Fi network.
+
+    android:allowBackup="false" and the extraction rules keep the encrypted
+    pairing record out of cloud and device-to-device backups; the key that
+    decrypts it lives in the Android Keystore and never leaves the phone.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Needed for ConnectivityManager.requestNetwork(TRANSPORT_WIFI). -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- Push-to-talk only: recording runs while the button is held. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Qronos"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            The PC's QR code is a qronos://pair URI, so the phone's camera
+            app can open it here directly; no scanning library is needed.
+            The activity always asks the user to confirm before pairing.
+        -->
+        <activity
+            android:name=".PairActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="qronos" android:host="pair" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

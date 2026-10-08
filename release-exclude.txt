@@ -36,8 +36,10 @@ tools/
 build_support/
 
 # The Device Link relay is a separate program deployed on its own server by
-# whoever operates it. It is not part of the PC application.
+# whoever operates it, and the phone app is built for the phone. Neither is
+# part of the PC application.
 relay/
+mobile/
 
 
 # ---------------------------------------------------------------------------

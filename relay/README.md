@@ -8,7 +8,7 @@ copies bytes. See `docs/QRONOS_DEVICE_LINK.md` §5 for the design.
 **Status: software only.** Tested on loopback with throwaway certificates. No
 relay has been deployed, and no default relay exists: Qronos uses one only
 when the user configures its address. Whether a relay is reachable and stable
-from Iranian mobile networks is an open question (§5.6) that this code does
+from Iranian mobile networks is an open question (§5.9) that this code does
 not answer.
 
 ## What the relay can and cannot do
@@ -104,5 +104,5 @@ test suite fails if the copy drifts.
 
 - No deployment, no operator, no default relay address.
 - No multi-address or domain-fronting strategy if a relay address is blocked;
-  §5.6 question 2 has to be measured first.
+  §5.9 question 2 has to be measured first.
 - No rate limiting of hellos beyond the per-address connection cap.

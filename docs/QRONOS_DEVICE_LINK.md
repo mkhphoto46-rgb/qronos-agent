@@ -5,7 +5,7 @@
 | Layer | Name | State |
 |---|---|---|
 | Layer 1 | Local Link — phone and PC on the same network | Implemented; verified on Windows 11 |
-| Layer 2 | Relay Link — phone reaches the PC over the internet | PC-side transport and self-hostable relay implemented and tested on loopback with real outer TLS (§5.3, §5.4). No relay deployed; not wired into the desktop; no phone has used it |
+| Layer 2 | Relay Link — phone reaches the PC over the internet | PC-side transport, self-hostable relay and the Android protocol core implemented and tested on loopback with real outer TLS (§5.3, §5.4, §5.8). Android app source not compiled (no SDK); no iOS. No relay deployed; not wired into the desktop; no phone has used it |
 
 Layer 1 ships first and is useful on its own. Layer 2 is a transport change on
 top of it, not a redesign. The point of this document is to make that true: the
@@ -615,7 +615,7 @@ configured; revoke through `LinkServer.revoke` and change opt-ins through
   taken at the PC for one named phone, not a global setting. Implemented, §5.4.
 - **Push-to-talk, not always-listening.** Bandwidth — Opus speech is 16–24 kbit/s
   against 256 kbit/s for raw audio — and an always-open remote microphone is a
-  bad idea on its own terms. Implemented on the PC side, §5.7.
+  bad idea on its own terms. Implemented on the PC side, §5.6.
 - **The capability ceiling is not negotiable at runtime.** A remote session
   cannot request elevation. If the user wants to run an application, they do it
   on the local network.
@@ -633,7 +633,7 @@ configured; revoke through `LinkServer.revoke` and change opt-ins through
   `performed_actions: []`, which the phone shows. Tested with a hostile remote
   session against a stand-in for the full assistant, in Persian and English.
 
-### 5.7 Push-to-talk protocol (`core/link_voice.py`)
+### 5.6 Push-to-talk protocol (`core/link_voice.py`)
 
 Three operations, all under the `ask` capability, so the remote ceiling does not
 move:
@@ -662,11 +662,11 @@ question.
 The PC's speech-to-text and text-to-speech are injected: `transcribe(wav_path,
 language) -> text` and `speak(text) -> wav_path`. Without `transcribe`, the
 voice operations refuse with `not_configured`. Wiring them to the existing
-Whisper and Chatterbox runtimes is part of the runtime contract in §5.8; it is
+Whisper and Chatterbox runtimes is part of the runtime contract in §5.7; it is
 not done here, and nothing in this protocol has run against a real microphone,
 model or phone.
 
-### 5.8 Runtime contract (`core/link_runtime.py`) — wiring requested, not applied
+### 5.7 Runtime contract (`core/link_runtime.py`) — wiring requested, not applied
 
 `LinkRuntime` is the one object the Qronos runtime holds for the link. It owns
 the registry, audit log, server, pairing window and relay dialler, and offers
@@ -725,7 +725,45 @@ Revocation and opt-in changes must go through these calls, not through a
 registry of the desktop's own, so open sessions end at once; the registry's
 cross-process checks are the backstop, not the path.
 
-### 5.6 Must be measured before Layer 2 is relied on
+### 5.8 The phone app (`mobile/`)
+
+**Android: source and protocol core; iOS: nothing.** Stated precisely in
+`mobile/README.md`; in short:
+
+| Part | State |
+|---|---|
+| Protocol core, Kotlin (`mobile/android/linkcore`) | Compiled and unit-tested here (kotlinc 2.4.21 and the committed Gradle build); interoperates with the real PC server directly and through the real relay |
+| Android app (`mobile/android/app`) | Source written; **not compiled** — the Android SDK needs a licence acceptance that was not given. Gradle (AGP 9.4.1) evaluated the module and stopped at "SDK location not found" |
+| iOS | Not implemented, not supported |
+
+One finding changes §4's "the reference client is the specification the phone
+app should follow" in practice: **Android's platform TLS cannot speak the
+link.** The Android `SSLSocket` reference and Conscrypt's `CAPABILITIES.md`
+list PSK cipher suites only for TLS 1.0–1.2; the PC requires TLS 1.3 with an
+external PSK and `psk_dhe_ke`. The app therefore uses BouncyCastle's TLS
+(`bctls` 1.86.2), which implements TLS 1.3 external PSKs, for the link itself,
+and the platform's `SSLSocket` only for the outer connection to the relay. The
+same question is open on iOS: Apple's documentation of
+`sec_protocol_options_add_pre_shared_key` does not say it supports TLS 1.3
+external PSKs, and that must be settled on a Mac before any iOS work.
+
+Measured on loopback (`mobile/android/linkcore/interop/run_interop.py`, Kotlin
+client against `core/link_server.py`): TLS 1.3 with
+`TLS_CHACHA20_POLY1305_SHA256` both directly and through the relay with its
+outer certificate verified against a pinned CA; Persian text round-trips
+exactly; the remote ceiling and the action refusal hold; push-to-talk uploads
+16 kHz audio and plays back a spoken reply; a connection cut after the PC ran a
+command is retried and answered from the ledger with exactly one execution; a
+wrong key is refused at the handshake and a revoked device gets `NO_HOST` from
+the relay.
+
+What the app does that §2 asked for: it never declares a `VpnService`; on Wi-Fi
+it opens the PC connection from `requestNetwork(TRANSPORT_WIFI)`'s socket
+factory so a VPN holding the default route is bypassed rather than replaced;
+away from home it uses the relay as an ordinary TLS connection inside whatever
+VPN runs. None of that has run on a phone.
+
+### 5.9 Must be measured before Layer 2 is relied on
 
 The code exists now; these questions are still open, and code does not answer
 them.
@@ -802,7 +840,7 @@ What follows:
 **Layer 2 as specified: the shape is right, the operational questions are open.**
 Outbound-only through an untrusted relay is the correct answer to the constraint
 in §2, and I would not expect a better one to emerge. What is unresolved is not
-the architecture but whether a relay can be run reliably and by whom — §5.6.
+the architecture but whether a relay can be run reliably and by whom — §5.9.
 Those are answerable with measurement, and should be answered before code.
 
 **What I would not do:** ship Layer 2 without the per-device remote opt-in and
