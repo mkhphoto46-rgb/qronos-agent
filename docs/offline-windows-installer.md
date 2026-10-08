@@ -130,6 +130,13 @@ the first failure.
   The previous review installer contained `NSISdl.dll`.
 - The embedded file, extracted again, has exactly the pinned SHA-256.
 
+The finished installer is moved out of Tauri's output folder into the build's own folder before
+any of these checks run. The only way it can sit there unmarked is beside its provenance record
+(`installer-provenance.json`), after every check has passed. If anything fails (the Tauri build,
+a check, extraction or the provenance record), the installer is renamed `*.UNVERIFIED`. An
+installer already lying at Tauri's output path from an earlier or manual build is renamed the
+same way before the build starts. Nothing is deleted. Never use a `*.UNVERIFIED` file.
+
 A plain `npm run tauri build` fails on purpose with *"Qronos installers must be
 built with build_support.build_desktop"*. It can therefore never produce an
 installer without the prerequisite.

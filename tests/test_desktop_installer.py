@@ -495,7 +495,85 @@ def test_a_built_installer_that_differs_from_the_pin_is_refused(tmp_path, monkey
     backend = wire(tmp_path, monkeypatch, fake)
 
     with pytest.raises(PrerequisiteError, match=message):
-        build_desktop.build(backend, target_dir=tmp_path / "t")
+        build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
+    assert_quarantined(tmp_path)
+
+
+CANONICAL = Path("t") / "release" / "bundle" / "nsis" / "qronos-desktop_0.1.0_x64-setup.exe"
+
+
+def assert_quarantined(tmp_path: Path) -> None:
+    """No unmarked installer anywhere: not at Tauri's output path, not in the build folder."""
+    assert not (tmp_path / CANONICAL).exists()
+    (work,) = (tmp_path / "w").iterdir()
+    assert not (work / CANONICAL.name).exists()
+    assert (work / (CANONICAL.name + ".UNVERIFIED")).read_bytes() == b"MZ installer"
+    assert not (work / "installer-provenance.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The desktop installer is built on Windows only.")
+def test_a_provenance_failure_quarantines_the_installer(tmp_path, monkeypatch):
+    fake = FakeBuild(tmp_path, committed_pin())
+    backend = wire(tmp_path, monkeypatch, fake)
+
+    def refuse(**kwargs):
+        raise OSError("git is unavailable")
+
+    monkeypatch.setattr(build_desktop, "provenance_record", refuse)
+
+    with pytest.raises(OSError):
+        build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
+    assert_quarantined(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The desktop installer is built on Windows only.")
+def test_an_extraction_failure_quarantines_the_installer(tmp_path, monkeypatch):
+    fake = FakeBuild(tmp_path, committed_pin())
+    backend = wire(tmp_path, monkeypatch, fake)
+
+    def refuse(root, pin):
+        raise PrerequisiteError("qronos-runtime does not match its manifest")
+
+    monkeypatch.setattr(build_desktop, "verify_extracted", refuse)
+
+    with pytest.raises(PrerequisiteError, match="does not match its manifest"):
+        build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
+    assert_quarantined(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The desktop installer is built on Windows only.")
+def test_a_tauri_failure_after_bundling_quarantines_the_output(tmp_path, monkeypatch):
+    fake = FakeBuild(tmp_path, committed_pin())
+    backend = wire(tmp_path, monkeypatch, fake)
+
+    def run_then_fail(command, **kwargs):
+        fake.run(command, **kwargs)
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(build_desktop.subprocess, "run", run_then_fail)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
+    assert not (tmp_path / CANONICAL).exists()
+    assert (tmp_path / (str(CANONICAL) + ".UNVERIFIED")).read_bytes() == b"MZ installer"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The desktop installer is built on Windows only.")
+def test_a_stale_installer_at_the_output_path_is_quarantined_first(tmp_path, monkeypatch):
+    fake = FakeBuild(tmp_path, committed_pin())
+    backend = wire(tmp_path, monkeypatch, fake)
+    stale = tmp_path / CANONICAL
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"MZ from a manual tauri build")
+    (stale.parent / (stale.name + ".UNVERIFIED")).write_bytes(b"MZ older refusal")
+
+    result = build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
+
+    assert not stale.exists()
+    assert (stale.parent / (stale.name + ".UNVERIFIED")).read_bytes() == b"MZ older refusal"  # never overwritten
+    assert (stale.parent / (stale.name + ".1.UNVERIFIED")).read_bytes() == b"MZ from a manual tauri build"
+    assert result["installer"].read_bytes() == b"MZ installer"
+    assert (result["work"] / "installer-provenance.json").is_file()
 
 
 # ------------------------------------------------ the extracted installer

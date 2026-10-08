@@ -110,6 +110,21 @@ def _target_dir(environment: dict[str, str]) -> Path:
     return Path(configured) if configured else ROOT / "desktop" / "src-tauri" / "target"
 
 
+#: Suffix of an installer that did not pass every check; it must never be used.
+UNVERIFIED_SUFFIX = ".UNVERIFIED"
+
+
+def quarantine(path: Path) -> Path:
+    """Rename a refused installer so it can never pass for verified output. Nothing is deleted."""
+    target = path.with_name(path.name + UNVERIFIED_SUFFIX)
+    number = 1
+    while target.exists():
+        target = path.with_name(f"{path.name}.{number}{UNVERIFIED_SUFFIX}")
+        number += 1
+    os.replace(path, target)
+    return target
+
+
 def _tauri_cli_version() -> str:
     lock = json.loads((ROOT / "desktop" / "package-lock.json").read_text(encoding="utf-8"))
     return lock["packages"]["node_modules/@tauri-apps/cli"]["version"]
@@ -162,28 +177,41 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     flags.extend((f"--remap-path-prefix={ROOT}=qronos-source",
                   f"--remap-path-prefix={Path.home()}=qronos-build-home"))
     environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
-    started = time.time()
-    subprocess.run([npm, "run", "tauri", "--", "build", "--config", str(overlay),
-                    "--bundles", bundles, "--", "--locked"], cwd=ROOT / "desktop", env=environment, check=True)
-
-    # The installer is checked as built, not assumed from configuration.
     release = _target_dir(environment) / "release"
-    verify_generated_script((release / "nsis" / "x64" / "installer.nsi").read_text(encoding="utf-8"), wrapper)
-    setup = release / "bundle" / "nsis" / f"{config['productName']}_{config['version']}_x64-setup.exe"
-    if not setup.is_file() or setup.stat().st_mtime < started:
-        raise PrerequisiteError(f"This build did not produce {setup.name}.")
-    entries = list_installer(setup, seven_zip)
-    verify_embedded_payload(entries, pin)
-    embedded = extract_and_hash_payload(setup, seven_zip, work / "payload")
-    if embedded != pin["sha256"]:
-        raise PrerequisiteError(f"The embedded WebView2 installer SHA-256 {embedded} does not match the pin.")
-    # Keep this build's installer beside its evidence; the Cargo target folder is reused.
-    kept = work / setup.name
-    shutil.copy2(setup, kept)
-    extracted = verify_extracted(extract_installer(kept, seven_zip, work / "x"), pin)
-    record = provenance_record(setup=kept, root=ROOT, pin=pin, extracted=extracted,
-                               backend_source=backend_source, purpose=purpose, tauri_cli=_tauri_cli_version())
-    write_record(work / "installer-provenance.json", record)
+    canonical = release / "bundle" / "nsis" / f"{config['productName']}_{config['version']}_x64-setup.exe"
+    # An installer left at Tauri's output path by an earlier or manual build must not be
+    # mistaken for this build's verified output.
+    if canonical.exists():
+        quarantine(canonical)
+    started = time.time()
+    try:
+        subprocess.run([npm, "run", "tauri", "--", "build", "--config", str(overlay),
+                        "--bundles", bundles, "--", "--locked"], cwd=ROOT / "desktop", env=environment, check=True)
+    except BaseException:
+        if canonical.exists():
+            quarantine(canonical)
+        raise
+    if not canonical.is_file() or canonical.stat().st_mtime < started:
+        raise PrerequisiteError(f"This build did not produce {canonical.name}.")
+    # Only this build's own folder ever holds the installer: verified beside its
+    # provenance, or renamed *.UNVERIFIED if any check below refuses it.
+    kept = work / canonical.name
+    shutil.move(str(canonical), str(kept))
+    try:
+        # The installer is checked as built, not assumed from configuration.
+        verify_generated_script((release / "nsis" / "x64" / "installer.nsi").read_text(encoding="utf-8"), wrapper)
+        entries = list_installer(kept, seven_zip)
+        verify_embedded_payload(entries, pin)
+        embedded = extract_and_hash_payload(kept, seven_zip, work / "payload")
+        if embedded != pin["sha256"]:
+            raise PrerequisiteError(f"The embedded WebView2 installer SHA-256 {embedded} does not match the pin.")
+        extracted = verify_extracted(extract_installer(kept, seven_zip, work / "x"), pin)
+        record = provenance_record(setup=kept, root=ROOT, pin=pin, extracted=extracted,
+                                   backend_source=backend_source, purpose=purpose, tauri_cli=_tauri_cli_version())
+        write_record(work / "installer-provenance.json", record)
+    except BaseException:
+        quarantine(kept)
+        raise
     return {"installer": kept, "work": work, "prerequisite": prerequisite, "entries": entries,
             "provenance": record}
 
