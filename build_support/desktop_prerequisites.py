@@ -91,6 +91,11 @@ def load_pin(path: Path = PIN_PATH) -> dict[str, Any]:
     if not isinstance(runtime, dict) or runtime.get("appId") != "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" \
             or not _RUNTIME_VERSION.fullmatch(str(runtime.get("version", ""))):
         raise PrerequisiteError("The WebView2 pin must declare the WebView2 Runtime appId and a four-part version.")
+    authenticode = pin["authenticode"]
+    if not isinstance(authenticode, dict) or not re.fullmatch(r"[0-9A-Fa-f]{40}",
+                                                               str(authenticode.get("signerCertificateSha1", "")))             or not authenticode.get("signer") or not authenticode.get("issuer"):
+        raise PrerequisiteError("The WebView2 pin must record the signer, issuer and SHA-1 thumbprint of the "
+                                "signing certificate.")
     if pin["installArguments"] != "/silent /install":
         raise PrerequisiteError("The WebView2 pin must use the silent install arguments the hook runs.")
     if not isinstance(pin["ownerGates"], list) or not pin["ownerGates"]:
@@ -118,8 +123,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def winverifytrust(path: Path) -> None:
-    """A valid Authenticode signature chaining to a trusted root, checked offline."""
+def winverifytrust(path: Path) -> dict[str, str]:
+    """A valid Authenticode signature chaining to a trusted root, checked offline.
+
+    Returns the identity of the certificate that signed the file (its SHA-1
+    thumbprint, subject and issuer names) so the caller can compare it with the pin.
+    """
     if os.name != "nt":
         raise PrerequisiteError("Authenticode verification needs Windows.")
     from ctypes import wintypes
@@ -131,6 +140,18 @@ def winverifytrust(path: Path) -> None:
     class FileInfo(ctypes.Structure):
         _fields_ = [("cbStruct", wintypes.DWORD), ("pcwszFilePath", wintypes.LPCWSTR),
                     ("hFile", wintypes.HANDLE), ("pgKnownSubject", ctypes.c_void_p)]
+
+    class ProviderCert(ctypes.Structure):  # CRYPT_PROVIDER_CERT, leading fields only
+        _fields_ = [("cbStruct", wintypes.DWORD), ("pCert", ctypes.c_void_p)]
+
+    class ProviderSigner(ctypes.Structure):  # CRYPT_PROVIDER_SGNR, leading fields only
+        _fields_ = [("cbStruct", wintypes.DWORD), ("sftVerifyAsOf", wintypes.FILETIME),
+                    ("csCertChain", wintypes.DWORD), ("pasCertChain", ctypes.POINTER(ProviderCert))]
+
+    class CertContext(ctypes.Structure):  # CERT_CONTEXT
+        _fields_ = [("dwCertEncodingType", wintypes.DWORD), ("pbCertEncoded", ctypes.POINTER(ctypes.c_ubyte)),
+                    ("cbCertEncoded", wintypes.DWORD), ("pCertInfo", ctypes.c_void_p),
+                    ("hCertStore", ctypes.c_void_p)]
 
     class TrustData(ctypes.Structure):
         _fields_ = [("cbStruct", wintypes.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
@@ -155,20 +176,50 @@ def winverifytrust(path: Path) -> None:
     wintrust = ctypes.WinDLL("wintrust")
     wintrust.WinVerifyTrust.argtypes = (wintypes.HANDLE, ctypes.POINTER(GUID), ctypes.c_void_p)
     wintrust.WinVerifyTrust.restype = wintypes.LONG
+    wintrust.WTHelperProvDataFromStateData.argtypes = (wintypes.HANDLE,)
+    wintrust.WTHelperProvDataFromStateData.restype = ctypes.c_void_p
+    wintrust.WTHelperGetProvSignerFromChain.argtypes = (ctypes.c_void_p, wintypes.DWORD, wintypes.BOOL,
+                                                        wintypes.DWORD)
+    wintrust.WTHelperGetProvSignerFromChain.restype = ctypes.POINTER(ProviderSigner)
+    crypt32 = ctypes.WinDLL("crypt32")
+    crypt32.CertGetNameStringW.argtypes = (ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                           wintypes.LPWSTR, wintypes.DWORD)
+    crypt32.CertGetNameStringW.restype = wintypes.DWORD
+
+    def name(certificate: int, issuer: bool) -> str:
+        buffer = ctypes.create_unicode_buffer(512)
+        crypt32.CertGetNameStringW(certificate, 4, 1 if issuer else 0, None, buffer, 512)  # SIMPLE_DISPLAY
+        return buffer.value
+
     result = wintrust.WinVerifyTrust(wintypes.HANDLE(-1), ctypes.byref(generic_verify_v2), ctypes.byref(data))
-    data.dwStateAction = 2           # WTD_STATEACTION_CLOSE
-    wintrust.WinVerifyTrust(wintypes.HANDLE(-1), ctypes.byref(generic_verify_v2), ctypes.byref(data))
+    identity: dict[str, str] = {}
+    try:
+        if result == 0:
+            provider = wintrust.WTHelperProvDataFromStateData(data.hWVTStateData)
+            signer = wintrust.WTHelperGetProvSignerFromChain(provider, 0, False, 0) if provider else None
+            if signer and signer.contents.csCertChain and signer.contents.pasCertChain:
+                certificate = signer.contents.pasCertChain[0].pCert
+                context = ctypes.cast(certificate, ctypes.POINTER(CertContext)).contents
+                encoded = ctypes.string_at(context.pbCertEncoded, context.cbCertEncoded)
+                identity = {"thumbprintSha1": hashlib.sha1(encoded).hexdigest().upper(),
+                            "subject": name(certificate, False), "issuer": name(certificate, True)}
+    finally:
+        data.dwStateAction = 2       # WTD_STATEACTION_CLOSE
+        wintrust.WinVerifyTrust(wintypes.HANDLE(-1), ctypes.byref(generic_verify_v2), ctypes.byref(data))
     if result != 0:
         raise PrerequisiteError(f"The WebView2 installer has no valid Authenticode signature "
                                 f"(WinVerifyTrust 0x{result & 0xFFFFFFFF:08X}).")
+    if not identity:
+        raise PrerequisiteError("The WebView2 installer's signing certificate could not be read.")
+    return identity
 
 
 def verify_installer(
     path: Path,
     pin: dict[str, Any],
-    trust: Callable[[Path], None] = winverifytrust,
+    trust: Callable[[Path], dict[str, str]] = winverifytrust,
 ) -> dict[str, Any]:
-    """The cached installer is exactly the pinned, signed file. Nothing is downloaded."""
+    """The cached installer is exactly the pinned file, signed by the pinned certificate."""
     if _is_link(path) or _is_link(path.parent):
         raise PrerequisiteError("The cached WebView2 installer is missing, or it or its folder is a link.")
     if not path.is_file():
@@ -181,9 +232,16 @@ def verify_installer(
     digest = sha256_file(path)
     if digest != pin["sha256"]:
         raise PrerequisiteError(f"The cached WebView2 installer SHA-256 {digest} does not match the pin.")
-    trust(path)
-    return {"fileName": path.name, "bytes": size, "sha256": digest, "authenticode": "valid (WinVerifyTrust)",
-            "runtimeVersion": pin["runtime"]["version"]}
+    signer = trust(path)
+    expected = pin["authenticode"]
+    if (signer.get("thumbprintSha1", "").upper() != expected["signerCertificateSha1"].upper()
+            or signer.get("subject") != expected["signer"] or signer.get("issuer") != expected["issuer"]):
+        raise PrerequisiteError(
+            f"The WebView2 installer is signed by {signer.get('subject')!r} (issuer {signer.get('issuer')!r}, "
+            f"thumbprint {signer.get('thumbprintSha1')}), not the pinned {expected['signer']!r} certificate "
+            f"{expected['signerCertificateSha1']}.")
+    return {"fileName": path.name, "bytes": size, "sha256": digest, "runtimeVersion": pin["runtime"]["version"],
+            "authenticode": f"valid (WinVerifyTrust); signer {signer['subject']}, thumbprint {signer['thumbprintSha1']}"}
 
 
 # ------------------------------------------------------------ NSIS hook

@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,20 @@ def fake_pin(data: bytes) -> dict:
     """The committed pin, re-pointed at a small fixture so the checks can be exercised."""
     pin = committed_pin()
     return {**pin, "bytes": len(data), "sha256": sha256(data)}
+
+
+def pinned_signer(pin: dict | None = None) -> dict:
+    authenticode = (pin or committed_pin())["authenticode"]
+    return {"thumbprintSha1": authenticode["signerCertificateSha1"], "subject": authenticode["signer"],
+            "issuer": authenticode["issuer"]}
+
+
+def trusted_as(identity: dict, seen: list | None = None):
+    def trust(path: Path) -> dict:
+        if seen is not None:
+            seen.append(path)
+        return identity
+    return trust
 
 
 def seven_zip() -> Path:
@@ -106,16 +122,16 @@ def test_a_cached_installer_must_match_size_hash_and_signature(tmp_path):
     cached.write_bytes(data)
     trusted: list[Path] = []
 
-    evidence = prerequisites.verify_installer(cached, fake_pin(data), trust=trusted.append)
+    evidence = prerequisites.verify_installer(cached, fake_pin(data), trust=trusted_as(pinned_signer(), trusted))
 
     assert trusted == [cached]
     assert evidence["sha256"] == sha256(data) and evidence["runtimeVersion"] == "154.0.4258.62"
 
     with pytest.raises(PrerequisiteError, match="bytes; the pin says"):
-        prerequisites.verify_installer(cached, {**fake_pin(data), "bytes": len(data) + 1}, trust=trusted.append)
+        prerequisites.verify_installer(cached, {**fake_pin(data), "bytes": len(data) + 1}, trust=trusted_as(pinned_signer(), trusted))
     cached.write_bytes(data[:-1] + b"X")  # same size, one byte changed
     with pytest.raises(PrerequisiteError, match="does not match the pin"):
-        prerequisites.verify_installer(cached, fake_pin(data), trust=trusted.append)
+        prerequisites.verify_installer(cached, fake_pin(data), trust=trusted_as(pinned_signer(), trusted))
 
     cached.write_bytes(data)
 
@@ -126,6 +142,50 @@ def test_a_cached_installer_must_match_size_hash_and_signature(tmp_path):
         prerequisites.verify_installer(cached, fake_pin(data), trust=untrusted)
 
 
+@pytest.mark.parametrize("field", ["thumbprintSha1", "subject", "issuer"])
+def test_a_trusted_but_different_signer_is_refused(tmp_path, field):
+    data = b"MZ pinned installer bytes"
+    cached = tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    cached.write_bytes(data)
+    other = {**pinned_signer(), field: "0" * 40 if field == "thumbprintSha1" else "Somebody Else"}
+
+    with pytest.raises(PrerequisiteError, match="not the pinned 'Microsoft Corporation' certificate"):
+        prerequisites.verify_installer(cached, fake_pin(data), trust=trusted_as(other))
+    # A thumbprint in another letter case is the same certificate.
+    lower = {**pinned_signer(), "thumbprintSha1": pinned_signer()["thumbprintSha1"].lower()}
+    prerequisites.verify_installer(cached, fake_pin(data), trust=trusted_as(lower))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="WinVerifyTrust is a Windows API.")
+def test_a_validly_signed_non_microsoft_binary_is_refused(tmp_path):
+    """A real Authenticode-valid file from another publisher, in place of the pinned installer."""
+    source = Path(sys.executable)
+    try:
+        identity = prerequisites.winverifytrust(source)
+    except PrerequisiteError:
+        pytest.skip("The test interpreter is not Authenticode-signed here.")
+    if identity["subject"] == "Microsoft Corporation":
+        pytest.skip("The test interpreter is signed by Microsoft here.")
+    stand_in = tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    stand_in.write_bytes(source.read_bytes())
+    pin = fake_pin(stand_in.read_bytes())  # the bytes match; only the signer differs
+
+    assert prerequisites.winverifytrust(stand_in) == identity  # the signature itself is valid
+    with pytest.raises(PrerequisiteError, match=f"signed by '{re.escape(identity['subject'])}'"):
+        prerequisites.verify_installer(stand_in, pin)
+
+
+@pytest.mark.parametrize("change", [{"signerCertificateSha1": "4028CAD6"}, {"signer": ""}, {"issuer": ""}])
+def test_a_pin_without_a_complete_signer_identity_is_refused(tmp_path, change):
+    pin = committed_pin()
+    pin = {**pin, "authenticode": {**pin["authenticode"], **change}}
+    path = tmp_path / "pin.json"
+    path.write_text(json.dumps(pin), encoding="utf-8")
+
+    with pytest.raises(PrerequisiteError, match="signer, issuer and SHA-1 thumbprint"):
+        prerequisites.load_pin(path)
+
+
 def test_a_misnamed_missing_or_linked_installer_is_refused(tmp_path):
     data = b"MZ pinned installer bytes"
     real = tmp_path / "real"
@@ -134,14 +194,14 @@ def test_a_misnamed_missing_or_linked_installer_is_refused(tmp_path):
     (real / "other.exe").write_bytes(data)
 
     with pytest.raises(PrerequisiteError, match="must be named"):
-        prerequisites.verify_installer(real / "other.exe", fake_pin(data), trust=lambda path: None)
+        prerequisites.verify_installer(real / "other.exe", fake_pin(data), trust=trusted_as(pinned_signer()))
     with pytest.raises(PrerequisiteError, match="missing"):
         prerequisites.verify_installer(tmp_path / "absent" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
-                                       fake_pin(data), trust=lambda path: None)
+                                       fake_pin(data), trust=trusted_as(pinned_signer()))
     junction(real, tmp_path / "linked")
     with pytest.raises(PrerequisiteError, match="link"):
         prerequisites.verify_installer(tmp_path / "linked" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
-                                       fake_pin(data), trust=lambda path: None)
+                                       fake_pin(data), trust=trusted_as(pinned_signer()))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="WinVerifyTrust is a Windows API.")
@@ -160,6 +220,7 @@ def test_the_real_cached_installer_verifies_and_a_tampered_copy_does_not(tmp_pat
     evidence = prerequisites.verify_installer(REAL_INSTALLER, pin)
 
     assert evidence["sha256"] == pin["sha256"] and evidence["authenticode"].startswith("valid")
+    assert prerequisites.winverifytrust(REAL_INSTALLER) == pinned_signer(pin)
     tampered = tmp_path / pin["fileName"]
     data = bytearray(REAL_INSTALLER.read_bytes())
     data[len(data) // 2] ^= 0xFF
