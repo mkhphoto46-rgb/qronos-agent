@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import shlex
 import subprocess
@@ -64,6 +65,33 @@ HOOK_SETTING = "installer-hooks/webview2-offline.nsh"
 USER_DATA_FOLDER = "Qronos"
 
 
+_FOLDER_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
+_DEVICE_NAMES = frozenset({"con", "prn", "aux", "nul", "conin$", "conout$",
+                           *(f"{port}{n}" for port in ("com", "lpt") for n in (*"123456789", "¹", "²",
+                                                                                 "³"))})
+
+
+def folder_name_problem(name: str) -> str | None:
+    """Why a configuration value cannot be used as one canonical Windows folder name, if it cannot.
+
+    Windows drops trailing dots and spaces ("Qronos." and "Qronos " open "Qronos"),
+    resolves 8.3 short names ("QRONOS~1"), treats device names as devices even with
+    an extension ("NUL.txt") and reads ":" as an alternate data stream. Each would
+    let a harmless-looking name reach another folder, so each is refused.
+    """
+    if not isinstance(name, str) or not name or name in (".", ".."):
+        return "is empty or a relative path element"
+    if _FOLDER_FORBIDDEN.search(name):
+        return "contains a path separator, ':' or another character Windows does not allow in a name"
+    if name != name.strip(" ") or name.endswith("."):
+        return "starts or ends with a space or ends with a dot, which Windows removes"
+    if re.search(r"~\d", name):
+        return "looks like an 8.3 short name, which Windows resolves to another folder"
+    if name.split(".")[0].rstrip(" ").casefold() in _DEVICE_NAMES:
+        return "is a Windows device name"
+    return None
+
+
 def require_windows_x64(bundles: str) -> None:
     """Refuse any build whose installer would not match the Windows x64 inventory and prerequisite."""
     if bundles not in SUPPORTED_BUNDLES:
@@ -102,7 +130,10 @@ def check_tauri_config(config: dict[str, Any]) -> None:
     # Neither may be the folder that holds Qronos user data.
     for setting, value in (("productName", config.get("productName", "")),
                            ("identifier", config.get("identifier", ""))):
-        if str(value).strip().casefold() == USER_DATA_FOLDER.casefold():
+        problem = folder_name_problem(value)
+        if problem:
+            raise ValueError(f"tauri.conf.json {setting} {value!r} {problem}; it names an install or app-data folder.")
+        if value.casefold() == USER_DATA_FOLDER.casefold():
             raise ValueError(f"tauri.conf.json {setting} {value!r} would place installer-managed files in the "
                              f"%LOCALAPPDATA%\\{USER_DATA_FOLDER} user-data folder.")
     if nsis.get("installMode", "currentUser") not in ("currentUser", "perMachine"):

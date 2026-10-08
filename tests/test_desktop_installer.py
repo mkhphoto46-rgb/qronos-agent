@@ -459,6 +459,14 @@ def test_the_committed_tauri_config_never_downloads_webview2():
     lambda c: c["bundle"]["windows"].update(minimumWebview2Version="120.0.0.0"),
     lambda c: c.update(productName="Qronos"),  # per-user install folder = the user-data folder
     lambda c: c.update(productName=" qronos "),
+    lambda c: c.update(productName="Qronos."),  # Windows opens %LOCALAPPDATA%\Qronos for this
+    lambda c: c.update(productName="Qronos. ."),
+    lambda c: c.update(identifier="qronos "),
+    lambda c: c.update(productName="QRONOS~1"),
+    lambda c: c.update(productName="NUL"),
+    lambda c: c.update(identifier="com1.qronos"),
+    lambda c: c.update(productName="qronos-desktop:stream"),
+    lambda c: c.update(productName="..\\Qronos"),
     lambda c: c.update(identifier="QRONOS"),  # "delete app data" would remove the user-data folder
     lambda c: c["bundle"]["windows"]["nsis"].update(installMode="both"),
 ])
@@ -482,6 +490,33 @@ def test_only_a_windows_x64_nsis_installer_is_built(monkeypatch, bundles, machin
 
     with pytest.raises(ValueError, match="x86_64-pc-windows-msvc"):
         build_desktop.require_windows_x64(bundles)
+
+
+@pytest.mark.parametrize("name", ["Qronos.", "Qronos ", " Qronos", "Qronos. . ", "QRONOS~1", "CON", "nul.txt",
+                                  "COM1", "lpt9.log", "COM¹", "CONIN$", "a:b", "a/b", "a\\b", "a\tb", ".", "..",
+                                  ""])
+def test_names_windows_would_resolve_elsewhere_are_refused(name):
+    assert build_desktop.folder_name_problem(name) is not None
+
+
+@pytest.mark.parametrize("name", ["qronos-desktop", "com.qronos.agent", "Qronos Desktop", "con-tools", "nullable",
+                                  "COM10", "Qronos.Agent"])
+def test_ordinary_folder_names_are_accepted(name):
+    assert build_desktop.folder_name_problem(name) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows name canonicalisation.")
+@pytest.mark.parametrize("alias", ["Qronos.", "Qronos ", "Qronos. . "])
+def test_windows_really_resolves_trailing_dot_and_space_aliases(tmp_path, alias):
+    """Fixture evidence for I5: as the last path component (the way %LOCALAPPDATA%\\<productName>
+    names the install folder) these aliases open the real folder, so they must be refused."""
+    (tmp_path / "Qronos").mkdir()
+    (tmp_path / "Qronos" / "state.txt").write_text("user data", encoding="utf-8")
+    aliased = str(tmp_path) + "\\" + alias
+
+    assert os.path.normcase(os.path.abspath(aliased)) == os.path.normcase(str(tmp_path / "Qronos"))
+    assert os.path.isdir(aliased) and os.path.samefile(aliased, tmp_path / "Qronos")  # same file ID
+    assert build_desktop.folder_name_problem(alias) is not None
 
 
 def test_the_install_and_app_data_folders_are_not_the_user_data_folder():
