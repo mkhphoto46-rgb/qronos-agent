@@ -44,6 +44,7 @@ import {
 import {
   DeviceLinkController,
   applyDeviceLinkEvent,
+  bindPairingDelivery,
   createDeviceLinkController,
 } from "./deviceLink";
 
@@ -320,6 +321,20 @@ function App() {
   }
 
   const deviceLink = deviceLinkRef.current;
+
+  useEffect(() => {
+    // Pairing replies come only to this window, on their own event.
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void bindPairingDelivery(listen, deviceLink).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [deviceLink]);
 
   const workflowApprovalView = useSyncExternalStore(
     workflowApproval.subscribe,

@@ -17,6 +17,21 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const RUNTIME_EVENT_NAME: &str = "qronos://runtime-event";
 
+// Device Link pairing. The runtime's answer holds a new phone's key, so it is
+// never broadcast: it goes only to the window that asked, on its own event.
+const LINK_PAIR_OPEN_ACTION: &str = "qronos.link_pair_open";
+const LINK_PAIR_CANCEL_ACTION: &str = "qronos.link_pair_cancel";
+const LINK_PAIRING_EVENT_TYPE: &str = "link_pairing";
+const LINK_PAIRING_EVENT_NAME: &str = "qronos://link-pairing";
+const PAIRING_URI_PREFIX: &str = "qronos://pair?";
+// The runtime's pairing window is 120 s; a reply later than this is dropped.
+const PAIRING_PENDING_SECONDS: u64 = 130;
+const MAX_PENDING_PAIRINGS: usize = 4;
+const MAX_PAIRING_NAME_CHARS: usize = 40;
+const MAX_PAIRING_URI_CHARS: usize = 400;
+// The capability that grants a window the app's commands; only its windows may pair.
+const DEFAULT_CAPABILITY: &str = include_str!("../../capabilities/default.json");
+
 const MAX_TEXT_MESSAGE_CHARS: usize = 16_000;
 const SCREEN_ACTION_ID: &str = "qronos.look_at_screen";
 const APPROVAL_ID_MIN_CHARS: usize = 22;
@@ -62,7 +77,222 @@ pub struct RuntimeManagerState {
     // race to overwrite each other.
     settings_command: Arc<tokio::sync::Mutex<()>>,
 
+    // Which window asked for each open pairing request, by request nonce.
+    pairings: Mutex<PendingPairings>,
+
     backend: Option<Backend>,
+}
+
+// ------------------------------------------------------------ pairing routes
+
+/// One pairing request: the nonce the window sent and the window that sent it.
+#[derive(Debug, Clone)]
+struct PendingPairing {
+    nonce: String,
+    window: String,
+    expires_at: std::time::Instant,
+}
+
+/// Bounded, single-use routes from a pairing reply to the window that asked.
+#[derive(Debug, Default)]
+struct PendingPairings {
+    entries: Vec<PendingPairing>,
+}
+
+impl PendingPairings {
+    fn prune(&mut self, now: std::time::Instant) {
+        self.entries.retain(|entry| entry.expires_at > now);
+    }
+
+    /// Record a request from `window`. A window has at most one open request.
+    fn begin(
+        &mut self,
+        nonce: &str,
+        window: &str,
+        allowed_windows: &[String],
+        now: std::time::Instant,
+    ) -> Result<(), String> {
+        if !allowed_windows.iter().any(|allowed| allowed == window) {
+            return Err("This window may not pair a phone.".to_string());
+        }
+
+        if !valid_pairing_nonce(nonce) {
+            return Err("Invalid pairing request.".to_string());
+        }
+
+        self.prune(now);
+
+        if self.entries.iter().any(|entry| entry.nonce == nonce) {
+            return Err("Invalid pairing request.".to_string());
+        }
+
+        self.entries.retain(|entry| entry.window != window);
+
+        if self.entries.len() >= MAX_PENDING_PAIRINGS {
+            return Err("Too many pairing requests are open.".to_string());
+        }
+
+        self.entries.push(PendingPairing {
+            nonce: nonce.to_string(),
+            window: window.to_string(),
+            expires_at: now + std::time::Duration::from_secs(PAIRING_PENDING_SECONDS),
+        });
+
+        Ok(())
+    }
+
+    /// The window that asked for `nonce`, once; None when unknown or late.
+    fn take(&mut self, nonce: &str, now: std::time::Instant) -> Option<String> {
+        self.prune(now);
+        let index = self.entries.iter().position(|entry| entry.nonce == nonce)?;
+        Some(self.entries.remove(index).window)
+    }
+
+    fn cancel_window(&mut self, window: &str) {
+        self.entries.retain(|entry| entry.window != window);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+fn valid_pairing_nonce(nonce: &str) -> bool {
+    (16..=64).contains(&nonce.len())
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// Control, line-break and bidi override/isolate characters; Persian joiners are fine.
+fn refused_name_character(character: char) -> bool {
+    let code = character as u32;
+    code < 0x20
+        || (0x7F..=0x9F).contains(&code)
+        || code == 0x2028
+        || code == 0x2029
+        || (0x202A..=0x202E).contains(&code)
+        || (0x2066..=0x2069).contains(&code)
+}
+
+fn clean_pairing_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+
+    if name.chars().count() > MAX_PAIRING_NAME_CHARS || name.chars().any(refused_name_character) {
+        return Err("Invalid device name.".to_string());
+    }
+
+    Ok(name.to_string())
+}
+
+/// Windows granted the default capability: the only ones that may pair.
+fn pairing_windows() -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(DEFAULT_CAPABILITY)
+        .ok()
+        .and_then(|capability| capability.get("windows").cloned())
+        .and_then(|windows| serde_json::from_value::<Vec<String>>(windows).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|label| !label.contains('*'))
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct PairingDelivery {
+    request_nonce: String,
+    uri: String,
+}
+
+/// Where one runtime event goes.
+#[derive(Debug, PartialEq)]
+enum EventRoute {
+    Broadcast,
+    /// A pairing reply for the window that asked (looked up by nonce).
+    Pairing(PairingDelivery),
+    /// Never shown anywhere: a malformed pairing reply, or a key out of place.
+    Drop,
+}
+
+fn route_runtime_event(event: &RuntimeEvent) -> EventRoute {
+    if event.event_type == LINK_PAIRING_EVENT_TYPE {
+        let parsed = serde_json::from_str::<serde_json::Value>(&event.message).ok();
+        let field = |name: &str| {
+            parsed
+                .as_ref()
+                .and_then(|value| value.get(name))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+
+        return match (field("requestNonce"), field("uri")) {
+            (Some(nonce), Some(uri))
+                if valid_pairing_nonce(&nonce)
+                    && uri.starts_with(PAIRING_URI_PREFIX)
+                    && uri.chars().count() <= MAX_PAIRING_URI_CHARS =>
+            {
+                EventRoute::Pairing(PairingDelivery {
+                    request_nonce: nonce,
+                    uri,
+                })
+            }
+            _ => EventRoute::Drop,
+        };
+    }
+
+    // A pairing key in any other event or log line is never broadcast.
+    if event.message.contains(PAIRING_URI_PREFIX) {
+        return EventRoute::Drop;
+    }
+
+    EventRoute::Broadcast
+}
+
+/// A failed pairing request leaves nothing pending.
+fn ends_pairing_requests(event: &RuntimeEvent) -> bool {
+    event.event_type == "link_error"
+        && serde_json::from_str::<serde_json::Value>(&event.message)
+            .ok()
+            .and_then(|value| value.get("action").and_then(|a| a.as_str()).map(str::to_string))
+            .as_deref()
+            == Some(LINK_PAIR_OPEN_ACTION)
+}
+
+fn clear_pairings(app: &AppHandle) {
+    if let Some(state) = app.try_state::<RuntimeManagerState>() {
+        if let Ok(mut pairings) = state.pairings.lock() {
+            pairings.clear();
+        }
+    }
+}
+
+fn deliver_runtime_event(app: &AppHandle, event: RuntimeEvent) {
+    if ends_pairing_requests(&event) {
+        clear_pairings(app);
+    }
+
+    match route_runtime_event(&event) {
+        EventRoute::Broadcast => emit_runtime_event(app, event),
+        EventRoute::Drop => {}
+        EventRoute::Pairing(delivery) => {
+            let window = app.try_state::<RuntimeManagerState>().and_then(|state| {
+                state
+                    .pairings
+                    .lock()
+                    .ok()
+                    .and_then(|mut pairings| pairings.take(&delivery.request_nonce, std::time::Instant::now()))
+            });
+
+            // Unknown, late or replayed replies are dropped without a trace.
+            if let Some(label) = window {
+                let _ = app.emit_to(
+                    tauri::EventTarget::WebviewWindow { label },
+                    LINK_PAIRING_EVENT_NAME,
+                    delivery,
+                );
+            }
+        }
+    }
 }
 
 impl RuntimeManagerState {
@@ -74,6 +304,7 @@ impl RuntimeManagerState {
                 stop_generation: 0,
             }),
             settings_command: Arc::new(tokio::sync::Mutex::new(())),
+            pairings: Mutex::new(PendingPairings::default()),
             backend,
         }
     }
@@ -101,6 +332,7 @@ fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
 
         for line in reader.lines() {
             let Ok(line) = line else {
+                clear_pairings(&app);
                 emit_runtime_event(
                     &app,
                     RuntimeEvent {
@@ -119,8 +351,8 @@ fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
             }
 
             match serde_json::from_str::<RuntimeEvent>(trimmed) {
-                Ok(event) => emit_runtime_event(&app, event),
-                Err(_) => emit_runtime_event(
+                Ok(event) => deliver_runtime_event(&app, event),
+                Err(_) => deliver_runtime_event(
                     &app,
                     RuntimeEvent {
                         event_type: "runtime_log".to_string(),
@@ -130,6 +362,9 @@ fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
                 ),
             }
         }
+
+        // The runtime is gone: no reply can belong to a pending request now.
+        clear_pairings(&app);
     });
 }
 
@@ -310,6 +545,11 @@ pub fn start_runtime(
         *guard = None;
     }
 
+    // A new runtime: no earlier pairing request can be answered by it.
+    if let Ok(mut pairings) = state.pairings.lock() {
+        pairings.clear();
+    }
+
     let mut command = state.require_backend()?.command(Service::Bridge)?;
     command
         .env("QRONOS_MEMORY_RUNTIME", "1")
@@ -430,6 +670,7 @@ pub fn send_runtime_action(
     action_id: String,
     playback_id: Option<u64>,
     data: Option<serde_json::Value>,
+    webview_window: tauri::WebviewWindow,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<(), String> {
     let cleaned = action_id.trim();
@@ -439,6 +680,13 @@ pub fn send_runtime_action(
     }
 
     reject_typed_only_action(cleaned)?;
+
+    if cleaned == LINK_PAIR_CANCEL_ACTION {
+        // A cancelled request's late reply, if any, goes nowhere.
+        if let Ok(mut pairings) = state.pairings.lock() {
+            pairings.cancel_window(webview_window.label());
+        }
+    }
 
     let mut payload = serde_json::json!({
         "command": "action",
@@ -472,6 +720,10 @@ pub fn send_runtime_action(
 fn reject_typed_only_action(action_id: &str) -> Result<(), String> {
     if action_id.trim() == SCREEN_ACTION_ID {
         return Err("Screen decisions must use the look_at_screen command.".to_string());
+    }
+
+    if action_id.trim() == LINK_PAIR_OPEN_ACTION {
+        return Err("Pairing must use the link_pair_open command.".to_string());
     }
     Ok(())
 }
@@ -563,6 +815,46 @@ pub fn look_at_screen(
     )?;
 
     send_to_runtime(&state, payload)
+}
+
+/// Ask the runtime to open a pairing window for one new phone.
+///
+/// The request nonce is bound here to the window that actually invoked the
+/// command (never to anything the payload says), and only a window granted
+/// the default capability may ask. The reply carrying the phone's key is
+/// delivered to that window alone, once, on `qronos://link-pairing`.
+#[tauri::command(rename_all = "camelCase")]
+pub fn link_pair_open(
+    request_nonce: String,
+    name: String,
+    webview_window: tauri::WebviewWindow,
+    state: State<'_, RuntimeManagerState>,
+) -> Result<(), String> {
+    let name = clean_pairing_name(&name)?;
+    let window = webview_window.label().to_string();
+
+    state
+        .pairings
+        .lock()
+        .map_err(|_| "Runtime manager lock failed.".to_string())?
+        .begin(&request_nonce, &window, &pairing_windows(), std::time::Instant::now())?;
+
+    let sent = send_to_runtime(
+        &state,
+        serde_json::json!({
+            "command": "action",
+            "actionId": LINK_PAIR_OPEN_ACTION,
+            "data": { "requestNonce": request_nonce, "name": name }
+        }),
+    );
+
+    if sent.is_err() {
+        if let Ok(mut pairings) = state.pairings.lock() {
+            pairings.cancel_window(&window);
+        }
+    }
+
+    sent
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1104,6 +1396,10 @@ pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStat
         .lock()
         .map_err(|_| "Runtime manager lock failed.".to_string())?;
 
+    if let Ok(mut pairings) = state.pairings.lock() {
+        pairings.clear();
+    }
+
     let Some(mut process) = guard.take() else {
         return Ok(RuntimeStatus {
             running: false,
@@ -1150,6 +1446,10 @@ pub fn shutdown(app: &AppHandle) {
     let Ok(mut guard) = state.process.lock() else {
         return;
     };
+
+    if let Ok(mut pairings) = state.pairings.lock() {
+        pairings.clear();
+    }
 
     let Some(mut process) = guard.take() else {
         return;
@@ -1235,5 +1535,152 @@ mod screen_decision_tests {
         assert!(reject_typed_only_action(" qronos.look_at_screen ").is_err());
         assert!(reject_typed_only_action("qronos.stop_response").is_ok());
         assert!(reject_typed_only_action("qronos.file_action_decision").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod pairing_route_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const NONCE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const URI: &str = "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=KEY&e=1";
+
+    fn main_only() -> Vec<String> {
+        vec!["main".to_string()]
+    }
+
+    fn event(event_type: &str, message: &str) -> RuntimeEvent {
+        RuntimeEvent {
+            event_type: event_type.to_string(),
+            status: "ready".to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    fn pairing_message(nonce: &str, uri: &str) -> String {
+        serde_json::json!({ "requestNonce": nonce, "uri": uri }).to_string()
+    }
+
+    #[test]
+    fn the_reply_goes_only_to_the_window_that_asked_and_only_once() {
+        let mut pairings = PendingPairings::default();
+        let now = Instant::now();
+        pairings.begin(NONCE, "main", &main_only(), now).expect("main may pair");
+        assert_eq!(pairings.take(OTHER, now), None, "another nonce finds nothing");
+        assert_eq!(pairings.take(NONCE, now).as_deref(), Some("main"));
+        assert_eq!(pairings.take(NONCE, now), None, "a replayed reply finds nothing");
+    }
+
+    #[test]
+    fn only_windows_granted_the_default_capability_may_pair() {
+        let mut pairings = PendingPairings::default();
+        let now = Instant::now();
+        assert!(pairings.begin(NONCE, "settings-popup", &main_only(), now).is_err());
+        assert!(pairings.begin(NONCE, "main", &[], now).is_err(), "no capability, no pairing");
+        assert_eq!(pairing_windows(), vec!["main".to_string()], "read from capabilities/default.json");
+    }
+
+    #[test]
+    fn malformed_or_duplicate_nonces_are_refused() {
+        let mut pairings = PendingPairings::default();
+        let now = Instant::now();
+        for bad in ["short", "has space here!!!!!", &"x".repeat(65)] {
+            assert!(pairings.begin(bad, "main", &main_only(), now).is_err(), "{bad}");
+        }
+        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
+        assert!(pairings.begin(NONCE, "main", &main_only(), now).is_err());
+    }
+
+    #[test]
+    fn a_new_request_replaces_the_window_s_earlier_one() {
+        let mut pairings = PendingPairings::default();
+        let now = Instant::now();
+        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
+        pairings.begin(OTHER, "main", &main_only(), now).unwrap();
+        assert_eq!(pairings.take(NONCE, now), None);
+        assert_eq!(pairings.take(OTHER, now).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn late_cancelled_and_cleared_requests_are_not_answered() {
+        let mut pairings = PendingPairings::default();
+        let now = Instant::now();
+        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
+        let late = now + Duration::from_secs(PAIRING_PENDING_SECONDS + 1);
+        assert_eq!(pairings.take(NONCE, late), None);
+
+        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
+        pairings.cancel_window("main");
+        assert_eq!(pairings.take(NONCE, now), None);
+
+        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
+        pairings.clear();
+        assert_eq!(pairings.take(NONCE, now), None);
+    }
+
+    #[test]
+    fn pending_requests_are_bounded() {
+        let mut pairings = PendingPairings::default();
+        let now = Instant::now();
+        let windows: Vec<String> = (0..=MAX_PENDING_PAIRINGS).map(|i| format!("w{i}")).collect();
+        for (i, window) in windows.iter().enumerate().take(MAX_PENDING_PAIRINGS) {
+            pairings.begin(&format!("{NONCE}{i:02}"), window, &windows, now).unwrap();
+        }
+        let extra = format!("{NONCE}zz");
+        assert!(pairings.begin(&extra, &windows[MAX_PENDING_PAIRINGS], &windows, now).is_err());
+    }
+
+    #[test]
+    fn a_pairing_reply_is_never_broadcast() {
+        let routed = route_runtime_event(&event(LINK_PAIRING_EVENT_TYPE, &pairing_message(NONCE, URI)));
+        assert_eq!(
+            routed,
+            EventRoute::Pairing(PairingDelivery { request_nonce: NONCE.to_string(), uri: URI.to_string() })
+        );
+        for message in [
+            "not json".to_string(),
+            pairing_message("short", URI),
+            pairing_message(NONCE, "https://example.org/?k=1"),
+            pairing_message(NONCE, &format!("{URI}{}", "x".repeat(400))),
+            serde_json::json!({ "uri": URI }).to_string(),
+        ] {
+            assert_eq!(route_runtime_event(&event(LINK_PAIRING_EVENT_TYPE, &message)), EventRoute::Drop, "{message}");
+        }
+    }
+
+    #[test]
+    fn a_pairing_key_in_any_other_event_or_log_line_is_dropped() {
+        assert_eq!(route_runtime_event(&event("runtime_log", URI)), EventRoute::Drop);
+        assert_eq!(route_runtime_event(&event("link_status", &format!("{{\"x\":\"{URI}\"}}"))), EventRoute::Drop);
+        assert_eq!(route_runtime_event(&event("link_status", "{\"running\":true}")), EventRoute::Broadcast);
+    }
+
+    #[test]
+    fn a_failed_pairing_request_ends_pending_requests() {
+        assert!(ends_pairing_requests(&event(
+            "link_error",
+            "{\"action\":\"qronos.link_pair_open\",\"code\":\"not_running\"}"
+        )));
+        assert!(!ends_pairing_requests(&event(
+            "link_error",
+            "{\"action\":\"qronos.link_revoke\",\"code\":\"unknown_device\"}"
+        )));
+    }
+
+    #[test]
+    fn the_generic_action_path_cannot_open_pairing() {
+        assert!(reject_typed_only_action(LINK_PAIR_OPEN_ACTION).is_err());
+        assert!(reject_typed_only_action(" qronos.link_pair_open ").is_err());
+        assert!(reject_typed_only_action(LINK_PAIR_CANCEL_ACTION).is_ok());
+    }
+
+    #[test]
+    fn device_names_follow_the_runtime_s_rules() {
+        assert_eq!(clean_pairing_name("  گوشی\u{200C}ها ").unwrap(), "گوشی\u{200C}ها");
+        assert!(clean_pairing_name(&"x".repeat(41)).is_err());
+        assert!(clean_pairing_name("evil\u{202E}gpj").is_err());
+        assert!(clean_pairing_name("a\u{7}b").is_err());
     }
 }

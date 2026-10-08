@@ -57,6 +57,7 @@ const device = (id, overrides = {}) => ({
 
 function harness({ failSend = false, now = 1000 } = {}) {
   const sent = [];
+  const requests = [];
   const saved = [];
   const errors = [];
   const clock = { now };
@@ -65,14 +66,26 @@ function harness({ failSend = false, now = 1000 } = {}) {
       sent.push({ actionId, data });
       if (failSend) throw new Error("bridge closed");
     },
+    requestPairing: async (requestNonce, name) => {
+      requests.push({ requestNonce, name });
+      if (failSend) throw new Error("bridge closed");
+    },
     saveEnabled: async (enabled) => { saved.push(enabled); },
     nonce: () => NONCE,
     now: () => clock.now,
     onError: (error) => errors.push(error),
   });
+  // The host's dedicated, window-addressed pairing event.
+  let pairingHandler = null;
+  void link.bindPairingDelivery(async (name, handler) => {
+    assert.equal(name, "qronos://link-pairing");
+    pairingHandler = handler;
+    return () => { pairingHandler = null; };
+  }, controller);
   return {
-    controller, sent, saved, errors, clock,
+    controller, sent, requests, saved, errors, clock,
     emit: (type, message) => link.applyDeviceLinkEvent(controller, type, message),
+    deliver: (payload) => pairingHandler({ payload }),
     view: () => controller.getSnapshot(),
   };
 }
@@ -95,9 +108,10 @@ test("status, devices and errors are accepted only in their exact shape", () => 
   ]) {
     assert.equal(link.parseLinkDevices(JSON.stringify(bad)), null, JSON.stringify(bad).slice(0, 80));
   }
-  assert.equal(link.parseLinkPairing(JSON.stringify({ requestNonce: NONCE, uri: "https://evil.example" })), null);
-  assert.equal(link.parseLinkPairing(JSON.stringify({ requestNonce: "short", uri: URI })), null);
-  assert.equal(link.parseLinkPairing(JSON.stringify({ requestNonce: NONCE, uri: URI })).expiresAt, 1000120);
+  assert.equal(link.parseLinkPairing({ requestNonce: NONCE, uri: "https://evil.example" }), null);
+  assert.equal(link.parseLinkPairing({ requestNonce: "short", uri: URI }), null);
+  assert.equal(link.parseLinkPairing(JSON.stringify({ requestNonce: NONCE, uri: URI })), null, "a string is not a delivery");
+  assert.equal(link.parseLinkPairing({ requestNonce: NONCE, uri: URI }).expiresAt, 1000120);
 });
 
 test("device names follow the runtime's rules, Persian joiners included", () => {
@@ -112,14 +126,15 @@ test("device names follow the runtime's rules, Persian joiners included", () => 
 test("a pairing code is shown only for this window's own request", async () => {
   const h = harness();
   await h.controller.openPairing("گوشی سارا");
-  assert.deepEqual(plain(h.sent), [{ actionId: "qronos.link_pair_open", data: { requestNonce: NONCE, name: "گوشی سارا" } }]);
+  assert.deepEqual(plain(h.requests), [{ requestNonce: NONCE, name: "گوشی سارا" }]);
+  assert.deepEqual(h.sent, [], "never through the generic action path");
   assert.equal(h.view().waitingForPairing, true);
-  h.emit("link_pairing", JSON.stringify({ requestNonce: "b".repeat(32), uri: URI }));
+  h.deliver({ requestNonce: "b".repeat(32), uri: URI });
   assert.equal(h.view().pairing, null, "another window's code is ignored");
-  h.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI }));
+  h.deliver({ requestNonce: NONCE, uri: URI });
   assert.equal(h.view().pairing.uri, URI);
   assert.equal(h.view().waitingForPairing, false);
-  h.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI.replace("47711", "1") }));
+  h.deliver({ requestNonce: NONCE, uri: URI.replace("47711", "1") });
   assert.equal(h.view().pairing.uri, URI, "a replayed answer cannot replace the code");
 });
 
@@ -127,13 +142,21 @@ test("a second pairing request while one is open sends nothing", async () => {
   const h = harness();
   await h.controller.openPairing("a");
   await h.controller.openPairing("b");
-  assert.equal(h.sent.length, 1);
+  assert.equal(h.requests.length, 1);
+});
+
+test("a pairing reply on the broadcast channel is never accepted", async () => {
+  const h = harness();
+  await h.controller.openPairing("a");
+  assert.equal(h.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI })), true);
+  assert.equal(h.view().pairing, null);
+  assert.equal(h.view().waitingForPairing, true);
 });
 
 test("the code disappears at its expiry, on cancel and when the window closes", async () => {
   const h = harness({ now: 1000000 });
   await h.controller.openPairing("a");
-  h.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI }));
+  h.deliver({ requestNonce: NONCE, uri: URI });
   h.clock.now = 1000119;
   h.controller.tick();
   assert.notEqual(h.view().pairing, null);
@@ -143,14 +166,14 @@ test("the code disappears at its expiry, on cancel and when the window closes", 
 
   const c = harness();
   await c.controller.openPairing("a");
-  c.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI }));
+  c.deliver({ requestNonce: NONCE, uri: URI });
   await c.controller.cancelPairing();
   assert.equal(c.view().pairing, null);
   assert.equal(c.sent.at(-1).actionId, "qronos.link_pair_cancel");
 
   const s = harness();
   await s.controller.openPairing("a");
-  s.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI }));
+  s.deliver({ requestNonce: NONCE, uri: URI });
   s.emit("link_status", statusMessage({ pairing_open: true }));
   assert.notEqual(s.view().pairing, null);
   s.emit("link_status", statusMessage({ pairing_open: false }));
@@ -160,14 +183,14 @@ test("the code disappears at its expiry, on cancel and when the window closes", 
 test("a local two-minute bound applies even when the URI says later", async () => {
   const h = harness({ now: 1000 });
   await h.controller.openPairing("a");
-  h.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI.replace("e=1000120", "e=9999999") }));
+  h.deliver({ requestNonce: NONCE, uri: URI.replace("e=1000120", "e=9999999") });
   assert.equal(h.view().pairing.expiresAt, 1000 + link.PAIRING_SECONDS);
 });
 
 test("turning the link off drops a shown code and saves the switch", async () => {
   const h = harness();
   await h.controller.openPairing("a");
-  h.emit("link_pairing", JSON.stringify({ requestNonce: NONCE, uri: URI }));
+  h.deliver({ requestNonce: NONCE, uri: URI });
   await h.controller.setEnabled(false);
   assert.equal(h.view().pairing, null);
   assert.deepEqual(h.saved, [false]);
@@ -181,7 +204,7 @@ test("a refused pairing request is explained in Persian and can be retried", asy
   assert.equal(h.view().waitingForPairing, false);
   assert.ok(h.view().error.includes("روشن نیست"));
   await h.controller.openPairing("a");
-  assert.equal(h.sent.length, 2);
+  assert.equal(h.requests.length, 2);
 });
 
 test("an unconfirmed send is reported and not replayed", async () => {
@@ -189,7 +212,7 @@ test("an unconfirmed send is reported and not replayed", async () => {
   await h.controller.openPairing("a");
   assert.equal(h.view().waitingForPairing, false);
   assert.ok(h.view().error);
-  assert.equal(h.sent.length, 1);
+  assert.equal(h.requests.length, 1);
   assert.equal(h.errors.length, 1);
 });
 
@@ -220,8 +243,8 @@ test("the runtime action carries exactly the action id and data", async () => {
   );
   await controller.openPairing("x");
   assert.deepEqual(plain(calls), [{
-    command: "send_runtime_action",
-    args: { actionId: "qronos.link_pair_open", data: { requestNonce: "ab".repeat(16), name: "x" } },
+    command: "link_pair_open",
+    args: { requestNonce: "ab".repeat(16), name: "x" },
   }]);
 });
 
@@ -355,6 +378,7 @@ test("the security reset is sent only when something is latched", async () => {
 test("App routes link events, never logs the pairing event, and the Settings page hosts the panel", () => {
   const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.ok(app.includes("applyDeviceLinkEvent("));
+  assert.ok(app.includes("bindPairingDelivery(listen, deviceLink)"), "pairing replies come on their own event");
   assert.match(app, /eventType !==\s*"link_pairing"/);
   assert.ok(app.includes('setSetting("link.enabled", enabled)'));
   const settings = readFileSync(new URL("../src/components/SettingsView.tsx", import.meta.url), "utf8");

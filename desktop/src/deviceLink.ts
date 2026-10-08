@@ -6,7 +6,10 @@
  * pairing code holds the new phone's key: it is accepted only for this
  * window's own outstanding request nonce, kept in memory while it is shown,
  * and dropped on cancel, close, expiry or a new status saying the window
- * closed. It is never logged or stored. Remote (outside the home network)
+ * closed. It is never logged or stored. The request goes through the typed
+ * link_pair_open command, which binds it to this window; the reply arrives
+ * only on this window's own qronos://link-pairing event, never on the
+ * broadcast runtime-event channel. Remote (outside the home network)
  * access stays off until the link's WAN gate is accepted; the page can only
  * switch a device's remote access off.
  */
@@ -21,7 +24,9 @@ export const LINK_ACTIONS = {
   securityReset: "qronos.link_security_reset",
 } as const;
 
-export const LINK_EVENTS = new Set(["link_status", "link_devices", "link_pairing", "link_error"]);
+export const LINK_EVENTS = new Set(["link_status", "link_devices", "link_error"]);
+/** The desktop host delivers a pairing reply only to the window that asked, here. */
+export const LINK_PAIRING_EVENT = "qronos://link-pairing";
 
 const DEVICE_ID = /^[0-9a-f]{16}$/;
 const NONCE = /^[A-Za-z0-9_-]{16,64}$/;
@@ -166,9 +171,10 @@ export function parseLinkDevices(message: string): LinkDevice[] | null {
 }
 
 /** The pairing answer, or null. The URI must be the link's own pairing scheme. */
-export function parseLinkPairing(message: string): { requestNonce: string; uri: string; expiresAt: number | null } | null {
-  const r = parseObject(message);
-  if (r === null || typeof r.requestNonce !== "string" || !NONCE.test(r.requestNonce)) return null;
+export function parseLinkPairing(payload: unknown): { requestNonce: string; uri: string; expiresAt: number | null } | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const r = payload as Record<string, unknown>;
+  if (typeof r.requestNonce !== "string" || !NONCE.test(r.requestNonce)) return null;
   if (typeof r.uri !== "string" || r.uri.length > 400 || !r.uri.startsWith("qronos://pair?")) return null;
   const expiry = Number(new URLSearchParams(r.uri.slice("qronos://pair?".length)).get("e"));
   return { requestNonce: r.requestNonce, uri: r.uri, expiresAt: Number.isFinite(expiry) && expiry > 0 ? expiry : null };
@@ -214,6 +220,8 @@ type Send = (actionId: string, data: Record<string, unknown>) => Promise<void>;
 
 export type DeviceLinkDeps = {
   send: Send;
+  /** The typed host command that binds the request to this window. */
+  requestPairing: (requestNonce: string, name: string) => Promise<void>;
   /** Save link.enabled and apply it in the runtime. */
   saveEnabled: (enabled: boolean) => Promise<void>;
   nonce: () => string;
@@ -301,9 +309,13 @@ export class DeviceLinkController {
     this.pendingName = name;
     this.error = null;
     this.publish();
-    if (!(await this.send(LINK_ACTIONS.pairOpen, { requestNonce: nonce, name }))) {
+    try {
+      await this.deps.requestPairing(nonce, name);
+    } catch (error) {
       this.pendingNonce = null;
+      this.error = linkErrorText("failed");
       this.publish();
+      this.deps.onError(error);
     }
   };
 
@@ -407,6 +419,9 @@ export function createDeviceLinkController(
     send: async (actionId, data) => {
       await invoke("send_runtime_action", { actionId, data });
     },
+    requestPairing: async (requestNonce, name) => {
+      await invoke("link_pair_open", { requestNonce, name });
+    },
     saveEnabled,
     nonce: () => Array.from(random(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join(""),
     now,
@@ -427,11 +442,9 @@ export function applyDeviceLinkEvent(controller: DeviceLinkController, eventType
       if (devices !== null) controller.devicesArrived(devices);
       return true;
     }
-    case "link_pairing": {
-      const pairing = parseLinkPairing(message);
-      if (pairing !== null) controller.pairingArrived(pairing);
+    case "link_pairing":
+      // Never accepted from the broadcast channel; see bindPairingDelivery.
       return true;
-    }
     case "link_error": {
       const error = parseLinkError(message);
       if (error !== null) controller.errorArrived(error);
@@ -440,4 +453,17 @@ export function applyDeviceLinkEvent(controller: DeviceLinkController, eventType
     default:
       return false;
   }
+}
+
+type Listen = (
+  event: string,
+  handler: (event: { payload: unknown }) => void,
+) => Promise<() => void>;
+
+/** Receive pairing replies addressed to this window; returns the unlisten function. */
+export function bindPairingDelivery(listen: Listen, controller: DeviceLinkController): Promise<() => void> {
+  return listen(LINK_PAIRING_EVENT, (event) => {
+    const pairing = parseLinkPairing(event.payload);
+    if (pairing !== null) controller.pairingArrived(pairing);
+  });
 }
