@@ -3297,7 +3297,7 @@ class QronosRuntime:
         self._ensure_file_runtime()
         from core.app_workflow import SideEffectJournal, WorkflowError, WorkflowRefused
         from core.file_resolver import NamedFileRequest
-        from core.print_workflow import PrintWorkflow, ShellPrintToSubmitter, WinSpooler
+        from core.print_workflow import PrintWorkflow, ShellPrintToSubmitter, WinSpooler, default_renderer
         from core.telegram_workflow import LocalDownloadFolder, TelegramDownloadWorkflow, UiaTelegramUi
 
         journal = SideEffectJournal(Path(CONFIG.paths.data) / "workflows" / "side-effects.json")
@@ -3359,7 +3359,10 @@ class QronosRuntime:
             )
 
         def print_workflow() -> PrintWorkflow:
-            return PrintWorkflow(spooler=WinSpooler(), submitter=ShellPrintToSubmitter(), journal=journal)
+            return PrintWorkflow(
+                spooler=WinSpooler(), submitter=ShellPrintToSubmitter(), journal=journal,
+                renderer=default_renderer(),
+            )
 
         def resolve_file(reference: str) -> Path:
             exact = reference if Path(reference).is_absolute() else None

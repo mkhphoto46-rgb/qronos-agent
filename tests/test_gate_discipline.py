@@ -60,6 +60,8 @@ NATIVE_BACKENDS = {
         "core.keyboard_control", "core.mouse_button", "core.mouse_hover", "core.mouse_wheel",
     }),
     "core.windows_accessibility_mutation": frozenset({"core.accessibility_action_executor"}),
+    # GDI/GDI+/Windows.Data.Pdf print renderer: only the gated print workflow.
+    "core.print_renderer": frozenset({"core.print_workflow"}),
 }
 
 # Modules that legitimately touch these without being action executors, with
@@ -233,7 +235,7 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
                 if backend in imports:
                     self.assertIn(name, callers, f"{name} bypasses the reviewed {backend} callers")
                     guard = "security.gate" if name in {
-                        "core.computer_executor", "core.accessibility_action_executor",
+                        "core.computer_executor", "core.accessibility_action_executor", "core.print_workflow",
                     } else "core.input_safety"
                     self.assertIn(guard, imports, f"{name} lost its action guard")
 

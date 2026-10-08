@@ -628,3 +628,130 @@ def test_handler_process_is_polled_without_waiting():
         assert process.finished() is True and process.exit_code() == 0
     finally:
         process.close()
+
+
+# --------------------------------------------------- per-job options (renderer)
+
+
+class FakeRenderer:
+    """Test boundary standing in for core.print_renderer.RendererSubmitter."""
+
+    IDENTITY = "Qronos renderer (test)"
+
+    def __init__(self, spooler, *, max_copies=99, color=True, pdf_pages=3) -> None:
+        self.spooler, self.max_copies, self.color, self.pdf_pages = spooler, max_copies, color, pdf_pages
+        self.started = []
+        self.outcome = "queued"  # queued | spooled_and_gone | not_submitted
+
+    def handler_for(self, path):
+        return self.IDENTITY if path.suffix.casefold() in {".txt", ".png", ".pdf"} else None
+
+    def capabilities(self, printer, port=None):
+        return self.max_copies, self.color
+
+    def page_count(self, path):
+        return self.pdf_pages
+
+    def start(self, path, printer, options):
+        from core.print_renderer import RenderedJob
+
+        self.started.append((path.name, printer, options.to_plan()))
+        job = RenderedJob()
+        if self.outcome == "not_submitted":
+            job.not_submitted_reason = "The printer refused these options."
+        else:
+            job.job_id = 77
+            if self.outcome == "queued":
+                # The renderer names the document after the file, but the match is by id.
+                self.spooler.queue.setdefault(printer, []).append(
+                    PrintJobState(77, "renamed by driver", "Test User", JOB_STATUS_PRINTED, 0, 2))
+        job._done.set()
+        return job
+
+
+@pytest.fixture
+def options_setup(setup, tmp_path):
+    workflow, spooler, submitter, document, journal, clock = setup
+    renderer = FakeRenderer(spooler)
+    workflow._renderer = renderer
+    pdf = tmp_path / "slides.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    text = tmp_path / "notes.txt"
+    text.write_text("hello", encoding="utf-8")
+    return workflow, spooler, submitter, renderer, pdf, text, journal
+
+
+def test_approved_options_are_applied_by_the_renderer_and_matched_by_job_id(options_setup):
+    workflow, spooler, submitter, renderer, pdf, text, journal = options_setup
+    prepared = workflow.prepare(PrintRequest(pdf, "Office Laser", copies=2, color="monochrome", pages="1-2"))
+    assert prepared.plan["route"] == "renderer"
+    assert (prepared.plan["copies"], prepared.plan["color"], prepared.plan["pages"]) == (2, "monochrome", "1-2")
+    report = submit(workflow, prepared)
+    assert report.outcome == "succeeded" and report.result["jobId"] == 77
+    assert renderer.started == [("slides.pdf", "Office Laser", {"copies": 2, "color": "monochrome", "pages": "1-2"})]
+    assert submitter.submissions == [], "printto is not used when options are approved"
+
+
+def test_a_job_that_spooled_and_left_the_queue_is_confirmed_by_its_exact_id(options_setup):
+    workflow, spooler, submitter, renderer, pdf, text, journal = options_setup
+    spooler.watch_available = False
+    renderer.outcome = "spooled_and_gone"
+    prepared = workflow.prepare(PrintRequest(text, "Office Laser", copies=3))
+    report = submit(workflow, prepared)
+    assert report.outcome == "succeeded" and report.result["jobId"] == 77
+    assert journal.get(operation_key("print-approval-1", prepared.digest)).state is SideEffectState.CONFIRMED
+
+
+def test_a_renderer_failure_before_the_job_started_is_not_submitted_and_releases_the_file(options_setup):
+    workflow, spooler, submitter, renderer, pdf, text, journal = options_setup
+    renderer.outcome = "not_submitted"
+    prepared = workflow.prepare(PrintRequest(text, "Office Laser", copies=2))
+    with pytest.raises(PrintNotSubmitted, match="refused these options"):
+        submit(workflow, prepared)
+    assert journal.get(operation_key("print-approval-1", prepared.digest)).state is SideEffectState.NOT_SUBMITTED
+    renderer.outcome = "queued"
+    assert submit(workflow, prepared, approve(prepared, "print-approval-2")).outcome == "succeeded"
+
+
+@pytest.mark.parametrize("request_kwargs, renderer_kwargs, message", [
+    ({"copies": 5}, {"max_copies": 3}, "at most 3 copies"),
+    ({"color": "color"}, {"color": False}, "cannot print in colour"),
+    ({"pages": "2-5"}, {"pdf_pages": 3}, "has 3 pages"),
+    ({"pages": "4"}, {"pdf_pages": 3}, "has 3 pages"),
+])
+def test_options_the_printer_or_document_cannot_honour_are_refused_before_approval(
+    options_setup, request_kwargs, renderer_kwargs, message,
+):
+    workflow, spooler, submitter, renderer, pdf, text, journal = options_setup
+    for key, value in renderer_kwargs.items():
+        setattr(renderer, key, value)
+    with pytest.raises(WorkflowRefused, match=message):
+        workflow.prepare(PrintRequest(pdf, "Office Laser", **request_kwargs))
+    assert renderer.started == []
+
+
+@pytest.mark.parametrize("kwargs", [{"copies": 0}, {"color": "sepia"}, {"pages": "3-1"}, {"pages": "1,1-2"}])
+def test_malformed_options_are_refused(options_setup, kwargs):
+    workflow, spooler, submitter, renderer, pdf, text, journal = options_setup
+    with pytest.raises((WorkflowRefused, ValueError)):
+        workflow.prepare(PrintRequest(pdf, "Office Laser", **kwargs))
+
+
+def test_options_on_a_format_the_renderer_cannot_draw_are_refused(options_setup, tmp_path):
+    workflow, spooler, submitter, renderer, pdf, text, journal = options_setup
+    doc = tmp_path / "letter.docx"
+    doc.write_bytes(b"PK fake docx")
+    with pytest.raises(WorkflowRefused, match="plain text, images and PDF"):
+        workflow.prepare(PrintRequest(doc, "Office Laser", copies=2))
+    # Default options still print through the registered handler.
+    assert workflow.prepare(PrintRequest(doc, "Office Laser")).plan["route"] == "printto"
+
+
+def test_an_unclear_job_with_options_still_blocks_a_reprint_with_other_options(options_setup):
+    workflow, spooler, submitter, renderer, pdf, text, journal = options_setup
+    renderer.start = lambda *args: (_ for _ in ()).throw(OSError("driver crashed mid-job"))
+    prepared = workflow.prepare(PrintRequest(text, "Office Laser", copies=2))
+    assert submit(workflow, prepared).outcome == "uncertain"
+    again = workflow.prepare(PrintRequest(text, "Office Laser"))
+    with pytest.raises(DuplicateSideEffect):
+        submit(workflow, again, approve(again, "print-approval-2"))

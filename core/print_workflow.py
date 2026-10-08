@@ -64,6 +64,13 @@ from core.app_workflow import (
     operation_key,
     plan_digest,
 )
+from core.print_renderer import (
+    PrintOptions,
+    RenderError,
+    RendererSubmitter,
+    document_kind,
+    parse_page_ranges,
+)
 from security.gate import ActionGrant
 from security.permissions import ActionCategory, PermissionDecision
 
@@ -131,6 +138,11 @@ _WARNING_PRINTER = {
     PRINTER_STATUS_TONER_LOW: "toner or ink is low",
     PRINTER_STATUS_MANUAL_FEED: "the printer is waiting for manual paper feed",
 }
+
+
+def default_renderer():
+    """The production renderer for per-job options (Windows only)."""
+    return RendererSubmitter()
 
 
 class SpoolerUnavailable(RuntimeError):
@@ -217,8 +229,8 @@ class PrintRequest:
     file_path: Path
     printer: str
     copies: int = 1
-    color: str = "default"
-    pages: str = "all"
+    color: str = "default"  # "default", "color" or "monochrome"
+    pages: str = "all"      # "all" or ranges such as "1-3,5"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "file_path", Path(self.file_path))
@@ -229,7 +241,7 @@ class PrintRequest:
             # Never strip it: a stripped name could be a different printer.
             raise ValueError("A printer name with a double quote cannot be passed safely.")
         object.__setattr__(self, "printer", name)
-        if int(self.copies) != self.copies or int(self.copies) < 1:
+        if isinstance(self.copies, bool) or int(self.copies) != self.copies or int(self.copies) < 1:
             raise ValueError("Copies must be a positive whole number.")
 
 
@@ -244,6 +256,8 @@ class PreparedPrint:
     plan: dict
     digest: str
     warnings: tuple[str, ...] = ()
+    options: PrintOptions = field(default_factory=PrintOptions)
+    route: str = "printto"
 
 
 def _is_link(path: Path) -> bool:
@@ -280,6 +294,7 @@ class PrintWorkflow:
         spooler: Spooler,
         submitter: PrintSubmitter,
         journal: SideEffectJournal,
+        renderer=None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[CancellationToken | None, float], None] | None = None,
         appear_timeout: float = DEFAULT_APPEAR_TIMEOUT,
@@ -288,6 +303,8 @@ class PrintWorkflow:
     ) -> None:
         self._spooler = spooler
         self._submitter = submitter
+        # Applies per-job copies/colour/page ranges for text, images and PDF.
+        self._renderer = renderer
         self._journal = journal
         self._clock = clock
         self._sleep = sleep or _cancellable_sleep
@@ -339,19 +356,17 @@ class PrintWorkflow:
     # ------------------------------------------------------------ prepare
 
     def prepare(self, request: PrintRequest) -> PreparedPrint:
-        if request.copies != 1 or request.color != "default" or request.pages != "all":
-            raise WorkflowRefused(
-                "This file is printed by its registered Windows handler, which uses the printer's "
-                "defaults (one copy, default colour, all pages). Other options are not applied, "
-                "so Qronos refuses instead of ignoring them."
+        try:
+            options = PrintOptions(
+                copies=int(request.copies), color=str(request.color), pages=parse_page_ranges(request.pages),
             )
+        except ValueError as error:
+            raise WorkflowRefused(f"The print options are not valid: {error}") from error
         path, sha256, size = self._checked_file(request.file_path)
         printer = self._printer(request.printer)
         if printer.problems:
             raise WorkflowRefused("Cannot print now: " + "; ".join(printer.problems) + ".")
-        handler = self._submitter.handler_for(path)
-        if not handler:
-            raise WorkflowRefused("Windows has no print handler registered for this file type.")
+        route, handler = self._route(path, printer, options)
         plan = {
             "workflow": "print",
             "file": str(path),
@@ -361,14 +376,51 @@ class PrintWorkflow:
             "port": printer.port,
             "driver": printer.driver,
             "handler": handler,
-            "copies": 1,
-            "color": "printer default",
-            "pages": "all",
+            "route": route,
+            **options.to_plan(),
         }
         return PreparedPrint(
             request=request, file_path=path, sha256=sha256, size=size, printer=printer,
             handler=handler, plan=plan, digest=plan_digest(plan), warnings=printer.warnings,
+            options=options, route=route,
         )
+
+    def _route(self, path: Path, printer: PrinterState, options: PrintOptions) -> tuple[str, str]:
+        """Choose how the file is printed, and check the options before approval."""
+        renderer = self._renderer
+        renderable = renderer is not None and bool(renderer.handler_for(path))
+        if options.is_default:
+            handler = self._submitter.handler_for(path)
+            if handler:
+                return "printto", handler
+            if renderable:
+                return "renderer", renderer.handler_for(path)
+            raise WorkflowRefused("Windows has no print handler registered for this file type.")
+        if not renderable:
+            raise WorkflowRefused(
+                "Copies, colour and page ranges are applied for plain text, images and PDF files. "
+                "This file type prints only with the printer's defaults (one copy, default colour, "
+                "all pages); Qronos refuses instead of ignoring the options."
+            )
+        try:
+            max_copies, color_device = renderer.capabilities(printer.name, printer.port)
+        except RenderError as error:
+            raise WorkflowRefused(f"The printer's capabilities could not be read: {error}") from error
+        if options.copies > max_copies:
+            raise WorkflowRefused(f"This printer allows at most {max_copies} copies per job.")
+        if options.color == "color" and not color_device:
+            raise WorkflowRefused("This printer cannot print in colour.")
+        if document_kind(path) == "image" and options.pages and not options.wants(1):
+            raise WorkflowRefused("An image has one page.")
+        if document_kind(path) == "pdf" and options.pages:
+            try:
+                count = renderer.page_count(path)
+            except RenderError as error:
+                raise WorkflowRefused(f"The PDF could not be read: {error}") from error
+            missing = [start for start, _ in options.pages if start > count]
+            if missing or options.last_page > count:
+                raise WorkflowRefused(f"The PDF has {count} pages; the approved range goes past the end.")
+        return "renderer", renderer.handler_for(path)
 
     # ------------------------------------------------------------- submit
 
@@ -402,7 +454,8 @@ class PrintWorkflow:
             raise WorkflowRefused("The printer's port or driver changed after approval; nothing was printed.")
         if printer.problems:
             raise WorkflowRefused("Cannot print now: " + "; ".join(printer.problems) + ".")
-        if self._submitter.handler_for(prepared.file_path) != prepared.handler:
+        route_submitter = self._renderer if prepared.route == "renderer" else self._submitter
+        if route_submitter is None or route_submitter.handler_for(prepared.file_path) != prepared.handler:
             raise WorkflowRefused("The file's print handler changed after approval; nothing was printed.")
 
         user = self._spooler.current_user()
@@ -412,6 +465,8 @@ class PrintWorkflow:
         except SpoolerUnavailable:
             watcher = None  # queue polling alone; a very fast job may then be uncertain
         op = operation_key(approval.approval_id, prepared.digest)
+        # Options are deliberately not part of the key: an unclear 2-copy job must
+        # block a 1-copy reprint of the same file too, or pages could duplicate.
         content = content_key("print", prepared.sha256, printer.name.casefold())
         guard.checkpoint("submit")
         try:
@@ -427,7 +482,10 @@ class PrintWorkflow:
         try:
             try:
                 guard.checkpoint("submit")
-                handler = self._submitter.start(prepared.file_path, printer.name)
+                if prepared.route == "renderer":
+                    handler = route_submitter.start(prepared.file_path, printer.name, prepared.options)
+                else:
+                    handler = route_submitter.start(prepared.file_path, printer.name)
             except (WorkflowStopped, PrintNotSubmitted) as not_started:
                 self._journal.settle(op, SideEffectState.NOT_SUBMITTED, str(not_started))
                 raise
@@ -454,6 +512,16 @@ class PrintWorkflow:
                 handler.close()
             if watcher is not None:
                 watcher.close()
+        if job == "not_submitted":
+            reason = getattr(handler, "not_submitted_reason", None) or "not submitted"
+            self._journal.settle(op, SideEffectState.NOT_SUBMITTED, reason)
+            raise PrintNotSubmitted(f"Nothing was printed: {reason}")
+        if job == "spooled":
+            # StartDoc returned this exact job id and EndDoc completed: the whole
+            # document reached the spooler even if the job already left the queue.
+            self._journal.settle(op, SideEffectState.CONFIRMED, f"job {handler.job_id} spooled")
+            return self._report("succeeded", "The file was sent to the printer.", guard,
+                                {"jobId": handler.job_id, "printer": printer.name})
         if job == "stopped":
             self._journal.settle(op, SideEffectState.UNCERTAIN, "stopped while waiting for the job")
             return self._report("uncertain", (
@@ -499,12 +567,17 @@ class PrintWorkflow:
                     found[job.job_id] = job  # the live queue has the latest fields
             except SpoolerUnavailable:
                 pass
-            new = [
-                job for job in found.values()
-                if job.job_id not in before
-                and job.user.casefold() == user.casefold()
-                and _document_matches(job.document, file_name)
-            ]
+            exact_id = getattr(handler, "job_id", None)
+            if exact_id is not None:
+                # The renderer knows its own job id from StartDoc.
+                new = [job for job in found.values() if job.job_id == exact_id]
+            else:
+                new = [
+                    job for job in found.values()
+                    if job.job_id not in before
+                    and job.user.casefold() == user.casefold()
+                    and _document_matches(job.document, file_name)
+                ]
             if len(new) == 1:
                 return new[0]
             if len(new) > 1:
@@ -512,6 +585,10 @@ class PrintWorkflow:
             now = self._clock()
             if handler_done_at is None and handler.finished():
                 handler_done_at = now
+                if getattr(handler, "not_submitted_reason", None):
+                    return "not_submitted"
+                if exact_id is not None and handler.exit_code() == 0:
+                    return "spooled"
             # Once the handler has exited, a job that has not appeared within a
             # short grace period will not appear.
             if now >= deadline or (
