@@ -577,3 +577,37 @@ def test_provenance_states_what_was_and_was_not_verified(tmp_path):
     installer_verify.write_record(tmp_path / "p.json", record)
     with pytest.raises(FileExistsError):
         installer_verify.write_record(tmp_path / "p.json", record)
+
+
+def test_source_state_ignores_line_ending_rewrites_but_not_real_changes(tmp_path):
+    """Tauri's CLI rewrites Cargo.toml with LF endings; only real content or untracked files count."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "core.autocrlf=true", *args], cwd=repo, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "core.autocrlf", "true")
+    (repo / "Cargo.toml").write_bytes(b"[package]\r\nname = \"demo\"\r\n")
+    git("add", "Cargo.toml")
+    git("commit", "-q", "-m", "fixture")
+
+    (repo / "Cargo.toml").write_bytes(b"[package]\nname = \"demo\"\n")  # line endings only
+    state = installer_verify.source_state(repo)
+    assert state["clean"] is True and state["changedPaths"] == [] and len(state["commit"]) == 40
+
+    (repo / "Cargo.toml").write_bytes(b"[package]\nname = \"other\"\n")
+    assert installer_verify.source_state(repo)["changedPaths"] == ["Cargo.toml"]
+
+    (repo / "Cargo.toml").write_bytes(b"[package]\r\nname = \"demo\"\r\n")
+    (repo / "extra.rs").write_text("fn main() {}\n", encoding="utf-8")
+    state = installer_verify.source_state(repo)
+    assert state["clean"] is False and state["changedPaths"] == ["extra.rs"]
+
+
+def test_source_state_outside_a_repository_is_not_clean(tmp_path):
+    state = installer_verify.source_state(tmp_path)
+
+    assert state["clean"] is False and state["commit"] == "unavailable"

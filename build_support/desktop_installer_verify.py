@@ -102,10 +102,18 @@ def _command_output(command: list[str], cwd: Path) -> str:
 
 
 def source_state(root: Path) -> dict[str, Any]:
-    """The desktop source commit and whether the working tree had any change."""
+    """The desktop source commit and whether any tracked content differs from it or any file is untracked.
+
+    Content is compared after Git's line-ending normalisation: the Tauri CLI rewrites
+    desktop/src-tauri/Cargo.toml with LF endings, which `git status` reports as modified
+    under core.autocrlf even though the content is the committed content.
+    """
     commit = _command_output(["git", "rev-parse", "HEAD"], root)
-    status = _command_output(["git", "status", "--porcelain", "--untracked-files=normal"], root)
-    return {"commit": commit, "clean": status == "", "changedPaths": len(status.splitlines()) if status else 0}
+    changed = _command_output(["git", "diff", "--name-only", "HEAD", "--"], root)
+    untracked = _command_output(["git", "ls-files", "--others", "--exclude-standard"], root)
+    unknown = "unavailable" in (commit, changed, untracked)
+    changed_paths = sorted(set(changed.splitlines()) | set(untracked.splitlines())) if not unknown else []
+    return {"commit": commit, "clean": not unknown and not changed_paths, "changedPaths": changed_paths}
 
 
 def provenance_record(*, setup: Path, root: Path, pin: dict[str, Any], extracted: dict[str, Any],
