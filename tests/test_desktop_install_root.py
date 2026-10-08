@@ -44,7 +44,8 @@ class Fixture:
         (self.documents / "Qronos" / "Library" / "report.md").write_text("user document", encoding="utf-8")
         self.count = 0
 
-    def probe(self, body: list[str]) -> str:
+    def probe(self, body: list[str], prelude: list[str] = ()) -> str:
+        """Compiles and runs a probe; prelude lines (such as a QRONOS_PROBE_* macro) come before the hook."""
         if MAKENSIS is None or not MAKENSIS.is_file():
             pytest.skip("Tauri's NSIS compiler is not installed on this machine.")
         self.count += 1
@@ -60,7 +61,7 @@ class Fixture:
             f'!define QRONOS_PROBE_PROFILE "{self.profile}"', f'!define QRONOS_PROBE_LOCALAPPDATA "{self.local}"',
             f'!define QRONOS_PROBE_APPDATA "{self.roaming}"', f'!define QRONOS_PROBE_DOCUMENTS "{self.documents}"',
             f'!define QRONOS_WEBVIEW2_INSTALLER "{payload}"', '!define QRONOS_WEBVIEW2_VERSION "1.2.3.4"',
-            f'!include "{prerequisites.HOOK_PATH}"',
+            *prelude, f'!include "{prerequisites.HOOK_PATH}"',
             "Section", *body,
             f'  FileOpen $R7 "{result}" w', '  FileWriteUTF16LE $R7 "$QronosMessage"', "  FileClose $R7",
             "SectionEnd", "")), encoding="utf-8-sig")  # with a BOM NSIS reads the script as UTF-8
@@ -77,8 +78,11 @@ class Fixture:
     def check(self, install_dir: str) -> str:
         return self.probe([f'  StrCpy $INSTDIR "{install_dir}"', "  Call QronosCheckInstallRoot"])
 
-    def remove(self, install_dir: Path) -> str:
-        return self.probe([f'  StrCpy $INSTDIR "{install_dir}"', "  Call QronosRemoveOwnedPayload"])
+    def remove(self, install_dir: Path, between_passes: list[str] = ()) -> str:
+        """Runs the removal; between_passes lines run after pass 1 has checked the list."""
+        prelude = ["!define QRONOS_PROBE_BETWEEN_PASSES", "!macro QRONOS_PROBE_BETWEEN_PASSES", *between_passes,
+                   "!macroend"] if between_passes else []
+        return self.probe([f'  StrCpy $INSTDIR "{install_dir}"', "  Call QronosRemoveOwnedPayload"], prelude)
 
 
 @pytest.fixture
@@ -357,6 +361,75 @@ def test_an_entry_of_the_wrong_kind_stops_before_anything_is_deleted(fx, line, m
     before = fx.snapshot()
 
     assert message in fx.remove(owned)
+    assert fx.snapshot() == before
+
+
+# --------------------------------- pass 2 acts only on the checked list (I8 follow-up)
+
+
+def test_the_list_cannot_be_changed_between_the_passes(fx):
+    """While removal runs, the list is open with FILE_SHARE_READ only: writing, renaming
+    and deleting it fail, so pass 2 reads the bytes pass 1 checked."""
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    (owned / "user-notes.txt").write_bytes(b"not listed")
+    manifest = owned / install_manifest.FILE_NAME
+    attempts = fx.base / "attempts.txt"
+
+    message = fx.remove(owned, between_passes=[
+        f'  System::Call \'kernel32::CreateFileW(w "{manifest}", i 0x40000000, i 7, p 0, i 3, i 0, p 0) p .R1\'',
+        f'  System::Call \'kernel32::MoveFileExW(w "{manifest}", w "{manifest}.moved", i 0) i .R2\'',
+        f'  System::Call \'kernel32::DeleteFileW(w "{manifest}") i .R3\'',
+        f'  FileOpen $R4 "{attempts}" w', '  FileWriteUTF16LE $R4 "$R1 $R2 $R3"', "  FileClose $R4"])
+
+    assert attempts.read_bytes().decode("utf-16-le") == "-1 0 0"  # open for writing, rename, delete: all refused
+    assert message == "ok"
+    assert sorted(path.name for path in owned.rglob("*")) == ["user-notes.txt"]
+
+
+TAMPERED = {
+    "wildcard": ("F foreign-*.bin", "unsafe entry: foreign-*.bin"),
+    "unknown kind": ("X qronos-desktop.exe", "contains an invalid line"),
+    "through a junction": ("F linked\\foreign.bin", "linked is a link to another location"),
+    "other header": (None, "is not a Qronos file list"),
+}
+
+
+@pytest.mark.parametrize("case", TAMPERED, ids=TAMPERED.keys())
+def test_pass_2_checks_every_line_again_before_acting(fx, case):
+    """Fault injection: pass 2 is handed a different list than pass 1 checked (which the
+    sharing lock prevents in practice). Its header, kinds, entries and disk state are all
+    checked again, so nothing unchecked is deleted."""
+    line, message = TAMPERED[case]
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    for name in ("foreign-a.bin", "foreign-b.bin"):
+        (owned / name).write_bytes(b"not listed")
+    outside = fx.base / "outside"
+    outside.mkdir()
+    (outside / "foreign.bin").write_bytes(b"outside the install folder")
+    junction(outside, owned / "linked")
+    header = install_manifest.HEADER if line else "QRONOS-INSTALL-MANIFEST 1 someone.else"
+    tampered = fx.base / "tampered.txt"
+    tampered.write_bytes((header + "\r\n" + (line or "F qronos-desktop.exe") + "\r\n").encode("utf-16-le"))
+    before = fx.snapshot()
+
+    result = fx.remove(owned, between_passes=["  FileClose $QronosHandle", f'  FileOpen $QronosHandle "{tampered}" r'])
+
+    assert message in result, result
+    assert fx.snapshot() == before
+    assert (outside / "foreign.bin").read_bytes() == b"outside the install folder"
+
+
+def test_a_list_another_program_has_open_for_writing_is_not_used(fx):
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    before = fx.snapshot()
+
+    with open(owned / install_manifest.FILE_NAME, "r+b"):  # a writer that could change it between the passes
+        message = fx.remove(owned)
+
+    assert message.startswith("The previous installation's file list cannot be read, or another program has it open")
     assert fx.snapshot() == before
 
 

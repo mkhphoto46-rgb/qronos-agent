@@ -289,7 +289,15 @@ the following before anything is installed.
   - the install folder itself is reached through a link, or Windows cannot
     open it or a folder on the way to it.
 
-  Each path is checked again right before its removal.
+  The list is opened once for both passes, not through a link, and with a
+  sharing mode that lets no other program write, rename or delete it while it
+  is open. If another program already has it open for writing, nothing is
+  removed. So the deletion pass reads exactly the bytes the first pass
+  checked. That guarantee comes from the lock, not from reading the list twice.
+  The deletion pass still checks the header and every line again (kind, path
+  rules and disk) before acting on it, and checks each path on disk right
+  before its removal. A path can still change on disk between that last check
+  and the removal itself; the checks narrow this window but do not close it.
 
   If a listed file cannot be deleted, for example because Qronos is still
   running, the installation stops and the manifest is kept, so running the

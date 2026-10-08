@@ -18,7 +18,8 @@
 ;
 ; A probe harness may define QRONOS_PROBE_PROFILE, QRONOS_PROBE_LOCALAPPDATA,
 ; QRONOS_PROBE_APPDATA and QRONOS_PROBE_DOCUMENTS to stand in for the user's
-; real folders; the installer never defines them.
+; real folders, and QRONOS_PROBE_BETWEEN_PASSES (with a macro of that name) to run
+; test steps between the two removal passes; the installer never defines them.
 
 !include "LogicLib.nsh"
 
@@ -684,6 +685,39 @@ qronos_disk_done:
   Pop $1
 FunctionEnd
 
+; The first line of the open list $QronosHandle -> $QronosMessage set unless it is
+; Qronos's header.
+Function ${UN}QronosCheckListHeader
+  ClearErrors
+  FileReadUTF16LE $QronosHandle $QronosLine
+  !insertmacro QRONOS_TRIM_LINE
+  ${If} $QronosLine != "${QRONOS_MANIFEST_HEADER}"
+    StrCpy $QronosMessage "The previous installation's file list is not a Qronos file list."
+  ${EndIf}
+FunctionEnd
+
+; One line of the list, as read ($QronosLine) -> $QronosLine its kind ("F " or "D "),
+; $QronosPath its entry, $QronosMessage set unless the line is a known kind, a plain
+; entry (QronosCheckEntry) and safe on disk (QronosCheckOnDisk).
+Function ${UN}QronosCheckListLine
+  Push $1
+  !insertmacro QRONOS_TRIM_LINE
+  StrCpy $1 $QronosLine 2
+  StrCpy $QronosPath $QronosLine "" 2
+  ${If} $1 != "F "
+  ${AndIf} $1 != "D "
+    StrCpy $QronosMessage "The previous installation's file list contains an invalid line."
+  ${Else}
+    Call ${UN}QronosCheckEntry
+    ${If} $QronosMessage == ""
+      StrCpy $QronosLine $1
+      Call ${UN}QronosCheckOnDisk
+    ${EndIf}
+  ${EndIf}
+  StrCpy $QronosLine $1
+  Pop $1
+FunctionEnd
+
 ; Deletes the payload the previous installation's manifest lists -> $QronosMessage.
 Function ${UN}QronosRemoveOwnedPayload
   Push $1
@@ -704,81 +738,74 @@ Function ${UN}QronosRemoveOwnedPayload
   ${EndIf}
   IfFileExists "$INSTDIR\${QRONOS_MANIFEST}" 0 qronos_remove_done
 
-  ; Pass 1: the whole list is checked before anything is deleted: every line is a
-  ; plain entry, and nothing on the way to any entry is a link or the other kind.
-  ClearErrors
-  FileOpen $QronosHandle "$INSTDIR\${QRONOS_MANIFEST}" r
-  ${If} ${Errors}
-    StrCpy $QronosMessage "The previous installation's file list cannot be read."
+  ; The list is opened once, for both passes, and not through a link. Its sharing mode
+  ; lets no other program write, rename or delete it while it is open, and the open
+  ; fails if another program already has it open for writing. So both passes read the
+  ; same bytes; that comes from the lock, not from reading twice. Pass 2 still checks
+  ; every line again before acting on it.
+  ; GENERIC_READ, FILE_SHARE_READ only, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+  System::Call 'kernel32::CreateFileW(w "$INSTDIR\${QRONOS_MANIFEST}", i 0x80000000, i 1, p 0, i 3, i 0x00200000, p 0) p .r1'
+  ${If} $1 = -1
+    StrCpy $QronosMessage "The previous installation's file list cannot be read, or another program has it open. Nothing was removed."
     Goto qronos_remove_done
   ${EndIf}
-  FileReadUTF16LE $QronosHandle $QronosLine
-  !insertmacro QRONOS_TRIM_LINE
-  ${If} $QronosLine != "${QRONOS_MANIFEST_HEADER}"
-    FileClose $QronosHandle
-    StrCpy $QronosMessage "The previous installation's file list is not a Qronos file list."
-    Goto qronos_remove_done
+  StrCpy $QronosHandle $1
+
+  ; Pass 1: the whole list is checked before anything is deleted: the header, then
+  ; every line is a plain entry of a known kind, and nothing on the way to any entry
+  ; is a link or the other kind.
+  Call ${UN}QronosCheckListHeader
+  ${If} $QronosMessage == ""
+    ${Do}
+      ClearErrors
+      FileReadUTF16LE $QronosHandle $QronosLine
+      ${If} ${Errors}
+        ${Break}
+      ${EndIf}
+      Call ${UN}QronosCheckListLine
+      ${If} $QronosMessage != ""
+        ${Break}
+      ${EndIf}
+    ${Loop}
   ${EndIf}
-  ${Do}
-    ClearErrors
-    FileReadUTF16LE $QronosHandle $QronosLine
-    ${If} ${Errors}
-      ${Break}
-    ${EndIf}
-    !insertmacro QRONOS_TRIM_LINE
-    StrCpy $1 $QronosLine 2
-    StrCpy $QronosPath $QronosLine "" 2
-    ${If} $1 != "F "
-    ${AndIf} $1 != "D "
-      StrCpy $QronosMessage "The previous installation's file list contains an invalid line."
-      ${Break}
-    ${EndIf}
-    Call ${UN}QronosCheckEntry
-    ${If} $QronosMessage != ""
-      ${Break}
-    ${EndIf}
-    StrCpy $QronosLine $1
-    Call ${UN}QronosCheckOnDisk
-    ${If} $QronosMessage != ""
-      ${Break}
-    ${EndIf}
-  ${Loop}
-  FileClose $QronosHandle
   ${If} $QronosMessage != ""
+    FileClose $QronosHandle
     Goto qronos_remove_done
   ${EndIf}
 
-  ; Pass 2: delete listed files, then remove listed folders that are now empty.
-  FileOpen $QronosHandle "$INSTDIR\${QRONOS_MANIFEST}" r
-  FileReadUTF16LE $QronosHandle $QronosLine
-  ${Do}
-    ClearErrors
-    FileReadUTF16LE $QronosHandle $QronosLine
-    ${If} ${Errors}
-      ${Break}
-    ${EndIf}
-    !insertmacro QRONOS_TRIM_LINE
-    StrCpy $1 $QronosLine 2
-    StrCpy $QronosPath $QronosLine "" 2
-    ; Checked again right before each removal, in case something changed meanwhile.
-    StrCpy $QronosLine $1
-    Call ${UN}QronosCheckOnDisk
-    ${If} $QronosMessage != ""
-      ${Break}
-    ${EndIf}
-    ${If} $1 == "F "
-      ${If} $QronosPath != "${QRONOS_MANIFEST}"
-        ClearErrors
-        Delete "$INSTDIR\$QronosPath"
-        ${If} ${Errors}
-          StrCpy $QronosMessage "The previously installed file $QronosPath could not be removed. Close Qronos and try again."
-          ${Break}
-        ${EndIf}
+  !ifdef QRONOS_PROBE_BETWEEN_PASSES
+    !insertmacro QRONOS_PROBE_BETWEEN_PASSES
+  !endif
+
+  ; Pass 2: the same open list from its start. Every line is checked again exactly as
+  ; in pass 1 (and on disk, in case something changed meanwhile) before it is acted on.
+  FileSeek $QronosHandle 0 SET
+  Call ${UN}QronosCheckListHeader
+  ${If} $QronosMessage == ""
+    ${Do}
+      ClearErrors
+      FileReadUTF16LE $QronosHandle $QronosLine
+      ${If} ${Errors}
+        ${Break}
       ${EndIf}
-    ${Else}
-      RMDir "$INSTDIR\$QronosPath"
-    ${EndIf}
-  ${Loop}
+      Call ${UN}QronosCheckListLine
+      ${If} $QronosMessage != ""
+        ${Break}
+      ${EndIf}
+      ${If} $QronosLine == "F "
+        ${If} $QronosPath != "${QRONOS_MANIFEST}"
+          ClearErrors
+          Delete "$INSTDIR\$QronosPath"
+          ${If} ${Errors}
+            StrCpy $QronosMessage "The previously installed file $QronosPath could not be removed. Close Qronos and try again."
+            ${Break}
+          ${EndIf}
+        ${EndIf}
+      ${Else}
+        RMDir "$INSTDIR\$QronosPath"
+      ${EndIf}
+    ${Loop}
+  ${EndIf}
   FileClose $QronosHandle
   ${If} $QronosMessage == ""
     Delete "$INSTDIR\${QRONOS_MANIFEST}"
