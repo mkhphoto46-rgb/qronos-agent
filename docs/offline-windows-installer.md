@@ -243,7 +243,14 @@ the following before anything is installed.
   past. Links and junctions in the part of the path that exists are resolved
   by Windows (`GetFinalPathNameByHandleW`), for the install folder and for every
   protected folder below, so a protected folder reached or redirected through
-  a junction is still recognised. The check runs on the directory page (so an
+  a junction is still recognised. Resolution fails closed. The part that does
+  not exist yet is kept as written only when Windows reports it as not found
+  below a folder that was resolved. Anything else refuses the install: a folder
+  Windows denies access to, a name it rejects, a missing drive, or a final path
+  too long for the installer. This applies to the install folder and to every
+  protected folder (a network Documents folder is compared as written, since
+  the install folder must be a local path without links). The check runs on
+  the directory page (so an
   unsafe folder is refused before Tauri creates it) and again before any file
   is installed; a silent install skips that page, so Tauri may already have
   created the empty folder. The installer refuses a folder that:
@@ -279,7 +286,8 @@ the following before anything is installed.
     or junction. This is checked on disk for every entry, whatever folder
     lines the list contains;
   - a listed file is really a folder, or a listed folder is really a file;
-  - the install folder itself is reached through a link.
+  - the install folder itself is reached through a link, or Windows cannot
+    open it or a folder on the way to it.
 
   Each path is checked again right before its removal.
 

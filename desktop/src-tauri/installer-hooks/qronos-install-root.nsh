@@ -45,23 +45,39 @@ Var QronosSegment
 ; $QronosPath (absolute) -> the same path with every link and junction in the part
 ; that exists resolved by Windows (GetFinalPathNameByHandleW on the deepest existing
 ; folder); the part that does not exist yet is appended unchanged.
+;
+; Fails closed: for a local drive path, "" whenever the existing part cannot be
+; resolved - an ancestor Windows reports as anything but "not found" (access denied,
+; a bad name, a drive that is not ready), no existing folder at all (a missing drive),
+; a folder that cannot be opened, or a final path that is empty or too long. Only a
+; suffix that genuinely does not exist, below a folder that was resolved, is kept as
+; written. Paths that are not "X:\..." are left as written: the install folder is
+; then refused by QronosCheckInstallRoot, and a data root such as a network
+; Documents folder can never be the same folder as a local, link-free install folder.
 Function ${UN}QronosResolveFinal
   Push $1
   Push $2
   Push $3
   Push $4
   Push $5
+  Push $6
   StrCpy $1 $QronosPath
   StrCpy $2 ""
-  ; Only local drive paths ("X:\...") are resolved; anything else is refused by callers.
   StrCpy $3 $1 2 1
   ${If} $3 != ":\"
     Goto qronos_final_done
   ${EndIf}
+  StrCpy $QronosPath ""
   ${Do}
-    System::Call 'kernel32::GetFileAttributesW(w "$1") i .r3'
+    System::Call 'kernel32::GetFileAttributesW(w "$1") i .r3 ?e'
+    Pop $6
     ${If} $3 <> -1
       ${Break}
+    ${EndIf}
+    ; ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND: look at the folder above.
+    ${If} $6 <> 2
+    ${AndIf} $6 <> 3
+      Goto qronos_final_done
     ${EndIf}
     StrLen $4 $1
     ${If} $4 <= 3
@@ -111,6 +127,7 @@ Function ${UN}QronosResolveFinal
     StrCpy $QronosPath "$4$2"
   ${EndIf}
 qronos_final_done:
+  Pop $6
   Pop $5
   Pop $4
   Pop $3
@@ -120,11 +137,13 @@ FunctionEnd
 
 ; $QronosPath -> canonical absolute path (GetFullPathNameW, then GetLongPathNameW
 ; when it exists, then links and junctions resolved) without a trailing backslash
-; except after a drive; "" if Windows cannot resolve it. $QronosLexical keeps the
-; form before links were resolved, so a caller can tell that a link was on the way.
+; except after a drive; "" if Windows cannot resolve it or its existing part. $QronosLexical
+; keeps the form before links were resolved ("" if even that failed), so a caller can
+; tell that a link was on the way.
 Function ${UN}QronosCanonical
   Push $1
   Push $2
+  StrCpy $QronosLexical ""
   System::Call 'kernel32::GetFullPathNameW(w "$QronosPath", i ${NSIS_MAX_STRLEN}, w .r1, p 0) i .r2'
   ${If} $2 = 0
   ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
@@ -202,8 +221,11 @@ FunctionEnd
 Function ${UN}QronosRefuseSame
   ${If} $QronosMessage == ""
   ${AndIf} $QronosPath != ""
+    StrCpy $QronosRoot $QronosPath
     Call ${UN}QronosCanonical
-    ${If} $QronosInstall == $QronosPath
+    !insertmacro QRONOS_REFUSE_UNRESOLVED_ROOT
+    ${If} $QronosPath != ""
+    ${AndIf} $QronosInstall == $QronosPath
       StrCpy $QronosMessage "Qronos cannot be installed directly into $QronosPath. Choose a folder of its own."
     ${EndIf}
   ${EndIf}
@@ -213,11 +235,15 @@ FunctionEnd
 Function ${UN}QronosRefuseOverlap
   ${If} $QronosMessage == ""
   ${AndIf} $QronosPath != ""
-    Call ${UN}QronosCanonical
     StrCpy $QronosRoot $QronosPath
-    Call ${UN}QronosRelation
-    ${If} $QronosRelation != "apart"
-      StrCpy $QronosMessage "The chosen folder overlaps $QronosRoot, where Qronos or your files are kept. Choose a separate folder."
+    Call ${UN}QronosCanonical
+    !insertmacro QRONOS_REFUSE_UNRESOLVED_ROOT
+    ${If} $QronosPath != ""
+      StrCpy $QronosRoot $QronosPath
+      Call ${UN}QronosRelation
+      ${If} $QronosRelation != "apart"
+        StrCpy $QronosMessage "The chosen folder overlaps $QronosRoot, where Qronos or your files are kept. Choose a separate folder."
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 FunctionEnd
@@ -267,10 +293,12 @@ Function ${UN}QronosCheckInstallRoot
   ${EndIf}
   Call ${UN}QronosCanonical
   StrCpy $QronosInstall $QronosPath
-  ${If} $QronosInstall == ""
+  ${If} $QronosLexical == ""
     StrCpy $QronosMessage "Windows cannot resolve the chosen folder."
     Goto qronos_check_done
   ${EndIf}
+  ; The name checks below look at the written form ($QronosLexical); the resolved
+  ; form is checked after them.
   ; A local drive path: "X:\...". Network shares and devices ("\\server", "\\.\CON",
   ; which is what GetFullPathNameW makes of "...\CON") start with two backslashes.
   StrCpy $1 $QronosLexical 2
@@ -282,18 +310,11 @@ Function ${UN}QronosCheckInstallRoot
     StrCpy $QronosMessage "Choose a folder on a local drive, not a network share or device."
     Goto qronos_check_done
   ${EndIf}
-  ; A link or junction anywhere on the way makes the resolved path differ from the
-  ; written one. Such a folder is refused whatever it points to, so the checks
-  ; below always see the folder that would really be written to.
-  ${If} $QronosInstall != $QronosLexical
-    StrCpy $QronosMessage "The chosen folder is reached through a link or junction. Choose a folder whose path contains no links."
-    Goto qronos_check_done
-  ${EndIf}
   ; No ':' after the drive (an alternate data stream).
-  StrLen $2 $QronosInstall
+  StrLen $2 $QronosLexical
   StrCpy $1 2
   ${DoWhile} $1 < $2
-    StrCpy $3 $QronosInstall 1 $1
+    StrCpy $3 $QronosLexical 1 $1
     ${If} $3 == ":"
       StrCpy $QronosMessage "The chosen folder name contains ':'."
       Goto qronos_check_done
@@ -310,10 +331,10 @@ Function ${UN}QronosCheckInstallRoot
   StrCpy $1 $2
   ${Do}
     IntOp $1 $1 - 1
-    StrCpy $3 $QronosInstall 1 $1
+    StrCpy $3 $QronosLexical 1 $1
   ${LoopUntil} $3 == "\"
   IntOp $1 $1 + 1
-  StrCpy $3 $QronosInstall "" $1
+  StrCpy $3 $QronosLexical "" $1
   StrCpy $1 0
   StrLen $2 $3
   ${DoWhile} $1 < $2
@@ -362,6 +383,21 @@ Function ${UN}QronosCheckInstallRoot
         Goto qronos_check_done
       ${EndIf}
     ${EndIf}
+  ${EndIf}
+
+  ; Where the folder really is. "" means Windows could not resolve the part that
+  ; exists (access denied, a missing drive, a folder that cannot be opened, a final
+  ; path too long), so where the files would go is unknown: refused.
+  ${If} $QronosInstall == ""
+    StrCpy $QronosMessage "Windows cannot open the chosen folder or the folders on the way to it, so where it really leads cannot be checked. Choose another folder."
+    Goto qronos_check_done
+  ${EndIf}
+  ; A link or junction anywhere on the way makes the resolved path differ from the
+  ; written one. Such a folder is refused whatever it points to, so the checks
+  ; below always see the folder that would really be written to.
+  ${If} $QronosInstall != $QronosLexical
+    StrCpy $QronosMessage "The chosen folder is reached through a link or junction. Choose a folder whose path contains no links."
+    Goto qronos_check_done
   ${EndIf}
 
   ; System and profile roots.
@@ -653,15 +689,20 @@ Function ${UN}QronosRemoveOwnedPayload
   Push $1
   Push $2
   StrCpy $QronosMessage ""
-  IfFileExists "$INSTDIR\${QRONOS_MANIFEST}" 0 qronos_remove_done
-  ; The install folder itself must be reached without a link or junction.
+  ; The install folder itself must be resolved by Windows and reached without a link
+  ; or junction. This comes first: a folder Windows cannot open would otherwise look
+  ; like one without a file list.
   StrCpy $QronosPath $INSTDIR
   Call ${UN}QronosCanonical
   ${If} $QronosPath == ""
-  ${OrIf} $QronosPath != $QronosLexical
+    StrCpy $QronosMessage "Windows cannot open the install folder or the folders on the way to it; nothing was removed."
+    Goto qronos_remove_done
+  ${EndIf}
+  ${If} $QronosPath != $QronosLexical
     StrCpy $QronosMessage "The install folder is reached through a link or junction; nothing was removed."
     Goto qronos_remove_done
   ${EndIf}
+  IfFileExists "$INSTDIR\${QRONOS_MANIFEST}" 0 qronos_remove_done
 
   ; Pass 1: the whole list is checked before anything is deleted: every line is a
   ; plain entry, and nothing on the way to any entry is a link or the other kind.
@@ -758,6 +799,14 @@ FunctionEnd
   StrCpy $QronosChar $QronosLine 1 -1
   ${If} $QronosChar == "$\r"
     StrCpy $QronosLine $QronosLine -1
+  ${EndIf}
+!macroend
+
+; After QronosCanonical on the protected folder $QronosRoot: one Windows cannot
+; resolve cannot be compared, so the install folder is refused.
+!macro QRONOS_REFUSE_UNRESOLVED_ROOT
+  ${If} $QronosPath == ""
+    StrCpy $QronosMessage "Windows cannot open $QronosRoot or the folders on the way to it, so the chosen folder cannot be checked against it. Nothing was installed."
   ${EndIf}
 !macroend
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import ctypes
 import os
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -433,6 +434,146 @@ def test_removal_refuses_an_install_folder_reached_through_a_junction(fx):
 
     assert fx.remove(fx.base / "owned-link") == ("The install folder is reached through a link or junction; "
                                                  "nothing was removed.")
+    assert fx.snapshot() == before
+
+
+# -------------------------------------- the resolver fails closed (I9 follow-up)
+#
+# Real Windows errors, made in throwaway folders: no flag in the hook simulates them.
+
+UNRESOLVED_INSTALL = "Windows cannot open the chosen folder or the folders on the way to it"
+UNRESOLVED_ROOT = "so the chosen folder cannot be checked against it"
+
+
+@pytest.fixture
+def deny_open():
+    """deny(folder) denies Everyone only SYNCHRONIZE on a fixture folder, which CreateFileW
+    always requests, so opening the folder fails with ERROR_ACCESS_DENIED while its
+    attributes stay readable. It returns a function that removes the ACE again; any still
+    in place are removed after the test.
+
+    Only SYNCHRONIZE: pytest's folders carry an inherited OWNER RIGHTS ACE (Python's
+    mkdir mode 0o700), so a deny-everything ACE could not be removed again without
+    elevation. This one leaves READ_CONTROL and WRITE_DAC with the owner.
+    """
+    locked = []
+
+    def allow(folder: Path) -> None:
+        if folder in locked:
+            subprocess.run(["icacls", str(folder), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
+            locked.remove(folder)
+
+    def deny(folder: Path):
+        subprocess.run(["icacls", str(folder), "/deny", "*S-1-1-0:(S)"], check=True, capture_output=True)
+        locked.append(folder)
+        return lambda: allow(folder)
+
+    yield deny
+    for folder in list(locked):
+        allow(folder)
+
+
+def test_a_folder_on_a_missing_drive_is_refused(fx):
+    """No ancestor exists at all, so nothing was resolved: refused, not compared as written."""
+    present = {drive[0].upper() for drive in os.listdrives()}
+    free = [letter for letter in "QRSTUVWXYZ" if letter not in present]
+    if not free:
+        pytest.skip("No unused drive letter.")
+
+    message = fx.check(f"{free[0]}:\\apps\\qronos-desktop")
+
+    assert message.startswith(UNRESOLVED_INSTALL), message
+
+
+def test_a_folder_windows_cannot_open_is_refused(fx, deny_open):
+    """GetFileAttributesW succeeds but CreateFileW is denied: the existing part is not resolved."""
+    locked = fx.base / "apps" / "locked"
+    locked.mkdir(parents=True)
+    deny_open(locked)
+
+    assert fx.check(str(locked)).startswith(UNRESOLVED_INSTALL)
+    assert fx.check(str(locked / "qronos-desktop")).startswith(UNRESOLVED_INSTALL)
+    # A sibling Windows can open is still an ordinary install folder.
+    assert fx.check(str(fx.base / "apps" / "qronos-desktop")) == "ok"
+
+
+def test_a_protected_folder_windows_cannot_open_refuses_every_install(fx, deny_open):
+    """Documents\\Qronos cannot be resolved, so no install folder can be checked against it."""
+    deny_open(fx.documents / "Qronos")
+
+    message = fx.check(str(fx.base / "apps" / "qronos-desktop"))
+
+    assert UNRESOLVED_ROOT in message and str(fx.documents / "Qronos") in message, message
+
+
+def test_a_name_windows_rejects_is_not_resolved_as_if_it_were_missing(fx):
+    """GetFileAttributesW fails with ERROR_INVALID_NAME, not "not found": the walk must stop, not skip it.
+
+    Probed on QronosCanonical itself: NSIS already strips <>|"*?: from $INSTDIR, so the
+    install guard never sees such a name. "apps" exists, so Windows reaches "a<b"
+    (below a missing folder the lookup stops earlier with "path not found", and the
+    walk correctly continues upwards)."""
+    (fx.base / "apps").mkdir()
+    path = str(fx.base / "apps" / "a<b" / "qronos-desktop")
+
+    result = fx.probe([f'  StrCpy $QronosPath "{path}"', "  Call QronosCanonical",
+                       '  StrCpy $QronosMessage "lexical=$QronosLexical|resolved=$QronosPath"'])
+
+    assert result == f"lexical={path}|resolved=", result
+
+
+def raw_junction(target: str, link: Path) -> None:
+    """A junction to an absolute target of any length (_winapi.CreateJunction stops at MAX_PATH)."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    link.mkdir()
+    substitute, printed = ("\\??\\" + target).encode("utf-16-le"), target.encode("utf-16-le")
+    data = struct.pack("<HHHH", 0, len(substitute), len(substitute) + 2, len(printed)) \
+        + substitute + b"\0\0" + printed + b"\0\0"
+    buffer = struct.pack("<IHH", 0xA0000003, len(data), 0) + data  # IO_REPARSE_TAG_MOUNT_POINT
+    # GENERIC_WRITE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+    handle = kernel.CreateFileW(str(link), 0x40000000, 0, None, 3, 0x02200000, None)
+    assert handle not in (None, ctypes.c_void_p(-1).value), ctypes.get_last_error()
+    try:
+        returned = ctypes.c_ulong()
+        assert kernel.DeviceIoControl(ctypes.c_void_p(handle), 0x000900A4, buffer, len(buffer), None, 0,
+                                      ctypes.byref(returned), None), ctypes.get_last_error()  # FSCTL_SET_REPARSE_POINT
+    finally:
+        kernel.CloseHandle(ctypes.c_void_p(handle))
+
+
+def test_a_final_path_longer_than_nsis_strings_is_refused(fx):
+    """GetFinalPathNameByHandleW needs more than NSIS's 1024 characters: the junction must not pass as no link."""
+    prefix = "\\\\?\\"
+    target = prefix + str(fx.base / "deep")
+    os.mkdir(target)
+    for _ in range(5):
+        target += "\\" + "d" * 200
+        os.mkdir(target)
+    link = fx.base / "short"
+    try:
+        raw_junction(target[len(prefix):], link)
+        assert os.path.isdir(link)  # the junction opens: only its final path is too long
+
+        message = fx.check(str(link / "qronos-desktop"))
+
+        assert message.startswith(UNRESOLVED_INSTALL), message
+    finally:
+        if os.path.lexists(link):
+            os.rmdir(link)  # removes the junction only
+        shutil.rmtree(prefix + str(fx.base / "deep"))
+
+
+def test_removal_refuses_an_install_folder_windows_cannot_open(fx, deny_open):
+    owned = fx.base / "apps" / "qronos-desktop"
+    owned_install(owned, OLD_FILES)
+    before = fx.snapshot()
+    allow = deny_open(owned)
+
+    message = fx.remove(owned)
+
+    allow()
+    assert message == "Windows cannot open the install folder or the folders on the way to it; nothing was removed."
     assert fx.snapshot() == before
 
 
