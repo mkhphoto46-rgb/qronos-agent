@@ -27,6 +27,12 @@ from build_support.desktop_notices import (
     collect_desktop_notices,
     verify_notice_output,
 )
+from build_support.desktop_installer_verify import (
+    extract_installer,
+    provenance_record,
+    verify_extracted,
+    write_record,
+)
 from build_support.desktop_prerequisites import (
     CACHE_DIR,
     PrerequisiteError,
@@ -46,6 +52,8 @@ DESKTOP_BUILDS_ROOT = ROOT / "runtime" / "package" / "desktop-builds"
 
 #: Only NSIS carries the offline WebView2 hook, and notices are collected for WINDOWS_TARGET only.
 SUPPORTED_BUNDLES = ("nsis",)
+#: Why an installer was built; recorded in its provenance.
+PURPOSES = ("packaging-check", "review-candidate")
 HOOK_SETTING = "installer-hooks/webview2-offline.nsh"
 
 
@@ -89,9 +97,17 @@ def _target_dir(environment: dict[str, str]) -> Path:
     return Path(configured) if configured else ROOT / "desktop" / "src-tauri" / "target"
 
 
+def _tauri_cli_version() -> str:
+    lock = json.loads((ROOT / "desktop" / "package-lock.json").read_text(encoding="utf-8"))
+    return lock["packages"]["node_modules/@tauri-apps/cli"]["version"]
+
+
 def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | None = None,
-          target_dir: Path | None = None) -> dict[str, Any]:
+          target_dir: Path | None = None, work_root: Path | None = None,
+          backend_source: str = "not stated", purpose: str = "packaging-check") -> dict[str, Any]:
     require_windows_x64(bundles)
+    if purpose not in PURPOSES:
+        raise ValueError(f"purpose must be one of {', '.join(PURPOSES)}.")
     config = json.loads(TAURI_CONFIG.read_text(encoding="utf-8"))
     check_tauri_config(config)
     # Everything that can fail quickly is checked before the long build starts.
@@ -105,9 +121,11 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     if npm is None:
         raise ValueError("Node.js/npm is required on the build machine.")
 
-    # A new folder per build: nothing is deleted, and it stays as evidence.
-    DESKTOP_BUILDS_ROOT.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="b-", dir=DESKTOP_BUILDS_ROOT))
+    # A new folder per build: nothing is deleted, and it stays as evidence. A short
+    # work root keeps the deepest notice paths below the Windows MAX_PATH limit.
+    builds_root = (work_root or DESKTOP_BUILDS_ROOT).absolute()
+    builds_root.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="b-", dir=builds_root))
     notices = work / "notices"
     collect_desktop_notices(notices)
     verify_notice_output(notices)
@@ -146,7 +164,15 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     embedded = extract_and_hash_payload(setup, seven_zip, work / "payload")
     if embedded != pin["sha256"]:
         raise PrerequisiteError(f"The embedded WebView2 installer SHA-256 {embedded} does not match the pin.")
-    return {"installer": setup, "work": work, "prerequisite": prerequisite, "entries": entries}
+    # Keep this build's installer beside its evidence; the Cargo target folder is reused.
+    kept = work / setup.name
+    shutil.copy2(setup, kept)
+    extracted = verify_extracted(extract_installer(kept, seven_zip, work / "x"), pin)
+    record = provenance_record(setup=kept, root=ROOT, pin=pin, extracted=extracted,
+                               backend_source=backend_source, purpose=purpose, tauri_cli=_tauri_cli_version())
+    write_record(work / "installer-provenance.json", record)
+    return {"installer": kept, "work": work, "prerequisite": prerequisite, "entries": entries,
+            "provenance": record}
 
 
 def main() -> int:
@@ -157,10 +183,20 @@ def main() -> int:
                         help="Pinned offline WebView2 installer (default: .cache/wv2/<pinned file name>).")
     parser.add_argument("--target-dir", type=Path, default=None,
                         help="Short Cargo target directory, to stay clear of Windows MAX_PATH.")
+    parser.add_argument("--work-root", type=Path, default=None,
+                        help="Short folder for this build's notices, extraction and provenance "
+                             "(default: runtime/package/desktop-builds).")
+    parser.add_argument("--backend-source", default="not stated",
+                        help="The commit the backend bundle was built from, as known to the builder.")
+    parser.add_argument("--purpose", default="packaging-check", choices=PURPOSES)
     arguments = parser.parse_args()
     result = build(arguments.backend, bundles=arguments.bundles, webview2_installer=arguments.webview2_installer,
-                   target_dir=arguments.target_dir)
-    print(json.dumps({"installer": str(result["installer"]), "prerequisite": result["prerequisite"]}, indent=2))
+                   target_dir=arguments.target_dir, work_root=arguments.work_root,
+                   backend_source=arguments.backend_source, purpose=arguments.purpose)
+    print(json.dumps({"installer": str(result["installer"]), "work": str(result["work"]),
+                      "sha256": result["provenance"]["installer"]["sha256"],
+                      "attributableToDesktopSource": result["provenance"]["attributableToDesktopSource"]},
+                     indent=2))
     return 0
 
 

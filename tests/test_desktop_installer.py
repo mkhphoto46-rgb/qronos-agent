@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from build_support import build_desktop
+from build_support import desktop_installer_verify as installer_verify
 from build_support import desktop_prerequisites as prerequisites
 from build_support.desktop_prerequisites import EMBEDDED_PATH, PrerequisiteError
 
@@ -360,6 +361,7 @@ class FakeBuild:
         self.embedded_sha = embedded_sha or pin["sha256"]
         self.mode = mode
         self.overlays: list[dict] = []
+        self.records: list[dict] = []
 
     def run(self, command, **kwargs):
         self.calls.append("tauri")
@@ -399,6 +401,23 @@ def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
                         lambda setup, tool: fake.calls.append("listed") or {EMBEDDED_PATH: fake.pin["bytes"]})
     monkeypatch.setattr(build_desktop, "extract_and_hash_payload",
                         lambda setup, tool, scratch: fake.calls.append("payload-hashed") or fake.embedded_sha)
+
+    def extract(setup, tool, destination):
+        fake.calls.append("extracted")
+        assert setup.parent == destination.parent  # the kept copy, beside its evidence
+        destination.mkdir()
+        return destination
+
+    monkeypatch.setattr(build_desktop, "extract_installer", extract)
+    monkeypatch.setattr(build_desktop, "verify_extracted",
+                        lambda root, pin: fake.calls.append("extracted-verified") or {"root": root})
+
+    def record(**kwargs):
+        fake.calls.append("provenance")
+        fake.records.append(kwargs)
+        return {"installer": {"sha256": "x"}, "attributableToDesktopSource": False}
+
+    monkeypatch.setattr(build_desktop, "provenance_record", record)
     monkeypatch.delenv("CARGO_BUILD_TARGET", raising=False)
     return backend
 
@@ -408,12 +427,20 @@ def test_a_build_verifies_the_prerequisite_first_and_the_installer_last(tmp_path
     fake = FakeBuild(tmp_path, committed_pin())
     backend = wire(tmp_path, monkeypatch, fake)
 
-    first = build_desktop.build(backend, target_dir=tmp_path / "t")
-    second = build_desktop.build(backend, target_dir=tmp_path / "t")
+    first = build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w",
+                                backend_source="7e12e2b (builder statement)")
+    second = build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
 
     assert fake.calls == ["prerequisite", "backend", "notices", "notices-verified", "tauri", "listed",
-                          "payload-hashed"] * 2
-    assert first["work"] != second["work"] and first["work"].is_dir() and second["work"].is_dir()
+                          "payload-hashed", "extracted", "extracted-verified", "provenance"] * 2
+    assert first["work"] != second["work"] and first["work"].parent == second["work"].parent == tmp_path / "w"
+    # Each build keeps its own installer copy and provenance record; nothing is overwritten.
+    for result in (first, second):
+        assert result["installer"] == result["work"] / "qronos-desktop_0.1.0_x64-setup.exe"
+        assert result["installer"].read_bytes() == b"MZ installer"
+        assert json.loads((result["work"] / "installer-provenance.json").read_text(encoding="utf-8")) ==             {"installer": {"sha256": "x"}, "attributableToDesktopSource": False}
+    assert fake.records[0]["backend_source"] == "7e12e2b (builder statement)"
+    assert fake.records[1]["backend_source"] == "not stated" and fake.records[0]["purpose"] == "packaging-check"
     overlay = fake.overlays[0]
     resources = overlay["bundle"]["resources"]
     assert resources[backend.resolve().as_posix() + "/"] == "qronos-runtime/"
@@ -451,3 +478,102 @@ def test_a_built_installer_that_differs_from_the_pin_is_refused(tmp_path, monkey
 
     with pytest.raises(PrerequisiteError, match=message):
         build_desktop.build(backend, target_dir=tmp_path / "t")
+
+
+# ------------------------------------------------ the extracted installer
+
+
+def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
+    """A synthetic extracted installer built with the real runtime-manifest and notice writers."""
+    from build_support import build_runtime
+    from build_support import desktop_notices as notices
+
+    root = tmp_path / "x"
+    payload = b"MZ stand-in for the pinned WebView2 installer"
+    pin = fake_pin(payload)
+    (root / "$PLUGINSDIR").mkdir(parents=True)
+    (root / "$PLUGINSDIR" / pin["fileName"]).write_bytes(payload)
+    (root / "$PLUGINSDIR" / "System.dll").write_bytes(b"MZ nsis plug-in")
+    (root / "qronos-desktop.exe").write_bytes(b"MZ desktop")
+    (root / "uninstall.exe").write_bytes(b"MZ uninstaller")
+    runtime = root / "qronos-runtime"
+    (runtime / "_internal").mkdir(parents=True)
+    (runtime / "qronos-runtime.exe").write_bytes(b"MZ runtime")
+    (runtime / "_internal" / "python313.dll").write_bytes(b"MZ python")
+    build_runtime.write_manifest(runtime)
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "LICENSE").write_text("Permission is hereby granted, free of charge, to any person.\n"
+                                     "THE SOFTWARE IS PROVIDED AS IS.\n", encoding="utf-8")
+    component = notices.Component("rust", "demo", "1.0.0", "MIT", None,
+                                  "registry+https://github.com/rust-lang/crates.io-index", "sum", package.resolve())
+    files = notices.check_coverage([component], {})
+    notices.write_notices([component], files, {}, root / "third-party-notices", notices.WINDOWS_TARGET, ())
+    return root, pin
+
+
+def test_an_extracted_installer_is_verified_byte_for_byte(tmp_path):
+    root, pin = extracted_tree(tmp_path)
+
+    evidence = installer_verify.verify_extracted(root, pin)
+
+    assert evidence["topLevel"] == sorted(installer_verify.EXPECTED_TOP_LEVEL)
+    assert evidence["webview2Installer"]["sha256"] == pin["sha256"]
+    assert evidence["runtimeFiles"] == 2 and evidence["desktopNoticeFiles"] >= 3
+    assert evidence["plugins"] == ["MicrosoftEdgeWebView2RuntimeInstallerX64.exe", "System.dll"]
+
+
+@pytest.mark.parametrize(("damage", "message"), [
+    (lambda root: (root / "models").mkdir(), "unexpected top-level items: models"),
+    (lambda root: (root / "Qwen.gguf").write_bytes(b"weights"), "unexpected top-level items: Qwen.gguf"),
+    (lambda root: (root / "$PLUGINSDIR" / "NSISdl.dll").write_bytes(b"MZ"), "download plug-in"),
+    (lambda root: (root / "$PLUGINSDIR" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe").write_bytes(b"MZ other"),
+     "does not match the pin"),
+    (lambda root: (root / "$PLUGINSDIR" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe").unlink(),
+     "does not contain the WebView2 installer"),
+    (lambda root: (root / "qronos-runtime" / "_internal" / "python313.dll").write_bytes(b"MZ swapped"),
+     "qronos-runtime does not match its manifest"),
+    (lambda root: (root / "qronos-runtime" / "_internal" / "extra.pyd").write_bytes(b"MZ"),
+     "qronos-runtime does not match its manifest"),
+    (lambda root: (root / "third-party-notices" / "licenses" / "rust" / "demo" / "1.0.0" / "LICENSE")
+     .write_bytes(b"edited"), "does not match its manifest"),
+])
+def test_a_damaged_or_unexpected_extracted_installer_is_refused(tmp_path, damage, message):
+    root, pin = extracted_tree(tmp_path)
+    damage(root)
+
+    with pytest.raises(PrerequisiteError, match=message):
+        installer_verify.verify_extracted(root, pin)
+
+
+def test_a_missing_notice_resource_is_refused(tmp_path):
+    root, pin = extracted_tree(tmp_path)
+    for path in sorted((root / "third-party-notices").rglob("*"), reverse=True):
+        path.rmdir() if path.is_dir() else path.unlink()
+    (root / "third-party-notices").rmdir()
+
+    with pytest.raises(PrerequisiteError, match="missing: third-party-notices"):
+        installer_verify.verify_extracted(root, pin)
+
+
+def test_provenance_states_what_was_and_was_not_verified(tmp_path):
+    root, pin = extracted_tree(tmp_path)
+    setup = tmp_path / "qronos-desktop_0.1.0_x64-setup.exe"
+    setup.write_bytes(b"MZ installer")
+    extracted = installer_verify.verify_extracted(root, pin)
+
+    record = installer_verify.provenance_record(setup=setup, root=build_desktop.ROOT, pin=pin, extracted=extracted,
+                                                backend_source="7e12e2b", purpose="packaging-check",
+                                                tauri_cli="2.11.4")
+
+    assert record["installer"] == {"fileName": setup.name, "bytes": 12, "sha256": sha256(b"MZ installer"),
+                                   "signed": False}
+    assert record["backend"]["sourceAsStatedByBuilder"] == "7e12e2b"
+    assert record["backend"]["sourceVerifiedFromBundle"] is False
+    assert len(record["desktopSource"]["commit"]) == 40
+    assert record["attributableToDesktopSource"] == record["desktopSource"]["clean"]
+    assert record["webview2"]["runtimeVersion"] == "154.0.4258.62"
+    assert any("clean Windows machine" in item for item in record["notVerifiedHere"])
+    installer_verify.write_record(tmp_path / "p.json", record)
+    with pytest.raises(FileExistsError):
+        installer_verify.write_record(tmp_path / "p.json", record)
