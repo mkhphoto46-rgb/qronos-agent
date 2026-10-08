@@ -690,27 +690,39 @@ list, revocation ending sessions, remote opt-in through the fake relay, relay
 settings). It is **not yet constructed by the runtime**; the shared files are
 owned elsewhere, so the wiring below is a request to Root, not a change made.
 
-Construction, in `QronosRuntime.__init__`:
+Construction, in `QronosRuntime.__init__` — the whole of it:
 
 ```python
 self.link = LinkRuntime(
     LinkRuntimeSettings.from_config(
-        link_enabled=<user's link switch>,             # default off
-        remote_access_enabled=<user's remote switch>,  # default off
+        link_enabled=bool(self.settings.get("link.enabled")),                        # default off
+        remote_access_enabled=bool(self.settings.get("link.remote_access_enabled")),  # default off
     ),
-    services=LinkServices(
-        status=<() -> dict: resource/storage summary, no content>,
-        remote_chat=<(messages) -> str: BrainRuntime.chat with the existing
-                     Fast model and settings; no router, orchestrator, tools
-                     or queue>,
-        transcribe=<(wav_path, language) -> str: the existing speech runtime>,
-        speak=<(text) -> wav_path: the existing voice runtime's speak_to_file(text).audio_path>,
-        # local_ask: leave unset until an assistant path with on-screen
-        # approval and LinkOrigin propagation exists; local phones then get
-        # the same answer-only path.
-    ),
+    services=runtime_services(self),
 )
 ```
+
+`runtime_services` (in `core/link_runtime.py`, tested on a stand-in runtime
+whose planner and queue raise if touched) builds the services from what the
+runtime already has, with its existing models and settings:
+
+| Service | Existing call | Not used |
+|---|---|---|
+| remote chat (the only remote answer path, wrapped in `ToolFreeAsk`) | `orchestrator.answer_web_prompt(prompt)` — the Fast brain behind the orchestrator's resource and activity guard, prompt only | `execute_plan`, workers, tools, the queue |
+| speech-to-text | `speech_runtime.transcribe_file(path, language)` | — |
+| text-to-speech | `voice_output.speak_to_file(text).audio_path` | — |
+
+Each refuses with `busy` while the runtime is busy or paused, so a phone never
+queues behind the person at the PC and nothing waits to run after a restart.
+Local phones get the same answer-only path until an assistant path with
+on-screen approval and `LinkOrigin` propagation exists.
+
+The exact diffs for `core/runtime_bridge.py` (Control's) and
+`core/settings_service.py` — two default-off settings, the construction above,
+`start` after `runtime_prepared`, `stop` first in `_close`, restart on settings
+reload, and a `handle_link_action` for the desktop actions below — were
+generated against this branch's base, checked to apply and compile, and handed
+to Root. They are not applied here.
 
 Lifecycle: `self.link.start()` once the runtime is prepared (it returns False
 and does nothing when the link is off); `self.link.stop()` at the start of

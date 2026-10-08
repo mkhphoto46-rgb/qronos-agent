@@ -50,7 +50,7 @@ from core.link_handlers import (
     default_handlers,
 )
 from core.link_pairing import DEFAULT_PORT, PairingService
-from core.link_server import LinkServer, LinkSettings
+from core.link_server import LinkOperationError, LinkServer, LinkSettings
 from core.link_tunnel import (
     Connector,
     RelayConfigError,
@@ -209,6 +209,95 @@ class DeviceView:
 
     def to_json(self) -> dict[str, Any]:
         return dict(self.__dict__)
+
+
+# ------------------------------------------------------------ runtime glue
+
+
+def chat_prompt(messages: list[dict[str, str]]) -> str:
+    """
+    The remote chat's messages as one prompt for a prompt-only brain call.
+
+    The runtime's guarded Fast-brain call takes a single prompt. The system
+    rules come first and are labelled, then the question, so the rule that
+    the remote answer can do nothing is in front of the model every time.
+    """
+
+    parts = []
+
+    for message in messages:
+        role = message.get("role", "user")
+        content = str(message.get("content", "")).strip()
+
+        if not content:
+            continue
+
+        label = "Instructions" if role == "system" else "Question"
+        parts.append(f"{label}:\n{content}")
+
+    return "\n\n".join(parts) + "\n\nAnswer:"
+
+
+def _refuse_if_busy(runtime: Any) -> None:
+    """
+    A phone does not queue behind, or jump ahead of, the person at the PC.
+
+    Paused or busy means a fixed refusal the phone shows as "busy, try again".
+    Nothing is queued, so nothing can run later - after a restart included.
+    """
+
+    if getattr(runtime, "runtime_paused", False) or getattr(runtime, "is_busy", False):
+        raise LinkOperationError("busy", "Qronos is busy on the computer. Try again shortly.")
+
+
+def runtime_services(runtime: Any) -> LinkServices:
+    """
+    What the running Qronos lends the link, built from its existing parts.
+
+    ``runtime`` is the Qronos runtime object; it is read by attribute so this
+    module does not import the runtime bridge. Only calls that already exist
+    are used, with their existing models and settings:
+
+        remote_chat  ``runtime.orchestrator.answer_web_prompt(prompt)`` - the
+                     Fast brain behind the orchestrator's resource and activity
+                     guard, prompt only. It is not ``execute_plan``: no
+                     planner, no workers, no tools, no queue.
+        transcribe   ``runtime.speech_runtime.transcribe_file(path, language)``
+        speak        ``runtime.voice_output.speak_to_file(text).audio_path``
+
+    Each refuses with ``busy`` while the runtime is busy or paused. A part the
+    runtime has not prepared is simply absent, and the link then answers
+    ``not_configured`` for what needs it.
+    """
+
+    def remote_chat(messages: list[dict[str, str]]) -> str:
+        _refuse_if_busy(runtime)
+        orchestrator = getattr(runtime, "orchestrator", None)
+
+        if orchestrator is None:
+            raise LinkOperationError("busy", "Qronos is still starting on the computer.")
+
+        return str(orchestrator.answer_web_prompt(chat_prompt(messages)))
+
+    def transcribe(wav_path: Path, language: str) -> str:
+        _refuse_if_busy(runtime)
+        speech = getattr(runtime, "speech_runtime", None)
+
+        if speech is None:
+            raise LinkOperationError("busy", "Speech recognition is not ready on the computer.")
+
+        return str(speech.transcribe_file(wav_path, language=language))
+
+    def speak(text: str) -> Path:
+        _refuse_if_busy(runtime)
+        voice = getattr(runtime, "voice_output", None)
+
+        if voice is None:
+            raise LinkOperationError("busy", "The voice is not ready on the computer.")
+
+        return Path(voice.speak_to_file(text).audio_path)
+
+    return LinkServices(remote_chat=remote_chat, transcribe=transcribe, speak=speak)
 
 
 # ------------------------------------------------------------------- runtime
