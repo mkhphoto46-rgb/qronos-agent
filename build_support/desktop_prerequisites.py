@@ -11,10 +11,12 @@ Instead:
 * ``build_support/webview2_prerequisite.json`` pins the exact Evergreen
   Standalone Installer (x64): its bytes, SHA-256, immutable download URL,
   declared runtime version and signing evidence.
-* A developer fetches that URL once into ``.cache/wv2/``. The build never
-  downloads; it verifies the cached file offline (size, SHA-256 and a valid
-  Authenticode signature through Windows ``WinVerifyTrust`` without revocation
-  network access) before every build.
+* A developer fetches that URL once into ``.cache/wv2/``, together with the
+  other one-time build tools (Cargo crates, Tauri's NSIS folder). The build
+  does not download: it verifies the cached file offline (size, SHA-256, and an
+  Authenticode signature by the pinned certificate through Windows
+  ``WinVerifyTrust`` without revocation network access), refuses to start
+  when Tauri's NSIS tools are incomplete, and runs Cargo with ``--offline``.
 * ``tauri.conf.json`` sets ``webviewInstallMode`` to ``skip`` and points to
   ``desktop/src-tauri/installer-hooks/webview2-offline.nsh``. build_desktop
   generates a wrapper that defines the verified path and includes that hook,
@@ -61,6 +63,25 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RUNTIME_VERSION = re.compile(r"[0-9]{1,5}(\.[0-9]{1,5}){3}")
 _NSIS_UNSAFE = re.compile(r'["$`\r\n;]')
 _READ_CHUNK = 4 * 1024 * 1024
+
+
+#: What the locked tauri-bundler 2.9.4 (inside @tauri-apps/cli 2.11.4) requires in its NSIS tool
+#: folder (src/bundle/windows/nsis/mod.rs NSIS_REQUIRED_FILES and NSIS_REQUIRED_FILES_HASH). When
+#: any file is missing or the plug-in hash differs, that bundler downloads NSIS 3.11 and
+#: nsis_tauri_utils.dll from GitHub during the build; the preflight refuses instead.
+TAURI_CLI_VERSION = "2.11.4"
+NSIS_REQUIRED_FILES = (
+    "makensis.exe", "Bin/makensis.exe", "Stubs/lzma-x86-unicode", "Stubs/lzma_solid-x86-unicode",
+    "Plugins/x86-unicode/additional/nsis_tauri_utils.dll", "Include/MUI2.nsh", "Include/FileFunc.nsh",
+    "Include/x64.nsh", "Include/nsDialogs.nsh", "Include/WinMessages.nsh", "Include/Win/COM.nsh",
+    "Include/Win/Propkey.nsh", "Include/Win/RestartManager.nsh",
+)
+NSIS_TAURI_UTILS = "Plugins/x86-unicode/additional/nsis_tauri_utils.dll"
+NSIS_TAURI_UTILS_SHA1 = "75197FEE3C6A814FE035788D1C34EAD39349B860"
+NSIS_URL = "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip"
+NSIS_SHA1 = "EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D"
+NSIS_TAURI_UTILS_URL = ("https://github.com/tauri-apps/nsis-tauri-utils/releases/download/"
+                        "nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll")
 
 
 class PrerequisiteError(RuntimeError):
@@ -242,6 +263,36 @@ def verify_installer(
             f"{expected['signerCertificateSha1']}.")
     return {"fileName": path.name, "bytes": size, "sha256": digest, "runtimeVersion": pin["runtime"]["version"],
             "authenticode": f"valid (WinVerifyTrust); signer {signer['subject']}, thumbprint {signer['thumbprintSha1']}"}
+
+
+# ------------------------------------------------- build-tool preflight
+
+
+def tauri_tools_dir() -> Path:
+    """Where the locked bundler keeps NSIS: dirs::cache_dir() / "tauri", i.e. %LOCALAPPDATA%/tauri."""
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local:
+        raise PrerequisiteError("LOCALAPPDATA is not set, so Tauri's NSIS tool folder cannot be located.")
+    return Path(local) / "tauri"
+
+
+def verify_build_tools(tools: Path, tauri_cli_version: str) -> dict[str, Any]:
+    """The prepared NSIS tool folder is complete, so the locked bundler will not download anything."""
+    if tauri_cli_version != TAURI_CLI_VERSION:
+        raise PrerequisiteError(f"@tauri-apps/cli is {tauri_cli_version}; the build-tool preflight was reviewed "
+                                f"against {TAURI_CLI_VERSION}. Re-check its NSIS download rules before building.")
+    nsis = tools / "NSIS"
+    missing = [name for name in NSIS_REQUIRED_FILES if not (nsis / name).is_file()]
+    if missing:
+        raise PrerequisiteError(
+            f"The Tauri NSIS tool folder {nsis} is missing {', '.join(missing)}; the build would download "
+            "NSIS from GitHub. Prepare it once as described in docs/offline-windows-installer.md.")
+    digest = hashlib.sha1((nsis / NSIS_TAURI_UTILS).read_bytes()).hexdigest().upper()
+    if digest != NSIS_TAURI_UTILS_SHA1:
+        raise PrerequisiteError(f"{NSIS_TAURI_UTILS} has SHA-1 {digest}, not {NSIS_TAURI_UTILS_SHA1}; the build "
+                                "would download a replacement. Prepare it once as described in "
+                                "docs/offline-windows-installer.md.")
+    return {"nsisToolDir": "%LOCALAPPDATA%/tauri/NSIS", "nsisTauriUtilsSha1": digest}
 
 
 # ------------------------------------------------------------ NSIS hook

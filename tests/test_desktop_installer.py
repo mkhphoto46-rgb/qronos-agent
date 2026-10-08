@@ -231,6 +231,76 @@ def test_the_real_cached_installer_verifies_and_a_tampered_copy_does_not(tmp_pat
         prerequisites.verify_installer(tampered, pin)
 
 
+# ------------------------------------------------- build-tool preflight
+
+
+def prepared_tools(tmp_path: Path) -> Path:
+    tools = tmp_path / "tauri"
+    for name in prerequisites.NSIS_REQUIRED_FILES:
+        (tools / "NSIS" / name).parent.mkdir(parents=True, exist_ok=True)
+        (tools / "NSIS" / name).write_bytes(b"tool")
+    return tools
+
+
+def test_a_prepared_nsis_tool_folder_passes(tmp_path, monkeypatch):
+    tools = prepared_tools(tmp_path)
+    plugin = tools / "NSIS" / prerequisites.NSIS_TAURI_UTILS
+    monkeypatch.setattr(prerequisites, "NSIS_TAURI_UTILS_SHA1",
+                        hashlib.sha1(plugin.read_bytes()).hexdigest().upper())
+
+    evidence = prerequisites.verify_build_tools(tools, "2.11.4")
+
+    assert evidence["nsisTauriUtilsSha1"] == prerequisites.NSIS_TAURI_UTILS_SHA1
+
+
+@pytest.mark.parametrize("missing", ["makensis.exe", "Stubs/lzma_solid-x86-unicode", "Include/x64.nsh",
+                                     "Plugins/x86-unicode/additional/nsis_tauri_utils.dll"])
+def test_an_incomplete_nsis_tool_folder_is_refused_instead_of_downloaded(tmp_path, missing):
+    tools = prepared_tools(tmp_path)
+    (tools / "NSIS" / missing).unlink()
+
+    with pytest.raises(PrerequisiteError, match=f"missing {re.escape(missing)}; the build would download"):
+        prerequisites.verify_build_tools(tools, "2.11.4")
+
+
+def test_a_wrong_nsis_tauri_utils_is_refused(tmp_path):
+    tools = prepared_tools(tmp_path)  # the stand-in plug-in bytes do not have the pinned SHA-1
+
+    with pytest.raises(PrerequisiteError, match="would download a replacement"):
+        prerequisites.verify_build_tools(tools, "2.11.4")
+
+
+def test_another_tauri_cli_version_needs_a_new_review(tmp_path):
+    with pytest.raises(PrerequisiteError, match="reviewed against 2.11.4"):
+        prerequisites.verify_build_tools(prepared_tools(tmp_path), "2.12.0")
+
+
+def test_the_preflight_matches_the_locked_cli():
+    lock = json.loads((build_desktop.ROOT / "desktop" / "package-lock.json").read_text(encoding="utf-8"))
+    assert lock["packages"]["node_modules/@tauri-apps/cli"]["version"] == prerequisites.TAURI_CLI_VERSION
+
+
+@pytest.mark.skipif(not (MAKENSIS and MAKENSIS.is_file()), reason="Tauri's NSIS folder is not prepared here.")
+def test_this_machines_prepared_nsis_folder_passes():
+    assert prerequisites.verify_build_tools(MAKENSIS.parent.parent, "2.11.4")["nsisTauriUtilsSha1"] == \
+        prerequisites.NSIS_TAURI_UTILS_SHA1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The desktop installer is built on Windows only.")
+def test_unprepared_build_tools_stop_before_anything_is_built(tmp_path, monkeypatch):
+    fake = FakeBuild(tmp_path, committed_pin())
+    backend = wire(tmp_path, monkeypatch, fake)
+
+    def refuse(tools, version):
+        raise PrerequisiteError("the build would download NSIS from GitHub")
+
+    monkeypatch.setattr(build_desktop, "verify_build_tools", refuse)
+
+    with pytest.raises(PrerequisiteError, match="would download NSIS"):
+        build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
+    assert "tauri" not in fake.calls and not (tmp_path / "w").exists()
+
+
 # ------------------------------------------------------- the NSIS hook
 
 
@@ -445,6 +515,7 @@ class FakeBuild:
     def run(self, command, **kwargs):
         self.calls.append("tauri")
         assert command[command.index("--bundles") + 1] == "nsis"
+        assert command[-2:] == ["--locked", "--offline"]  # Cargo may not fetch crates during the build
         overlay = json.loads(Path(command[command.index("--config") + 1]).read_text(encoding="utf-8"))
         self.overlays.append(overlay)
         release = Path(kwargs["env"]["CARGO_TARGET_DIR"]) / "release"
@@ -465,6 +536,9 @@ def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
     monkeypatch.setattr(build_desktop, "verify_installer",
                         lambda path, pin: fake.calls.append("prerequisite") or {"sha256": pin["sha256"]})
     monkeypatch.setattr(build_desktop, "find_seven_zip", lambda: tmp_path / "7z.exe")
+    monkeypatch.setattr(build_desktop, "tauri_tools_dir", lambda: tmp_path / "tools")
+    monkeypatch.setattr(build_desktop, "verify_build_tools",
+                        lambda tools, version: {"nsisToolDir": str(tools), "version": version})
     monkeypatch.setattr(build_desktop, "verify_manifest", lambda path: fake.calls.append("backend"))
     monkeypatch.setattr(build_desktop.shutil, "which", lambda name: "npm")
 

@@ -1,9 +1,12 @@
 """Build a Tauri installer with a verified standalone Qronos backend.
 
 This build-time tool requires a prepared Python bundle, the locked desktop
-dependencies and the pinned offline WebView2 installer in .cache/wv2/. It
-never packages local models, voice binaries or user state, and it never
-downloads anything (see docs/offline-windows-installer.md).
+dependencies, the pinned offline WebView2 installer in .cache/wv2/, the Cargo
+crates already fetched and Tauri's NSIS tool folder already prepared (one-time
+developer steps in docs/offline-windows-installer.md). It never packages local
+models, voice binaries or user state. It runs Cargo with --offline and refuses
+to start when the NSIS tools are incomplete, so the build itself downloads
+nothing; the finished installer never downloads anything either.
 """
 
 from __future__ import annotations
@@ -43,6 +46,8 @@ from build_support.desktop_prerequisites import (
     verify_embedded_payload,
     verify_generated_script,
     verify_installer,
+    tauri_tools_dir,
+    verify_build_tools,
     write_hook_wrapper,
 )
 
@@ -143,6 +148,7 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     installer = (webview2_installer or CACHE_DIR / pin["fileName"]).absolute()
     prerequisite = verify_installer(installer, pin)
     seven_zip = find_seven_zip()
+    build_tools = verify_build_tools(tauri_tools_dir(), _tauri_cli_version())
     backend = backend.resolve(strict=True)
     verify_manifest(backend)
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
@@ -186,7 +192,8 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     started = time.time()
     try:
         subprocess.run([npm, "run", "tauri", "--", "build", "--config", str(overlay),
-                        "--bundles", bundles, "--", "--locked"], cwd=ROOT / "desktop", env=environment, check=True)
+                        "--bundles", bundles, "--", "--locked", "--offline"], cwd=ROOT / "desktop", env=environment,
+                       check=True)
     except BaseException:
         if canonical.exists():
             quarantine(canonical)
@@ -213,7 +220,7 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
         quarantine(kept)
         raise
     return {"installer": kept, "work": work, "prerequisite": prerequisite, "entries": entries,
-            "provenance": record}
+            "provenance": record, "buildTools": build_tools}
 
 
 def main() -> int:

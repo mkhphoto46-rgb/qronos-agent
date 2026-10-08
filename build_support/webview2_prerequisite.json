@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "The exact Microsoft Edge WebView2 Runtime Evergreen Standalone Installer embedded in the Qronos NSIS installer. The build never downloads it: a developer fetches the pinned URL into .cache/wv2/ once, and build_support.build_desktop verifies these bytes offline before every build. Re-pinning is a reviewed change. Redistribution terms and installer signing are owner gates, not approvals recorded here.",
+  "comment": "The exact Microsoft Edge WebView2 Runtime Evergreen Standalone Installer embedded in the Qronos NSIS installer. The build does not download it: a developer fetches the pinned URL into .cache/wv2/ once, and build_support.build_desktop verifies these bytes offline before every build. Re-pinning is a reviewed change. Redistribution terms and installer signing are owner gates, not approvals recorded here.",
   "component": "Microsoft Edge WebView2 Runtime Evergreen Standalone Installer",
   "target": "x86_64-pc-windows-msvc",
   "architecture": "x64",

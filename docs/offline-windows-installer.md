@@ -10,8 +10,13 @@ bootstrapper during installation, which then downloads the runtime. With no
 internet connection, the installation stopped.
 
 The installer now carries the WebView2 Runtime inside it and installs it only
-when it is missing. Nothing is downloaded, either while building or while
-installing.
+when it is missing.
+
+- **Installing:** never downloads anything.
+- **Building:** downloads nothing either, but only after the one-time developer
+  preparation below has fetched the WebView2 installer, the Cargo crates and
+  Tauri's NSIS tools. The build checks that all of them are already present
+  and refuses to start otherwise; it does not quietly fetch them.
 
 This is technical packaging. It does not grant permission to redistribute
 Microsoft software, and it does not sign the Qronos installer. Both are owner
@@ -65,8 +70,8 @@ into the ignored `.cache/wv2/` folder.
    Set-Location "C:\path\to\Qronos"
    ```
 
-3. Create the cache folder and download the pinned file. This is the only step
-   that uses the internet:
+3. Create the cache folder and download the pinned file. This and steps 6 and
+   7 are the one-time preparation steps that use the internet:
 
    ```powershell
    New-Item -ItemType Directory -Force .cache\wv2 | Out-Null
@@ -89,6 +94,38 @@ into the ignored `.cache/wv2/` folder.
    build uses it only to read the finished installer, not to install anything.
    If `7z.exe` is not in `C:\Program Files\7-Zip`, set the `QRONOS_7ZIP`
    environment variable to its full path.
+
+6. Fetch the Rust crates once. The build runs Cargo with `--offline`, so it
+   fails instead of downloading a missing crate:
+
+   ```powershell
+   Set-Location desktop\src-tauri
+   cargo fetch --locked
+   Set-Location ..\..
+   ```
+
+7. Prepare Tauri's NSIS tools once. On a machine where it has never built an
+   installer, the locked Tauri bundler (`tauri-bundler` 2.9.4, inside
+   `@tauri-apps/cli` 2.11.4) downloads two files from GitHub during the build.
+   `build_desktop` refuses to start until they are already in place:
+
+   - NSIS 3.11:
+     `https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip`
+     (SHA-1 `EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D`). Unpack it so that
+     `%LOCALAPPDATA%\tauri\NSIS\makensis.exe` exists. The zip contains a
+     folder `nsis-3.11`; rename it to `NSIS`.
+   - `nsis_tauri_utils.dll` v0.5.3:
+     `https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll`
+     (SHA-1 `75197FEE3C6A814FE035788D1C34EAD39349B860`), saved as
+     `%LOCALAPPDATA%\tauri\NSIS\Plugins\x86-unicode\additional\nsis_tauri_utils.dll`.
+
+   Check the hashes with `Get-FileHash -Algorithm SHA1 <file>` before using the
+   files. Any machine that has built a Tauri NSIS installer before already has
+   this folder.
+
+   The preflight checks every file the locked bundler requires and the plug-in's
+   exact SHA-1. It also stops if `@tauri-apps/cli` is no longer 2.11.4, because
+   a newer bundler may have different download rules.
 
 ## Building
 
@@ -113,8 +150,13 @@ the first failure.
 - No updater artifacts and no minimum WebView2 version are configured. Either
   would make the installer contact Microsoft.
 - The cached WebView2 installer has the pinned size and SHA-256, a valid
-  signature checked offline, and no link in its path.
+  signature by the pinned Microsoft certificate (thumbprint, subject and
+  issuer) checked offline, and no link in its path.
+- Tauri's NSIS tool folder holds every file the locked bundler needs, with the
+  pinned `nsis_tauri_utils.dll` SHA-1, and `@tauri-apps/cli` is still 2.11.4.
+  Otherwise Tauri would download NSIS during the build.
 - 7-Zip is available and the backend manifest verifies.
+- Cargo then runs with `--locked --offline`.
 
 **During the build**
 - It creates a new folder under `runtime/package/desktop-builds/` (ignored by

@@ -4,8 +4,10 @@
 ; section neither downloads nor embeds anything. This hook installs the
 ; Microsoft Edge WebView2 Runtime from the Evergreen Standalone Installer that
 ; build_support.build_desktop verified against build_support/
-; webview2_prerequisite.json and embedded at compile time. Nothing is
-; downloaded, at build time or at install time.
+; webview2_prerequisite.json and embedded at compile time. The installer never
+; downloads anything. The build downloads nothing either, once the one-time
+; developer tool preparation in that document is done; build_desktop refuses
+; to start without it.
 ;
 ; build_desktop generates a small wrapper that defines the values below and
 ; includes this file. Built any other way (for example a plain
