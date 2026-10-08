@@ -216,6 +216,29 @@ def test_bundled_binary_reached_through_a_junction_is_refused(setup, tmp_path):
         setup.plan(roots=("python313.dll", "_tcl_data"))
 
 
+@pytest.mark.parametrize("root", ["tcl9", "tk9.0", "TCL8.6", "_tcl_data", "_tk_data", "tk"])
+def test_tcl_tk_shaped_folder_without_an_audited_tree_is_refused(setup, root):
+    """A Tcl 9-style script folder must never pass as plain Python code without Tcl/Tk texts."""
+    raw = setup.variant()
+    raw["interpreters"][0]["dataTrees"] = {}
+    raw["components"].pop("tcl@8.6.15")
+    raw["texts"].pop("tcl/license.terms")
+    (setup.builder.text_root / "tcl" / "license.terms").unlink()
+    folder = setup.internal / root
+    folder.mkdir()
+    (folder / "init.tcl").write_bytes(b"# script library only, no native code")
+    with pytest.raises(UnsupportedCPythonBuild, match=f"Tcl/Tk data folder {root} is not an audited data tree"):
+        setup.plan(setup.load(raw), roots=("python313.dll", root))
+
+
+def test_tkinter_python_package_folder_is_not_mistaken_for_tcl_data(setup):
+    (setup.internal / "tkinter").mkdir()
+    (setup.internal / "tkinter" / "__init__.py").write_bytes(b"# python")
+    plan = setup.plan(roots=("python313.dll", "tkinter"))
+    assert plan.inventory["pythonRoots"] == ["tkinter"]
+    assert "tcl@8.6.15" not in {item["id"] for item in plan.inventory["components"]}
+
+
 def test_microsoft_file_is_never_attributed_to_cpython(setup):
     (setup.python / "vcruntime140.dll").write_bytes(b"ms")
     raw = setup.builder.raw(

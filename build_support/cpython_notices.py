@@ -50,6 +50,10 @@ _NATIVE = (".dll", ".pyd")
 # Folders PyInstaller fills from a CPython installation's Tcl/Tk tree (Tcl/Tk
 # 8.6). Bundling one always requires an audited data tree.
 TCL_TK_DATA_ROOTS = frozenset({"_tcl_data", "_tk_data", "tcl8"})
+# Any folder shaped like Tcl/Tk script data (tcl9, tk9.0, _tcl_data, ...) also
+# needs an audited tree; it is never accepted as plain Python code. "tkinter"
+# is not matched.
+_TCL_TK_LIKE = re.compile(r"^_?(tcl|tk)([0-9]|_data$|$)", re.IGNORECASE)
 
 _SOURCE_KEYS = {
     "archive-member": {"kind", "url", "archiveSha256", "member", "pinnedBy"},
@@ -510,7 +514,7 @@ def plan_cpython_notices(
                           "components": list(tree["components"])})
             for key in tree["components"]:
                 selected.setdefault(key, set()).add(root)
-        elif path.is_dir() and root in TCL_TK_DATA_ROOTS:
+        elif path.is_dir() and (root in TCL_TK_DATA_ROOTS or _TCL_TK_LIKE.match(root)):
             _unsupported(f"bundled Tcl/Tk data folder {root} is not an audited data tree of {record['id']}.")
         elif path.is_dir():
             native = [
