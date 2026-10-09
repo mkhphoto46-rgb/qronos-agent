@@ -1,0 +1,198 @@
+import { useEffect, useState } from "react";
+
+import { launchUpdate, refusalText, shortDigest, UpdateRefused } from "../updateStore";
+import type { UpdateClient, UpdateOffer, UpdateStatus } from "../updateStore";
+
+type UpdatePanelProps = {
+  client: UpdateClient;
+  visible: boolean;
+  /** Native dialogs (Control): one installer + its manifest, or a folder; null when cancelled. */
+  pickPackage: () => Promise<{ installer: string; manifest: string } | null>;
+  pickFolder: () => Promise<string | null>;
+  /** Really stops the runtime bridge and reports whether it stopped (Control/Runtime). */
+  stopRuntime: () => Promise<boolean>;
+  restartRuntime: () => Promise<void>;
+  exitApp: () => Promise<void>;
+};
+
+const KIND_TEXT: Record<UpdateOffer["kind"], string> = {
+  upgrade: "ارتقا",
+  repair: "تعمیر (نصب دوبارهٔ همین نسخه)",
+  rollback: "بازگشت به نسخهٔ قدیمی‌تر",
+};
+
+// Install a signed Qronos update from a file the person chose. Nothing is
+// downloaded. The approval secret lives only in this component's transient
+// state and is cleared on submit, on cancel and whenever the panel is hidden;
+// tokens are kept in memory only and dropped the same way.
+function UpdatePanel(props: UpdatePanelProps) {
+  const { client, visible } = props;
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [offer, setOffer] = useState<UpdateOffer | null>(null);
+  const [approvalToken, setApprovalToken] = useState<string | null>(null);
+  const [launchToken, setLaunchToken] = useState<string | null>(null);
+  const [secret, setSecret] = useState("");
+  const [candidates, setCandidates] = useState<{ installer: string; manifest: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const reset = () => {
+    setSecret("");
+    setOffer(null);
+    setApprovalToken(null);
+    setLaunchToken(null);
+    setCandidates([]);
+  };
+
+  const refresh = async () => {
+    try {
+      setStatus(await client.status());
+    } catch (error) {
+      setMessage(error instanceof UpdateRefused ? error.message : refusalText("unknown"));
+    }
+  };
+
+  useEffect(() => {
+    if (visible) {
+      void refresh();
+    } else {
+      reset();
+      setMessage(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+
+  const run = async (step: () => Promise<void>) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await step();
+    } catch (error) {
+      setMessage(error instanceof UpdateRefused ? error.message : refusalText("unknown"));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+
+  const check = (chosen: { installer: string; manifest: string }) => run(async () => {
+    reset();
+    const answer = await client.request(chosen.installer, chosen.manifest);
+    setOffer(answer.offer);
+    setApprovalToken(answer.approvalToken);
+  });
+
+  const chooseFile = () => run(async () => {
+    const chosen = await props.pickPackage();
+    if (chosen) {
+      await check(chosen);
+    }
+  });
+
+  const chooseFolder = () => run(async () => {
+    const folder = await props.pickFolder();
+    if (folder) {
+      setCandidates(await client.discover(folder));
+    }
+  });
+
+  const approve = () => run(async () => {
+    if (!approvalToken || !secret) return;
+    const typed = secret;
+    setSecret("");
+    const answer = await client.approve(approvalToken, typed);
+    setApprovalToken(null);
+    setLaunchToken(answer.launchToken);
+  });
+
+  const launch = () => run(async () => {
+    if (!launchToken) return;
+    const token = launchToken;
+    setLaunchToken(null);
+    await launchUpdate(client, token, props);
+  });
+
+  const discard = () => run(async () => {
+    reset();
+    await client.discard();
+  });
+
+  const trust = status?.trust;
+
+  return (
+    <section className="update-panel" dir="rtl" aria-label="به‌روزرسانی Qronos">
+      <h3>به‌روزرسانی از فایل</h3>
+      <p>نسخهٔ فعلی: {status?.runningVersion ?? "—"}</p>
+      {trust && !trust.configured && (
+        <p role="status">
+          هیچ کلید امضای مالک تنظیم نشده است؛ تا وقتی تنظیم نشود هیچ بسته‌ای پذیرفته نمی‌شود.
+        </p>
+      )}
+      {status?.outcome && (
+        <p role="status">
+          {status.outcome.result === "applied"
+            ? `به‌روزرسانی ${status.outcome.version} نصب شد.`
+            : `به‌روزرسانی ${status.outcome.version} نصب نشد؛ می‌توانید دوباره تلاش کنید یا آن را کنار بگذارید.`}
+        </p>
+      )}
+      <div className="update-actions">
+        <button type="button" onClick={chooseFile} disabled={busy}>انتخاب فایل نصب‌کننده…</button>
+        <button type="button" onClick={chooseFolder} disabled={busy}>جستجو در یک پوشه…</button>
+        {status && status.phase !== "idle" && (
+          <button type="button" onClick={discard} disabled={busy}>کنار گذاشتن به‌روزرسانی آماده</button>
+        )}
+      </div>
+      {candidates.length > 0 && (
+        <ul className="update-candidates">
+          {candidates.map((item) => (
+            <li key={item.installer}>
+              <button type="button" onClick={() => check(item)} disabled={busy}>
+                {item.installer.split(/[\\/]/).pop()}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {offer && (
+        <div className="update-offer" role="group" aria-label="تأیید به‌روزرسانی">
+          <p>{KIND_TEXT[offer.kind]}: از {offer.fromVersion} به {offer.version}</p>
+          <p>امضاکننده: {offer.owner} (کلید {offer.keyId.slice(0, 8)})</p>
+          <p dir="ltr">SHA-256: {shortDigest(offer.packageSha256)}…</p>
+          {offer.changedStores.length > 0 && (
+            <p>قالب این داده‌ها تغییر می‌کند و پیش از نصب نسخهٔ پشتیبان گرفته می‌شود: {offer.changedStores.join("، ")}</p>
+          )}
+          {offer.restoreSnapshot && (
+            <p role="alert">
+              این بازگشت داده‌های ذخیره‌شده پیش از ارتقا را برمی‌گرداند. تغییرات بعد از آن ارتقا در همان داده‌ها
+              کنار گذاشته می‌شود؛ وضعیت فعلی پیش از آن جداگانه نگه داشته می‌شود.
+            </p>
+          )}
+          {offer.notes && <p className="update-notes">{offer.notes}</p>}
+          {approvalToken && (
+            <label>
+              رمز تأیید
+              <input
+                type="password"
+                autoComplete="off"
+                value={secret}
+                onChange={(event) => setSecret(event.target.value)}
+                disabled={busy}
+              />
+            </label>
+          )}
+          {approvalToken && (
+            <button type="button" onClick={approve} disabled={busy || !secret}>تأیید و آماده‌سازی</button>
+          )}
+          {launchToken && (
+            <button type="button" onClick={launch} disabled={busy}>
+              بستن Qronos و اجرای نصب‌کننده
+            </button>
+          )}
+        </div>
+      )}
+      {message && <p role="alert">{message}</p>}
+    </section>
+  );
+}
+
+export default UpdatePanel;
