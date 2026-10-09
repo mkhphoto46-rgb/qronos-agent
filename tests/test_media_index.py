@@ -256,13 +256,15 @@ def test_pause_mid_stage_keeps_checkpoint_and_resume_continues(tmp_path: Path, b
     service.scan()
     monkeypatch.setattr(stages_module, "SCENE_CHUNK_SECONDS", 1.5)
     starts: list[str] = []
+    pauses = {"left": 1}  # one pause, in the first run; the resumed run must complete
     real = stages_module.run_bounded
     other = MediaStore(service.layout.database)  # "another process" holding its own connection
 
     def recording(argv, **kwargs):
         if "scdet" in " ".join(argv):
             starts.append(argv[argv.index("-ss") + 1])
-            if len(starts) == 2:
+            if len(starts) == 2 and pauses["left"]:
+                pauses["left"] -= 1
                 other.set_meta("paused", "1")
         return real(argv, **kwargs)
 

@@ -22,14 +22,14 @@ import re
 import sqlite3
 from typing import Callable
 
-from qronos_media.identity import checked_asset_id, full_sha256
+from qronos_media.identity import FileState, HashCancelled, checked_asset_id, full_sha256
 from qronos_media.paths import UnsafeMediaPath, owned_child, readable_media_file
 from qronos_media.scope import OutOfScope, admit_sidecar
 from qronos_media.probe import ProbeResult, probe
 from qronos_media.resources import StageNeeds
 from qronos_media.subtitles import (
-    IMAGE_SUBTITLE_CODECS, TEXT_SUBTITLE_CODECS, Cue, SubtitleError, decode_subtitle_bytes, find_sidecars,
-    parse_srt, read_subtitle_file,
+    IMAGE_SUBTITLE_CODECS, MAX_SUBTITLE_BYTES, TEXT_SUBTITLE_CODECS, Cue, SubtitleError, decode_subtitle_bytes,
+    find_sidecars, parse_srt, parse_subtitle_text,
 )
 from qronos_media.text import normalise_for_search
 from qronos_media.tools import ASS_DEMUXERS, ChildCancelled, MediaTools, MediaToolUnavailable, run_bounded
@@ -87,6 +87,9 @@ MIN_SCENE_MS = 400
 LONG_SCENE_MS = 20_000
 MAX_KEYFRAMES_PER_ASSET = 3_000
 SUBTITLE_STDOUT_LIMIT = 32 * 1024 * 1024
+#: Sidecar reads are chunked so pause, Stop, the deadline, permission loss and
+#: lease loss are observed between chunks (through the stage's watch).
+SIDECAR_READ_CHUNK = 256 * 1024
 
 _SCDET = re.compile(rb"lavfi\.scd\.score:\s*([0-9.]+),\s*lavfi\.scd\.time:\s*([0-9.]+)")
 _PROGRESS_TIME = re.compile(rb"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
@@ -134,7 +137,12 @@ class StageContext:
         return self.tools
 
     def primary_file(self) -> Path:
-        """The copy a decoder may open: admitted again now, no link anywhere on its path."""
+        """The copy a decoder may open: admitted again now, no link anywhere on its path.
+
+        If no copy can be admitted now (its root was revoked or its approval
+        expired, or it left scope), the stage is *refused*, not failed: the
+        runner requeues it and says why.
+        """
         if self.admit is None:
             raise StageFailed("no admission check was provided; refusing to open any copy")
         for path in self.files:
@@ -142,7 +150,16 @@ class StageContext:
                 return readable_media_file(self.admit(path))
             except (UnsafeMediaPath, OutOfScope):
                 continue
-        raise StageFailed("no present, in-scope, link-free copy of this asset")
+        raise OutOfScope("no_admitted_copy")
+
+    def reopen(self, path: Path) -> Path:
+        """Fresh admission (scope + the copy's own root, asked now) before *each* decoder spawn."""
+        if self.admit is None:
+            raise StageFailed("no admission check was provided; refusing to open any copy")
+        try:
+            return readable_media_file(self.admit(path))
+        except UnsafeMediaPath:
+            raise OutOfScope("unsafe_path") from None
 
     def asset(self) -> sqlite3.Row:
         return self.db.execute("SELECT * FROM assets WHERE asset_id = ?", (self.asset_id,)).fetchone()
@@ -218,6 +235,28 @@ class _Track:
     cues: list[Cue] = field(default_factory=list)
 
 
+def read_bounded(path: Path, limit: int, cancelled) -> bytes:
+    """Read at most ``limit`` bytes in chunks, checking ``cancelled`` before each chunk.
+
+    More than ``limit`` bytes (the file grew after its size was checked)
+    refuses the file. Cancellation raises ChildCancelled, never a partial success.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    with open(path, "rb") as handle:
+        while True:
+            if cancelled():
+                raise ChildCancelled("subtitle read stopped")
+            chunk = handle.read(min(SIDECAR_READ_CHUNK, limit + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise SubtitleError("subtitle file is too large")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _extract_embedded(ctx: StageContext, path: Path, index: int, demuxers=None) -> list[Cue]:
     tools = ctx.require_tools()
     argv = tools.subtitle_argv(path, index) if demuxers is None else tools.subtitle_argv(path, index, demuxers=demuxers)
@@ -232,6 +271,75 @@ def _extract_embedded(ctx: StageContext, path: Path, index: int, demuxers=None) 
     return parse_srt(text)
 
 
+def _refused_track(ctx: StageContext, sidecar, n: int, detail: str) -> "_Track":
+    return _Track(f"{ctx.asset_id}:s-refused-{n}", "sidecar", sidecar_path=str(sidecar.path),
+                  language=sidecar.language, codec=sidecar.path.suffix.lower().lstrip("."),
+                  status="failed", detail=detail)
+
+
+def _read_sidecar(ctx: StageContext, copy: Path, sidecar, n: int, seen_hashes: set[str]) -> "_Track | None":
+    """One sidecar, as one observed and bounded handoff.
+
+    1. Its size is checked first: over MAX_SUBTITLE_BYTES it is refused with
+       no read and no decoder spawn.
+    2. Its identity hash streams through ``full_sha256`` with the stage's
+       cancellation, so pause, Stop, the deadline, permission loss and lease
+       loss stop it between chunks (a typed ChildCancelled, never success).
+    3. SRT/VTT are then read in bounded chunks (at most the size limit) and
+       must hash to that same digest, so the stored hash is of exactly the
+       bytes parsed. ASS/SSA are decoded by ffmpeg with bounded output.
+    4. The file must not have changed (size, mtime, file id) at the end.
+
+    The hash and the read/decode are separate opens, so the copy and the
+    sidecar are admitted again, with a fresh gate answer, right before the
+    read/decode as well (the caller did so before the hash).
+    """
+    try:
+        before = FileState.of(sidecar.path)
+    except OSError as exc:
+        return _refused_track(ctx, sidecar, n, f"unreadable: {type(exc).__name__}")
+    if before.size > MAX_SUBTITLE_BYTES:
+        return _refused_track(ctx, sidecar, n, f"too large: {before.size} bytes (limit {MAX_SUBTITLE_BYTES})")
+    try:
+        digest = full_sha256(sidecar.path, cancelled=ctx.cancelled)
+    except HashCancelled:
+        raise ChildCancelled("subtitle hash stopped") from None
+    except OSError as exc:
+        return _refused_track(ctx, sidecar, n, f"unreadable: {type(exc).__name__}")
+    try:
+        grown = FileState.of(sidecar.path).size > MAX_SUBTITLE_BYTES
+    except OSError:
+        grown = True
+    if grown:
+        return _refused_track(ctx, sidecar, n, "too large or gone after hashing")
+    if digest in seen_hashes:
+        return None  # the same subtitle beside two copies of the same film
+    seen_hashes.add(digest)
+    track = _Track(
+        track_id=f"{ctx.asset_id}:s{digest[:16]}", source="sidecar", sidecar_path=str(sidecar.path),
+        sidecar_sha256=digest, language=sidecar.language, forced="forced" in sidecar.flags,
+        codec=sidecar.path.suffix.lower().lstrip("."),
+    )
+    ctx.checkpoint_boundary()
+    admit_sidecar(ctx.admit(copy), sidecar.path, ctx.excluded)  # fresh, right before the second open
+    try:
+        if sidecar.path.suffix.lower() in {".ass", ".ssa"}:
+            track.cues = _extract_embedded(ctx, sidecar.path, 0, demuxers=ASS_DEMUXERS)
+            track.encoding = "ffmpeg"
+        else:
+            data = read_bounded(sidecar.path, MAX_SUBTITLE_BYTES, ctx.cancelled)
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise SubtitleError("the subtitle file changed while it was read")
+            text, track.encoding = decode_subtitle_bytes(data)
+            track.cues = parse_subtitle_text(text, sidecar.path.suffix)
+        if FileState.of(sidecar.path) != before:
+            raise SubtitleError("the subtitle file changed while it was read")
+    except (SubtitleError, MediaToolUnavailable, OSError) as exc:
+        track.cues = []
+        track.status, track.detail = "failed", str(exc)[:300]
+    return track
+
+
 def run_subtitles(ctx: StageContext) -> Commit:
     tracks: list[_Track] = []
     video = ctx.primary_file()
@@ -240,6 +348,7 @@ def run_subtitles(ctx: StageContext) -> Commit:
         (ctx.asset_id,),
     ).fetchall()
     for row in streams:
+        video = ctx.reopen(video)  # every embedded extraction reopens the video: admit it again now
         track = _Track(
             track_id=f"{ctx.asset_id}:e{row['idx']}", source="embedded", stream_index=row["idx"],
             language=row["language"], title=row["title"], codec=row["codec"], forced=bool(row["forced"]),
@@ -259,31 +368,12 @@ def run_subtitles(ctx: StageContext) -> Commit:
     seen_hashes: set[str] = set()
     for copy in ctx.files:
         for sidecar in admitted_sidecars(ctx.admit(copy), ctx.excluded):
-            if ctx.cancelled():
-                raise ChildCancelled("subtitles cancelled")
-            try:
-                digest = full_sha256(sidecar.path)
-            except OSError as exc:
-                tracks.append(_Track(f"{ctx.asset_id}:s-unreadable-{len(tracks)}", "sidecar",
-                                     sidecar_path=str(sidecar.path), status="failed", detail=type(exc).__name__))
-                continue
-            if digest in seen_hashes:
-                continue  # the same subtitle beside two copies of the same film
-            seen_hashes.add(digest)
-            track = _Track(
-                track_id=f"{ctx.asset_id}:s{digest[:16]}", source="sidecar", sidecar_path=str(sidecar.path),
-                sidecar_sha256=digest, language=sidecar.language, forced="forced" in sidecar.flags,
-                codec=sidecar.path.suffix.lower().lstrip("."),
-            )
-            try:
-                if sidecar.path.suffix.lower() in {".ass", ".ssa"}:
-                    track.cues = _extract_embedded(ctx, sidecar.path, 0, demuxers=ASS_DEMUXERS)
-                    track.encoding = "ffmpeg"
-                else:
-                    track.cues, track.encoding = read_subtitle_file(sidecar.path)
-            except (SubtitleError, MediaToolUnavailable, OSError) as exc:
-                track.status, track.detail = "failed", str(exc)[:300]
-            tracks.append(track)
+            # Each sidecar is its own read handoff: stop/pause/deadline/permission
+            # (uncached), then the copy's root and the sidecar are admitted again now.
+            ctx.checkpoint_boundary()
+            admit_sidecar(ctx.admit(copy), sidecar.path, ctx.excluded)
+            tracks.append(_read_sidecar(ctx, copy, sidecar, len(tracks), seen_hashes))
+    tracks = [track for track in tracks if track is not None]
 
     def commit(db: sqlite3.Connection) -> None:
         db.execute("DELETE FROM dialogue WHERE asset_id = ?", (ctx.asset_id,))
@@ -376,6 +466,7 @@ def run_scenes(ctx: StageContext) -> Commit:
         ctx.renew()
         begin = max(0.0, start - SCENE_OVERLAP_SECONDS) if start > 0 else 0.0
         length = SCENE_CHUNK_SECONDS + (start - begin)
+        video = ctx.reopen(video)  # each chunk is a new decoder open
         result = run_bounded(
             tools.scenes_argv(video, start_seconds=begin, length_seconds=length, threshold=SCENE_THRESHOLD),
             # A ceiling, not an estimate of decode speed.
@@ -472,6 +563,7 @@ def run_keyframes(ctx: StageContext) -> Commit:
             if cache_bytes(ctx.db) >= ctx.cache_quota_bytes:
                 raise StageFailed("keyframe cache quota reached")
             target = owned_child(directory, f"{index:06d}_{ordinal}.jpg")
+            video = ctx.reopen(video)  # each frame is a new decoder open
             result = run_bounded(
                 tools.keyframe_argv(video, time_seconds=at / 1000.0, output=target),
                 timeout_seconds=60.0, stdout_limit=64 * 1024, stderr_limit=256 * 1024,

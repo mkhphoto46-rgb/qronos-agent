@@ -19,6 +19,7 @@ from typing import Any, Sequence
 from core.action_audit import ActionAuditLog
 from qronos_media.paths import UnsafeMediaPath
 from qronos_media.permissions import GatePermissions, MediaPermissionRefused
+from qronos_media.scope import OutOfScope
 from qronos_media.resources import StandaloneCpuAuthority
 from qronos_media.search import SearchError
 from qronos_media.service import (
@@ -164,7 +165,7 @@ def main(argv: Sequence[str] | None = None, *, service: MediaService | None = No
                 cache_quota_bytes=max(1, args.cache_quota_mb) * 1024**2,
             )
         result = dispatch(service, args)
-    except (MediaRequestError, UnsafeMediaPath, SearchError, MediaPermissionRefused) as exc:
+    except (MediaRequestError, UnsafeMediaPath, SearchError, MediaPermissionRefused, OutOfScope) as exc:
         _emit({"error": str(exc)})
         return 2
     finally:

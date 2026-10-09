@@ -267,13 +267,14 @@ class RunReport:
     failed: list[str] = field(default_factory=list)
     identity_changed: list[str] = field(default_factory=list)
     out_of_scope: list[str] = field(default_factory=list)
+    refused: list[str] = field(default_factory=list)
     refused_roots: dict[str, str] = field(default_factory=dict)
     stopped: str = "idle"
     detail: str = ""
 
     def as_json(self) -> dict[str, object]:
         return {"hashed": self.hashed, "completed": self.completed, "failed": self.failed,
-                "identityChanged": self.identity_changed, "outOfScope": self.out_of_scope,
+                "identityChanged": self.identity_changed, "outOfScope": self.out_of_scope, "refused": self.refused,
                 "refusedRoots": self.refused_roots,
                 "stopped": self.stopped, "detail": self.detail}
 
@@ -565,7 +566,7 @@ class StageRunner:
             outcome = self._run_one(row["asset_id"], row["stage"], row["checkpoint"], report, deadline)
             if outcome in {"deferred", "stop"}:
                 return report
-            if outcome in {"identity_changed", "no_verified_file", "cancelled"}:
+            if outcome in {"identity_changed", "no_verified_file", "cancelled", "refused"}:
                 skip.add(row["asset_id"])
         report.stopped = "stage_budget"
         return report
@@ -630,6 +631,16 @@ class StageRunner:
                 commit = RUNNERS[stage](ctx)
             except ChildCancelled:
                 return self._interrupted(asset_id, stage, report, watch.reason)
+            except OutOfScope as exc:
+                # A copy could not be admitted at a read handoff (its root was
+                # revoked or its approval expired, or it left scope): refused,
+                # requeued with the reason, never a crash or a stuck RUNNING row.
+                self._set(asset_id, stage, "QUEUED", note=f"refused:{exc.reason}")
+                report.refused.append(f"{key}:{exc.reason}")
+                permission = exc.reason in {"not_allowed", "no_admitted_copy"}
+                report.stopped = "permission" if permission else "out_of_scope"
+                report.detail = f"refused:{exc.reason}"
+                return "stop"
             except ResourceRefused as exc:
                 self._set(asset_id, stage, "QUEUED", note=f"deferred:{exc.reason}")
                 report.stopped, report.detail = "deferred", str(exc)
@@ -648,6 +659,11 @@ class StageRunner:
                         "WHERE asset_id = ? AND stage = ? AND state = 'RUNNING'", (asset_id, stage))
                 report.identity_changed.append(key)
                 return "identity_changed"
+            # Last look before anything is committed: work finished under a
+            # tripped watch (pause, deadline, lost lease) or after any bound
+            # root lost permission (asked fresh here) is requeued, not kept.
+            if watch.now() or (watch.roots and not watch.roots <= self.allowed_roots(max_age=0)):
+                return self._interrupted(asset_id, stage, report, watch.reason or "permission")
             with self.store.transaction() as db:
                 current = db.execute("SELECT state FROM stages WHERE asset_id = ? AND stage = ?",
                                      (asset_id, stage)).fetchone()
