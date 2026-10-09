@@ -37,6 +37,10 @@ class PaintVerificationUnavailable(PaintAdapterError):
     """The drawing cannot be verified stroke by stroke (no capture or no tool regions)."""
 
 
+class PaintPlanNotApproved(PaintAdapterError):
+    """The plan to draw is not exactly the visually approved one; nothing about the window."""
+
+
 
 @dataclass(frozen=True)
 class PaintCanvasRegion:
@@ -182,11 +186,11 @@ class PaintAdapter:
         trusted callers, but agent sketch execution should use this gate.
         """
         if not isinstance(approved_sketch, VisualApprovedSketch):
-            raise PaintAdapterError(
+            raise PaintPlanNotApproved(
                 "Paint sketch execution requires a VisualApprovedSketch capability."
             )
         if digest_shape_plan(approved_sketch.plan) != approved_sketch.plan_digest:
-            raise PaintAdapterError(
+            raise PaintPlanNotApproved(
                 "VisualApprovedSketch plan digest does not match the frozen approved plan."
             )
 

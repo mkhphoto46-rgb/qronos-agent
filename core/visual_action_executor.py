@@ -190,6 +190,10 @@ class VisualActionExecutor:
         # its row/column and window) unchanged where Vision found it; the
         # cursor then moves, one more frame must show nothing opened because
         # of the motion, and only then is the button pressed, without motion.
+        # A locator that grounded a box with the point (VisionGrounder) lets
+        # the whole control show its own hover highlight after the motion;
+        # confirmed_press checks, clips and caps that box. The point-only
+        # VisualTargetLocator has none, so only the point scope may change.
         clicked = press_grounded_point(
             target.point,
             fingerprint,
@@ -203,6 +207,7 @@ class VisualActionExecutor:
             screen_approved=screen_approved,
             reason="Confirm the located target is still in place before the click.",
             cancel_token=self.cancel_token,
+            grounded_box=getattr(target, "screen_box", None),
         )
 
         # Native input is considered successful only if the exact window and

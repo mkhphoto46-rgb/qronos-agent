@@ -15,14 +15,21 @@ The order here is:
 4. take one more frame and require it to equal the step-2 frame everywhere
    except the target box itself plus a small margin, where the control's own
    hover highlight may appear. A tooltip, menu or anything else that appeared
-   because of the motion refuses the press;
+   because of the motion refuses the press. For a point target the "target
+   box" of this allowance may be the box the locator grounded (a whole button
+   highlights as a whole), but only after it is checked: it must contain the
+   point, it is clipped to the bound window's client area, and a box larger
+   than a button (HOVER_BOX_MAX_*, scaled by the window's DPI, and never more
+   than half the client width or height) is not used at all, so the strict
+   point scope stays. The checks of step 2 are never widened by it;
 5. check Stop, then press and release at the cursor's current position: the
    cursor is already there, so no further motion happens before the press.
 
 Limits (stated, not hidden): a change that happens between step 4's frame and
-the press (milliseconds) is not seen; a change confined to the target box
-during the motion cannot be told apart from its hover highlight; the native
-press itself is one call and is not interrupted by Stop.
+the press (milliseconds) is not seen; a change confined to the hover-allowance
+box (the target box, or the checked grounded box) during the motion cannot be
+told apart from its hover highlight; the native press itself is one call and
+is not interrupted by Stop.
 """
 
 from __future__ import annotations
@@ -51,6 +58,45 @@ from core.window_binding import WindowBinder, WindowBinding, WindowRect
 
 #: Where the control's own hover highlight may appear after the motion.
 HOVER_MARGIN_PIXELS = 4
+#: The largest grounded box (logical pixels at 96 DPI) accepted as a control's
+#: own hover area. Larger boxes are not buttons; they are not used.
+HOVER_BOX_MAX_WIDTH = 320
+HOVER_BOX_MAX_HEIGHT = 96
+
+
+def hover_allowance_box(
+    box: WindowRect | None,
+    x: int,
+    y: int,
+    client: WindowRect,
+    *,
+    dpi: int = 96,
+) -> WindowRect | None:
+    """The checked grounded box usable as the after-motion hover allowance, or None.
+
+    None (keep the strict target box) when there is no box, when it does not
+    contain the point, or when, clipped to the client area, it is larger than a
+    button: wider or taller than HOVER_BOX_MAX_* at the window's DPI, or than
+    half the client's width or height.
+    """
+    if box is None:
+        return None
+    if not (box.left <= x < box.right and box.top <= y < box.bottom):
+        return None
+    clipped = WindowRect(
+        max(box.left, client.left),
+        max(box.top, client.top),
+        min(box.right, client.right),
+        min(box.bottom, client.bottom),
+    )
+    if not (clipped.left <= x < clipped.right and clipped.top <= y < clipped.bottom):
+        return None
+    scale = max(1.0, int(dpi) / 96.0)
+    too_wide = clipped.width > min(HOVER_BOX_MAX_WIDTH * scale, client.width / 2)
+    too_tall = clipped.height > min(HOVER_BOX_MAX_HEIGHT * scale, client.height / 2)
+    if too_wide or too_tall:
+        return None
+    return clipped
 
 
 def press_grounded_target(
@@ -110,8 +156,15 @@ def press_grounded_point(
     before_press: Callable[[], None] | None = None,
     max_age_seconds: float = GROUNDING_MAX_AGE_SECONDS,
     clock: Clock = monotonic,
+    grounded_box: WindowRect | None = None,
 ) -> Any:
-    """press_grounded_target for a point-only target with its recorded pixels."""
+    """press_grounded_target for a point-only target with its recorded pixels.
+
+    ``grounded_box`` is the box the locator returned with the point, if any. It
+    is used only as the after-motion hover allowance, and only as
+    hover_allowance_box checks it; the confirmation before the motion stays the
+    strict one of ``fingerprint``.
+    """
     return _press(
         point,
         fingerprint,
@@ -130,6 +183,13 @@ def press_grounded_point(
         before_press=before_press,
         max_age_seconds=max_age_seconds,
         clock=clock,
+        hover_box=hover_allowance_box(
+            grounded_box,
+            point.screen_x,
+            point.screen_y,
+            binding.snapshot.client_rect,
+            dpi=binding.snapshot.dpi,
+        ),
     )
 
 
@@ -152,6 +212,7 @@ def _press(
     before_press: Callable[[], None] | None,
     max_age_seconds: float,
     clock: Clock,
+    hover_box: WindowRect | None = None,
 ) -> Any:
     x, y = revalidate_grounded_point(
         point,
@@ -189,11 +250,18 @@ def _press(
     _validate_bound_capture(after_motion)
     if after_motion.binding_token != binding.identity_token or after_motion.layout_token != binding.layout_token:
         raise GroundingStale("The window or its layout changed while the cursor moved.")
+    # The checked grounded box adds to the target box; it never shrinks it.
+    hover = target_box if hover_box is None else WindowRect(
+        min(target_box.left, hover_box.left),
+        min(target_box.top, hover_box.top),
+        max(target_box.right, hover_box.right),
+        max(target_box.bottom, hover_box.bottom),
+    )
     highlight = WindowRect(
-        target_box.left - HOVER_MARGIN_PIXELS,
-        target_box.top - HOVER_MARGIN_PIXELS,
-        target_box.right + HOVER_MARGIN_PIXELS,
-        target_box.bottom + HOVER_MARGIN_PIXELS,
+        hover.left - HOVER_MARGIN_PIXELS,
+        hover.top - HOVER_MARGIN_PIXELS,
+        hover.right + HOVER_MARGIN_PIXELS,
+        hover.bottom + HOVER_MARGIN_PIXELS,
     )
     try:
         require_region_unchanged(

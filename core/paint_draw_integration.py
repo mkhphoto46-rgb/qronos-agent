@@ -1192,6 +1192,7 @@ def paint_failure_kind(exc: BaseException) -> str:
         PaintAdapterError,
         PaintCanvasChanged,
         PaintCanvasExpired,
+        PaintPlanNotApproved,
         PaintVerificationUnavailable,
     )
     from core.paint_canvas_grounding import PaintCanvasGroundingError
@@ -1217,6 +1218,8 @@ def paint_failure_kind(exc: BaseException) -> str:
         chain.append(current)
         current = current.__cause__
     for cause in chain:
+        if isinstance(cause, PaintPlanNotApproved):
+            return "plan_not_approved"
         if isinstance(cause, PaintVerificationUnavailable):
             return "verification_unavailable"
         if isinstance(cause, (PaintCanvasExpired, EvidenceTooOld, InputSinceCapture)):
@@ -1253,6 +1256,9 @@ _FAILURE_FA = {
     ),
     "verification_unavailable": (
         "امکان بررسی تصویری مرحله‌به‌مرحلهٔ نقاشی فراهم نبود؛ برای ایمنی ادامه داده نشد."
+    ),
+    "plan_not_approved": (
+        "طرحی که باید کشیده می‌شد دقیقاً همان طرح تأییدشده نبود؛ برای ایمنی ادامه داده نشد."
     ),
     "other": "نقاشی در Paint انجام نشد.",
 }
