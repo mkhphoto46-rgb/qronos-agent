@@ -130,6 +130,7 @@ from core.task_plan import TaskPlan
 from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.compute_estimator import ComputeEstimator
 from core.intent_gate import IntentGate
+from core.runtime_hooks import run_startup_status_hooks
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.undo_journal import Reversal, UndoJournal
@@ -10896,6 +10897,10 @@ def _run() -> int:
         "ready",
         "Qronos runtime bridge is ready.",
     )
+
+    # Reviewed status hooks (core/runtime_hooks.py), on their own daemon
+    # thread with a deadline each: they can never hold up the command loop.
+    run_startup_status_hooks(emit)
 
     # Paired phones, when the user turned the link on. Text-only mode too;
     # off by default, and then nothing is built.
