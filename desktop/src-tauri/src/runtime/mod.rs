@@ -266,8 +266,14 @@ fn clear_pairings(app: &AppHandle) {
     }
 }
 
+/// The bridge that took a pairing request is gone: it stopped, or its
+/// supervisor is replacing it. A new bridge cannot answer the old request.
+fn ends_runtime_session(event: &RuntimeEvent) -> bool {
+    event.event_type == "runtime_stopping"
+}
+
 fn deliver_runtime_event(app: &AppHandle, event: RuntimeEvent) {
-    if ends_pairing_requests(&event) {
+    if ends_pairing_requests(&event) || ends_runtime_session(&event) {
         clear_pairings(app);
     }
 
@@ -550,7 +556,10 @@ pub fn start_runtime(
         pairings.clear();
     }
 
-    let mut command = state.require_backend()?.command(Service::Bridge)?;
+    // The supervisor starts the bridge itself, relays this process's pipes
+    // to it, restarts it within a bounded budget and reports
+    // `supervisor_state` events; see core/supervisor_relay.py.
+    let mut command = state.require_backend()?.command(Service::Supervisor)?;
     command
         .env("QRONOS_MEMORY_RUNTIME", "1")
         .env("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "1")
@@ -647,7 +656,7 @@ pub fn start_runtime(
     Ok(RuntimeStatus {
         running: true,
         status: "starting".to_string(),
-        message: "Qronos runtime process started with native wake bootstrap.".to_string(),
+        message: "Qronos runtime supervisor started with native wake bootstrap.".to_string(),
     })
 }
 
@@ -1389,6 +1398,11 @@ pub fn runtime_set_paused(paused: bool, state: State<'_, RuntimeManagerState>) -
     )
 }
 
+/// 100 x 50 ms = 5 s for an orderly stop. The supervisor's own shutdown
+/// grace (3 s) plus its terminate step fits inside it, so the desktop's
+/// kill is only the backstop.
+const STOP_WAIT_STEPS: u32 = 100;
+
 #[tauri::command]
 pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStatus, String> {
     let mut guard = state
@@ -1410,7 +1424,7 @@ pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStat
 
     let _ = write_runtime_command(&mut process, "shutdown");
 
-    for _ in 0..20 {
+    for _ in 0..STOP_WAIT_STEPS {
         match process.child.try_wait() {
             Ok(Some(_)) => {
                 return Ok(RuntimeStatus {
@@ -1462,7 +1476,7 @@ pub fn shutdown(app: &AppHandle) {
     // localhost ports allocated after the desktop has exited.
     let _ = write_runtime_command(&mut process, "shutdown");
 
-    for _ in 0..20 {
+    for _ in 0..STOP_WAIT_STEPS {
         match process.child.try_wait() {
             Ok(Some(_)) => {
                 return;
@@ -1476,8 +1490,9 @@ pub fn shutdown(app: &AppHandle) {
         }
     }
 
-    // Shutdown is bounded: if Python does not exit within roughly one second,
-    // force-stop only the runtime process owned by this manager.
+    // Shutdown is bounded: if the supervisor has not exited within
+    // STOP_WAIT_STEPS x 50 ms, force-stop only the process owned by this
+    // manager. Its kill-on-close Job Object then ends the bridge too.
     let _ = process.child.kill();
 }
 
@@ -1667,6 +1682,13 @@ mod pairing_route_tests {
             "link_error",
             "{\"action\":\"qronos.link_revoke\",\"code\":\"unknown_device\"}"
         )));
+    }
+
+    #[test]
+    fn a_runtime_that_stopped_or_is_being_restarted_ends_pending_requests() {
+        assert!(ends_runtime_session(&event("runtime_stopping", "restarting")));
+        assert!(!ends_runtime_session(&event("supervisor_state", "running")));
+        assert!(!ends_runtime_session(&event("runtime_pong", "")));
     }
 
     #[test]

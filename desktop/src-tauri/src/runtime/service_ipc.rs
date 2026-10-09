@@ -130,7 +130,7 @@ impl Plan {
                 MIB,
                 4 * MIB,
             ),
-            Service::Bridge | Service::Audio => {
+            Service::Bridge | Service::Supervisor | Service::Audio => {
                 return Err("This backend service does not support one-shot IPC.".into())
             }
         };
