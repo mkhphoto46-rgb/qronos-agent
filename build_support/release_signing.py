@@ -10,7 +10,9 @@ reviewed step-by-step procedure):
       (set in the same call that creates the file). Only the public
       trusted-key entry is printed.
   public-entry --key-file PATH
-      Prints the entry for config/update_trusted_keys.json (public key only).
+      Prints the entry for config/update_trusted_keys.json (public key only),
+      after proving custody: the key file must unlock on this account to the
+      private key of the public key it lists.
   sign --key-file PATH --installer EXE --security-floor VERSION
        [--minimum-version VERSION] [--rollback] [--notes-file TXT]
       Writes EXE.qronos-update.json (payload schema 2) beside the installer.
@@ -423,10 +425,24 @@ def _read_key_record(key_file: Path) -> dict[str, Any]:
 
 
 def public_entry(key_file: Path) -> dict[str, Any]:
+    """The trusted-key entry, printed only after custody is proved on this account.
+
+    The file's own ``publicKey`` field is not evidence: the protected secret is
+    unlocked (DPAPI, this Windows account) and must derive exactly that public
+    key. The unlocked secret is wiped before the entry is returned.
+    """
     record = _read_key_record(key_file)
     public = base64.b64decode(record["publicKey"], validate=True)
     if local_update.key_id(public) != record["keyId"]:
         raise SigningError("The key file's public key and key id do not match.")
+    if not isinstance(record["owner"], str) or not _OWNER.fullmatch(record["owner"]):
+        raise SigningError("The key file's owner name is not valid.")
+    try:
+        ed25519.check_public_key(public)
+    except ed25519.SignatureError as error:
+        raise SigningError("The key file's public key is not an acceptable Ed25519 key.") from error
+    secret = _unlock(record)  # refuses a file whose protected secret is not the key of its public key
+    secret[:] = bytes(len(secret))
     return _public_entry(public, record["owner"])
 
 

@@ -26,6 +26,7 @@ import pytest
 from core import ed25519, local_update, update_cli, update_service, update_stores
 from core.local_update import DataProfile, InstalledState, UpdateError
 from core.update_service import UpdateService
+from tests.fixtures.owned_junction import owned_junction
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = update_stores.current_profile()
@@ -949,11 +950,9 @@ def test_discover_lists_only_installer_and_manifest_pairs(world):
 
 
 def test_discover_refuses_a_linked_folder(world):
-    winapi = pytest.importorskip("_winapi")
     real = world.tmp / "real"
     real.mkdir()
-    winapi.CreateJunction(str(real), str(world.tmp / "linked"))
-    with pytest.raises(UpdateError) as refused:
+    with owned_junction(real, world.tmp / "linked"), pytest.raises(UpdateError) as refused:
         world.service().discover(world.tmp / "linked")
     assert refused.value.code == "not_a_folder"
 

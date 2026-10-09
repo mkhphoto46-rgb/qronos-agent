@@ -8,6 +8,7 @@ file holds no key, and the tests prove that this refuses every package.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import pytest
 from core import ed25519
 from core import local_update
 from core.local_update import InstalledState, LocalUpdateStore, UpdateError
+from tests.fixtures.owned_junction import owned_junction
 
 # ------------------------------------------------------------- fixtures
 
@@ -169,11 +171,12 @@ def test_something_other_than_a_regular_file_is_refused(tmp_path, chosen):
     installer = package(tmp_path)
     envelope = local_update.build_envelope(payload_for(installer), [owner])
     target = {"folder": installer.parent, "missing": tmp_path / "absent.exe", "junction": tmp_path / "linked"}[chosen]
-    if chosen == "junction":
-        pytest.importorskip("_winapi").CreateJunction(str(installer.parent), str(target))
+    with contextlib.ExitStack() as fixtures:
+        if chosen == "junction":
+            fixtures.enter_context(owned_junction(installer.parent, target))
 
-    with pytest.raises(UpdateError) as refused:
-        verify(envelope, target, trusted(owner))
+        with pytest.raises(UpdateError) as refused:
+            verify(envelope, target, trusted(owner))
     assert refused.value.code == "not_a_file"
 
 
@@ -369,15 +372,14 @@ def test_a_state_file_naming_foreign_files_is_refused(tmp_path):
 
 
 def test_a_junctioned_update_folder_is_refused(tmp_path):
-    winapi = pytest.importorskip("_winapi")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (tmp_path / "data").mkdir()
-    winapi.CreateJunction(str(elsewhere), str(tmp_path / "data" / "Updates"))
-    store, manifest, installer, keys = stage_fixture(tmp_path)
+    with owned_junction(elsewhere, tmp_path / "data" / "Updates"):
+        store, manifest, installer, keys = stage_fixture(tmp_path)
 
-    with pytest.raises(UpdateError) as refused:
-        store.stage(manifest, installer, keys, "0.1.0", 3)
+        with pytest.raises(UpdateError) as refused:
+            store.stage(manifest, installer, keys, "0.1.0", 3)
     assert refused.value.code == "store"
     assert list(elsewhere.iterdir()) == []
 
@@ -748,15 +750,14 @@ def test_a_same_version_repair_is_never_confirmed_by_the_version_alone(tmp_path)
 
 
 def test_a_store_below_a_junctioned_ancestor_is_refused(tmp_path):
-    winapi = pytest.importorskip("_winapi")
     real = tmp_path / "real-data"
     real.mkdir()
-    winapi.CreateJunction(str(real), str(tmp_path / "data-link"))
-    _, manifest, installer, keys = stage_fixture(tmp_path)
-    store = LocalUpdateStore(tmp_path / "data-link" / "Updates")
+    with owned_junction(real, tmp_path / "data-link"):
+        _, manifest, installer, keys = stage_fixture(tmp_path)
+        store = LocalUpdateStore(tmp_path / "data-link" / "Updates")
 
-    with pytest.raises(UpdateError, match="above the update store"):
-        store.stage(manifest, installer, keys, "0.1.0", 3)
+        with pytest.raises(UpdateError, match="above the update store"):
+            store.stage(manifest, installer, keys, "0.1.0", 3)
     assert not (real / "Updates").exists()
 
 

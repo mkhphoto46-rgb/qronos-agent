@@ -25,6 +25,7 @@ from build_support import release_signing
 from build_support.release_signing import SigningError
 from core import ed25519, local_update, update_stores
 from core.local_update import InstalledState
+from tests.fixtures.owned_junction import owned_junction
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="DPAPI and Windows access lists")
 
@@ -90,13 +91,36 @@ def test_a_key_inside_a_git_checkout_is_refused(tmp_path):
 
 
 def test_a_key_below_a_junction_is_refused(tmp_path):
-    winapi = pytest.importorskip("_winapi")
     real = tmp_path / "real"
     real.mkdir()
-    winapi.CreateJunction(str(real), str(tmp_path / "linked"))
-    with pytest.raises(SigningError, match="link or junction"):
-        release_signing.create_key(tmp_path / "linked" / "owner.key", "Owner")
+    with owned_junction(real, tmp_path / "linked") as linked:
+        with pytest.raises(SigningError, match="link or junction"):
+            release_signing.create_key(linked / "owner.key", "Owner")
     assert list(real.iterdir()) == []
+    assert not os.path.lexists(tmp_path / "linked")  # F4: the fixture's junction is gone, its target kept
+
+
+def test_the_junction_fixture_removes_only_its_own_junction(tmp_path):
+    """F4: cleanup removes the link alone, and refuses anything that is no longer its junction."""
+    real = tmp_path / "real"
+    (real / "kept").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="test body failed"):
+        with owned_junction(real, tmp_path / "linked"):
+            raise RuntimeError("test body failed")  # cleanup still runs
+    assert not os.path.lexists(tmp_path / "linked") and (real / "kept").is_dir()
+
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(AssertionError, match="no longer this fixture's junction"):
+        with owned_junction(real, tmp_path / "swapped"):
+            os.rmdir(tmp_path / "swapped")  # the link is replaced by a plain folder holding data
+            (tmp_path / "swapped").mkdir()
+            (tmp_path / "swapped" / "data").write_text("not the fixture's", encoding="utf-8")
+    assert (tmp_path / "swapped" / "data").is_file() and (real / "kept").is_dir()
+    with pytest.raises(AssertionError, match="already exists"):
+        with owned_junction(real, other):
+            pass
+    assert other.is_dir()
 
 
 def test_a_key_whose_access_was_loosened_is_not_used(owner, tmp_path):
@@ -259,3 +283,60 @@ def test_a_key_file_reached_through_another_final_path_is_not_used(owner, monkey
 def test_create_and_read_check_the_real_final_path(owner):
     key_file, _, entry = owner
     assert release_signing.public_entry(key_file) == entry  # the real GetFinalPathNameByHandleW agrees
+
+
+def _rewrite_public_key(key_file: Path, public: bytes) -> None:
+    """A same-account edit of the key file's public fields (the owner's account may write its own file)."""
+    record = json.loads(key_file.read_text(encoding="utf-8"))
+    record["publicKey"] = base64.b64encode(public).decode()
+    record["keyId"] = local_update.key_id(public)
+    with open(key_file, "w", encoding="utf-8") as stream:  # keeps the protected access list
+        stream.write(json.dumps(record, indent=1) + "\n")
+
+
+def test_public_entry_refuses_a_foreign_public_key_in_the_key_file(owner, capsys):
+    """F1: the printed entry must be the key this file can actually sign with, proved by unlocking it."""
+    key_file, _, entry = owner
+    foreign = ed25519.public_key(os.urandom(32))
+    _rewrite_public_key(key_file, foreign)
+    with pytest.raises(SigningError, match="does not unlock to its own public key"):
+        release_signing.public_entry(key_file)
+    assert release_signing.main(["public-entry", "--key-file", str(key_file)]) == 1
+    printed = capsys.readouterr().out
+    assert json.loads(printed)["ok"] is False and "trustedKeyEntry" not in printed
+    assert base64.b64encode(foreign).decode() not in printed and local_update.key_id(foreign) not in printed
+
+
+def test_public_entry_refuses_a_weak_public_key_even_with_a_matching_id(owner):
+    key_file, _, _ = owner
+    _rewrite_public_key(key_file, bytes(32))  # small-order point, a weak key
+    with pytest.raises(SigningError, match="not an acceptable Ed25519 key"):
+        release_signing.public_entry(key_file)
+
+
+def test_public_entry_wipes_the_unlocked_secret(owner, monkeypatch):
+    key_file, secret, entry = owner
+    unlocked = []
+    real = release_signing._unlock
+
+    def recording(record):
+        value = real(record)
+        assert value == bytearray(secret)  # the real DPAPI unlock on this account
+        unlocked.append(value)
+        return value
+
+    monkeypatch.setattr(release_signing, "_unlock", recording)
+    assert release_signing.public_entry(key_file) == entry
+    assert unlocked and unlocked[0] == bytearray(32)  # zeroed before the entry was returned
+
+
+def test_public_entry_refuses_a_key_file_another_account_protected(owner, monkeypatch):
+    """A protected blob that does not unlock here (DPAPI refuses) prints no entry."""
+    key_file, _, _ = owner
+
+    def refused(data, protect):
+        raise SigningError("Windows could not unlock the owner key (DPAPI).")
+
+    monkeypatch.setattr(release_signing, "_dpapi", refused)
+    with pytest.raises(SigningError, match="DPAPI"):
+        release_signing.public_entry(key_file)
