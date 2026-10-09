@@ -10735,7 +10735,100 @@ QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
 }
 
 
+SUPERVISED_FLAG = "--supervised"
+#: After the supervisor asks for shutdown (or is gone), the command loop ends
+#: when its input does. If it has not within this, the process ends anyway: a
+#: supervised bridge never outlives its supervisor's request.
+SUPERVISED_EXIT_BACKSTOP_SECONDS = 30.0
+
+
+class CommandLoopHealth:
+    """
+    Whole seconds the command loop has spent inside the command it is
+    handling now (0 while it waits for the next). Sent with each heartbeat,
+    so the supervisor can report a loop stuck in one command; the heartbeat
+    thread alone would keep beating through that.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._since: float | None = None
+        self._lock = threading.Lock()
+
+    def enter(self) -> None:
+        with self._lock:
+            self._since = self._clock()
+
+    def leave(self) -> None:
+        with self._lock:
+            self._since = None
+
+    def busy_seconds(self) -> int:
+        with self._lock:
+            since = self._since
+        return 0 if since is None else int(self._clock() - since)
+
+
+COMMAND_LOOP = CommandLoopHealth()
+
+
+def _command_lines(stream):
+    """The command loop's input; marks each command busy until the next is asked for."""
+    for raw_line in stream:
+        COMMAND_LOOP.enter()
+        yield raw_line
+        COMMAND_LOOP.leave()
+
+
+def start_supervision(stream) -> Any:
+    """
+    Join the supervisor that started this bridge (``core/supervisor_relay.py``).
+
+    The supervisor's bootstrap is the first line of standard input, read here
+    before the command loop reads anything. The supervisor's process id is
+    checked on the pipe and both sides prove the session key; any failure
+    raises, and a supervised bridge then exits rather than run unsupervised.
+    """
+    from core.supervisor import SupervisedRuntimeClient, read_bootstrap
+
+    bootstrap = read_bootstrap(stream)
+
+    def on_shutdown(reason: str) -> None:
+        # The supervisor also sends "shutdown" on standard input, which the
+        # command loop handles in order. This is only the backstop.
+        backstop = threading.Timer(SUPERVISED_EXIT_BACKSTOP_SECONDS, os._exit, args=(70,))
+        backstop.daemon = True
+        backstop.start()
+
+    client = SupervisedRuntimeClient(
+        bootstrap, on_shutdown=on_shutdown, busy_seconds=COMMAND_LOOP.busy_seconds,
+    )
+    client.start()
+    return client
+
+
 def main() -> int:
+    supervision = None
+
+    if SUPERVISED_FLAG in sys.argv[1:]:
+        try:
+            supervision = start_supervision(sys.stdin.buffer)
+        except Exception as exc:
+            emit(
+                "runtime_error",
+                "error",
+                f"The Qronos runtime could not join its supervisor ({type(exc).__name__}).",
+            )
+            return 3
+
+    try:
+        return _run()
+    finally:
+        if supervision is not None:
+            supervision.stop("runtime exiting")
+
+
+def _run() -> int:
     runtime = QronosRuntime()
 
     # The real desktop must not depend on a later Settings write or a frontend
@@ -10809,7 +10902,7 @@ def main() -> int:
     runtime.start_device_link()
 
     try:
-        for raw_line in sys.stdin:
+        for raw_line in _command_lines(sys.stdin):
             line = raw_line.strip()
 
             if not line:

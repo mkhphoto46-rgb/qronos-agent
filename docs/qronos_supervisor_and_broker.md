@@ -1,9 +1,10 @@
 # Supervisor, user runtime and Elevated Action Broker (D8)
 
-Status: **component contracts implemented and tested with disposable fixtures; not
-wired into the product.** Nothing here is installed, registered as a service,
-started at sign-in, or exercised through a real UAC prompt yet. Those steps
-belong to the product startup owner and to later live acceptance. See
+Status: **the supervisor is wired into the desktop's runtime start, stop and
+shutdown (see [Product wiring](#product-wiring-supervised-desktop-runtime));
+the broker is not wired yet.** Nothing here is installed, registered as a
+service, started at sign-in, or exercised through a real UAC prompt. Live
+acceptance on a real desktop is deferred. See
 [What is not done](#what-is-not-done).
 
 The architecture asks for a persistent supervisor and a separate user-session
@@ -18,6 +19,7 @@ accepts one exact approved action rather than a shell command.
 | `core/supervisor_ipc.py` | Authenticated, deadline-bounded local channel | both sides |
 | `core/pipe_peer.py` | Read-only pipe peer process ids (`GetNamedPipe{Client,Server}ProcessId`) | both sides |
 | `core/supervisor.py` | `Supervisor` (keeps the runtime alive) and `SupervisedRuntimeClient` (the runtime's half) | signed-in user |
+| `core/supervisor_relay.py` | Desktop mode: relays the desktop's pipes to the bridge, Job Object, lifecycle events | signed-in user |
 | `core/action_broker.py` | The broker: verify one request, perform it, exit | elevated, via UAC |
 | `core/action_broker_client.py` | `BrokerSession`: the runtime's side, from a gate grant to a result | user runtime |
 | `core/uac_launch.py` | Starts the bundled broker with `ShellExecuteExW` `runas` | user runtime |
@@ -145,30 +147,74 @@ proves the mechanics fail closed. **It does not mean any privileged
 capability exists or is complete.** Adding an action requires a reviewed
 `ActionSpec`, a permission policy for its category, and live UAC acceptance.
 
-## Production wiring contract (for the runtime and desktop startup owner)
+## Product wiring (supervised desktop runtime)
 
-These files are owned by Control (`core/runtime_bridge.py`) and the desktop
-startup owner. Nothing below has been edited, and nothing calls these modules
-in production yet.
+Implemented in round 1 of the production wave: the desktop now reaches the
+supervisor.
 
-1. **Startup.** Start `qronos-runtime.exe supervisor --runtime-arguments
-   bridge --supervised` as the signed-in user, from the desktop or a per-user
-   sign-in entry the installer owner decides. Do not use an elevated Windows
-   service.
-2. **Runtime side.** When `bridge` receives `--supervised`, the runtime reads
-   `core.supervisor.read_bootstrap(sys.stdin.buffer)` first and starts
-   `SupervisedRuntimeClient(bootstrap, on_shutdown=…)`. `on_shutdown` should
-   trigger the bridge's existing orderly shutdown. Audio, UI and dialogs stay
-   in the runtime and desktop.
-3. **Elevated action.** For an approved action that needs elevation, the
-   runtime calls
-   `BrokerSession(UacBrokerLauncher(Path(sys.executable))).perform(TypedAction(kind, params), request, grant)`.
-   `grant` comes from `security.gate.issue_grant` after the user's approval.
-   `UacDeclined` and `BrokerUnavailable` must be shown as refusals or as
-   "outcome unknown". A lost answer after the request was sent is reported as
-   outcome unknown and never retried automatically.
-4. **Owner decisions.** The installer owner decides how the supervisor is
-   started at sign-in, if at all, and the broker's code signing.
+```text
+desktop (Tauri start_runtime)
+  -> qronos-runtime supervisor --desktop          core/supervisor_relay.py
+       -> qronos-runtime bridge --supervised      core/runtime_bridge.py
+```
+
+1. **Startup.** `start_runtime` (`desktop/src-tauri/src/runtime/mod.rs`)
+   launches the closed `Service::Supervisor` command (`backend.rs`: bundled
+   executable, fixed words `supervisor --desktop`). It runs as the signed-in
+   user and is never elevated. Stop and app exit send `shutdown`, wait at
+   most 5 s, then kill the supervisor. Its kill-on-close Job Object then
+   ends the bridge as well.
+2. **Supervisor.** The supervisor owns the bridge's pipes. The first stdin
+   line is the bootstrap, and then the desktop's lines are relayed. The
+   bridge's stdout comes back as whole lines, at most 16 MiB each. An
+   oversized line is dropped, and the desktop is told. Relayed content is
+   not parsed or logged, apart from recognising `{"command":"shutdown"}`.
+   Pairing secrets are therefore still routed only by the desktop's
+   existing targeted pairing delivery.
+3. **Health.** The bridge's peer pid is checked first, then the HMAC
+   handshake, then heartbeats (every 5 s, timeout 45 s). A bridge that
+   exits, closes its channel or stops beating is stopped (exact child only)
+   and restarted with backoff. A 4th failure within 10 minutes leads to
+   `degraded`: the desktop receives `runtime_stopping` and `runtime_error`,
+   and the supervisor exits.
+4. **Command-loop health.** Each heartbeat also carries `busy`: the seconds
+   the bridge's command loop has spent inside the current command. At 120 s
+   or more the supervisor emits one `runtime_warning` per stall. It does not
+   kill the bridge for this, because the command may be part-way through a
+   change. Stop still works, because the supervisor handles it without the
+   bridge's command loop.
+5. **Events to the desktop.** `supervisor_state` reports `starting`,
+   `running`, `restarting`, `stopping`, `stopped` or `degraded`.
+   `runtime_stopping` is sent when a bridge ended without being asked; the
+   desktop then clears pending pairing requests and screen prompts.
+   `runtime_error` is sent for commands that were not delivered (while
+   restarting or degraded, or when the queue is full) and on giving up.
+   Commands are never held for a later bridge, and nothing is retried.
+6. **Runtime side.** `bridge --supervised` reads the bootstrap before its
+   command loop and joins the supervisor; if that fails it exits (code 3)
+   and never runs unsupervised. Without the flag it behaves as before.
+7. **Development builds.** From source, the supervisor starts the base
+   interpreter with this environment's import path. A venv `python.exe`
+   launcher's pid is not the process that connects, so the peer check
+   would refuse it.
+
+**Limits.**
+- Beats prove the process and its interpreter are alive.
+- Command-loop progress is reported, not enforced.
+- Work handed to other threads, such as conversation turns and queued work,
+  is not watched by the supervisor.
+- The bridge is bound to the Job Object a moment after it starts, before it
+  has started any sidecar.
+- Sign-in start, a persistent supervisor that outlives the desktop, and any
+  Windows service remain installer/owner decisions. None of them exist.
+
+**Elevated action (not wired yet; slice 2).** For an approved action that
+needs elevation, the runtime calls
+`BrokerSession(UacBrokerLauncher(Path(sys.executable))).perform(TypedAction(kind, params), request, grant)`.
+`grant` comes from `security.gate.issue_grant` after the user's approval.
+`UacDeclined` and `BrokerUnavailable` are shown as refusals or as "outcome
+unknown". A lost answer after the request was sent is reported as outcome
+unknown and never retried automatically.
 
 ## Tests (fixtures only)
 
@@ -194,6 +240,20 @@ in production yet.
   being restarted, a child that never connects, a wrong key or a stalled
   authentication, an impostor grandchild, and a bystander process left
   untouched.
+- `tests/test_supervisor_relay.py`: relay units (framing, bounds, refused
+  and dropped commands, state events, fixed bridge command). It also runs the
+  supervisor as its own process (`tests/fixtures/relay_supervisor_driver.py`)
+  over pipes, as the desktop does, with a disposable bridge stand-in
+  (`tests/fixtures/relay_bridge_child.py`). These cover pass-through and
+  orderly shutdown; the desktop closing its input; a crash loop going
+  degraded; a hung bridge replaced; a command loop stuck in one command
+  reported and not killed; an oversized output line; a bridge ignoring
+  shutdown being terminated after the grace; and killing the supervisor
+  ending its bridge through the Job Object. One end-to-end test runs
+  `python -m core.supervisor --desktop` with the real bridge on throwaway
+  state, through ping, pong and shutdown.
+- Rust (`backend.rs`, `mod.rs`): the closed `supervisor --desktop` command,
+  and `runtime_stopping` ending pending pairing requests.
 - `tests/test_action_broker.py`: every verification step and refusal, the
   registry rules, single use across instances and races, and audit contents.
 - `tests/test_action_broker_session.py`: a real non-elevated broker child
@@ -208,8 +268,9 @@ refuses that indirection.
 
 ## What is not done
 
-- Not wired into `runtime_bridge`, the desktop, or the installer (contract
-  above).
+- The broker is not wired into the runtime yet. The supervisor is wired into
+  the desktop's start, stop and shutdown. The installer starts nothing at
+  sign-in.
 - No live UAC prompt, elevated run, Windows service, scheduled task or
   sign-in entry has been created or exercised.
 - `PRODUCTION_ACTIONS` is empty, so there is no elevated product capability.
