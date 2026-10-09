@@ -44,6 +44,7 @@ from core.supervisor_relay import (
     is_shutdown_command,
 )
 from tests.fixtures.child_python import child_python
+from tests.live_device import requires_live_device
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "tests" / "fixtures" / "relay_supervisor_driver.py"
@@ -805,18 +806,30 @@ def test_killing_the_supervisor_ends_its_runtime_through_the_job_object(desktop)
 
 
 @windows_only
+@requires_live_device
 def test_the_production_entry_supervises_the_real_bridge_end_to_end(tmp_path):
     """
-    ``python -m core.supervisor --desktop`` starts the real bridge with
-    ``--supervised`` (base interpreter, real peer check and handshake). The
-    bridge runs on throwaway state with Ollama auto-start off; no wake
-    bootstrap is requested, so no microphone is opened, and nothing is asked
-    of a model.
+    LIVE-DEVICE PRODUCTION PROBE, default off (QRONOS_RUN_LIVE_DEVICE_TESTS=1
+    only). It is not synthetic fixture acceptance and is not counted as one.
 
-    Storage isolation comes from this suite's conftest (isolated LOCALAPPDATA,
-    APPDATA, USERPROFILE and permission state, inherited through
-    ``child_python``). Run outside pytest, a caller must establish the same
-    isolation first.
+    What it really invokes (source-audited, not assumed):
+
+    - ``python -m core.supervisor --desktop``, the production entry. It
+      creates the PRODUCTION session objects ``Local\\QronosSupervisor`` (the
+      instance mutex) and ``Local\\QronosSupervisedRuntime`` (the Job Object's
+      mutex), which would collide with a real Qronos in the same session.
+    - The REAL ``core.runtime_bridge --supervised`` as a child process. That
+      child does not inherit pytest's in-process primitive stand-ins
+      (tests/conftest.py), so ``QRONOS_RUN_LIVE_DEVICE_TESTS=0`` does not guard
+      it.
+    - Only the environment is passed down: conftest's isolated
+      LOCALAPPDATA/APPDATA/USERPROFILE, plus the settings, history and queue
+      paths below, and Ollama auto-start off.
+
+    By source: QronosRuntime() builds settings, history and in-memory objects.
+    Audio, wake, screen and the queue's GPU sampler are lazy, and this probe
+    sends only ping and shutdown. "Not touched by the code paths read" is
+    not a device guard, so the probe stays behind the live-device gate.
     """
     executable, environment = child_python()
     state = tmp_path
