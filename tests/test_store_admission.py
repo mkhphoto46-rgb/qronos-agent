@@ -33,8 +33,9 @@ sys.path.insert(0, sys.argv[1])
 from core.local_update import UpdateError
 from core.store_admission import admit_writer
 data, log, go, stop = (Path(a) for a in sys.argv[2:6])
+fence = sys.argv[6]
 try:
-    admission = admit_writer(data)
+    admission = admit_writer(data, fence=fence)
 except UpdateError as error:
     log.write_text("refused:" + error.code)
     raise SystemExit(0)
@@ -50,12 +51,17 @@ admission.release()
 """
 
 
+def unique_fence() -> str:
+    return f"Local\\QronosUpdateTest-fence-{uuid.uuid4().hex}"
+
+
 class Writer:
-    def __init__(self, tmp: Path, data: Path, name: str) -> None:
+    def __init__(self, tmp: Path, data: Path, name: str, fence: str | None = None) -> None:
         self.log, self.go, self.stop = tmp / f"{name}.log", tmp / f"{name}.go", tmp / f"{name}.stop"
         executable, environment = child_python()
         self.process = subprocess.Popen(
-            [executable, "-c", WRITER, str(ROOT), str(data), str(self.log), str(self.go), str(self.stop)],
+            [executable, "-c", WRITER, str(ROOT), str(data), str(self.log), str(self.go), str(self.stop),
+             fence or unique_fence()],
             env=environment)
 
     def state(self, timeout: float = 30.0) -> str:
@@ -79,7 +85,8 @@ class Writer:
 
 def test_writers_share_admission_and_the_updater_cannot_take_it_while_one_is_inside(tmp_path):
     data = tmp_path / "data"
-    first, second = store_admission.admit_writer(data), store_admission.admit_writer(data)
+    fence = unique_fence()
+    first, second = store_admission.admit_writer(data, fence), store_admission.admit_writer(data, fence)
     try:
         with pytest.raises(UpdateError) as refused:
             store_admission.admit_exclusive(data)
@@ -124,7 +131,7 @@ def test_the_admission_file_must_be_this_profile_s_own(tmp_path):
     outside.write_bytes(b"")
     os.link(outside, data / store_admission.ADMISSION_FILE)
     with pytest.raises(UpdateError) as refused:
-        store_admission.admit_writer(data)
+        store_admission.admit_writer(data, unique_fence())
     assert refused.value.code == "store"
 
 
@@ -158,7 +165,7 @@ def test_a_launch_hold_keeps_writers_out_until_the_installer_ends(tmp_path, worl
     try:
         assert announced.wait(60), "the launch never announced the started installer"
         assert thread.is_alive()  # still guarding
-        probe = Writer(tmp_path, world.data, "during-install")
+        probe = Writer(tmp_path, world.data, "during-install", fence=names[0])
         try:
             assert probe.state() == "refused:update_in_progress"
         finally:
@@ -174,7 +181,7 @@ def test_a_launch_hold_keeps_writers_out_until_the_installer_ends(tmp_path, worl
                 process.kill()
             process.wait(timeout=30)
         thread.join(30)
-    after = Writer(tmp_path, world.data, "after-install")
+    after = Writer(tmp_path, world.data, "after-install", fence=names[0])
     try:
         assert after.state() == "admitted"
     finally:
@@ -187,7 +194,7 @@ def test_a_writer_inside_its_store_makes_the_launch_refuse(tmp_path):
     names = (f"Local\\QronosUpdateTest-busy-{uuid.uuid4().hex}",)
     service = world.service(quiesce=lambda: update_service.LaunchHold(world.data, names))
     _, approved = staged(service, *world.release("0.2.0"))
-    inside = Writer(tmp_path, world.data, "inside")
+    inside = Writer(tmp_path, world.data, "inside", fence=names[0])
     try:
         assert inside.state() == "admitted"
         with pytest.raises(UpdateError) as refused:
@@ -196,3 +203,103 @@ def test_a_writer_inside_its_store_makes_the_launch_refuse(tmp_path):
     finally:
         inside.finish()
     assert world.launcher.calls == [] and service.status()["launchReady"] is not None
+
+
+# A launching guard that dies right after starting the installer: the byte-range lock dies with it,
+# the update mutex lives on in the installer's inherited handle.
+GUARD = r"""
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from core import update_service
+data, fence, go, info = Path(sys.argv[2]), sys.argv[3], sys.argv[4], Path(sys.argv[5])
+hold = update_service.LaunchHold(data, (fence,))
+code = ("import os, sys, time\n"
+        "deadline = time.monotonic() + 90\n"
+        "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
+        "    time.sleep(0.05)\n")
+installer = update_service.spawn_inheriting([sys.executable, "-I", "-c", code, go], hold.handles())
+info.write_text(str(installer.pid))
+os._exit(9)  # the guard crashes: nothing is released by this process
+"""
+
+
+def _open_owned(pid: int, started_after: float):
+    """Open the fixture installer by pid, but only if it is a python process created during this test."""
+    import ctypes
+    from ctypes import wintypes
+
+    import _winapi
+
+    handle = _winapi.OpenProcess(0x1000 | 0x100000 | 0x0001, False, pid)  # QUERY_LIMITED | SYNCHRONIZE | TERMINATE
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    times = [wintypes.FILETIME() for _ in range(4)]
+    assert kernel.GetProcessTimes(handle, *[ctypes.byref(x) for x in times])
+    created = ((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime) / 10_000_000 - 11_644_473_600
+    assert created >= started_after - 2, "the pid does not belong to this test's fixture installer"
+    return handle
+
+
+def test_a_guard_that_dies_leaves_the_fence_up_until_the_installer_ends(tmp_path):
+    """Root's failure case: the launching guard dies after starting the installer. No writer may open a store
+    while that installer lives; once it ends, writers are admitted again."""
+    import _winapi
+
+    data = tmp_path / "data"
+    data.mkdir()
+    store = data / "store.json"
+    fence = unique_fence()
+    go, info = tmp_path / "installer-may-exit", tmp_path / "installer.pid"
+    started = time.time()
+    executable, environment = child_python()
+    guard = subprocess.Popen([executable, "-c", GUARD, str(ROOT), str(data), fence, str(go), str(info)],
+                             env=environment)
+    installer = None
+    try:
+        guard.wait(timeout=60)
+        assert guard.returncode == 9, "the guard should have crashed on purpose"
+        installer = _open_owned(int(info.read_text()), started)
+        assert _winapi.WaitForSingleObject(installer, 0) == _winapi.WAIT_TIMEOUT  # still installing
+        assert store_admission.update_in_progress(fence) is True
+
+        during = Writer(tmp_path, data, "after-guard-crash", fence=fence)
+        try:
+            assert during.state() == "refused:update_in_progress"
+        finally:
+            during.finish()
+        assert not store.exists(), "a writer opened its store while the installer was still running"
+
+        go.write_text("1")
+        assert _winapi.WaitForSingleObject(installer, 60_000) == _winapi.WAIT_OBJECT_0
+    finally:
+        go.write_text("1")
+        if guard.poll() is None:
+            guard.kill()
+            guard.wait(timeout=30)
+        if installer is not None:
+            if _winapi.WaitForSingleObject(installer, 30_000) != _winapi.WAIT_OBJECT_0:
+                _winapi.TerminateProcess(installer, 1)  # verified as this test's own fixture above
+            _winapi.CloseHandle(installer)
+    assert store_admission.update_in_progress(fence) is False
+    after = Writer(tmp_path, data, "after-install-ended", fence=fence)
+    try:
+        assert after.state() == "admitted"
+    finally:
+        after.finish()
+    assert store.read_text() == "written\n"
+
+
+def test_a_writer_holding_its_admission_never_sees_the_fence_appear(tmp_path):
+    """Order: shared lock, then fence. While a writer holds the lock the updater cannot take the exclusive
+    admission, so it cannot create the fence; the launch is refused instead."""
+    data = tmp_path / "data"
+    fence = unique_fence()
+    writer = store_admission.admit_writer(data, fence)
+    try:
+        with pytest.raises(UpdateError) as refused:
+            update_service.LaunchHold(data, (fence,))
+        assert refused.value.code == "writers_active"
+        assert store_admission.update_in_progress(fence) is False  # no fence was created
+    finally:
+        writer.release()

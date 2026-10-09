@@ -14,9 +14,18 @@ data root:
   refused at once.
 
 So no writer can be inside a store while the updater restores data or the
-installer replaces the program, and none can start until the update ends. The
-updater keeps the exclusive admission in the process that launched the
-installer for the installer's whole lifetime (``core.update_service``).
+installer replaces the program, and none can start until the update ends.
+
+The fence that outlives the launching process. A byte-range lock belongs to the
+process that took it: if the launching process (the lifetime guard) dies, its
+exclusive admission ends although the installer still runs. So a writer, AFTER
+taking its shared lock, also refuses while the update mutex exists
+(``update_in_progress``). The updater creates that mutex only while it holds the
+exclusive admission, and the installer inherits a handle to it, so the mutex
+exists for the installer's whole life. The order makes it atomic: a writer that
+holds a shared lock can never see the mutex appear afterwards (the updater
+cannot take the exclusive admission meanwhile), and a mutex that already exists,
+for example after the guard died, refuses the writer.
 
 Wiring every store-opening entry point to ``admit_writer`` is the Runtime and
 Control contract (work/opus-production-installer-contract-round5.txt); until it
@@ -32,6 +41,8 @@ from core import local_update
 from core.local_update import UpdateError
 
 ADMISSION_FILE = ".qronos-store-admission.lock"
+# Exists while an update launch or the installer it started is alive.
+UPDATE_IN_PROGRESS_MUTEX = "Local\\Qronos.UpdateInProgress.v1"
 
 _LOCKFILE_FAIL_IMMEDIATELY = 0x1
 _LOCKFILE_EXCLUSIVE_LOCK = 0x2
@@ -118,6 +129,24 @@ def _unlock(descriptor: int) -> None:
     kernel.UnlockFileEx(msvcrt.get_osfhandle(descriptor), 0, 1, 0, overlapped)
 
 
+def update_in_progress(name: str = UPDATE_IN_PROGRESS_MUTEX) -> bool:
+    """True while the named update mutex exists: a launch or the installer it started is alive."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.OpenMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenMutexW(0x00100000, False, name)  # SYNCHRONIZE
+    if handle:
+        kernel.CloseHandle(handle)
+        return True
+    return ctypes.get_last_error() == 5  # exists but cannot be opened: still an update in progress
+
+
 def _admit(data_root: Path, exclusive: bool) -> Admission:
     if os.name != "nt":
         raise UpdateError("unsupported_platform", "Store admission is implemented for Windows only.")
@@ -130,9 +159,18 @@ def _admit(data_root: Path, exclusive: bool) -> Admission:
     return Admission(descriptor, exclusive)
 
 
-def admit_writer(data_root: Path) -> Admission:
-    """SHARED admission for a process that opens stores. Take it before the first store opens; keep it."""
-    return _admit(data_root, exclusive=False)
+def admit_writer(data_root: Path, fence: str = UPDATE_IN_PROGRESS_MUTEX) -> Admission:
+    """SHARED admission for a process that opens stores. Take it before the first store opens; keep it.
+
+    After the shared lock is held, the update fence is checked: while the update
+    mutex exists (an installer is alive, even if its launching guard died), the
+    admission is given back and refused.
+    """
+    admission = _admit(data_root, exclusive=False)
+    if update_in_progress(fence):
+        admission.release()
+        raise UpdateError("update_in_progress", "An update is being installed; Qronos's data cannot be opened now.")
+    return admission
 
 
 def admit_exclusive(data_root: Path) -> Admission:

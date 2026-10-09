@@ -127,7 +127,7 @@ SNAPSHOT_DIR = "snapshots"
 # Held for the whole launch, then kept existing by the installer's inherited
 # handle for the installer's lifetime. Every backend service must refuse to
 # start while it exists (update_in_progress()); the start-up barrier refuses too.
-UPDATE_IN_PROGRESS_MUTEX = "Local\\Qronos.UpdateInProgress.v1"
+UPDATE_IN_PROGRESS_MUTEX = store_admission.UPDATE_IN_PROGRESS_MUTEX
 RUNTIME_MUTEXES = (
     "Local\\QronosAgentRuntimeBridge",
     "Local\\QronosSupervisor",
@@ -392,21 +392,8 @@ def owned_launch_hold(data_root: Path) -> Callable[[], LaunchHold]:
 
 
 def update_in_progress(name: str = UPDATE_IN_PROGRESS_MUTEX) -> bool:
-    """True while the named update mutex exists: a launch or the installer it started is alive."""
-    if os.name != "nt":
-        return False
-    import ctypes
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel.OpenMutexW.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = kernel.OpenMutexW(0x00100000, False, name)  # SYNCHRONIZE
-    if handle:
-        kernel.CloseHandle(handle)
-        return True
-    return ctypes.get_last_error() == 5  # exists but cannot be opened: still an update in progress
+    """True while the named update mutex exists (see core.store_admission.update_in_progress)."""
+    return store_admission.update_in_progress(name)
 
 
 # ----------------------------------------------------------------------- offer

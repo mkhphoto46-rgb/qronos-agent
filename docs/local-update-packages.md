@@ -272,10 +272,12 @@ Limits:
   (bounded by the 2 GiB package limit).
 - Snapshots cover only single-file stores, at most 64 MiB each and 256 MiB in
   total. Two upgrade snapshots are kept, plus pinned ones.
-- The lifetime guard keeps the exclusion only while the launching process
-  lives. If that process is killed, the update mutex still lives in the
-  installer, but writer admission is free again. The desktop must not start
-  writers while an update is in progress (contract).
+- If the launching process (the lifetime guard) dies, its exclusive admission
+  ends with it, because a byte-range lock belongs to its process. The update
+  mutex still exists in the installer's inherited handle, and every writer
+  admission checks that fence AFTER taking its shared lock. So no writer is
+  admitted until the installer ends. The updater creates the fence only while
+  it holds the exclusive admission, which makes the order atomic.
 
 ## Owner key and signing (`build_support/release_signing.py`)
 
