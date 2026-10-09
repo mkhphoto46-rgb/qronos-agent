@@ -175,84 +175,107 @@ reviewed code in the new build.
 
 ## The product lifecycle (`core/update_service.py`)
 
-The desktop reaches it through the `update` backend service
+**Activation status: launching an installer is REFUSED by default**
+(`launch_unavailable`). It opens only when the dependencies in
+`LAUNCH_DEPENDENCIES` exist and are independently accepted together with this
+code: the runtime's own instance ownership, store admission in every
+store-opening process, the awaited start-up barrier, and the desktop's drain of
+its writers. No request field, flag or frontend value can open it. The exact
+cross-owner contract is in `work/opus-production-installer-contract-round5.txt`
+(coordination file, outside the repository).
+
+The desktop reaches the backend through the `update` service
 (`core/update_cli.py`: operation in argv, one JSON object on stdin, one JSON
-object out; every refusal is `{"ok": false, "code": ..., "error": ...}`).
+object out; every refusal is `{"ok": false, "code": ..., "error": ...}`). The
+running version is never taken from a request; one that names `runningVersion`
+is refused. It comes from `QRONOS_APP_VERSION`, which the desktop binary sets
+from its own compiled package information, or from `tauri.conf.json` in a
+source checkout. A packaged backend without it refuses (`version_unknown`).
 
-The running version is never taken from a request; one that names
-`runningVersion` is refused. It comes from `QRONOS_APP_VERSION`, which the
-desktop binary sets from its own compiled package information when it starts
-the service. In a source checkout it comes from `tauri.conf.json`. A packaged
-backend without it refuses (`version_unknown`).
-
-1. **status**: the running version, whether an owner key is configured, the
-   phase, the staged package, the outcome of the last update, snapshots and a
-   bounded event history (100 entries).
+1. **status** (read-only):
+   - the running version and whether an owner key is configured;
+   - whether launching is available;
+   - the phase, the staged package and the last outcome;
+   - whether an update is in progress or a recovery is pending;
+   - snapshots and a bounded event history.
 2. **discover** `{folder}`: installer and manifest pairs directly in a folder
    the person chose (not recursive, links refused). Nothing is opened.
-3. **verify** / **request** `{installer, manifest}`: every check, offline,
-   before anything is copied. `request` then asks the permission gate
-   (`security.gate`, category `INSTALL_SOFTWARE`) for exactly this version,
-   kind and SHA-256. A refusing policy refuses. Otherwise an approval secret
-   must be configured (updates always need the TYPED_SECRET level, even if the
-   policy was relaxed). It returns the offer and a random single-use
-   `approvalToken` (10 minutes); only its SHA-256 is stored.
-4. **approve** `{approvalToken, secret}`: verifies the approval secret (with
-   the store's persisted lockout), re-verifies the files and checks they are
-   still exactly the package, signer and paths that were requested. Then it
-   consumes the token, stages the copy, and returns a single-use `launchToken`
-   (15 minutes). A wrong secret changes nothing; the request stays usable until
-   it expires. A missing or unknown token is refused before the secret is even
-   checked.
-5. **launch** `{launchToken}`:
-   - It proves the runtime is stopped by creating the named mutexes the runtime
-     bridge, supervisor and sidecars hold while they run. If any exists, it
-     refuses with `runtime_running`. While they are held, none of those
-     processes can start. A caller saying "stopped" is not evidence.
-   - It also holds `Local\Qronos.UpdateInProgress.v1` for the whole launch.
-     Other backend services (settings, permissions, library and so on) do not
-     hold the runtime mutexes. Once Runtime wires `update_in_progress()` into
-     the backend entry point, they refuse to start while the update holds it.
-     Until then, the desktop must not start them during a launch.
-   - It claims the launch in the lifecycle file, so a crash is recovered at the
-     next start.
-   - Before an upgrade it keeps a bounded, hashed snapshot of the snapshot-able
-     stores whose format changes.
-   - It re-verifies the staged copy, holds it open so nobody can write, rename or
-     delete it, and re-hashes it through that handle.
-   - For a rollback that needs older data, it first saves the current files as
-     another snapshot, then restores. A restore that fails part-way puts the
-     current files back.
-   - Only then does it start exactly the staged installer, with no arguments.
-     The desktop exits; the installer's own install-root and owned-payload
-     guards apply.
-6. **startup_check** (at every start, before stores open):
-   - It records `applied` (the running version is the target; any store whose
-     format differs from the signed one is reported as `dataMismatch`) or
-     `not_applied` (cancelled, failed or crashed installer). The staged copy is
-     kept for a retry.
-   - It puts back data restored by a launch that crashed before the installer
-     started.
-   - It removes interrupted snapshot folders. Foreign files are never removed.
-7. **discard**: forgets the staged update and its tokens.
+3. **verify** / **request** `{installer, manifest}`:
+   - every check runs offline, before anything is copied;
+   - `request` then asks the permission gate (`security.gate`, category
+     `INSTALL_SOFTWARE`) for exactly this version, kind, installer SHA-256,
+     manifest SHA-256 and signer;
+   - updates always need the approval secret (the TYPED_SECRET level), so one
+     must be configured;
+   - it returns the offer and a single-use `approvalToken` (10 minutes); only its
+     SHA-256 is stored.
+4. **approve** `{approvalToken, secret}`:
+   - the token is checked first;
+   - the gate is asked again, so a policy changed meanwhile is honoured;
+   - the secret is verified (the approval store keeps its lockout);
+   - the files are re-verified and compared with the exact binding, including
+     the manifest digest and the signer;
+   - only then is the token consumed, the copy staged and a single-use
+     `launchToken` (15 minutes) returned;
+   - the approval is written to the action audit trail, with no token or secret.
+5. **launch** `{launchToken}`, when enabled:
+   - It takes the **exclusive store admission** (`core/store_admission.py`). This
+     is granted only while no process holds a shared writer admission, and while
+     it is held every new writer is refused, atomically, with no check-to-open gap.
+   - It owns the runtime, supervisor, sidecar and update mutexes: each is
+     created, then wait-acquired, on a holder thread.
+   - The gate is asked a third time.
+   - It claims the launch, snapshots what an upgrade changes, re-verifies the
+     staged installer and manifest, holds the installer open, re-hashes it, and
+     starts only that file.
+   - The installer inherits the update mutex. The launching process answers the
+     desktop at once, then stays alive holding everything until the installer
+     exits: it is the installer's lifetime guard.
+   - Completion is audited.
+6. **The start-up barrier**, `recover_before_stores` (mutating, exclusive,
+   awaited; Runtime calls it in-process before any store opens, never in the
+   post-ready hook):
+   - It refuses while an update is in progress. Liveness is the update mutex,
+     never a timer.
+   - It recovers an interrupted launch.
+   - It resolves a handed-off update:
+     - **applied** only on a version change;
+     - **unconfirmed** for a same-version repair, which stays staged until
+       there is reviewed evidence (an installer receipt, not built yet) or the
+       person discards it;
+     - **not applied** otherwise. A rollback that did not apply gets its pinned
+       safety snapshot back, under the exclusive admission.
+   - A failure is a typed refusal (`recovery_failed`, `recovery_pending`), and
+     the process must stop without opening stores.
+   - `startup_check` is the separate read-only status for after `runtime_ready`.
+7. **discard**: forgets the staged update and its tokens. It refuses while a
+   launch is alive or a recovery is pending.
+
+Data rules for snapshots:
+
+- An upgrade that changes the format of any of the following is refused
+  (`unsupported_migration`):
+  - a SQLite store;
+  - a security registry (paired devices, permissions), because an old copy
+    would undo a revocation or a tightening;
+  - a store moved out of the data folder by an environment variable.
+- A store that did not exist before the upgrade is recorded as absent. A
+  rollback that would have to delete today's file is refused.
+- Snapshots that an unresolved launch, handoff, request or grant refers to are
+  never pruned.
 
 Limits:
 
-- A same-version repair counts as applied whether or not the installer
-  finished, since the version cannot tell the difference.
+- A same-version repair cannot be confirmed until a reviewed installer receipt
+  exists.
 - `store.handoff` re-hashes the staged installer while holding the store lock
   (bounded by the 2 GiB package limit).
 - Snapshots cover only single-file stores, at most 64 MiB each and 256 MiB in
-  total. Two upgrade snapshots are kept.
-- Recovery after a crash runs at the next start-up, which must call
-  `startup_check` before any store is opened.
-- JSON stores have no per-store lock (`JsonStore` relies on atomic replace).
-  A snapshot therefore reads one complete version of each file, never a torn
-  one. A backend service that was already running when the launch began could
-  still write afterwards. If it overwrote restored data with a newer format,
-  the older version refuses that store (`StoreTooNew`), and the saved current
-  copy lets it be put back. Blocking new services (above) and draining
-  in-flight desktop commands (Control) close this window.
+  total. Two upgrade snapshots are kept, plus pinned ones.
+- The lifetime guard keeps the exclusion only while the launching process
+  lives. If that process is killed, the update mutex still lives in the
+  installer, but writer admission is free again. The desktop must not start
+  writers while an update is in progress (contract).
 
 ## Owner key and signing (`build_support/release_signing.py`)
 
@@ -267,10 +290,26 @@ How the key is kept:
 - It is written to a **new** file **outside every Git checkout**. The tool
   refuses a path inside a checkout, or one reached through a link, and never
   overwrites an existing key.
-- The file's access list is then reduced to that account alone. A key file
+- The file is created (CREATE_NEW) with an access list that admits that
+  account alone, set in the same call that creates it, so it is never broader.
+  Every later use re-checks, through the open handle: the owner-only access
+  list, a plain single-link file, and that the handle's final path is exactly
+  the intended path (no folder on the way was swapped for a link). A key file
   whose access was loosened is refused.
+- If creating the key fails and the half-written file cannot be removed, the
+  tool says so and names the file, so it can be deleted by hand.
 - The private key is never printed, logged, passed on the command line or in
   the environment. Only the public trusted-key entry is printed.
+
+Limits, stated plainly:
+
+- DPAPI protects the key against other Windows accounts and against copies
+  taken off the machine. It does NOT protect against software running as the
+  owner's own account, which can ask DPAPI to unlock it just as this tool does.
+  Create and use the key only on an account and machine the owner trusts.
+- Wiping the decrypted key from memory is best effort. The tool zeroes the
+  buffers it controls (the ctypes copies and the byte array), but Python makes
+  its own copies, which it cannot erase.
 
 Owner procedure (once, after review). Run each command in **Windows
 PowerShell**, opened from the Start menu, in the Qronos source folder:
@@ -314,40 +353,44 @@ exits non-zero while any is closed:
 
 - **owner update key:** closed until the reviewed public entry is added.
 - **version authority:** open when the three version fields agree.
-- **Authenticode:** closed. No code-signing certificate exists. The owner must
-  obtain one from a public certificate authority, which is an external, paid
-  step. Then they install the Windows SDK signing tools and set
-  `QRONOS_AUTHENTICODE_THUMBPRINT`. A self-signed certificate is not a
-  substitute, and nothing here installs certificates or touches trust stores.
+- **Authenticode:** always closed for now. No step in this repository signs a
+  built installer, verifies the signature (`signtool verify /pa /all`), or
+  checks that the certificate is for code signing, chains to a public root and
+  is not self-signed, so nothing can show readiness. A thumbprint setting
+  (`QRONOS_AUTHENTICODE_THUMBPRINT`) or a `signtool` binary is reported but is
+  not evidence. `signtool` is only looked for at the fixed Windows SDK path,
+  never through `PATH`. Opening this gate needs a certificate from a public
+  certificate authority (an external, paid step for the owner) and a reviewed
+  sign-and-verify build step. A self-signed certificate is never a substitute,
+  and nothing here installs certificates or touches trust stores.
+- **owner update key:** counts the public trusted entries only. It does not
+  check the custody of the private key file.
 
 Signing in pure Python is not constant-time, so the owner signs only on their
 own trusted machine.
 
 ## Wiring that other owners do (requested, not done here)
 
-- **Runtime** (`build_support/runtime_entry.py`, `core/runtime_bridge.py`):
-  - add the service `"update": "core.update_cli"`;
-  - register the start-up hook `core.update_service.startup_check` with
-    context `{"appVersion": ...}` (a small, bounded dict that never raises).
-    It must run once, before stores open, and its result is emitted as
-    `update_status`;
-  - in the backend entry point, refuse every service except `update` while
-    `core.update_service.update_in_progress()` is true.
-- **Control** (desktop):
-  - add `Service::Update` (`update`, `core.update_cli`) to
-    `src-tauri/src/runtime/backend.rs`;
-  - add a Tauri command `update_command(operation, payload)` with the same
-    shape as `permissions_command`. Start the service with `QRONOS_APP_VERSION`
-    set from the app's own compiled package information, never from the
-    frontend;
-  - block and drain other backend commands while an update launch is running;
-  - add native file and folder pickers;
-  - add a real `stopRuntime` that stops the bridge and reports the result, plus
-    `restartRuntime` and `exitApp`;
-  - mount `src/components/UpdatePanel.tsx` (Persian) in Settings, with
-    `src/updateStore.ts` as its client.
+The closed contract is `work/opus-production-installer-contract-round5.txt`. In
+short:
+
+- **Runtime:**
+  - the bridge and supervisor OWN their instance mutexes;
+  - every store-opening process calls `recover_before_stores` first, then
+    `core.store_admission.admit_writer`, then opens stores;
+  - backend services refuse while `update_in_progress()`;
+  - `SERVICES["update"]`;
+  - only the read-only `startup_check` may use the post-ready hook seam.
+- **Control:**
+  - `Service::Update` and `update_command` with `QRONOS_APP_VERSION` from the
+    binary;
+  - the stop result derived from the actual process exit;
+  - every other backend command blocked and drained during a launch;
+  - read the launch's single answer line without waiting for the process to
+    exit;
+  - restart the runtime only on a typed proved-no-start refusal;
+  - mount `UpdatePanel` after acceptance.
 - **Elevation:** none. Installs are per user (`installMode: currentUser`).
-  A machine-wide configuration is refused rather than routed through a broker.
 
 The unsigned review installers built so far are not owner-signed and must not
 be described as such.
