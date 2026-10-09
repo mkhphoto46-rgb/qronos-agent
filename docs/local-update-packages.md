@@ -281,9 +281,12 @@ Limits:
 
 ## Owner key and signing (`build_support/release_signing.py`)
 
-**Status:** the tool is implemented and tested with synthetic keys only. The
-real owner key is created only after the tool has been reviewed and Root gives
-the go-ahead.
+**Status:** the key-creation part of the tool was independently reviewed at
+`b76a904` (work/opus-production-media-review-signing-round5.txt) and accepted
+for owner-key creation only. The real owner key was then created once, on
+2026-10-09, from that exact source, on the owner's account, under Root's
+authorization. The tool's tests use synthetic keys only. Public release
+signing, Authenticode and update activation are not accepted.
 
 How the key is kept:
 
@@ -302,6 +305,25 @@ How the key is kept:
   tool says so and names the file, so it can be deleted by hand.
 - The private key is never printed, logged, passed on the command line or in
   the environment. Only the public trusted-key entry is printed.
+- `public-entry` proves custody before it prints anything: it unlocks the key
+  file with DPAPI on the current account, and the unlocked key must produce
+  exactly the public key the file lists (a strong Ed25519 key). The unlocked
+  key is wiped before the entry is printed. An edited file whose listed public
+  key is not its own prints nothing.
+
+Where the key can be created and used (anything else is refused, never
+worked around):
+
+- **Account:** the owner's own ordinary Windows account, in a normal
+  (non-elevated) PowerShell. Only local or domain user accounts
+  (`S-1-5-21-...`) are accepted; a Microsoft Entra ID-only account
+  (`S-1-12-1-...`), a service account or another user is refused.
+- **Path:** a new, plain, local folder given as a full long path. It must be
+  outside every Git checkout (a `.git` file or folder above it counts). It must
+  not be synchronised (OneDrive or similar) or shared, and nothing on the way
+  may be a junction or link. A path in 8.3 short form, or reached through a
+  `SUBST` or mapped drive, is refused because the opened file's final path
+  differs from the path given.
 
 Limits, stated plainly:
 
@@ -353,7 +375,9 @@ python -m build_support.release_signing sign --key-file "$env:USERPROFILE\Qronos
 `python -m build_support.release_signing preflight` lists the release gates and
 exits non-zero while any is closed:
 
-- **owner update key:** closed until the reviewed public entry is added.
+- **owner update key:** open when `config/update_trusted_keys.json` lists at
+  least one active (not revoked) entry. It counts the public entries only; it
+  does not check the custody of any private key file.
 - **version authority:** open when the three version fields agree.
 - **Authenticode:** always closed for now. No step in this repository signs a
   built installer, verifies the signature (`signtool verify /pa /all`), or
@@ -365,8 +389,6 @@ exits non-zero while any is closed:
   certificate authority (an external, paid step for the owner) and a reviewed
   sign-and-verify build step. A self-signed certificate is never a substitute,
   and nothing here installs certificates or touches trust stores.
-- **owner update key:** counts the public trusted entries only. It does not
-  check the custody of the private key file.
 
 Signing in pure Python is not constant-time, so the owner signs only on their
 own trusted machine.
