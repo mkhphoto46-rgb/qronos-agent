@@ -41,6 +41,7 @@ from core.action_broker_client import (
     build_approval,
 )
 from core.actions import ActionOutcome, ActionRequest
+from core.approval_ledger import ApprovalLedger
 from core.elevated_actions import (
     FA,
     KIND,
@@ -727,3 +728,209 @@ def test_the_suite_refuses_the_real_scm_and_uac_bindings():
         Win32ServiceControl().open()
     with pytest.raises(AssertionError, match="real Windows computer side effect"):
         uac_launch.Win32()
+
+
+# ------------------------------------------------- Stop races at the real boundaries (R-P3a)
+
+
+class BarrierLedger(ApprovalLedger):
+    """The real ledger, able to pause just AFTER a real issue or take, until released."""
+
+    def __init__(self):
+        super().__init__(ttl_seconds=elevated_actions.APPROVAL_TTL_SECONDS)
+        self.pause = None  # "issue" | "take"
+        self.reached = threading.Event()
+        self.release = threading.Event()
+
+    def _barrier(self, step):
+        if self.pause == step:
+            self.reached.set()
+            assert self.release.wait(10), "the test never released the barrier"
+
+    def issue(self, *args, **kwargs):
+        ticket = super().issue(*args, **kwargs)
+        self._barrier("issue")
+        return ticket
+
+    def take(self, *args, **kwargs):
+        ticket = super().take(*args, **kwargs)
+        self._barrier("take")
+        return ticket
+
+
+class Sends:
+    """Records everything that could leave toward a broker. Each list must stay empty."""
+
+    def __init__(self, monkeypatch):
+        from core import action_broker_client
+
+        self.sessions, self.launches, self.servers = [], [], []
+        real_server = action_broker_client.ChannelServer
+        sends = self
+
+        def server(*args, **kwargs):
+            sends.servers.append(args[0] if args else "?")  # a key would be released on this server
+            return real_server(*args, **kwargs)
+
+        monkeypatch.setattr(action_broker_client, "ChannelServer", server)
+
+        class Launcher:
+            def launch(self, address, runtime_pid):
+                sends.launches.append(address)
+                raise AssertionError("no broker may be launched after Stop")
+
+        self.launcher = Launcher()
+
+        def session(launcher):
+            sends.sessions.append(launcher)
+            return BrokerSession(launcher, accept_timeout_seconds=2, reply_timeout_seconds=2)
+
+        self.session_factory = session
+
+    def none(self):
+        return self.sessions == [] and self.launches == [] and self.servers == []
+
+
+@pytest.fixture
+def real_secret(tmp_path):
+    """The real verifier contract over a disposable store with a test secret."""
+    from core.approval_secret import ApprovalSecretStore
+    from core.library_executor import WorkflowSecretCheck
+
+    store = ApprovalSecretStore(tmp_path / "approval_secret.sqlite3", audit_path=tmp_path / "audit.jsonl")
+    store.set_secret("disposable test secret 1")
+    return WorkflowSecretCheck(store), "disposable test secret 1"
+
+
+def race_coordinator(ledger, sends, check, events, scheduled, verify=None):
+    return ElevatedActionCoordinator(
+        notify=lambda kind, status, message: events.append((kind, json.loads(message))),
+        verify_secret=verify or check.verify,
+        secret_status=check.status,
+        paused=lambda: False,
+        launcher_factory=lambda: sends.launcher,
+        session_factory=sends.session_factory,
+        gate_check=lambda request: gate.Verdict(request=request, decision=PermissionDecision.REQUIRE_TYPED_SECRET,
+                                                outcome=ActionOutcome.AWAITING_APPROVAL, reason="test"),
+        run_async=scheduled.append,  # the action's thread starts when the test says so
+        ledger=ledger,
+    )
+
+
+def prompt_token(events):
+    return next(body["actionToken"] for kind, body in events if kind == "app_workflow_approval_required")
+
+
+def finished(events):
+    return [body for kind, body in events if kind == "app_workflow_finished"]
+
+
+def test_stop_just_after_a_genuine_approval_is_taken_releases_nothing(monkeypatch, real_secret):
+    """
+    The R-P3a boundary: resolve has consumed the real ticket (correct secret,
+    real ledger) and pauses right there; Stop runs; resolve resumes; then the
+    action's thread starts. Stop must win: no session, no server (so no key
+    released), no launch, and exactly one honest terminal event.
+    """
+    check, secret = real_secret
+    ledger, sends, events, scheduled = BarrierLedger(), Sends(monkeypatch), [], []
+    coordinator = race_coordinator(ledger, sends, check, events, scheduled)
+    coordinator.try_begin("restart the print spooler", "req-race")
+    token = prompt_token(events)
+
+    ledger.pause = "take"
+    resolving = threading.Thread(target=lambda: coordinator.resolve(token, approved=True, secret=secret))
+    resolving.start()
+    assert ledger.reached.wait(10)  # the ticket is consumed; resolve is paused right after it
+    stopping = threading.Thread(target=lambda: coordinator.discard("runtime_stopped"))
+    stopping.start()
+    stopping.join(0.3)
+    stop_waited_for_consumption = stopping.is_alive()
+    ledger.release.set()
+    resolving.join(10)
+    stopping.join(10)
+    assert not resolving.is_alive() and not stopping.is_alive()
+    for start in scheduled:  # the action's thread starts after Stop
+        start()
+
+    assert sends.none(), (sends.sessions, sends.launches, sends.servers)
+    (result,) = finished(events)
+    assert result["outcome"] == "refused" and result["message"] == FA["cancelled"]
+    assert [kind for kind, _ in events].count("app_workflow_finished") == 1
+    assert stop_waited_for_consumption  # Stop is serialized with consumption, not interleaved
+
+
+def test_stop_while_a_prompt_is_being_issued_leaves_no_usable_approval(monkeypatch, real_secret):
+    check, secret = real_secret
+    ledger, sends, events, scheduled = BarrierLedger(), Sends(monkeypatch), [], []
+    coordinator = race_coordinator(ledger, sends, check, events, scheduled)
+    ledger.pause = "issue"
+    beginning = threading.Thread(target=lambda: coordinator.try_begin("restart the print spooler", "req-issue"))
+    beginning.start()
+    assert ledger.reached.wait(10)
+    stopping = threading.Thread(target=lambda: coordinator.discard("runtime_stopped"))
+    stopping.start()
+    ledger.release.set()
+    beginning.join(10)
+    stopping.join(10)
+    token = prompt_token(events)
+    kinds = [kind for kind, body in events if body.get("actionToken") == token]
+    assert kinds[-1] == "app_workflow_stale"  # the desktop's last word on it is "stale", whatever the order
+    coordinator.resolve(token, approved=True, secret=secret)
+    for start in scheduled:
+        start()
+    assert sends.none() and finished(events) == []
+
+
+def test_stop_during_secret_verification_refuses_the_answer(monkeypatch, real_secret):
+    check, secret = real_secret
+    ledger, sends, events, scheduled = BarrierLedger(), Sends(monkeypatch), [], []
+    verifying, release = threading.Event(), threading.Event()
+
+    def slow_verify(candidate):
+        verifying.set()
+        assert release.wait(10)
+        return check.verify(candidate)  # the real verifier says yes
+
+    coordinator = race_coordinator(ledger, sends, check, events, scheduled, verify=slow_verify)
+    coordinator.try_begin("restart the print spooler", "req-verify")
+    token = prompt_token(events)
+    resolving = threading.Thread(target=lambda: coordinator.resolve(token, approved=True, secret=secret))
+    resolving.start()
+    assert verifying.wait(10)
+    coordinator.discard("runtime_stopped")  # revokes the still-open ticket
+    release.set()
+    resolving.join(10)
+    for start in scheduled:
+        start()
+    assert sends.none() and scheduled == [] and finished(events) == []
+    assert events[-1][0] == "app_workflow_stale"
+
+
+def test_stop_after_the_approval_but_before_its_thread_starts_cancels_it(monkeypatch, real_secret):
+    check, secret = real_secret
+    ledger, sends, events, scheduled = BarrierLedger(), Sends(monkeypatch), [], []
+    coordinator = race_coordinator(ledger, sends, check, events, scheduled)
+    coordinator.try_begin("restart the print spooler", "req-start")
+    coordinator.resolve(prompt_token(events), approved=True, secret=secret)
+    assert len(scheduled) == 1
+    coordinator.discard("runtime_stopped")
+    scheduled[0]()
+    assert sends.none()
+    (result,) = finished(events)
+    assert result["message"] == FA["cancelled"]
+
+
+def test_a_prompt_issued_after_stop_still_works(monkeypatch, real_secret):
+    """The fix must not make Stop poison approvals given after it."""
+    check, secret = real_secret
+    ledger, sends, events, scheduled = BarrierLedger(), Sends(monkeypatch), [], []
+    coordinator = race_coordinator(ledger, sends, check, events, scheduled)
+    coordinator.discard("runtime_stopped")
+    coordinator.try_begin("restart the print spooler", "req-after")
+    coordinator.resolve(prompt_token(events), approved=True, secret=secret)
+    scheduled[0]()  # it really proceeds to a launch (refused here only by the recording launcher)
+    assert len(sends.sessions) == 1 and len(sends.launches) == 1
+    (result,) = finished(events)
+    assert result["outcome"] == "refused" and result["message"] == FA["unavailable"]
+

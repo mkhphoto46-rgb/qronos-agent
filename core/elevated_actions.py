@@ -219,8 +219,14 @@ class ElevatedActionCoordinator:
             self._finish(request_id, "refused", FA["forbidden"], "gate refused")
             return FA["forbidden"]
 
-        ticket = self._ledger.issue(ApprovalKind.APP_WORKFLOW, request_id,
-                                    payload=PendingElevation(request_id, request))
+        # The approval's cancellation epoch is bound HERE, at issuance, under
+        # the same lock as discard(): a prompt issued before a Stop is revoked
+        # by it (or, once taken, carries the old epoch and is cancelled); one
+        # issued after it belongs to the new epoch. A later Stop can never be
+        # adopted as this approval's authority.
+        with self._epoch_lock:
+            ticket = self._ledger.issue(ApprovalKind.APP_WORKFLOW, request_id,
+                                        payload=PendingElevation(request_id, request, epoch=self._epoch))
         self._notify("app_workflow_approval_required", "approval_required", _json({
             "actionToken": ticket.approval_id,
             "requestId": request_id,
@@ -229,6 +235,10 @@ class ElevatedActionCoordinator:
             "details": {"service": "Spooler", "elevation": "uac"},
             "message": FA["prompt"],
         }))
+        if not self.owns(ticket.approval_id):
+            # A Stop revoked it between issuance and this notice; its own
+            # "stale" may have reached the desktop first, so say it again.
+            self._stale(ticket.approval_id, "revoked")
         return FA["asked"]
 
     def _refusal_before_prompt(self) -> Optional[str]:
@@ -274,17 +284,24 @@ class ElevatedActionCoordinator:
                     "actionToken": token, "requestId": pending.request_id, "message": FA["secret_rejected"],
                 }))
                 return
-        try:
-            ticket = self._ledger.take(token, kinds=(ApprovalKind.APP_WORKFLOW,))
-        except StaleApproval as stale:
-            self._stale(token, stale.reason)
+        # Consumption is serialized with discard(): either discard revoked
+        # the ticket first (take refuses), or the ticket is taken first with
+        # the epoch bound at issuance, which a later Stop then outdates.
+        # Lock order everywhere: _epoch_lock, then the ledger's own lock; no
+        # callback runs while _epoch_lock is held.
+        with self._epoch_lock:
+            try:
+                ticket = self._ledger.take(token, kinds=(ApprovalKind.APP_WORKFLOW,))
+            except StaleApproval as stale:
+                ticket, reason = None, stale.reason
+        if ticket is None:
+            self._stale(token, reason)
             return
         pending = ticket.payload
         if not approved:
             self._finish(pending.request_id, "refused", FA["declined"], "declined")
             return
-        with self._epoch_lock:
-            pending = replace(pending, secret=secret or "", epoch=self._epoch)
+        pending = replace(pending, secret=secret or "")  # the epoch stays the one bound at issuance
         self._run_async(lambda: self._perform(pending))
 
     def _cancelled(self, pending: PendingElevation) -> bool:
@@ -299,7 +316,7 @@ class ElevatedActionCoordinator:
         """
         with self._epoch_lock:
             self._epoch += 1
-        revoked = self._ledger.revoke_kinds((ApprovalKind.APP_WORKFLOW,), reason)
+            revoked = self._ledger.revoke_kinds((ApprovalKind.APP_WORKFLOW,), reason)
         for ticket in revoked:
             self._notify("app_workflow_stale", "ready", _json({
                 "actionToken": ticket.approval_id, "requestId": ticket.payload.request_id, "reason": reason,
