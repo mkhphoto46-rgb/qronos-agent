@@ -7,7 +7,12 @@
  *   and the person's approval secret, which is sent once and never kept;
  * - a launch needs the backend's single-use launch token, and happens only
  *   after the desktop has really stopped the runtime (the backend proves that
- *   itself through the runtime's mutexes); the app exits after a launch.
+ *   itself); the app exits after a launch. The backend refuses launching
+ *   (launch_unavailable) until its runtime/desktop dependencies are accepted.
+ * - Only a typed refusal that proves no installer started may bring the
+ *   runtime back. Any other failure (a lost transport, an unknown answer) is
+ *   "outcome unknown": the installer may be running, so no competing writer
+ *   is started and the person is told so.
  *
  * Tauri command (proposed to Control): update_command(operation, payload),
  * the same shape as permissions_command, running the "update" backend service.
@@ -37,15 +42,34 @@ export type UpdateOffer = {
   restoreSnapshot: string | null;
 };
 
+export type UpdatePhase = "idle" | "staged" | "handed_off";
+
+/** applied: a version change proves the new build runs. unconfirmed: a same-version repair
+ *  whose installer may not have run (kept staged). not_applied: cancelled, failed or crashed. */
+export type UpdateOutcomeResult = "applied" | "not_applied" | "unconfirmed";
+
+export type UpdateOutcome = {
+  result: UpdateOutcomeResult;
+  kind: UpdateKind;
+  version: string;
+  dataMismatch: string[];
+  dataRestored: boolean;
+};
+
 export type UpdateStatus = {
   runningVersion: string;
   trust: { configured: boolean; activeKeys: number; error: string | null };
-  phase: "idle" | "staged" | "handed_off";
+  launchAvailable: boolean;
+  phase: UpdatePhase;
   staged: { version: string; kind: UpdateKind; packageSha256: string } | null;
+  launchReady: boolean;
+  updateInProgress: boolean;
   launching: boolean;
-  outcome: { result: "applied" | "not_applied"; version: string; dataMismatch: string[] } | null;
-  events: { at: number; event: string; version: string | null; detail: string }[];
+  recoveryPending: boolean;
+  outcome: UpdateOutcome | null;
 };
+
+export type UpdateCandidate = { installer: string; manifest: string };
 
 export type UpdateRefusal = { ok: false; code: string; message: string };
 
@@ -87,6 +111,12 @@ export const REFUSAL_TEXT: Record<string, string> = {
   not_staged: "به‌روزرسانی تأییدشده آماده نیست.",
   runtime_running: "Qronos هنوز در حال اجراست؛ ابتدا باید متوقف شود.",
   launch_failed: "ویندوز نتوانست نصب‌کننده را اجرا کند.",
+  launch_unavailable: "اجرای نصب‌کننده هنوز فعال نشده است؛ بستهٔ تأییدشده آماده باقی می‌ماند.",
+  update_in_progress: "یک به‌روزرسانی هم‌اکنون در حال اجراست؛ پس از پایان آن دوباره تلاش کنید.",
+  writers_active: "بخش دیگری از Qronos هنوز داده‌ها را باز نگه داشته است؛ ابتدا باید بسته شود.",
+  recovery_pending: "یک به‌روزرسانی نیمه‌کاره باید هنگام شروع دوبارهٔ Qronos بازیابی شود.",
+  recovery_failed: "بازگرداندن داده‌های ذخیره‌شده ناموفق بود؛ Qronos تا رفع این مشکل داده‌ها را باز نمی‌کند.",
+  bad_response: "پاسخ بخش به‌روزرسانی معتبر نبود.",
   busy: "بخش دیگری از Qronos در حال تغییر به‌روزرسانی‌هاست؛ دوباره تلاش کنید.",
   store: "پوشهٔ به‌روزرسانی‌ها قابل اعتماد نیست؛ چیزی تغییر نکرد.",
   key_file: "فایل کلیدهای مورد اعتماد معتبر نیست.",
@@ -96,6 +126,27 @@ export const REFUSAL_TEXT: Record<string, string> = {
 
 export function refusalText(code: string): string {
   return REFUSAL_TEXT[code] ?? "به‌روزرسانی انجام نشد.";
+}
+
+/** Typed refusals that prove the backend started no installer and changed no data: only these may
+ *  bring the runtime back after it was stopped for a launch. */
+export const LAUNCH_NOT_STARTED: ReadonlySet<string> = new Set([
+  "launch_unavailable", "runtime_running", "update_in_progress", "writers_active", "recovery_pending",
+  "not_approved", "approval_expired", "permission_denied", "not_staged",
+]);
+
+/** Of those, the ones raised before the single-use launch token was spent: keep the token. */
+export const LAUNCH_TOKEN_KEPT: ReadonlySet<string> = new Set([
+  "launch_unavailable", "runtime_running", "update_in_progress", "writers_active",
+]);
+
+/** A launch whose result is not known (transport lost, unknown answer): the installer may be running. */
+export class UpdateOutcomeUnknown extends Error {
+  readonly code = "outcome_unknown";
+  constructor() {
+    super("نتیجهٔ اجرای نصب‌کننده معلوم نیست. Qronos دوباره راه‌اندازی نمی‌شود؛ اگر نصب‌کننده باز است آن را "
+      + "تمام کنید و سپس Qronos را باز کنید.");
+  }
 }
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -126,6 +177,78 @@ function token(value: unknown): string {
   return value;
 }
 
+function bad(what: string): never {
+  throw new UpdateRefused("bad_response", `The update backend returned an invalid ${what}.`);
+}
+
+const PHASES: ReadonlySet<string> = new Set(["idle", "staged", "handed_off"]);
+const RESULTS: ReadonlySet<string> = new Set(["applied", "not_applied", "unconfirmed"]);
+
+function bool(value: unknown, what: string): boolean {
+  return typeof value === "boolean" ? value : bad(what);
+}
+
+function parseOutcome(value: unknown): UpdateOutcome | null {
+  if (value === null || value === undefined) return null;
+  const outcome = record(value);
+  if (typeof outcome.result !== "string" || !RESULTS.has(outcome.result) || typeof outcome.kind !== "string"
+      || !KINDS.has(outcome.kind) || typeof outcome.version !== "string"
+      || !Array.isArray(outcome.dataMismatch) || !outcome.dataMismatch.every((v) => typeof v === "string")) {
+    bad("outcome");
+  }
+  return {
+    result: outcome.result as UpdateOutcomeResult, kind: outcome.kind as UpdateKind, version: outcome.version,
+    dataMismatch: (outcome.dataMismatch as string[]).slice(0, 64), dataRestored: bool(outcome.dataRestored, "outcome"),
+  };
+}
+
+/** Only the fields the panel shows, each checked. */
+export function parseStatus(value: unknown): UpdateStatus {
+  const status = record(value);
+  const trust = record(status.trust);
+  if (typeof status.runningVersion !== "string" || typeof status.phase !== "string" || !PHASES.has(status.phase)
+      || typeof trust.configured !== "boolean" || typeof trust.activeKeys !== "number") {
+    bad("status");
+  }
+  let staged: UpdateStatus["staged"] = null;
+  if (status.staged !== null && status.staged !== undefined) {
+    const item = record(status.staged);
+    if (typeof item.version !== "string" || typeof item.kind !== "string" || !KINDS.has(item.kind)
+        || typeof item.packageSha256 !== "string" || !SHA256.test(item.packageSha256)) {
+      bad("staged update");
+    }
+    staged = { version: item.version, kind: item.kind as UpdateKind, packageSha256: item.packageSha256 };
+  }
+  return {
+    runningVersion: status.runningVersion,
+    trust: { configured: trust.configured, activeKeys: trust.activeKeys,
+             error: typeof trust.error === "string" ? trust.error : null },
+    launchAvailable: bool(status.launchAvailable, "status"),
+    phase: status.phase as UpdatePhase,
+    staged,
+    launchReady: status.launchReady !== null && status.launchReady !== undefined,
+    updateInProgress: bool(status.updateInProgress, "status"),
+    launching: bool(status.launching, "status"),
+    recoveryPending: bool(status.recoveryPending, "status"),
+    outcome: parseOutcome(status.outcome),
+  };
+}
+
+const ABSOLUTE = /^[A-Za-z]:\\[^\0]*$/;
+
+/** At most 16 installer/manifest pairs, each an absolute path, the manifest beside its installer. */
+export function parseCandidates(value: unknown): UpdateCandidate[] {
+  if (!Array.isArray(value) || value.length > 16) bad("package list");
+  return (value as unknown[]).map((entry) => {
+    const item = record(entry);
+    if (typeof item.installer !== "string" || typeof item.manifest !== "string"
+        || !ABSOLUTE.test(item.installer) || item.manifest !== `${item.installer}.qronos-update.json`) {
+      bad("package list");
+    }
+    return { installer: item.installer as string, manifest: item.manifest as string };
+  });
+}
+
 /** The first 16 hex digits, grouped for reading aloud: "a1b2 c3d4 e5f6 0718". */
 export function shortDigest(sha256: string): string {
   return sha256.slice(0, 16).replace(/(.{4})(?!$)/g, "$1 ");
@@ -147,11 +270,10 @@ export function createUpdateClient(invoke: UpdateInvoke) {
 
   return {
     async status(): Promise<UpdateStatus> {
-      return record((await call("status")).status) as unknown as UpdateStatus;
+      return parseStatus((await call("status")).status);
     },
-    async discover(folder: string): Promise<{ installer: string; manifest: string }[]> {
-      const packages = (await call("discover", { folder })).packages;
-      return Array.isArray(packages) ? packages as { installer: string; manifest: string }[] : [];
+    async discover(folder: string): Promise<UpdateCandidate[]> {
+      return parseCandidates((await call("discover", { folder })).packages);
     },
     /** Verifies and asks the permission gate; the token is kept only by the caller, in memory. */
     async request(installer: string, manifest: string): Promise<{ offer: UpdateOffer; approvalToken: string }> {
@@ -172,7 +294,13 @@ export function createUpdateClient(invoke: UpdateInvoke) {
   };
 }
 
-/** Stops the runtime, launches, then exits; any refusal brings the runtime back. */
+/** Stops the runtime, launches, then exits.
+ *
+ * - A typed refusal that proves nothing started (LAUNCH_NOT_STARTED) brings the runtime
+ *   back and is re-thrown; the caller keeps the launch token only for LAUNCH_TOKEN_KEPT.
+ * - Anything else is UpdateOutcomeUnknown: the runtime is NOT restarted (the installer may
+ *   be running and replacing files) and the app does not exit on its own.
+ */
 export async function launchUpdate(
   client: UpdateClient,
   launchToken: string,
@@ -189,8 +317,11 @@ export async function launchUpdate(
   try {
     await client.launch(launchToken);
   } catch (error) {
-    await hooks.restartRuntime();
-    throw error;
+    if (error instanceof UpdateRefused && LAUNCH_NOT_STARTED.has(error.code)) {
+      await hooks.restartRuntime();
+      throw error;
+    }
+    throw new UpdateOutcomeUnknown();
   }
   await hooks.exitApp();
 }

@@ -77,7 +77,7 @@ test("malformed offers and tokens from the backend are refused, not shown", asyn
 });
 
 test("the secret is sent once in the approve payload and the client keeps nothing", async () => {
-  const { calls, invoke } = backend({ approve: { ok: true, launchToken: TOKEN }, status: { ok: true, status: {} } });
+  const { calls, invoke } = backend({ approve: { ok: true, launchToken: TOKEN }, status: { ok: true, status: STATUS } });
   const client = update.createUpdateClient(invoke);
   await client.approve(TOKEN, "my secret");
   await client.status();
@@ -137,4 +137,77 @@ test("the panel compiles, keeps the secret out of storage and uses a password fi
   assert.match(panel, /type="password"/);
   assert.match(panel, /autoComplete="off"/);
   assert.match(panel, /dir="rtl"/);
+});
+
+// ---- round 5: review U-1..U-3 and L-2 as required behaviour
+
+test("an ambiguous launch failure never restarts the runtime and never exits on its own", async () => {
+  const order = [];
+  for (const failure of [new Error("IPC pipe closed"), { ok: false, code: "store" }, { ok: true }]) {
+    order.length = 0;
+    const client = update.createUpdateClient(async () => {
+      order.push("launch");
+      if (failure instanceof Error) throw failure;
+      if (failure.ok === false) return failure;
+      throw new Error("unreadable answer");
+    });
+    await assert.rejects(update.launchUpdate(client, TOKEN, {
+      stopRuntime: async () => { order.push("stop"); return true; },
+      restartRuntime: async () => { order.push("restart"); },
+      exitApp: async () => { order.push("exit"); },
+    }), (error) => error.code === "outcome_unknown");
+    assert.deepEqual(order, ["stop", "launch"]);
+  }
+});
+
+test("only typed refusals that prove nothing started bring the runtime back", async () => {
+  for (const code of ["launch_unavailable", "writers_active", "not_staged", "permission_denied"]) {
+    const order = [];
+    const client = update.createUpdateClient(async () => ({ ok: false, code }));
+    await assert.rejects(update.launchUpdate(client, TOKEN, {
+      stopRuntime: async () => true,
+      restartRuntime: async () => { order.push("restart"); },
+      exitApp: async () => { order.push("exit"); },
+    }), (error) => error.code === code);
+    assert.deepEqual(order, ["restart"]);
+  }
+  assert.equal(update.LAUNCH_TOKEN_KEPT.has("launch_unavailable"), true);
+  assert.equal(update.LAUNCH_TOKEN_KEPT.has("not_approved"), false); // the token was spent or unknown
+});
+
+const STATUS = {
+  runningVersion: "0.1.0", trust: { configured: false, activeKeys: 0, error: null }, launchAvailable: false,
+  phase: "handed_off", staged: { version: "0.1.0", kind: "repair", packageSha256: SHA }, launchReady: null,
+  updateInProgress: false, launching: false, recoveryPending: false,
+  outcome: { result: "unconfirmed", kind: "repair", version: "0.1.0", dataMismatch: [], dataRestored: false },
+};
+
+test("status is validated and carries the honest unconfirmed outcome", () => {
+  const status = update.parseStatus(STATUS);
+  assert.equal(status.outcome.result, "unconfirmed");
+  assert.equal(status.launchAvailable, false);
+  for (const broken of [{ ...STATUS, phase: "installed" }, { ...STATUS, launching: "yes" },
+                        { ...STATUS, outcome: { ...STATUS.outcome, result: "probably" } },
+                        { ...STATUS, staged: { version: "0.1.0", kind: "repair", packageSha256: "x" } }]) {
+    assert.throws(() => update.parseStatus(broken), (error) => error.code === "bad_response");
+  }
+});
+
+test("discovered packages are validated", () => {
+  const good = { installer: "C:\\u\\qronos-desktop_0.2.0_x64-setup.exe",
+                 manifest: "C:\\u\\qronos-desktop_0.2.0_x64-setup.exe.qronos-update.json" };
+  assert.equal(update.parseCandidates([good]).length, 1);
+  for (const bad of [[{ ...good, installer: "relative.exe", manifest: "relative.exe.qronos-update.json" }],
+                     [{ ...good, manifest: "C:\\other.json" }], Array(17).fill(good), "list"]) {
+    assert.throws(() => update.parseCandidates(bad), (error) => error.code === "bad_response");
+  }
+});
+
+test("the panel keeps the token after a not-yet-spent refusal and shows the new states", () => {
+  const panel = source("../src/components/UpdatePanel.tsx");
+  assert.match(panel, /LAUNCH_TOKEN_KEPT\.has\(error\.code\)\) \{\s*setLaunchToken\(token\)/);
+  assert.match(panel, /UpdateOutcomeUnknown/);
+  for (const state of ["unconfirmed", "updateInProgress", "recoveryPending", "launchAvailable"]) {
+    assert.match(panel, new RegExp(state));
+  }
 });

@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { launchUpdate, refusalText, shortDigest, UpdateRefused } from "../updateStore";
-import type { UpdateClient, UpdateOffer, UpdateStatus } from "../updateStore";
+import {
+  LAUNCH_TOKEN_KEPT, launchUpdate, refusalText, shortDigest, UpdateOutcomeUnknown, UpdateRefused,
+} from "../updateStore";
+import type { UpdateCandidate, UpdateClient, UpdateOffer, UpdateStatus } from "../updateStore";
 
 type UpdatePanelProps = {
   client: UpdateClient;
@@ -32,7 +34,9 @@ function UpdatePanel(props: UpdatePanelProps) {
   const [approvalToken, setApprovalToken] = useState<string | null>(null);
   const [launchToken, setLaunchToken] = useState<string | null>(null);
   const [secret, setSecret] = useState("");
-  const [candidates, setCandidates] = useState<{ installer: string; manifest: string }[]>([]);
+  const [candidates, setCandidates] = useState<UpdateCandidate[]>([]);
+  // Set once a launch outcome is unknown: nothing more is started from this panel.
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -109,7 +113,16 @@ function UpdatePanel(props: UpdatePanelProps) {
     if (!launchToken) return;
     const token = launchToken;
     setLaunchToken(null);
-    await launchUpdate(client, token, props);
+    try {
+      await launchUpdate(client, token, props);
+    } catch (error) {
+      if (error instanceof UpdateOutcomeUnknown) {
+        setOutcomeUnknown(true);
+      } else if (error instanceof UpdateRefused && LAUNCH_TOKEN_KEPT.has(error.code)) {
+        setLaunchToken(token); // refused before the single-use token was spent: still usable
+      }
+      throw error;
+    }
   });
 
   const discard = () => run(async () => {
@@ -132,7 +145,22 @@ function UpdatePanel(props: UpdatePanelProps) {
         <p role="status">
           {status.outcome.result === "applied"
             ? `به‌روزرسانی ${status.outcome.version} نصب شد.`
-            : `به‌روزرسانی ${status.outcome.version} نصب نشد؛ می‌توانید دوباره تلاش کنید یا آن را کنار بگذارید.`}
+            : status.outcome.result === "unconfirmed"
+              ? `معلوم نیست تعمیر ${status.outcome.version} انجام شده باشد (همین نسخه در حال اجراست). بستهٔ آماده نگه داشته شده است؛ می‌توانید دوباره تلاش کنید یا آن را کنار بگذارید.`
+              : `به‌روزرسانی ${status.outcome.version} نصب نشد؛ می‌توانید دوباره تلاش کنید یا آن را کنار بگذارید.`}
+          {status.outcome.dataRestored && " داده‌های پیش از این بازگشت به حالت قبل برگردانده شد."}
+        </p>
+      )}
+      {status?.updateInProgress && (
+        <p role="status">یک به‌روزرسانی هم‌اکنون در حال اجراست؛ تا پایان آن کاری انجام نمی‌شود.</p>
+      )}
+      {status?.recoveryPending && !status.updateInProgress && (
+        <p role="alert">یک به‌روزرسانی نیمه‌کاره هنگام شروع دوبارهٔ Qronos بازیابی می‌شود.</p>
+      )}
+      {outcomeUnknown && (
+        <p role="alert">
+          نتیجهٔ اجرای نصب‌کننده معلوم نیست. Qronos دوباره راه‌اندازی نمی‌شود؛ اگر نصب‌کننده باز است آن را تمام کنید و
+          سپس Qronos را باز کنید.
         </p>
       )}
       <div className="update-actions">
@@ -183,8 +211,12 @@ function UpdatePanel(props: UpdatePanelProps) {
           {approvalToken && (
             <button type="button" onClick={approve} disabled={busy || !secret}>تأیید و آماده‌سازی</button>
           )}
+          {launchToken && status && !status.launchAvailable && (
+            <p role="status">اجرای نصب‌کننده هنوز فعال نشده است؛ بستهٔ تأییدشده آماده باقی می‌ماند.</p>
+          )}
           {launchToken && (
-            <button type="button" onClick={launch} disabled={busy}>
+            <button type="button" onClick={launch}
+              disabled={busy || outcomeUnknown || !status?.launchAvailable || status.updateInProgress}>
               بستن Qronos و اجرای نصب‌کننده
             </button>
           )}
