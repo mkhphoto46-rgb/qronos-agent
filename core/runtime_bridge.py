@@ -69,6 +69,7 @@ from core.paint_draw_integration import (
     PaintUndoExecution,
     PreparedPaintDrawAction,
     PreparedPaintUndo,
+    paint_draw_failure_response_fa,
 )
 from core.paint_draw_parser import (
     PAINT_UNDO_AMBIGUOUS,
@@ -4312,7 +4313,7 @@ class QronosRuntime:
             else:
                 self._fail_text_file_action(
                     request_id=request_id,
-                    error=execution.result.detail or "Paint drawing failed.",
+                    error=paint_draw_failure_response_fa(execution),
                     started_at=started_at,
                 )
             return True
@@ -4455,6 +4456,8 @@ class QronosRuntime:
             report["voiceComputerFailed"] = True
             report["voiceComputerFailure"] = execution.result.detail
         report["voiceComputerDeferred"] = False
+        if execution.result.outcome is ActionOutcome.FAILED:
+            return paint_draw_failure_response_fa(execution)
         return "نقاشی در Paint کامل یا تأیید نشد؛ هیچ retry خودکاری انجام نشد."
 
     def _begin_text_calculator_semantic_action(
@@ -9152,10 +9155,7 @@ class QronosRuntime:
         elif execution.result.outcome is ActionOutcome.REFUSED:
             response = "مجوز فعلی اجازهٔ این نقاشی را نمی‌دهد."
         else:
-            response = (
-                "نقاشی کامل یا تأیید نشد؛ برای جلوگیری از خطوط دوبل "
-                "Qronos روی همان canvas دوباره تلاش نکرد."
-            )
+            response = paint_draw_failure_response_fa(execution)
             self._notify(
                 "paint_draw_failed",
                 "error",
