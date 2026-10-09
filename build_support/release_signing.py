@@ -25,6 +25,12 @@ reviewed step-by-step procedure):
 The private key never appears on the command line, in the environment, in
 output, logs or reports; it exists decrypted only in this process's memory.
 Nothing here reaches the network, installs a certificate or touches a trust store.
+
+Limits: DPAPI CurrentUser protects against other accounts and offline copies,
+not against software running as the owner's own account. Wiping is best effort:
+the ctypes buffers and byte arrays this module controls are zeroed, but Python's
+own copies of bytes objects cannot be. The Authenticode gate cannot open here:
+no reviewed sign-and-verify step exists.
 """
 
 from __future__ import annotations
@@ -36,7 +42,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 from ctypes import wintypes
 from pathlib import Path
@@ -118,6 +123,8 @@ class _Win32:
         self.WriteFile = bind(k.WriteFile, [HANDLE, ctypes.c_char_p, DWORD, ctypes.POINTER(DWORD), PVOID], BOOL)
         self.ReadFile = bind(k.ReadFile, [HANDLE, PVOID, DWORD, ctypes.POINTER(DWORD), PVOID], BOOL)
         self.FlushFileBuffers = bind(k.FlushFileBuffers, [HANDLE], BOOL)
+        self.GetFinalPathNameByHandleW = bind(k.GetFinalPathNameByHandleW, [HANDLE, wintypes.LPWSTR, DWORD, DWORD],
+                                              DWORD)
         self.GetFileInformationByHandle = bind(k.GetFileInformationByHandle,
                                                [HANDLE, ctypes.POINTER(_ByHandleFileInformation)], BOOL)
         self.SetFileInformationByHandle = bind(k.SetFileInformationByHandle, [HANDLE, ctypes.c_int, PVOID, DWORD],
@@ -171,6 +178,9 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
     else:
         ok = win.CryptUnprotectData(ctypes.byref(source), None, ctypes.byref(entropy), None, None, 0x1,
                                     ctypes.byref(result))
+    # Best effort: zero the ctypes copy of the input (the plaintext key when protecting).
+    # Python's own bytes objects cannot be wiped; see the module documentation.
+    ctypes.memset(keep_source, 0, len(data))
     del keep_source, keep_entropy
     if not ok:
         raise SigningError("Windows could not " + ("protect" if protect else "unlock") + " the owner key "
@@ -260,6 +270,26 @@ def _open(path: Path, access: int, share: int, disposition: int,
     return handle
 
 
+def _final_path(handle: Any) -> str:
+    win = _Win32.get()
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = win.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)  # FILE_NAME_NORMALIZED, VOLUME_NAME_DOS
+    if not 0 < length < len(buffer):
+        raise SigningError("Windows could not say which file the key file handle refers to.")
+    text = buffer.value
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    return text[4:] if text.startswith("\\\\?\\") else text
+
+
+def _check_final_path(handle: Any, intended: Path) -> None:
+    """The open handle must be the intended file: no ancestor was swapped for a link meanwhile."""
+    actual = os.path.normcase(os.path.normpath(_final_path(handle)))
+    if actual != os.path.normcase(os.path.normpath(str(Path(os.path.abspath(intended))))):
+        raise SigningError("The key file that was opened is not at the intended path (a folder on the way "
+                           "changed); nothing was used.")
+
+
 def check_private_access(path: Path, sid: str | None = None) -> None:
     """The key file at ``path``: plain, single-link, owned by and accessible only to the current user."""
     win = _Win32.get()
@@ -283,7 +313,9 @@ def _create_private_file(path: Path, data: bytes, sid: str) -> None:
     finally:
         win.LocalFree(descriptor)
     keep = False
+    cleanup_failed = False
     try:
+        _check_final_path(handle, path)
         written = wintypes.DWORD()
         if not win.WriteFile(handle, data, len(data), ctypes.byref(written), None) or written.value != len(data) \
                 or not win.FlushFileBuffers(handle):
@@ -293,8 +325,12 @@ def _create_private_file(path: Path, data: bytes, sid: str) -> None:
     finally:
         if not keep:  # remove exactly this file, through its handle
             disposition = ctypes.c_ubyte(1)
-            win.SetFileInformationByHandle(handle, 4, ctypes.byref(disposition), 1)  # FileDispositionInfo
+            cleanup_failed = not win.SetFileInformationByHandle(handle, 4, ctypes.byref(disposition), 1)
         win.CloseHandle(handle)
+        if cleanup_failed:
+            # Reported, never silent: the partial file holds a DPAPI-protected key blob.
+            raise SigningError(f"Creating the key failed, and the partial key file at {path} could not be removed. "
+                               "Delete it yourself before trying again.")
 
 
 def _check_access_after_create(handle: Any, sid: str) -> None:
@@ -305,9 +341,10 @@ def _read_private_file(path: Path, sid: str, limit: int) -> bytes:
     """Reads the key file through one handle that was checked first (no swap between check and read)."""
     win = _Win32.get()
     handle = _open(path, _GENERIC_READ | _READ_CONTROL, 0x1, 3)
+    buffer = ctypes.create_string_buffer(limit + 1)
     try:
+        _check_final_path(handle, path)
         _check_handle(handle, sid)
-        buffer = ctypes.create_string_buffer(limit + 1)
         read = wintypes.DWORD()
         if not win.ReadFile(handle, buffer, limit + 1, ctypes.byref(read), None):
             raise SigningError("The key file could not be read.")
@@ -315,6 +352,7 @@ def _read_private_file(path: Path, sid: str, limit: int) -> bytes:
             raise SigningError("The key file is too large to be an owner key file.")
         return buffer.raw[:read.value]
     finally:
+        ctypes.memset(buffer, 0, limit + 1)
         win.CloseHandle(handle)
 
 
@@ -473,10 +511,9 @@ def sign(key_file: Path, installer: Path, *, security_floor: str, minimum_versio
 
 
 def _find_signtool() -> Path | None:
-    found = shutil.which("signtool.exe")
-    if found:
-        return Path(found)
-    kits = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10" / "bin"
+    """signtool from the fixed Windows SDK location only; PATH is never searched."""
+    windows = Path(os.environ.get("SystemDrive", "C:") + "\\")
+    kits = windows / "Program Files (x86)" / "Windows Kits" / "10" / "bin"
     candidates = sorted(kits.glob("*/x64/signtool.exe")) if kits.is_dir() else []
     return candidates[-1] if candidates else None
 
@@ -494,27 +531,26 @@ def preflight(root: Path = ROOT, *, signtool: Callable[[], Path | None] = _find_
         keys = local_update.load_trusted_keys(root / "config" / "update_trusted_keys.json")
         active = [k for k in keys.values() if not k.revoked]
         gates.append({"gate": "owner_update_key", "open": bool(active),
-                      "detail": f"{len(active)} active owner key(s)" if active else
+                      "detail": f"{len(active)} active trusted entr{'y' if len(active) == 1 else 'ies'} listed "
+                                "(only the public entries are counted; custody of the private key file is not "
+                                "checked here)" if active else
                       "config/update_trusted_keys.json lists no owner key. After review: run create-key on the "
                       "owner's account, then add the printed public entry in a reviewed change."})
     except UpdateError as error:
         gates.append({"gate": "owner_update_key", "open": False, "detail": str(error)})
     tool = signtool()
-    thumbprint = certificate or os.environ.get("QRONOS_AUTHENTICODE_THUMBPRINT", "").strip() or None
-    if tool is None:
-        gates.append({"gate": "authenticode", "open": False,
-                      "detail": "signtool.exe (Windows SDK) is not available, and no code-signing certificate is "
-                                "configured. Obtain an Authenticode code-signing certificate from a public "
-                                "certificate authority (an external, paid step for the owner), install the Windows "
-                                "SDK signing tools, and set QRONOS_AUTHENTICODE_THUMBPRINT to its thumbprint."})
-    elif thumbprint is None or not re.fullmatch(r"[0-9A-Fa-f]{40}", thumbprint):
-        gates.append({"gate": "authenticode", "open": False,
-                      "detail": f"signtool found ({tool.name}), but no code-signing certificate is configured. "
-                                "Obtain one from a public certificate authority and set "
-                                "QRONOS_AUTHENTICODE_THUMBPRINT. A self-signed certificate is not a substitute."})
-    else:
-        gates.append({"gate": "authenticode", "open": True,
-                      "detail": "certificate configured; signing and timestamping are verified at build time"})
+    configured = bool(certificate or os.environ.get("QRONOS_AUTHENTICODE_THUMBPRINT", "").strip())
+    # Always closed in this repository: nothing here signs a built installer, verifies the signature
+    # (signtool verify /pa /all), checks the certificate's code-signing EKU and its chain to a public
+    # root, or rejects a self-signed certificate. A thumbprint setting or a signtool binary is not evidence.
+    gates.append({"gate": "authenticode", "open": False, "detail": (
+        "No reviewed Authenticode signing-and-verification step exists yet, so this gate cannot open. "
+        f"Detected: {'signtool at the fixed Windows SDK path' if tool else 'no signtool at the fixed Windows SDK path'}; "
+        f"{'a thumbprint setting (not used as evidence)' if configured else 'no certificate setting'}. "
+        "Needed: an Authenticode code-signing certificate from a public certificate authority (an external, paid "
+        "step for the owner), then a reviewed build step that signs the installer with timestamping and verifies "
+        "it (chain to a public root, code-signing EKU, not self-signed). A self-signed certificate is never a "
+        "substitute.")})
     return {"ok": all(g["open"] for g in gates), "gates": gates}
 
 

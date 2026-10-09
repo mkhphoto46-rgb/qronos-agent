@@ -199,8 +199,63 @@ def test_preflight_reports_the_closed_gates_with_actions():
     assert gates["authenticode"]["open"] is False and "certificate authority" in gates["authenticode"]["detail"]
 
 
-def test_preflight_needs_a_real_thumbprint_not_just_signtool(tmp_path):
+@pytest.mark.parametrize("certificate", ["not-a-thumbprint", "0" * 40, "A1B2" * 10])
+def test_no_thumbprint_or_signtool_opens_the_authenticode_gate(tmp_path, certificate):
+    """S-1: readiness needs a reviewed sign-and-verify of a built artefact; none exists, so it stays closed."""
     tool = tmp_path / "signtool.exe"
-    report = release_signing.preflight(signtool=lambda: tool, certificate="not-a-thumbprint")
+    report = release_signing.preflight(signtool=lambda: tool, certificate=certificate)
     authenticode = next(g for g in report["gates"] if g["gate"] == "authenticode")
-    assert authenticode["open"] is False and "self-signed certificate is not a substitute" in authenticode["detail"]
+    assert authenticode["open"] is False
+    assert "not used as evidence" in authenticode["detail"]
+    assert "self-signed certificate is never a substitute" in authenticode["detail"]
+
+
+def test_signtool_is_never_taken_from_path():
+    source = Path(release_signing.__file__).read_text(encoding="utf-8")
+    assert "shutil.which" not in source and "Windows Kits" in source
+
+
+def test_the_owner_key_gate_does_not_claim_custody_was_checked(tmp_path):
+    root = product(tmp_path / "root")
+    (root / "config").mkdir()
+    public = ed25519.public_key(os.urandom(32))
+    entry = {"keyId": local_update.key_id(public), "publicKey": base64.b64encode(public).decode(), "owner": "O",
+             "revoked": False}
+    (root / "config" / "update_trusted_keys.json").write_text(json.dumps({"schema": 1, "keys": [entry]}),
+                                                              encoding="utf-8")
+    gate = next(g for g in release_signing.preflight(root, signtool=lambda: None)["gates"]
+                if g["gate"] == "owner_update_key")
+    assert gate["open"] is True and "custody of the private key file is not checked" in gate["detail"]
+
+
+def test_a_failed_cleanup_after_create_is_reported_with_the_path(tmp_path, monkeypatch):
+    """S-2: if the half-written key file cannot be removed, the error says so and where."""
+    win = release_signing._Win32.get()
+
+    def broken_check(handle, sid):
+        raise SigningError("fixture: access check failed")
+
+    monkeypatch.setattr(release_signing, "_check_access_after_create", broken_check)
+    monkeypatch.setattr(win, "SetFileInformationByHandle", lambda *args: 0)  # deletion refused
+    key_file = tmp_path / "owner.key"
+    with pytest.raises(SigningError) as refused:
+        release_signing.create_key(key_file, "Fixture Owner", random=fixed_random(os.urandom(32)))
+    try:
+        assert "could not be removed" in str(refused.value) and str(key_file) in str(refused.value)
+        assert isinstance(refused.value.__context__, SigningError)  # the original failure is kept
+    finally:
+        if key_file.exists():
+            os.remove(key_file)  # the synthetic fixture file
+
+
+def test_a_key_file_reached_through_another_final_path_is_not_used(owner, monkeypatch):
+    """S-3: the handle that is read must be the intended file, not one an ancestor swap redirected to."""
+    key_file, _, _ = owner
+    monkeypatch.setattr(release_signing, "_final_path", lambda handle: "C:\\somewhere\\else\\owner.key")
+    with pytest.raises(SigningError, match="not at the intended path"):
+        release_signing.public_entry(key_file)
+
+
+def test_create_and_read_check_the_real_final_path(owner):
+    key_file, _, entry = owner
+    assert release_signing.public_entry(key_file) == entry  # the real GetFinalPathNameByHandleW agrees
