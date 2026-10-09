@@ -24,6 +24,8 @@ accepts one exact approved action rather than a shell command.
 | `core/action_broker.py` | The broker: verify one request, perform it, exit | elevated, via UAC |
 | `core/action_broker_client.py` | `BrokerSession`: the runtime's side, from a gate grant to a result | user runtime |
 | `core/uac_launch.py` | Starts the bundled broker with `ShellExecuteExW` `runas` | user runtime |
+| `core/elevated_actions.py` | The spooler-restart request, typed-secret prompt, cancellation and outcomes | user runtime |
+| `core/spooler_service.py` | Stops and starts the one service `Spooler` through the Service Control Manager | elevated, via UAC |
 
 `build_support/runtime_entry.py` exposes them as two more closed services of
 the frozen executable: `supervisor` and `action-broker`.
