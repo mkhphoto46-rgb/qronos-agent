@@ -20,9 +20,24 @@ _DRAW_RE = re.compile(
 )
 
 
+# Arabic-script diacritics (tanween, harakat, the ezafe hamza U+0654,
+# superscript alef): they never change which drawing is asked for, and a
+# stray one left behind (as in "لطفاً") must not make a request unmatchable.
+_DIACRITICS = re.compile("[\u064B-\u065F\u0670]")
+
+# A request that says NOT to draw is refused outright, never parsed into a
+# drawing. Conservative on purpose: "draw a house, not a circle" is refused too.
+_NEGATION_RE = re.compile(
+    r"(?<!\w)(?:don'?t|do\s+not|never|not|cannot|can'?t|shouldn'?t|mustn'?t|stop)(?!\w)"
+    r"|(?:نکش|رسم\s*نکن|نقاشی\s*نکن|نباید|هرگز)",
+    re.IGNORECASE,
+)
+
+
 def _normalise(text: str) -> str:
-    value = str(text or "").replace("\u200c", " ")
-    value = value.replace("ي", "ی").replace("ك", "ک")
+    value = str(text or "").replace("\u2019", "'").replace("\u200c", " ")
+    value = value.replace("ي", "ی").replace("ك", "ک").replace("ۀ", "ه")
+    value = _DIACRITICS.sub("", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -39,6 +54,8 @@ def parse_paint_draw_action(text: str) -> PaintDrawAction:
         )
     if not _PAINT_RE.search(cleaned):
         raise PaintDrawParseError("The request does not explicitly target Paint.")
+    if _NEGATION_RE.search(cleaned):
+        raise PaintDrawParseError("The request says not to draw; nothing will be drawn.")
     if not _DRAW_RE.search(cleaned):
         raise PaintDrawParseError("No explicit draw/sketch verb was found.")
 
@@ -75,7 +92,8 @@ def parse_paint_draw_action(text: str) -> PaintDrawAction:
     prompt = _PAINT_RE.sub(" ", prompt)
     prompt = _DRAW_RE.sub(" ", prompt)
     prompt = re.sub(
-        r"(?<!\w)(?:لطفا|لطفاً|please|برام|برای\s+من)(?!\w)",
+        r"(?<!\w)(?:لطفا|please|kindly|برام|برای\s+من|for\s+me|"
+        r"(?:can|could|would|will)\s+you)(?!\w)",
         " ",
         prompt,
         flags=re.IGNORECASE,

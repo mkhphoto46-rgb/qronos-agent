@@ -415,6 +415,7 @@ def test_stop_between_strokes_reports_exact_committed_edits():
             authorization=_authorization(binding),
             cancel_token=token,
             progress=progress,
+            tool_regions=(WindowRect(105, 105, 135, 125),),
         )
 
     assert len(calls) == 2
@@ -443,6 +444,7 @@ def test_interrupted_stroke_with_unproven_release_makes_edit_count_uncertain():
             _paint_canvas(binding),
             authorization=_authorization(binding),
             progress=progress,
+            tool_regions=(WindowRect(105, 105, 135, 125),),
         )
 
     assert progress.unproven_marks == 1

@@ -660,7 +660,7 @@ class PaintDrawExecutor:
                 close_grounder=False,
             )
             state.normalizer = normalizer
-            normalizer.normalize(
+            normalization = normalizer.normalize(
                 binding,
                 authorization=input_authorization,
                 screen_approved=True,
@@ -715,6 +715,7 @@ class PaintDrawExecutor:
             cancel_token=cancel_token,
             progress=state.canvas_progress,
             screen_approved=True,
+            tool_regions=normalization.control_boxes,
         )
 
         # The drawing is complete. From here on only observation remains, so
@@ -1180,9 +1181,19 @@ class PaintDrawExecutor:
 
 
 def paint_failure_kind(exc: BaseException) -> str:
-    """A stable, user-explainable reason a drawing stopped."""
-    from core.grounding_freshness import FreshnessExpired
-    from core.paint_adapter import PaintAdapterError
+    """A stable, user-explainable reason a drawing stopped.
+
+    The most specific cause wins: a toolbar or canvas error that was caused
+    by out-of-date evidence is "expired", by a changed screen "window_changed",
+    and so on, whatever wrapper carried it.
+    """
+    from core.grounding_freshness import ContentChanged, EvidenceTooOld, InputSinceCapture
+    from core.paint_adapter import (
+        PaintAdapterError,
+        PaintCanvasChanged,
+        PaintCanvasExpired,
+        PaintVerificationUnavailable,
+    )
     from core.paint_canvas_grounding import PaintCanvasGroundingError
     from core.paint_state import PaintStateError
     from core.paint_templates import TemplateSketchRejected
@@ -1199,10 +1210,23 @@ def paint_failure_kind(exc: BaseException) -> str:
         return "preview_rejected"
     if isinstance(exc, PaintPostDrawError):
         return "not_verified"
+
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__
+    for cause in chain:
+        if isinstance(cause, PaintVerificationUnavailable):
+            return "verification_unavailable"
+        if isinstance(cause, (PaintCanvasExpired, EvidenceTooOld, InputSinceCapture)):
+            return "expired"
+        if isinstance(cause, (PaintCanvasChanged, ContentChanged, WindowBindingStale, CaptureUnavailable)):
+            return "window_changed"
+
     if isinstance(exc, (PaintCanvasGroundingError, PaintStateError, GroundingUnavailable)):
         return "not_grounded"
-    if isinstance(exc, (GroundingStale, WindowBindingStale, CaptureUnavailable,
-                        FreshnessExpired, PaintAdapterError)):
+    if isinstance(exc, (GroundingStale, PaintAdapterError)):
         return "window_changed"
     return "other"
 
@@ -1222,6 +1246,13 @@ _FAILURE_FA = {
     ),
     "not_verified": (
         "نتیجهٔ واقعی روی بوم با طرح تأییدشده تطبیق نداشت؛ موفقیتی ادعا نمی‌شود."
+    ),
+    "expired": (
+        "شناسایی بوم یا ابزارهای Paint دیگر تازه نبود (زمانش گذشته بود یا Qronos پیش از آن "
+        "در Paint کاری کرده بود)؛ برای ایمنی ادامه داده نشد."
+    ),
+    "verification_unavailable": (
+        "امکان بررسی تصویری مرحله‌به‌مرحلهٔ نقاشی فراهم نبود؛ برای ایمنی ادامه داده نشد."
     ),
     "other": "نقاشی در Paint انجام نشد.",
 }

@@ -239,7 +239,8 @@ def test_a_failed_native_press_still_counts_as_a_possible_change():
     _, buttons, _ = _mouse(binder, on_button=broken)
     with pytest.raises(OSError):
         buttons.down_at(binding, 100, 80, authorization=_authorization(binding))
-    assert state_epoch(binding.identity_token) == before + 1
+    # The approach motion and the failed press both count.
+    assert state_epoch(binding.identity_token) >= before + 2
 
 
 def test_low_confidence_and_ambiguous_answers_never_become_coordinates():
@@ -374,6 +375,7 @@ def test_focus_lost_to_a_dialog_window_refuses_before_any_capture():
 
 
 CANVAS = WindowRect(60, 60, 360, 280)
+TOOL = WindowRect(12, 32, 40, 52)  # a verified tool indicator, outside the canvas band
 
 
 class _Stroke:
@@ -419,7 +421,7 @@ THREE_LINES = ShapePlanner.custom(
 def test_own_strokes_are_expected_and_every_stroke_gets_a_fresh_frame():
     binder, binding, window, canvas, stroke, adapter = _paint()
     adapter.execute(binding, THREE_LINES, canvas, authorization=_authorization(binding),
-                    screen_approved=True)
+                    screen_approved=True, tool_regions=(TOOL,))
     assert stroke.calls == 3
     # canvas grounding frame + start check + one check before each later stroke
     assert len(window.calls) == 1 + 1 + 2
@@ -437,7 +439,7 @@ def test_a_change_inside_the_canvas_between_strokes_stops_the_drawing():
     state["window"] = window
     with pytest.raises(PaintAdapterError, match="outside Qronos's own strokes"):
         adapter.execute(binding, THREE_LINES, canvas, authorization=_authorization(binding),
-                        screen_approved=True)
+                        screen_approved=True, tool_regions=(TOOL,))
     assert stroke.calls == 1
 
 
@@ -453,7 +455,7 @@ def test_the_page_scrolling_between_strokes_stops_the_drawing():
     state["window"] = window
     with pytest.raises(PaintAdapterError, match="changed during drawing"):
         adapter.execute(binding, THREE_LINES, canvas, authorization=_authorization(binding),
-                        screen_approved=True)
+                        screen_approved=True, tool_regions=(TOOL,))
     assert stroke.calls == 1
 
 
@@ -462,7 +464,7 @@ def test_a_canvas_that_changed_after_grounding_is_refused_before_the_first_strok
     window.pixels[100:140, 100:180] = 255
     with pytest.raises(PaintAdapterError, match="Paint canvas changed on screen"):
         adapter.execute(binding, THREE_LINES, canvas, authorization=_authorization(binding),
-                        screen_approved=True)
+                        screen_approved=True, tool_regions=(TOOL,))
     assert stroke.calls == 0
 
 
@@ -471,7 +473,7 @@ def test_a_canvas_grounded_before_a_toolbar_click_is_refused_before_any_stroke()
     advance_state_epoch(binding.identity_token)  # a toolbar click after the canvas frame
     with pytest.raises(PaintAdapterError, match="before Qronos changed the window"):
         adapter.execute(binding, THREE_LINES, canvas, authorization=_authorization(binding),
-                        screen_approved=True)
+                        screen_approved=True, tool_regions=(TOOL,))
     assert stroke.calls == 0
 
 
@@ -483,7 +485,7 @@ def test_an_old_canvas_is_refused():
                            clock=Clock(canvas.captured_at + 46.0))
     with pytest.raises(PaintAdapterError, match="old"):
         adapter.execute(binding, THREE_LINES, canvas, authorization=_authorization(binding),
-                        screen_approved=True)
+                        screen_approved=True, tool_regions=(TOOL,))
     assert stroke.calls == 0
 
 

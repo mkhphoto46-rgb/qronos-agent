@@ -102,6 +102,22 @@ class MouseHoverController:
         authorization: BoundInputAuthorization,
         allowed_rect: WindowRect | None = None,
     ) -> MouseHoverResult:
+        # Moving the pointer can change what the window shows (hover menus,
+        # tooltips): coordinates grounded before it expire, delivered or not.
+        try:
+            return self._smooth_hover(binding, x, y, authorization=authorization, allowed_rect=allowed_rect)
+        finally:
+            self._guard.note_state_change(binding)
+
+    def _smooth_hover(
+        self,
+        binding: WindowBinding,
+        x: int,
+        y: int,
+        *,
+        authorization: BoundInputAuthorization,
+        allowed_rect: WindowRect | None = None,
+    ) -> MouseHoverResult:
         """
         Move visibly and smoothly inside the authorized region.
 
@@ -336,6 +352,20 @@ class MouseHoverController:
         )
 
     def hover(
+        self,
+        binding: WindowBinding,
+        x: int,
+        y: int,
+        *,
+        authorization: BoundInputAuthorization,
+        allowed_rect: WindowRect | None = None,
+    ) -> MouseHoverResult:
+        try:
+            return self._hover(binding, x, y, authorization=authorization, allowed_rect=allowed_rect)
+        finally:
+            self._guard.note_state_change(binding)
+
+    def _hover(
         self,
         binding: WindowBinding,
         x: int,

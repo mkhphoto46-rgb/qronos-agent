@@ -128,12 +128,22 @@ class FakeClick:
         return SimpleNamespace()
 
 
+class FakeHover:
+    """Records the approach motion that precedes each confirmed press."""
+
+    def __init__(self):
+        self.calls = []
+
+    def smooth_hover(self, binding, x, y, **kwargs):
+        self.calls.append((x, y))
+
+
 def _normalizer(binding, points):
     binder = FakeBinder(binding)
     capture = FakeCapture(binding)
     grounder = FakeGrounder(binding, points)
     click = FakeClick()
-    inputs = SimpleNamespace(click=click)
+    inputs = SimpleNamespace(click=click, hover=FakeHover())
     normalizer = PaintStateNormalizer(
         binder,
         capture,
@@ -172,13 +182,14 @@ def test_normalizer_selects_pencil_black_and_minimum_size_before_verification():
     assert size_rect.left == binding.snapshot.client_rect.left
     assert size_rect.right < binding.snapshot.client_rect.right
     assert size_rect.top > binding.snapshot.client_rect.top
-    # Each click: one frame to ground, one fresh frame to confirm before the
-    # click; then one frame to verify the selected state.
-    assert len(capture.calls) == 7
+    # Each click: one frame to ground, one fresh frame to confirm, one frame
+    # after the cursor moved (before the press); then one frame to verify.
+    assert len(capture.calls) == 10
     reasons = [call[2]["reason"] for call in capture.calls]
-    assert [r.startswith("Confirm the Paint control") for r in reasons] == [
-        False, True, False, True, False, True, False,
-    ]
+    kinds = ["confirm" if r.startswith("Confirm the Paint control") else
+             "after" if r.startswith("Check nothing opened") else "ground" for r in reasons]
+    assert kinds == ["ground", "confirm", "after"] * 3 + ["ground"]
+    assert result.control_boxes and len(result.control_boxes) == 3
     assert len(grounder.calls) == 6
     assert result.pencil_selected_confidence == pytest.approx(0.95)
     assert result.black_selected_confidence == pytest.approx(0.95)

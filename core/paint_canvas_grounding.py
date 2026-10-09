@@ -88,7 +88,7 @@ def ground_paint_canvas(
         )
 
     try:
-        fingerprint = region_fingerprint(frame, rect, max_side=None)
+        fingerprint = region_fingerprint(frame, rect)
     except FreshnessExpired as exc:
         raise PaintCanvasGroundingError(f"Paint canvas pixels could not be recorded: {exc}") from exc
     return PaintCanvasRegion.verified(

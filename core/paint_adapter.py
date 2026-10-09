@@ -25,6 +25,19 @@ class PaintAdapterError(RuntimeError):
     """Paint-specific execution preconditions were not satisfied."""
 
 
+class PaintCanvasExpired(PaintAdapterError):
+    """The grounded canvas is too old, or Qronos used Paint after it was grounded."""
+
+
+class PaintCanvasChanged(PaintAdapterError):
+    """Paint's canvas, its surroundings or its selected tools changed during drawing."""
+
+
+class PaintVerificationUnavailable(PaintAdapterError):
+    """The drawing cannot be verified stroke by stroke (no capture or no tool regions)."""
+
+
+
 @dataclass(frozen=True)
 class PaintCanvasRegion:
     """A short-lived canvas capability tied to one verified Paint layout."""
@@ -160,6 +173,7 @@ class PaintAdapter:
         cancel_token: CancellationToken | None = None,
         progress: PaintCanvasProgress | None = None,
         screen_approved: bool = False,
+        tool_regions: tuple[WindowRect, ...] = (),
     ) -> PaintDrawResult:
         """
         Production sketch path: only a visually approved frozen plan may reach Paint.
@@ -189,6 +203,7 @@ class PaintAdapter:
             cancel_token=cancel_token,
             progress=progress,
             screen_approved=screen_approved,
+            tool_regions=tool_regions,
         )
 
     def execute(
@@ -206,6 +221,7 @@ class PaintAdapter:
         cancel_token: CancellationToken | None = None,
         progress: PaintCanvasProgress | None = None,
         screen_approved: bool = False,
+        tool_regions: tuple[WindowRect, ...] = (),
     ) -> PaintDrawResult:
         tracker = progress if progress is not None else PaintCanvasProgress()
         checkpoint(cancel_token)
@@ -228,7 +244,7 @@ class PaintAdapter:
                 what="The grounded Paint canvas bounds",
             )
         except FreshnessExpired as exc:
-            raise PaintAdapterError(str(exc)) from exc
+            raise PaintCanvasExpired(str(exc)) from exc
 
         fresh = self._binder.revalidate(
             binding,
@@ -247,16 +263,25 @@ class PaintAdapter:
         )
 
         if self._capture is None:
-            raise PaintAdapterError(
+            raise PaintVerificationUnavailable(
                 "Paint drawing needs a bound window capture to verify the canvas before each stroke."
             )
+        if not tool_regions:
+            raise PaintVerificationUnavailable(
+                "Paint drawing needs the verified tool, colour and size indicators to watch before each stroke."
+            )
+        if not all(_rect_inside(fresh.client_rect, region) for region in tool_regions):
+            raise PaintVerificationUnavailable(
+                "A watched Paint tool indicator lies outside the verified client area."
+            )
         watch = PaintCanvasWatch(
-            self._capture, self._binder, binding, canvas, screen_approved=screen_approved
+            self._capture, self._binder, binding, canvas, screen_approved=screen_approved,
+            tool_regions=tuple(tool_regions),
         )
         try:
             watch.start()
         except CanvasChanged as exc:
-            raise PaintAdapterError(str(exc)) from exc
+            raise PaintCanvasChanged(str(exc)) from exc
 
         tracker.planned_strokes = len(screen_strokes)
         results: list[PointerStrokeResult] = []
@@ -270,7 +295,7 @@ class PaintAdapter:
                 try:
                     watch.before_stroke()
                 except CanvasChanged as exc:
-                    raise PaintAdapterError(str(exc)) from exc
+                    raise PaintCanvasChanged(str(exc)) from exc
                 checkpoint(cancel_token)
             stroke_progress = StrokeProgress()
             try:

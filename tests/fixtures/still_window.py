@@ -87,5 +87,5 @@ def canvas_from(binding, rect, capture):
         rect,
         captured_at=capture.captured_at,
         state_epoch=capture.state_epoch,
-        fingerprint=region_fingerprint(capture, rect, max_side=None),
+        fingerprint=region_fingerprint(capture, rect),
     )

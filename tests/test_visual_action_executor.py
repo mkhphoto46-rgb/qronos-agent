@@ -211,10 +211,19 @@ class FakeKeyboard:
         return object()
 
 
+class FakeHover:
+    def __init__(self):
+        self.calls = []
+
+    def smooth_hover(self, binding, x, y, **kwargs):
+        self.calls.append((x, y))
+
+
 class FakeInputs:
     def __init__(self):
         self.click = FakeClick()
         self.keyboard = FakeKeyboard()
+        self.hover = FakeHover()
 
 
 def grant_for(binding, *, target=None):

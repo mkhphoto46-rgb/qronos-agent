@@ -15,7 +15,7 @@ import math
 from typing import Any
 
 from core.grounding_freshness import (
-    CONTEXT_MAX_CHANGED_FRACTION,
+    CONTEXT_MAX_CHANGED_NATIVE_PIXELS,
     GROUNDING_MAX_AGE_SECONDS,
     Clock,
     FreshnessExpired,
@@ -23,6 +23,7 @@ from core.grounding_freshness import (
     monotonic,
     region_fingerprint,
     require_fresh,
+    require_neighbourhood_unchanged,
     require_region_unchanged,
 )
 from core.screen_capture import Capture
@@ -468,9 +469,9 @@ def target_fingerprint(capture: Capture, screen_box: WindowRect) -> RegionFinger
 
 
 def viewport_fingerprint(capture: Capture) -> RegionFingerprint:
-    """The whole bound frame at full resolution: the context of any target in it."""
+    """The whole bound frame at model resolution: the context of any target in it."""
     try:
-        return region_fingerprint(capture, capture.frame_rect, max_side=None)
+        return region_fingerprint(capture, capture.frame_rect)
     except FreshnessExpired as exc:
         raise GroundingUnavailable(f"The window's pixels could not be recorded: {exc}") from exc
 
@@ -504,9 +505,10 @@ def confirm_grounded_target(
         max_age_seconds=max_age_seconds,
         clock=clock,
     )
-    _confirm_pixels(
+    confirm_frame(
         target.fingerprint,
         target.context,
+        target.screen_box,
         f"The target '{target.label}'",
         binding,
         binder,
@@ -541,9 +543,10 @@ def confirm_grounded_point(
         max_age_seconds=max_age_seconds,
         clock=clock,
     )
-    _confirm_pixels(
+    confirm_frame(
         fingerprint,
         context,
+        fingerprint.screen_rect,
         f"The target '{point.label}'",
         binding,
         binder,
@@ -556,9 +559,10 @@ def confirm_grounded_point(
     return xy
 
 
-def _confirm_pixels(
+def confirm_frame(
     fingerprint: RegionFingerprint,
     context: RegionFingerprint,
+    target_box: WindowRect,
     what: str,
     binding: WindowBinding,
     binder: WindowBinder,
@@ -566,9 +570,16 @@ def _confirm_pixels(
     *,
     screen_approved: bool,
     reason: str,
-    max_age_seconds: float,
-    clock: Clock,
-) -> None:
+    max_age_seconds: float = GROUNDING_MAX_AGE_SECONDS,
+    clock: Clock = monotonic,
+):
+    """Take a fresh frame and require it to show the target and its context unchanged.
+
+    Three comparisons, per colour channel (core.grounding_freshness):
+    the target box itself, strictly; its row and column bands across the
+    window, strictly; the rest of the window, within a small native-pixel
+    allowance. Returns the confirming frame.
+    """
     fresh = capture_source.capture_bound(
         binding,
         binder,
@@ -579,15 +590,17 @@ def _confirm_pixels(
     _validate_bound_capture(fresh)
     if fresh.binding_token != binding.identity_token or fresh.layout_token != binding.layout_token:
         raise GroundingStale("The confirming frame belongs to a different window or layout.")
+    around = f"The window around {what[4:] if what.startswith('The ') else what}"
     try:
         require_region_unchanged(fingerprint, fresh, what=what)
-        # Same pixels at the target are not enough: the rows, document or
-        # view around it must not have changed either.
+        # Same pixels at the target are not enough: the rows, labels or view
+        # around it must not have changed either.
+        require_neighbourhood_unchanged(context, fresh, target_box, what=around)
         require_region_unchanged(
             context,
             fresh,
-            what=f"The window around {what[4:] if what.startswith('The ') else what}",
-            max_fraction=CONTEXT_MAX_CHANGED_FRACTION,
+            what=around,
+            max_native_pixels=CONTEXT_MAX_CHANGED_NATIVE_PIXELS,
         )
         # The confirming frame itself must still be current.
         require_fresh(
@@ -600,6 +613,7 @@ def _confirm_pixels(
         )
     except FreshnessExpired as exc:
         raise GroundingStale(str(exc)) from exc
+    return fresh
 
 
 def revalidate_grounded_point(

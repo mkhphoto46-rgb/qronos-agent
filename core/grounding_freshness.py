@@ -38,37 +38,52 @@ GROUNDING_MAX_AGE_SECONDS = 20.0
 #: Every later stroke is authorised by its own fresh frame (PaintCanvasWatch).
 CANVAS_MAX_AGE_SECONDS = 45.0
 
-#: A pixel counts as changed when its grey level moved more than this.
-PIXEL_CHANGE_THRESHOLD = 40
+#: A pixel counts as changed when ANY colour channel moved more than this.
+#: Bound window captures are lossless PNGs of deterministic GDI copies, made
+#: smaller (when at all) by the same deterministic resampling every time, so
+#: an unchanged window gives identical pixels. 12 of 255 per channel is far
+#: below a light list-selection tint (204,232,255 on white: 51 on red) and
+#: sees colour-only changes of equal brightness (red <-> green), which a
+#: grey-level comparison cannot.
+CHANNEL_CHANGE_THRESHOLD = 12
 
-#: A region counts as unchanged while at most this share of pixels changed
-#: (and at most ``MIN_CHANGED_PIXELS`` in small regions). Window captures
-#: are deterministic, so real content changes are far above this.
-MAX_CHANGED_FRACTION = 0.01
+#: The target box itself (+4 px): at most this many model pixels may differ.
 MIN_CHANGED_PIXELS = 4
 
-#: Fingerprints are stored at most this size per side.
-FINGERPRINT_MAX_SIDE = 64
+#: The rest of the window (the target's viewport context), in NATIVE screen
+#: pixels: captures may be scaled down to the model size first, so the model
+#: pixel count is converted back with the capture's own scale. About one
+#: 8x8 blob anywhere in the window (a blinking caret, a busy spinner) is
+#: tolerated; a changed status label, a moved selection row or a rewritten
+#: text line is not.
+CONTEXT_MAX_CHANGED_NATIVE_PIXELS = 64
 
-#: A drawing canvas is compared at full resolution and far more strictly:
-#: even a small tooltip or dialog over it must stop the drawing.
-CANVAS_MAX_CHANGED_FRACTION = 0.002
+#: A band around the target (its row and its column across the whole window,
+#: padded by twice the target's size, at least 32 native px) where the rows,
+#: labels or state the control acts on usually are: as strict as the target.
+NEIGHBOURHOOD_MIN_PAD_NATIVE = 32
 
-#: The whole window (the target's viewport context) is compared at full
-#: resolution too. A repeated icon can sit in the same spot after a scroll
-#: while the row, document or view it acts on changed; the context check
-#: catches that. Its limit: changes smaller than this share of the window
-#: (about 0.05%, e.g. one icon-sized repaint far from the target, a ticking
-#: clock) are not treated as a change of context, and two different screens
-#: that are pixel-identical cannot be told apart by pixels at all.
-CONTEXT_MAX_CHANGED_FRACTION = 0.0005
-MIN_CONTEXT_CHANGED_PIXELS = 16
+#: Inside a drawing canvas, outside Qronos's own strokes, and in the band
+#: around it: at most this many native pixels may differ.
+CANVAS_MAX_CHANGED_NATIVE_PIXELS = 16
 
 Clock = Callable[[], float]
 
 
 class FreshnessExpired(RuntimeError):
     """Grounded evidence is too old, or the window changed since it."""
+
+
+class EvidenceTooOld(FreshnessExpired):
+    """The frame is older than its limit (or carries no usable capture time)."""
+
+
+class InputSinceCapture(FreshnessExpired):
+    """Qronos sent input to the window after the frame was taken."""
+
+
+class ContentChanged(FreshnessExpired):
+    """A fresh frame shows different pixels than the frame the evidence came from."""
 
 
 # ------------------------------------------------------------ input epochs
@@ -117,108 +132,145 @@ def require_fresh(
         raise ValueError("max_age_seconds must be a positive finite number.")
     stamp = float(captured_at)
     if not math.isfinite(stamp) or stamp <= 0.0:
-        raise FreshnessExpired(f"{what} carry no capture time; ground them again.")
+        raise EvidenceTooOld(f"{what} carry no capture time; ground them again.")
     age = float(clock()) - stamp
     if age < 0.0:
-        raise FreshnessExpired(f"{what} come from a frame newer than now; refusing.")
+        raise EvidenceTooOld(f"{what} come from a frame newer than now; refusing.")
     if age > limit:
-        raise FreshnessExpired(
+        raise EvidenceTooOld(
             f"{what} are {age:.1f} s old (limit {limit:.0f} s); ground them again."
         )
     if int(captured_epoch) != state_epoch(identity_token):
-        raise FreshnessExpired(
+        raise InputSinceCapture(
             f"{what} were found before Qronos changed the window; ground them again."
         )
 
 
 # ------------------------------------------------------------ pixel evidence
+#
+# What these checks can and cannot see (stated limits, not a guarantee):
+# - They compare model-resolution pixels per colour channel. A change smaller
+#   than one model pixel after scaling (a 4K window is shown to the model at
+#   one third of its size) can disappear in resampling.
+# - Away from the target and its row/column band, up to
+#   CONTEXT_MAX_CHANGED_NATIVE_PIXELS native pixels may change unnoticed.
+# - Two different states that render pixel-identically cannot be told apart
+#   (no UI Automation identity is bound here; the UIA executor keeps its own
+#   element re-read rails).
+# - Animated content is not exempted: an animating window is refused, which
+#   fails closed and may need the person to retry.
 
 
 @dataclass(frozen=True)
 class RegionFingerprint:
-    """Grey pixels of one screen rectangle as one frame showed it."""
+    """Model-resolution RGB pixels of one screen rectangle as one frame showed it."""
 
     screen_rect: Any  # WindowRect; kept untyped to avoid an import cycle
     width: int
     height: int
-    grey: bytes
+    rgb: bytes
     image_size: tuple[int, int]
-    #: Block-averaging bound used when it was recorded; None keeps full resolution.
-    max_side: int | None = FINGERPRINT_MAX_SIDE
+    #: Model pixels per native screen pixel (x, y) in the frame it came from.
+    scale: tuple[float, float]
 
 
-def _grey_region(capture: Any, screen_rect: Any):
-    """The grey pixels of ``screen_rect`` in ``capture``'s model image, as a numpy array."""
-    import numpy as np
-    from PIL import Image
-
+def _scale(capture: Any) -> tuple[float, float]:
     frame = capture.frame_rect
     if frame is None or not frame.usable:
         raise FreshnessExpired("The frame does not record the screen rectangle it shows.")
-    scale_x = capture.image.width / frame.width
-    scale_y = capture.image.height / frame.height
+    return capture.image.width / frame.width, capture.image.height / frame.height
+
+
+def _crop_box(capture: Any, screen_rect: Any) -> tuple[int, int, int, int]:
+    frame = capture.frame_rect
+    scale_x, scale_y = _scale(capture)
     left = max(0, math.floor((screen_rect.left - frame.left) * scale_x))
     top = max(0, math.floor((screen_rect.top - frame.top) * scale_y))
     right = min(capture.image.width, math.ceil((screen_rect.right - frame.left) * scale_x))
     bottom = min(capture.image.height, math.ceil((screen_rect.bottom - frame.top) * scale_y))
     if right <= left or bottom <= top:
         raise FreshnessExpired("The checked region lies outside the captured frame.")
+    return left, top, right, bottom
+
+
+def _rgb_region(capture: Any, screen_rect: Any):
+    """The RGB pixels of ``screen_rect`` in ``capture``'s model image, as an int16 array (H, W, 3)."""
+    import numpy as np
+    from PIL import Image
+
+    box = _crop_box(capture, screen_rect)
     try:
         with Image.open(BytesIO(capture.image.data)) as opened:
-            region = opened.convert("L").crop((left, top, right, bottom))
+            region = opened.convert("RGB").crop(box)
     except OSError as exc:
         raise FreshnessExpired(f"The frame could not be decoded: {exc}") from exc
     return np.asarray(region, dtype=np.int16)
 
 
-def _shrink(array, max_side: int | None = FINGERPRINT_MAX_SIDE):
-    """Block-average down to at most ``max_side`` per side (deterministic)."""
+def changed_mask(before, after):
+    """True where any colour channel moved by more than CHANNEL_CHANGE_THRESHOLD."""
     import numpy as np
 
-    if max_side is None:
-        return array
-    height, width = array.shape
-    step = max(1, math.ceil(max(height, width) / max_side))
-    if step == 1:
-        return array
-    h = (height // step) * step
-    w = (width // step) * step
-    if h == 0 or w == 0:
-        return array
-    return array[:h, :w].reshape(h // step, step, w // step, step).mean(axis=(1, 3)).astype(np.int16)
+    return np.abs(after - before).max(axis=2) > CHANNEL_CHANGE_THRESHOLD
 
 
-def region_fingerprint(
-    capture: Any,
-    screen_rect: Any,
-    *,
-    max_side: int | None = FINGERPRINT_MAX_SIDE,
-) -> RegionFingerprint:
-    grey = _shrink(_grey_region(capture, screen_rect), max_side)
+def region_fingerprint(capture: Any, screen_rect: Any) -> RegionFingerprint:
+    rgb = _rgb_region(capture, screen_rect)
     return RegionFingerprint(
         screen_rect=screen_rect,
-        width=int(grey.shape[1]),
-        height=int(grey.shape[0]),
-        grey=grey.astype("uint8").tobytes(),
+        width=int(rgb.shape[1]),
+        height=int(rgb.shape[0]),
+        rgb=rgb.astype("uint8").tobytes(),
         image_size=(int(capture.image.width), int(capture.image.height)),
-        max_side=max_side,
+        scale=_scale(capture),
     )
 
 
-def changed_pixels(fingerprint: RegionFingerprint, capture: Any) -> tuple[int, int]:
-    """(changed, total) pixels between the fingerprint and the same region in ``capture``."""
+def fingerprint_pixels(fingerprint: RegionFingerprint):
     import numpy as np
 
+    return np.frombuffer(fingerprint.rgb, dtype=np.uint8).reshape(
+        fingerprint.height, fingerprint.width, 3
+    ).astype(np.int16)
+
+
+def region_change(fingerprint: RegionFingerprint, capture: Any):
+    """The changed-pixel mask between the fingerprint and the same region in ``capture``."""
     if (int(capture.image.width), int(capture.image.height)) != fingerprint.image_size:
         raise FreshnessExpired("The fresh frame has a different size; ground again.")
-    now = _shrink(_grey_region(capture, fingerprint.screen_rect), fingerprint.max_side)
-    before = np.frombuffer(fingerprint.grey, dtype=np.uint8).reshape(
-        fingerprint.height, fingerprint.width
-    ).astype(np.int16)
+    now = _rgb_region(capture, fingerprint.screen_rect)
+    before = fingerprint_pixels(fingerprint)
     if now.shape != before.shape:
         raise FreshnessExpired("The checked region changed shape; ground again.")
-    changed = int((np.abs(now - before) > PIXEL_CHANGE_THRESHOLD).sum())
-    return changed, int(before.size)
+    return changed_mask(before, now)
+
+
+def changed_pixels(fingerprint: RegionFingerprint, capture: Any) -> tuple[int, int]:
+    """(changed, total) model pixels between the fingerprint and the same region in ``capture``."""
+    mask = region_change(fingerprint, capture)
+    return int(mask.sum()), int(mask.size)
+
+
+def native_pixel_limit(fingerprint: RegionFingerprint, native_pixels: float) -> float:
+    """``native_pixels`` expressed in this fingerprint's model pixels (never below MIN_CHANGED_PIXELS)."""
+    scale_x, scale_y = fingerprint.scale
+    return max(float(MIN_CHANGED_PIXELS), float(native_pixels) * scale_x * scale_y)
+
+
+def rect_mask(fingerprint: RegionFingerprint, screen_rect: Any):
+    """True for the fingerprint's pixels that lie inside ``screen_rect`` (clipped)."""
+    import numpy as np
+
+    mask = np.zeros((fingerprint.height, fingerprint.width), dtype=bool)
+    scale_x, scale_y = fingerprint.scale
+    origin = fingerprint.screen_rect
+    left = max(0, math.floor((screen_rect.left - origin.left) * scale_x))
+    top = max(0, math.floor((screen_rect.top - origin.top) * scale_y))
+    right = min(fingerprint.width, math.ceil((screen_rect.right - origin.left) * scale_x))
+    bottom = min(fingerprint.height, math.ceil((screen_rect.bottom - origin.top) * scale_y))
+    if right > left and bottom > top:
+        mask[top:bottom, left:right] = True
+    return mask
 
 
 def require_region_unchanged(
@@ -226,13 +278,48 @@ def require_region_unchanged(
     capture: Any,
     *,
     what: str,
-    max_fraction: float = MAX_CHANGED_FRACTION,
+    max_native_pixels: float = 0.0,
+    exclude: Any = None,
 ) -> None:
-    """Refuse when the fresh frame shows different content where the target was."""
-    changed, total = changed_pixels(fingerprint, capture)
-    minimum = MIN_CONTEXT_CHANGED_PIXELS if max_fraction == CONTEXT_MAX_CHANGED_FRACTION else MIN_CHANGED_PIXELS
-    if changed > max(minimum, float(max_fraction) * total):
-        raise FreshnessExpired(
-            f"{what} changed on screen since it was found ({changed} of {total} "
-            "sampled pixels differ); ground it again."
+    """Refuse when the fresh frame shows different content in the fingerprinted region.
+
+    ``max_native_pixels`` tolerates that many changed native pixels (converted
+    to model pixels; never fewer than MIN_CHANGED_PIXELS). ``exclude`` is one
+    screen rectangle left out of the comparison.
+    """
+    mask = region_change(fingerprint, capture)
+    if exclude is not None:
+        mask &= ~rect_mask(fingerprint, exclude)
+    changed = int(mask.sum())
+    if changed > native_pixel_limit(fingerprint, max_native_pixels):
+        raise ContentChanged(
+            f"{what} changed on screen since it was found ({changed} of {mask.size} "
+            "model pixels differ); ground it again."
+        )
+
+
+def require_neighbourhood_unchanged(
+    context: RegionFingerprint,
+    capture: Any,
+    target_box: Any,
+    *,
+    what: str,
+) -> None:
+    """The target's row and column bands across the whole window must be unchanged.
+
+    A list row, a status label or a sibling control that says what the target
+    acts on usually sits in line with it. Changes there are refused as
+    strictly as changes to the target itself.
+    """
+    mask = region_change(context, capture)
+    pad_x = max(NEIGHBOURHOOD_MIN_PAD_NATIVE, 2 * target_box.width)
+    pad_y = max(NEIGHBOURHOOD_MIN_PAD_NATIVE, 2 * target_box.height)
+    frame = context.screen_rect
+    row = type(target_box)(frame.left, target_box.top - pad_y, frame.right, target_box.bottom + pad_y)
+    column = type(target_box)(target_box.left - pad_x, frame.top, target_box.right + pad_x, frame.bottom)
+    band = rect_mask(context, row) | rect_mask(context, column)
+    changed = int((mask & band).sum())
+    if changed > MIN_CHANGED_PIXELS:
+        raise ContentChanged(
+            f"{what}: the row or column around it changed on screen ({changed} model pixels); ground it again."
         )

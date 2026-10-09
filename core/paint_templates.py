@@ -73,10 +73,13 @@ _NAMES: dict[str, str] = {
 }
 
 _FILLER = re.compile(
-    r"(?<!\w)(?:a|an|the|one|simple|basic|plain|small|"
-    r"یک|یه|ساده|یک\s+عدد|یه\s+دونه|رو|را)(?!\w)",
+    r"(?<!\w)(?:a|an|the|one|simple|basic|plain|small|please|"
+    r"یک|یه|ساده|یک\s+عدد|یه\s+دونه|رو|را|لطفا|ی)(?!\w)",
     re.IGNORECASE,
 )
+# Diacritics and the ezafe hamza ("خانهٔ"); the ZWNJ ezafe ("خانه‌ی") leaves a
+# lone "ی", removed as filler above.
+_DIACRITICS = re.compile("[\u064B-\u065F\u0670]")
 
 
 def _named(plan: ShapePlan, name: str) -> ShapePlan:
@@ -84,7 +87,8 @@ def _named(plan: ShapePlan, name: str) -> ShapePlan:
 
 
 def _normalise(text: str) -> str:
-    value = str(text or "").replace("‌", " ").replace("ي", "ی").replace("ك", "ک")
+    value = str(text or "").replace("\u200c", " ").replace("ي", "ی").replace("ك", "ک").replace("ۀ", "ه")
+    value = _DIACRITICS.sub("", value)
     value = re.sub(r"[\s،,.!؟?:;\-]+", " ", value).strip().casefold()
     value = _FILLER.sub(" ", value)
     return re.sub(r"\s+", " ", value).strip()

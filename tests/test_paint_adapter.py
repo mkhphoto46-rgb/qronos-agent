@@ -90,13 +90,16 @@ def _adapter(binding):
     return PaintAdapter(binder, inputs=inputs, capture=StillWindowCapture()), binder, stroke
 
 
+TOOL = WindowRect(120, 130, 160, 150)  # a verified tool indicator box
+
+
 def _fresh(binding, rect) -> dict:
     """What ground_paint_canvas records from the frame it grounded the canvas in."""
     frame = StillWindowCapture().capture_bound(binding, None)
     return {
         "captured_at": monotonic(),
         "state_epoch": state_epoch(binding.identity_token),
-        "fingerprint": region_fingerprint(frame, rect, max_side=None),
+        "fingerprint": region_fingerprint(frame, rect),
     }
 
 
@@ -149,6 +152,7 @@ def test_adapter_executes_generic_plan_only_inside_supplied_canvas():
         canvas,
         authorization=_authorization(binding),
         step_delay_seconds=0.0,
+        tool_regions=(TOOL,),
     )
 
     assert result.plan_name == "arbitrary-brain-plan"
@@ -176,7 +180,7 @@ def test_adapter_refuses_stale_canvas_capability_before_side_effect():
     )
 
     with pytest.raises(PaintAdapterError):
-        adapter.execute(binding, ShapePlanner.line(), stale, authorization=_authorization(binding))
+        adapter.execute(binding, ShapePlanner.line(), stale, authorization=_authorization(binding), tool_regions=(TOOL,))
 
     assert stroke.calls == []
 
@@ -204,6 +208,7 @@ def test_adapter_production_path_accepts_only_visual_approval_capability():
         canvas,
         authorization=_authorization(binding),
         step_delay_seconds=0.0,
+        tool_regions=(TOOL,),
     )
 
     assert result.plan_name == plan.name
@@ -215,6 +220,7 @@ def test_adapter_production_path_accepts_only_visual_approval_capability():
             plan,  # type: ignore[arg-type]
             canvas,
             authorization=_authorization(binding),
+            tool_regions=(TOOL,),
         )
 
     tampered = VisualApprovedSketch(
@@ -234,6 +240,7 @@ def test_adapter_production_path_accepts_only_visual_approval_capability():
             tampered,
             canvas,
             authorization=_authorization(binding),
+            tool_regions=(TOOL,),
         )
 
 
@@ -243,7 +250,7 @@ def test_adapter_uses_fidelity_projection_and_pointer_delivery_defaults():
     canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650), **_fresh(binding, WindowRect(200, 250, 800, 650)))
     plan = ShapePlanner.line((0.0, 0.0), (1.0, 1.0))
 
-    adapter.execute(binding, plan, canvas, authorization=_authorization(binding))
+    adapter.execute(binding, plan, canvas, authorization=_authorization(binding), tool_regions=(TOOL,))
 
     _, points, kwargs = stroke.calls[0]
     # 600x400 canvas contains a centered 400x400 projection.
