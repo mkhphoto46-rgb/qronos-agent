@@ -94,6 +94,105 @@ cannot see an edit that preserves all three. So playback plans
 (`open-timestamp`) and exports re-hash the copy first (`verify_asset`), and
 search results label their check `identityCheck: stat`.
 
+**Per-file admission (rounds 3-4).** A `files` row is a record of what a scan
+saw, never permission to read. Every read goes through
+`qronos_media.scope.admit` against the root as approved *now*, immediately
+before the file is opened. "Every read" means:
+
+- the stat and full hash for identity;
+- the copies a stage may use, re-admitted again right before the decoder
+  opens one;
+- sidecar discovery, fingerprinting and reading;
+- strict verification, exports and playback plans;
+- the paths search offers.
+
+A path is admitted only if all of these hold:
+
+- it equals an approved file root, or lies inside an approved folder root at
+  a folder depth no greater than the root's *current* `max_depth` (files in the
+  root folder are depth 0);
+- it has a video extension;
+- it is a safe local path: no UNC share, device namespace, URL-like value,
+  `..`, alternate data stream or reserved device name;
+- it has no link or junction anywhere on its path;
+- it is not inside the media index's own data folder (database, keyframe
+  cache, reports), so the index never feeds on its own state. A root inside
+  that folder is refused when it is added.
+
+That is the whole read boundary. It is not a new permission system, and
+nothing else is excluded: an explicitly selected folder on an external drive,
+under the user profile or under AppData is an ordinary root.
+`core.library_executor.default_protected_roots` describes where *Library
+actions* may not write or act; it is not a read policy and media does not
+apply it to reads.
+
+Approved companion-subtitle scope: only `.srt/.vtt/.ass/.ssa` files in the
+same folder as an admitted video, named after it (`<stem>[.<tags>].<ext>`),
+link-free and not inside the media data folder. Nothing else beside a film is
+read.
+
+A row that fails admission is marked `missing` with `error = out_of_scope`;
+its asset's other copies are unaffected. Scans sweep every row of the root
+against its scope, even a capped scan, outside any write transaction.
+Re-approving a root with a narrower depth or a different kind sweeps at once.
+Search does not offer an asset whose every copy is out of scope. Widening the
+scope again re-admits files through a fresh scan and full hash.
+
+The Files policy is category-scoped today (`security.gate.evaluate` decides
+per category), so the gate is asked per root (`recheck_root`). `admit` is the
+single place a future path-scoped rule would apply.
+
+**Fresh permission at every read (round 4, M-P4).**
+
+- **At every read handoff:** before a file is stat'ed for its identity hash,
+  when a stage starts, before a decoder opens a copy, and before strict
+  verification reads a copy. The gate is asked fresh, with no cache, for the
+  root of *that* copy.
+- **While a hash or decoder runs:** the gate is asked again for the roots
+  actually in use at least every `REVOCATION_CHECK_SECONDS` (production default
+  2 s), so a Files DENY or an expired approval stops the work within about that
+  long, with its checkpoint kept and the reason reported.
+- **Binding to the copy actually opened:** the watch is bound to the roots of
+  the copies actually opened, and every one of them must still be allowed. A
+  duplicate copy under another root with a live approval never carries a copy
+  whose own root was revoked or expired.
+- **Grant lifetime:** an ALWAYS_ASK approval carries background work only for
+  the gate's own grant lifetime, measured from approval time.
+
+**Strict verification is a bounded, owned operation.** `verify_asset(asset,
+max_seconds=30, cancelled=None)` does these steps, in this order:
+
+1. Asks the gate for every root holding a copy; nothing is read for a refused
+   or revoked root.
+2. Admits each copy.
+3. Reserves a resource lease, so it defers to gaming and creator work.
+4. Hashes the copy in full, never a sample. While hashing, the same `Watch`
+   as indexing observes pause, `cancelled` (Stop), the time budget,
+   permission revocation and lease renewal.
+
+It returns a typed `status`:
+
+| Status | Meaning |
+|---|---|
+| `verified` | One copy's bytes hash to the asset; it is listed in `verified`. |
+| `mismatch` | Every admitted copy hashed differently; those copies go back for re-identity. |
+| `no_copy` | No present, in-scope copy whose stat still matches. |
+| `refused` | The gate refused every root holding a copy; see `refusedRoots`. |
+| `deferred` | The resource authority said not now; see `reason`. |
+| `incomplete` | It stopped mid-hash; see `reason`. Nothing is claimed. |
+
+**API change from round 1 (service and CLI).**
+
+- **`open_timestamp`:** returns `{"status": "planned", ...}`, or
+  `{"status": "not_verified", "verification": {...}}` with no path, instead of
+  raising. The CLI now exits 0 with that JSON where it used to exit 2.
+- **`export_report`:** validates the destination, renders from the index,
+  then asks the write gate on those exact bytes *before* any media read.
+  Only then does it verify and write. A copy that cannot be verified now
+  returns `{"status": "not_verified", ...}` and writes nothing.
+- **`verify_asset`:** stops at the first verified copy (one proof is
+  enough). Its `verified` list therefore has at most one entry.
+
 ## One timeline
 
 All times are on the **asset timeline**: milliseconds from the container's
@@ -159,8 +258,9 @@ under the current Files policy:
   request, preview, audit record, report or CLI argument.
 - **Denied:** refused.
 
-Background work re-asks the gate for every root at the start of every run and
-at least every minute. It continues only while the policy allows reading, or
+Background work asks the gate fresh at every read handoff and, while a read is
+in progress, at least every 2 seconds (see "Fresh permission at every read").
+It continues only while the policy allows reading, or
 while the in-process grant that approved the root is still active *and* the
 root still has the kind and depth that grant approved. A stored approval row
 is a record, never a reason to proceed.
