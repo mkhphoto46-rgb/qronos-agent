@@ -168,7 +168,12 @@ class MouseButtonController:
             allowed_rect=allowed_rect,
         )
         self._guard.revalidate(binding, authorization=authorization)
-        self._button(button.value, down)
+        try:
+            self._button(button.value, down)
+        finally:
+            # Delivered or not, this press/release may have changed the app:
+            # every coordinate grounded before it expires.
+            self._guard.note_state_change(binding)
         with self._held_lock:
             if down:
                 self._held.add(button)

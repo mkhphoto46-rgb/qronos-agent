@@ -677,6 +677,7 @@ class PaintDrawExecutor:
         draw = PaintAdapter(
             self.computer_executor.window_binder,
             inputs=inputs,
+            capture=capture,
         ).execute_approved(
             binding,
             approved_sketch,
@@ -686,6 +687,7 @@ class PaintDrawExecutor:
             inset_pixels=12,
             cancel_token=cancel_token,
             progress=state.canvas_progress,
+            screen_approved=True,
         )
 
         # The drawing is complete. From here on only observation remains, so

@@ -9,7 +9,7 @@ from core.input_safety import BoundInputAuthorization
 from core.mouse_click import MouseClickResult
 from core.screen_capture import ScreenCapture
 from core.visual_targeting import VisualTarget, VisualTargetLocator
-from core.vision_grounding import revalidate_grounded_point
+from core.vision_grounding import confirm_grounded_point, target_fingerprint, viewport_fingerprint
 from core.window_binding import (
     WindowBinder,
     WindowBinding,
@@ -149,6 +149,12 @@ class VisualActionExecutor:
             description,
             frame,
         )
+        # The pixels around the located point, as the model saw them.
+        fingerprint = target_fingerprint(
+            frame,
+            _point_scope(binding.snapshot.client_rect, target.point.screen_x,
+                         target.point.screen_y, radius=radius),
+        )
 
         # Vision inference may take seconds and another window can steal
         # foreground. Never click until the exact bound HWND is foreground
@@ -163,11 +169,17 @@ class VisualActionExecutor:
             require_same_layout=True,
         )
 
-        x, y = revalidate_grounded_point(
+        # Provenance is not enough: a fresh frame must show the target
+        # unchanged where Vision found it (scroll/dialog/content changes).
+        x, y = confirm_grounded_point(
             target.point,
+            fingerprint,
+            viewport_fingerprint(frame),
             binding,
             self.binder,
-            require_foreground=True,
+            self.capture,
+            screen_approved=screen_approved,
+            reason="Confirm the located target is still in place before the click.",
         )
 
         client = binding.snapshot.client_rect

@@ -12,6 +12,7 @@ from core.screen_capture import Capture, DisplayGeometry
 from core.vision_grounding import GroundedPoint, GroundedTarget, ImageBox
 from core.vision_image import PreparedImage
 from core.window_binding import WindowBinding, WindowRect, WindowSnapshot
+from tests.fixtures.still_window import StillWindowCapture, as_seen_in
 
 
 def _binding() -> WindowBinding:
@@ -83,28 +84,16 @@ class FakeBinder:
 
 
 class FakeCapture:
+    """A real PNG of a controlled picture of the bound window."""
+
     def __init__(self, binding: WindowBinding):
         self.binding = binding
         self.calls = []
+        self.window = StillWindowCapture()
 
     def capture_bound(self, binding, binder, **kwargs):
         self.calls.append((binding, binder, kwargs))
-        snap = binding.snapshot
-        return Capture(
-            image=PreparedImage(
-                data=b"png",
-                width=snap.window_rect.width,
-                height=snap.window_rect.height,
-                format="png",
-            ),
-            geometry=DisplayGeometry(1920, 1080, 1920, 1080),
-            window=binding.hwnd,
-            binding_token=binding.identity_token,
-            layout_token=binding.layout_token,
-            source_width=snap.window_rect.width,
-            source_height=snap.window_rect.height,
-            frame_rect=snap.window_rect,
-        )
+        return self.window.capture_bound(binding, binder, **kwargs)
 
 
 class FakeGrounder:
@@ -113,8 +102,9 @@ class FakeGrounder:
         self.calls = []
 
     def locate(self, target, capture):
+        # A real grounder's coordinates carry the provenance of the frame.
         self.calls.append((target, capture))
-        return self.target
+        return as_seen_in(self.target, capture)
 
 
 def test_valid_vision_bbox_becomes_exact_canvas_capability():

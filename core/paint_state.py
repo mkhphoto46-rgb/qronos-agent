@@ -15,9 +15,9 @@ from core.vision_grounding import (
     GroundedTarget,
     GroundingUnavailable,
     GroundingStale,
+    confirm_grounded_target,
     ground_structured_response,
     grounding_prompt,
-    revalidate_grounded_target,
     validate_grounding_capture,
 )
 from core.window_binding import WindowBinder, WindowBinding, WindowRect
@@ -271,11 +271,15 @@ class PaintStateNormalizer:
         )
         grounded = self._locate(target, frame, step=target)
         try:
-            x, y = revalidate_grounded_target(
+            # A fresh frame must show the control unchanged where Vision found
+            # it: a scroll, panel or dialog since then refuses the click.
+            x, y = confirm_grounded_target(
                 grounded,
                 binding,
                 self._binder,
-                require_foreground=True,
+                self._capture,
+                screen_approved=screen_approved,
+                reason=f"Confirm the Paint control is still in place before clicking: {target}",
             )
         except GroundingStale as exc:
             raise PaintStateError(

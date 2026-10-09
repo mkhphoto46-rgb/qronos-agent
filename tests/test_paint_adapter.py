@@ -4,6 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.grounding_freshness import monotonic, region_fingerprint, state_epoch
+from tests.fixtures.still_window import StillWindowCapture
+
 from core.actions import ActionRequest
 from core.input_safety import BoundInputAuthorization
 from core.paint_adapter import PaintAdapter, PaintAdapterError, PaintCanvasRegion
@@ -84,15 +87,22 @@ def _adapter(binding):
     stroke = FakeStroke()
     inputs = SimpleNamespace(stroke=stroke)
     binder = FakeBinder(binding)
-    return PaintAdapter(binder, inputs=inputs), binder, stroke
+    return PaintAdapter(binder, inputs=inputs, capture=StillWindowCapture()), binder, stroke
+
+
+def _fresh(binding, rect) -> dict:
+    """What ground_paint_canvas records from the frame it grounded the canvas in."""
+    frame = StillWindowCapture().capture_bound(binding, None)
+    return {
+        "captured_at": monotonic(),
+        "state_epoch": state_epoch(binding.identity_token),
+        "fingerprint": region_fingerprint(frame, rect, max_side=None),
+    }
 
 
 def test_canvas_region_is_tied_to_exact_paint_layout():
     binding = _binding()
-    canvas = PaintCanvasRegion.verified(
-        binding,
-        WindowRect(200, 250, 800, 650),
-    )
+    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650), **_fresh(binding, WindowRect(200, 250, 800, 650)))
     assert canvas.matches(binding)
 
     changed = WindowBinding(
@@ -110,19 +120,21 @@ def test_canvas_region_rejects_non_paint_and_outside_client():
         PaintCanvasRegion.verified(
             _binding(app_id="notepad", process_path=r"C:\Windows\notepad.exe"),
             WindowRect(200, 250, 800, 650),
+            **_fresh(_binding(), WindowRect(200, 250, 800, 650)),
         )
 
     with pytest.raises(PaintAdapterError):
         PaintCanvasRegion.verified(
             _binding(),
             WindowRect(0, 0, 1000, 1000),
+            **_fresh(_binding(), WindowRect(100, 120, 880, 680)),
         )
 
 
 def test_adapter_executes_generic_plan_only_inside_supplied_canvas():
     binding = _binding()
     adapter, binder, stroke = _adapter(binding)
-    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650))
+    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650), **_fresh(binding, WindowRect(200, 250, 800, 650)))
     plan = ShapePlanner.custom(
         (
             ((0.1, 0.2), (0.9, 0.2)),
@@ -155,7 +167,7 @@ def test_adapter_executes_generic_plan_only_inside_supplied_canvas():
 def test_adapter_refuses_stale_canvas_capability_before_side_effect():
     binding = _binding()
     adapter, _, stroke = _adapter(binding)
-    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650))
+    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650), **_fresh(binding, WindowRect(200, 250, 800, 650)))
     stale = PaintCanvasRegion(
         rect=canvas.rect,
         hwnd=canvas.hwnd,
@@ -171,7 +183,7 @@ def test_adapter_refuses_stale_canvas_capability_before_side_effect():
 def test_adapter_production_path_accepts_only_visual_approval_capability():
     binding = _binding()
     adapter, _, stroke = _adapter(binding)
-    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650))
+    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650), **_fresh(binding, WindowRect(200, 250, 800, 650)))
     plan = ShapePlanner.line()
     preview = SketchPreviewRenderer().render(plan)
     approved = VisualApprovedSketch(
@@ -228,7 +240,7 @@ def test_adapter_production_path_accepts_only_visual_approval_capability():
 def test_adapter_uses_fidelity_projection_and_pointer_delivery_defaults():
     binding = _binding()
     adapter, _, stroke = _adapter(binding)
-    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650))
+    canvas = PaintCanvasRegion.verified(binding, WindowRect(200, 250, 800, 650), **_fresh(binding, WindowRect(200, 250, 800, 650)))
     plan = ShapePlanner.line((0.0, 0.0), (1.0, 1.0))
 
     adapter.execute(binding, plan, canvas, authorization=_authorization(binding))

@@ -19,6 +19,7 @@ from core.vision_grounding import (
     revalidate_grounded_target,
 )
 from core.vision_image import PreparedImage
+from tests.fixtures.still_window import png, textured
 from core.window_binding import (
     WindowBinder,
     WindowRect,
@@ -47,7 +48,7 @@ def snapshot(*, left=100, top=50, width=1600, height=900, foreground=True):
 def bound_capture(binding, *, model_width=1280, model_height=720):
     return Capture(
         image=PreparedImage(
-            data=b"png",
+            data=png(textured(model_width, model_height)),
             width=model_width,
             height=model_height,
             format="png",

@@ -12,6 +12,8 @@ from security.permissions import ActionCategory
 from core.screen_capture import Capture, DisplayGeometry
 from core.vision_grounding import GroundedPoint, GroundedTarget, ImageBox
 from core.vision_image import PreparedImage
+from core.vision_grounding import target_fingerprint, viewport_fingerprint
+from tests.fixtures.still_window import StillWindowCapture
 from core.window_binding import WindowBinding, WindowRect, WindowSnapshot
 
 
@@ -71,19 +73,12 @@ class FakeCapture:
     def __init__(self, binding):
         self.binding = binding
         self.calls = []
+        self.window = StillWindowCapture()
 
     def capture_bound(self, binding, binder, **kwargs):
+        # A real PNG of a controlled picture of the bound window.
         self.calls.append((binding, binder, kwargs))
-        return Capture(
-            image=PreparedImage(data=b"png", width=810, height=610, format="png"),
-            geometry=DisplayGeometry(1920, 1080, 1920, 1080),
-            window=binding.hwnd,
-            binding_token=binding.identity_token,
-            layout_token=binding.layout_token,
-            source_width=810,
-            source_height=610,
-            frame_rect=WindowRect(90, 90, 900, 700),
-        )
+        return self.window.capture_bound(binding, binder, **kwargs)
 
 
 class FakeGrounder:
@@ -114,9 +109,13 @@ class FakeGrounder:
                 model_height=610,
                 source_width=810,
                 source_height=610,
+                captured_at=capture.captured_at,
+                state_epoch=capture.state_epoch,
             ),
             image_box=ImageBox(max(0, x - 95), max(0, y - 95), 10, 10),
             screen_box=WindowRect(x - 5, y - 5, x + 5, y + 5),
+            fingerprint=target_fingerprint(capture, WindowRect(x - 5, y - 5, x + 5, y + 5)),
+            context=viewport_fingerprint(capture),
         )
 
 
@@ -173,7 +172,13 @@ def test_normalizer_selects_pencil_black_and_minimum_size_before_verification():
     assert size_rect.left == binding.snapshot.client_rect.left
     assert size_rect.right < binding.snapshot.client_rect.right
     assert size_rect.top > binding.snapshot.client_rect.top
-    assert len(capture.calls) == 4
+    # Each click: one frame to ground, one fresh frame to confirm before the
+    # click; then one frame to verify the selected state.
+    assert len(capture.calls) == 7
+    reasons = [call[2]["reason"] for call in capture.calls]
+    assert [r.startswith("Confirm the Paint control") for r in reasons] == [
+        False, True, False, True, False, True, False,
+    ]
     assert len(grounder.calls) == 6
     assert result.pencil_selected_confidence == pytest.approx(0.95)
     assert result.black_selected_confidence == pytest.approx(0.95)

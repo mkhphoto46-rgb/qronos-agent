@@ -371,7 +371,16 @@ class _AdapterBinder(_Binder):
 
 
 def _paint_canvas(binding: WindowBinding) -> PaintCanvasRegion:
-    return PaintCanvasRegion.verified(binding, WindowRect(150, 150, 450, 350))
+    from tests.fixtures.still_window import StillWindowCapture, canvas_from
+
+    rect = WindowRect(150, 150, 450, 350)
+    return canvas_from(binding, rect, StillWindowCapture().capture_bound(binding, None))
+
+
+def _still_window():
+    from tests.fixtures.still_window import StillWindowCapture
+
+    return StillWindowCapture()
 
 
 def test_stop_between_strokes_reports_exact_committed_edits():
@@ -387,7 +396,7 @@ def test_stop_between_strokes_reports_exact_committed_edits():
                 token.cancel()
             return SimpleNamespace(points=points)
 
-    adapter = PaintAdapter(_AdapterBinder(), inputs=SimpleNamespace(stroke=_Stroke()))
+    adapter = PaintAdapter(_AdapterBinder(), inputs=SimpleNamespace(stroke=_Stroke()), capture=_still_window())
     plan = ShapePlanner.custom(
         (
             ((0.1, 0.1), (0.9, 0.1)),
@@ -424,7 +433,7 @@ def test_interrupted_stroke_with_unproven_release_makes_edit_count_uncertain():
             progress.clean_release = False
             raise WindowBindingStale("focus stolen mid-stroke")
 
-    adapter = PaintAdapter(_AdapterBinder(), inputs=SimpleNamespace(stroke=_Stroke()))
+    adapter = PaintAdapter(_AdapterBinder(), inputs=SimpleNamespace(stroke=_Stroke()), capture=_still_window())
     progress = PaintCanvasProgress()
 
     with pytest.raises(WindowBindingStale):
