@@ -145,9 +145,12 @@ single place a future path-scoped rule would apply.
 **Fresh permission at every read (round 4, M-P4).**
 
 - **At every read handoff:** before a file is stat'ed for its identity hash,
-  when a stage starts, before a decoder opens a copy, and before strict
+  when a stage starts, before every decoder spawn that opens a copy (each
+  embedded subtitle extraction, scene chunk and keyframe), before each
+  sidecar's hash and again before its read or decode, and before strict
   verification reads a copy. The gate is asked fresh, with no cache, for the
-  root of *that* copy.
+  root of *that* copy. Since round 6 this holds per open, not only per stage
+  start.
 - **While a hash or decoder runs:** the gate is asked again for the roots
   actually in use at least every `REVOCATION_CHECK_SECONDS` (production default
   2 s), so a Files DENY or an expired approval stops the work within about that
@@ -158,6 +161,38 @@ single place a future path-scoped rule would apply.
   whose own root was revoked or expired.
 - **Grant lifetime:** an ALWAYS_ASK approval carries background work only for
   the gate's own grant lifetime, measured from approval time.
+
+**Every subtitle and decoder read is its own handoff (round 6, M-P5).**
+
+- **Sidecars:** each one is admitted separately. Its copy is admitted again
+  with a fresh gate answer, the sidecar itself is admitted, and pause, Stop,
+  the deadline and permission are checked uncached first. This happens twice
+  per sidecar: before the hash and again before the read or decode, because
+  those are two separate opens.
+- **Size limit:** a sidecar larger than 16 MiB (SRT, VTT, ASS or SSA) is
+  refused from its size alone, before any hash, read or ffmpeg spawn.
+- **Hashing:** the sidecar's identity hash streams through `full_sha256` with
+  the stage's cancellation. Pause, Stop, the deadline, revocation and lease
+  loss stop it between chunks and requeue the stage. A sidecar that grows past
+  the limit or disappears by the time the hash ends is refused.
+- **Reading:** SRT and VTT are then read in 256 KiB chunks, at most 16 MiB,
+  with the same cancellation. The bytes read must hash to the same digest, so
+  the stored sidecar hash is of exactly the bytes parsed. A file that changes
+  between the hash and the read, or while it is read (size, mtime or file id),
+  is recorded as a failed track.
+- **ASS/SSA:** decoded by ffmpeg only after the same size check and hash, with
+  bounded output.
+- **Decoder spawns:** every embedded subtitle extraction, every scene chunk
+  and every keyframe opens its copy again through a fresh admission.
+- **Refusals:** a refusal at any of these handoffs requeues the stage with
+  `note = refused:<reason>` and lists it under `refused` in the run report.
+  `stopped` is `permission` when the root was revoked or its approval expired,
+  and `out_of_scope` when the copy left scope. It is never a crash, a stuck
+  RUNNING row or a partial success.
+- **Before commit:** the stage's watch is checked uncached, and every root it
+  opened is asked again with a fresh gate answer, immediately before results
+  are written. Work that finished after a pause, Stop, deadline, lease loss or
+  revocation is requeued, not committed, so the stage runs again on resume.
 
 **Strict verification is a bounded, owned operation.** `verify_asset(asset,
 max_seconds=30, cancelled=None)` does these steps, in this order:
