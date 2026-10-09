@@ -395,3 +395,11 @@ def block_real_windows_computer_side_effects(
         "_default_gui_action",
         blocked_side_effect,
     )
+
+    # The Elevated Action Broker's native adapters: the real UAC prompt
+    # (ShellExecuteExW "runas") and the real Service Control Manager. Tests
+    # inject fake Win32 calls; resolving the real ones is refused.
+    from core import spooler_service, uac_launch
+
+    monkeypatch.setattr(uac_launch, "_real_win32_calls", blocked_side_effect)
+    monkeypatch.setattr(spooler_service, "_real_advapi32", blocked_side_effect)

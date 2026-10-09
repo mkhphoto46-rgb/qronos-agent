@@ -162,12 +162,12 @@ def test_parameters_must_match_the_spec_exactly(setup, params, outcome):
     assert refusal.value.outcome == outcome
 
 
-def test_an_unknown_kind_is_refused_and_production_holds_no_actions(setup):
+def test_an_unknown_kind_is_refused_and_production_holds_only_the_spooler_restart(setup):
     action, approval = setup.approved()
     with pytest.raises(BrokerRefusal) as refusal:
         verify_request(action, approval, setup.key, PRODUCTION_ACTIONS, setup.consumed)
     assert refusal.value.outcome == "unknown_action"
-    assert PRODUCTION_ACTIONS.kinds() == ()
+    assert PRODUCTION_ACTIONS.kinds() == ("printer.spooler_restart",)
 
 
 def test_the_gate_is_asked_again_inside_the_broker(setup):

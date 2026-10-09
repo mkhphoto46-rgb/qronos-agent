@@ -56,6 +56,16 @@ class BrokerUnavailable(RuntimeError):
     """The broker could not be asked; nothing was performed by this session."""
 
 
+class BrokerOutcomeUnknown(BrokerUnavailable):
+    """
+    The request was sent but its answer was lost: the broker may have acted.
+
+    A subclass, so a caller that only knows ``BrokerUnavailable`` still
+    refuses; a caller that tells them apart must report "outcome unknown"
+    and never retry automatically.
+    """
+
+
 class ElevatedProcess(Protocol):
     pid: int
 
@@ -156,18 +166,23 @@ class BrokerSession:
             except ChannelError as error:
                 raise BrokerUnavailable(f"The broker did not connect ({type(error).__name__}).") from error
 
+            sent = False
             try:
                 hello = channel.receive(self._reply_timeout)
                 if hello["kind"] != "hello" or hello["pid"] != process.pid or hello["protocol"] != PROTOCOL_VERSION:
                     raise BrokerUnavailable("The broker introduced itself wrongly.")
 
+                # From here the request may have left, so a failure means the
+                # broker may have acted: the outcome is unknown, not "refused".
+                sent = True
                 channel.send("request", action={"kind": action.kind, "params": dict(action.params)}, approval=approval)
                 reply = channel.receive(self._reply_timeout)
                 if reply["kind"] != "result":
-                    raise BrokerUnavailable("The broker answered wrongly.")
+                    raise BrokerOutcomeUnknown("The broker answered wrongly; the outcome is unknown.")
             except ChannelError as error:
-                # The broker may have acted before the channel failed.
-                raise BrokerUnavailable(
+                if not sent:
+                    raise BrokerUnavailable(f"The broker did not introduce itself ({type(error).__name__}).") from error
+                raise BrokerOutcomeUnknown(
                     f"The broker's answer was lost ({type(error).__name__}); the outcome is unknown."
                 ) from error
             finally:

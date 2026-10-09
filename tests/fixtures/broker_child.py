@@ -7,7 +7,13 @@ verification and single-use journal; the only difference from production is
 the action table: one test action that writes a marker file into a directory
 the test owns. Nothing here is elevated, touches a device or user data.
 
-Usage: python broker_child.py WORK_DIR --pipe ADDRESS --key HEX --runtime-pid PID [--tamper]
+Usage: python broker_child.py WORK_DIR --pipe ADDRESS --key HEX --runtime-pid PID
+       [--tamper | --vanish | --spooler]
+
+    --vanish   perform the action, then exit without answering (a lost answer)
+    --spooler  use the PRODUCTION ``printer.spooler_restart`` spec exactly, with
+               only its ``perform`` replaced by a marker write: the real
+               Service Control Manager is never touched
 """
 
 from __future__ import annotations
@@ -46,13 +52,36 @@ def registry(work: Path) -> ActionRegistry:
     ])
 
 
+def spooler_registry(work: Path) -> ActionRegistry:
+    from dataclasses import replace
+
+    def perform(params) -> str:
+        (work / "markers").mkdir(exist_ok=True)
+        (work / "markers" / "spooler.done").write_text("performed", encoding="utf-8")
+        return "fixture: spooler restart recorded"
+
+    return ActionRegistry([replace(action_broker.PRODUCTION_ACTIONS.get("printer.spooler_restart"), perform=perform)])
+
+
 def main() -> int:
     work = Path(sys.argv[1])
     arguments = sys.argv[2:]
-    tamper = "--tamper" in arguments
-    if tamper:
-        arguments.remove("--tamper")
+    flags = {flag for flag in ("--tamper", "--vanish", "--spooler") if flag in arguments}
+    for flag in flags:
+        arguments.remove(flag)
+    tamper = "--tamper" in flags
     address, key, runtime_pid = action_broker.parse_arguments(arguments)
+
+    if "--vanish" in flags:
+        original_handle = action_broker.handle_request
+
+        def vanish(message, *args, **kwargs):
+            original_handle(message, *args, **kwargs)
+            import os
+
+            os._exit(5)  # acted, never answered
+
+        action_broker.handle_request = vanish
 
     if tamper:
         # A broker that receives an approval but acts on different parameters
@@ -68,7 +97,7 @@ def main() -> int:
 
     result = action_broker.serve_once(
         address, key, runtime_pid,
-        registry=registry(work),
+        registry=spooler_registry(work) if "--spooler" in flags else registry(work),
         consumed=ConsumedApprovals(work / "consumed"),
         audit=action_broker.jsonl_audit(work / "audit.jsonl"),
     )

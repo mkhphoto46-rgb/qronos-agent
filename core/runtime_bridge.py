@@ -3503,10 +3503,56 @@ class QronosRuntime:
         )
         return self._app_workflows
 
+    def _ensure_elevated_actions(self):
+        """The elevated-action coordinator (core/elevated_actions.py), built on first use."""
+        coordinator = getattr(self, "_elevated_actions", None)
+        if coordinator is None:
+            from core.elevated_actions import ElevatedActionCoordinator
+            from core.library_executor import WorkflowSecretCheck
+
+            # The bridge never opens the secret store itself; like printing,
+            # it borrows the Library's per-profile check and shared lockout.
+            secret_check = WorkflowSecretCheck()
+            coordinator = ElevatedActionCoordinator(
+                notify=self._notify,
+                verify_secret=secret_check.verify,
+                secret_status=secret_check.status,
+                paused=lambda: self.runtime_paused,
+            )
+            self._elevated_actions = coordinator
+        return coordinator
+
+    def _begin_text_elevated_action(self, text: str, request_id: str, started_at: float) -> bool:
+        """
+        Route the person's own request to restart the print spooler.
+
+        Only desktop chat turns come here; Device Link text goes to the
+        tool-free chat path and can never reach an elevated action.
+        """
+        from core.elevated_actions import parse_spooler_restart
+
+        if not parse_spooler_restart(text):
+            return False
+        if self._computer_actions.stopped_since_turn_start():
+            self._finish_text_file_action(
+                request_id=request_id,
+                response="لغو شد؛ هیچ کاری شروع نشد.",
+                started_at=started_at,
+            )
+            return True
+        reply = self._ensure_elevated_actions().try_begin(text, request_id)
+        if reply is None:
+            return False
+        self._finish_text_file_action(request_id=request_id, response=reply, started_at=started_at)
+        return True
+
     def _begin_text_app_workflow(self, text: str, request_id: str, started_at: float) -> bool:
         """Route a Telegram-download or print request to its approval flow."""
         from core.app_workflow_intents import parse_workflow_intent
         from core.browser_research import plan_navigation
+
+        if self._begin_text_elevated_action(text, request_id, started_at):
+            return True
 
         if parse_workflow_intent(text) is None and plan_navigation(text) is None:
             return False
@@ -3531,6 +3577,10 @@ class QronosRuntime:
         secret: str | None = None,
     ) -> None:
         """Answer one workflow prompt by its single-use identity."""
+        elevated = getattr(self, "_elevated_actions", None)
+        if elevated is not None and elevated.owns(action_token):
+            elevated.resolve(action_token, approved=approved, secret=secret)
+            return
         coordinator = getattr(self, "_app_workflows", None)
         if coordinator is None:
             self._notify(
@@ -6821,6 +6871,11 @@ class QronosRuntime:
         if app_workflows is not None:
             # Telegram/print prompts and running steps stop with everything else.
             app_workflows.discard(reason)
+        elevated = getattr(self, "_elevated_actions", None)
+        if elevated is not None:
+            # Open elevation prompts too. A broker already started is not
+            # interrupted: it performs one action or none, and reports.
+            elevated.discard(reason)
         if revoked:
             self._notify(
                 "computer_approval_discarded",

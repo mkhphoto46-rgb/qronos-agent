@@ -36,10 +36,15 @@ approved action needs it, and it exits after that one action. It:
     4. performs the action, reports the result, and exits.
 
 There is no shell, interpreter or command-line action, and the registry
-refuses to hold one. **The production registry is empty**: no current Qronos
-feature needs elevation, so every request is refused until a reviewed action
-is added to ``PRODUCTION_ACTIONS``. The mechanics above are real and tested end
-to end with a fixture action in a disposable, non-elevated child process.
+refuses to hold one. **The production registry holds exactly one action**,
+``printer.spooler_restart``: stop and start the one Windows service named
+``Spooler`` (``core/spooler_service.py``), with no parameters at all — the
+service is a constant, never chosen by the caller. It is the recovery the
+print workflow needs when the spooler stops responding, and Windows allows
+only administrators to do it. Every other kind is refused (``unknown_action``).
+The mechanics above are real and tested end to end with a fixture action in a
+disposable, non-elevated child process; the real spooler restart is never run
+by tests and belongs to deferred live acceptance.
 """
 
 from __future__ import annotations
@@ -138,6 +143,9 @@ class ActionSpec:
     perform: Callable[[Mapping[str, Any]], str]
     summary: str
     validate: Callable[[Mapping[str, Any]], None] = field(default=lambda params: None)
+    #: Exception types whose messages are fixed, reviewed text safe to show;
+    #: any other failure is reported by its type name only.
+    failures: tuple[type, ...] = ()
 
 
 class ActionRegistry:
@@ -165,8 +173,28 @@ class ActionRegistry:
         return tuple(sorted(self._table))
 
 
-#: What this build can perform elevated. Empty on purpose; see the module doc.
-PRODUCTION_ACTIONS = ActionRegistry(())
+def _restart_spooler(params: Mapping[str, Any]) -> str:
+    from core.spooler_service import SpoolerRecovery
+
+    return SpoolerRecovery().restart()
+
+
+def _spooler_spec() -> ActionSpec:
+    from core.spooler_service import SERVICE_DISPLAY, SpoolerRecoveryFailed
+
+    return ActionSpec(
+        kind="printer.spooler_restart",
+        category=ActionCategory.DEVICE_CONTROL,
+        fields={},
+        target=lambda params: SERVICE_DISPLAY,
+        perform=_restart_spooler,
+        summary="Restart the Windows Print Spooler service: stop it, then start it. Nothing else.",
+        failures=(SpoolerRecoveryFailed,),
+    )
+
+
+#: What this build can perform elevated; see the module doc.
+PRODUCTION_ACTIONS = ActionRegistry((_spooler_spec(),))
 
 
 def action_digest(kind: str, params: Mapping[str, Any]) -> str:
@@ -345,6 +373,8 @@ def handle_request(message: dict, key: bytes, registry: ActionRegistry, consumed
         detail = verified.spec.perform(verified.params)
     except Exception as error:
         _audit(audit, message, False, "failed")
+        if verified.spec.failures and isinstance(error, verified.spec.failures):
+            return {"ok": False, "outcome": "failed", "detail": str(error)[:500]}
         return {"ok": False, "outcome": "failed", "detail": f"The action failed: {type(error).__name__}."}
 
     _audit(audit, message, True, "performed")

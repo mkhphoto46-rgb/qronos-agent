@@ -1,8 +1,9 @@
 # Supervisor, user runtime and Elevated Action Broker (D8)
 
 Status: **the supervisor is wired into the desktop's runtime start, stop and
-shutdown (see [Product wiring](#product-wiring-supervised-desktop-runtime));
-the broker is not wired yet.** Nothing here is installed, registered as a
+shutdown (see [Product wiring](#product-wiring-supervised-desktop-runtime)),
+and the broker holds one production action, the print-spooler restart,
+reached from the person's own desktop chat turn.** Nothing here is installed, registered as a
 service, started at sign-in, or exercised through a real UAC prompt. Live
 acceptance on a real desktop is deferred. See
 [What is not done](#what-is-not-done).
@@ -141,11 +142,27 @@ The registry refuses command-like kinds (`shell`, `cmd`, `powershell`,
 (script execution, code, registry, boot, raw disk, security settings, backup
 destruction, privilege escalation, cyber attack).
 
-**`PRODUCTION_ACTIONS` is empty.** No current Qronos feature needs elevation,
-so the shipped broker refuses every request with `unknown_action`. That
-proves the mechanics fail closed. **It does not mean any privileged
-capability exists or is complete.** Adding an action requires a reviewed
-`ActionSpec`, a permission policy for its category, and live UAC acceptance.
+**`PRODUCTION_ACTIONS` holds exactly one action: `printer.spooler_restart`.**
+
+- **Need.** The print workflow stops with "The Windows print spooler is not
+  responding". Restarting that one service is the standard recovery, and
+  Windows lets only administrators do it.
+- **Spec.** It has no parameters. The service is the constant `Spooler`,
+  never chosen by a caller. The category is `device_control`, and the
+  target is "Windows Print Spooler service (Spooler)".
+- **Adapter.** `core/spooler_service.py` uses the Service Control Manager
+  with query, stop and start rights only. It never runs a shell, `sc.exe`,
+  `net.exe` or PowerShell.
+- **Behaviour.** It stops the service, waits up to 30 s, starts it, and
+  waits up to 30 s. Each failure says how far it got. Dependent services
+  are never stopped, a paused service is not touched, and the service's
+  configuration is never read or changed.
+- **Everything else** is refused with `unknown_action`.
+- **Not done.** The real restart, UAC prompt and elevated run have not been
+  exercised. That is deferred live acceptance.
+
+Adding any further action needs a reviewed `ActionSpec`, a permission
+policy for its category, and live UAC acceptance.
 
 ## Product wiring (supervised desktop runtime)
 
@@ -208,13 +225,45 @@ desktop (Tauri start_runtime)
 - Sign-in start, a persistent supervisor that outlives the desktop, and any
   Windows service remain installer/owner decisions. None of them exist.
 
-**Elevated action (not wired yet; slice 2).** For an approved action that
-needs elevation, the runtime calls
-`BrokerSession(UacBrokerLauncher(Path(sys.executable))).perform(TypedAction(kind, params), request, grant)`.
-`grant` comes from `security.gate.issue_grant` after the user's approval.
-`UacDeclined` and `BrokerUnavailable` are shown as refusals or as "outcome
-unknown". A lost answer after the request was sent is reported as outcome
-unknown and never retried automatically.
+**Elevated action (`core/elevated_actions.py`).** The person's own desktop
+chat turn reaches it, for example "سرویس چاپ را ری‌استارت کن" or "restart
+the print spooler". A strict deterministic parser is used; negations and
+other text are ignored. Device Link text goes to the tool-free chat path and
+never reaches it. The layers, all required, in order:
+
+1. The permission gate must not refuse `device_control`.
+2. The typed approval secret, always. This is a floor even if settings
+   lowered device control to "allow" or "ask". A UAC dialog is Windows'
+   consent to elevation, not Qronos's approval of the exact action.
+3. A gate grant for this exact request (170 s). `BrokerSession` turns it into
+   a single-use HMAC envelope.
+4. The UAC prompt, which the person can decline.
+5. The broker's own verification and gate re-check.
+
+The prompt uses the existing app-workflow protocol:
+- `app_workflow_approval_required` with phase `printer_spooler_restart` and
+  permission `require_typed_secret`.
+- The decision comes back through `qronos.app_workflow_decision`, routed by
+  token.
+- Prompts expire after 120 s and are revoked by Stop, Pause and shutdown.
+
+Outcomes are reported once and never retried:
+- `succeeded`.
+- `failed`: the adapter's reviewed message.
+- `refused`: declined, UAC declined, unavailable, forbidden, or not the
+  installed build.
+- `uncertain`: `BrokerOutcomeUnknown`. The request left but the answer was
+  lost, so the person is told to check the service.
+
+Only one elevated action runs at a time. From source, elevation is refused
+before any prompt.
+
+**Desktop contract (Control).** `desktop/src/appWorkflowApproval.ts` accepts
+four phases today, so the frontend drops this prompt until Control adds
+`printer_spooler_restart` with permission `require_typed_secret`. The secret
+should be sent exactly as for `print`. Until then the action is reachable
+in the runtime but not approvable from the UI. It fails closed: the prompt
+simply expires.
 
 ## Tests (fixtures only)
 
@@ -252,6 +301,16 @@ unknown and never retried automatically.
   ending its bridge through the Job Object. One end-to-end test runs
   `python -m core.supervisor --desktop` with the real bridge on throwaway
   state, through ping, pong and shutdown.
+- `tests/test_elevated_actions.py`: the request parser; the exact production
+  spec (no parameters, so a caller cannot choose the service); reviewed
+  failure messages only; the SCM adapter with a fake advapi32, covering each
+  stop/start/timeout/dependent/paused path and only `Spooler` opened; the
+  coordinator, covering the typed-secret floor whatever the settings,
+  single use, refusals before any prompt, every outcome reported once and
+  never retried, UAC declined, revocation and pause; bridge routing; and,
+  with real non-elevated broker children, the production spec end to end
+  (only `perform` replaced by a marker write) and a lost answer after acting,
+  which is reported as `BrokerOutcomeUnknown`.
 - Rust (`backend.rs`, `mod.rs`): the closed `supervisor --desktop` command,
   and `runtime_stopping` ending pending pairing requests.
 - `tests/test_action_broker.py`: every verification step and refusal, the
@@ -273,7 +332,13 @@ refuses that indirection.
   sign-in.
 - No live UAC prompt, elevated run, Windows service, scheduled task or
   sign-in entry has been created or exercised.
-- `PRODUCTION_ACTIONS` is empty, so there is no elevated product capability.
+- `printer.spooler_restart` has never been run for real: no UAC prompt,
+  elevated broker or Service Control Manager call has been exercised. The
+  desktop does not yet display its prompt (Control contract above).
+- An over-the-shoulder elevation, where a standard user types an
+  administrator's credentials, runs the broker as another user. The broker's
+  same-user check then refuses it. This fails closed, but it means such users
+  cannot use elevated actions.
 - The broker's session key is on its command line. Another process of the
   same user could read it. The pid checks in both directions mean such a
   process can neither impersonate the runtime nor receive the action, but the
