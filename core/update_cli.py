@@ -81,7 +81,8 @@ def running_version(environ: dict[str, str] | None = None, root: Path = ROOT) ->
 
 def run(operation: str, payload: dict[str, Any],
         service_factory: Callable[[str], UpdateService] | None = None,
-        version: str | None = None) -> dict[str, Any]:
+        version: str | None = None,
+        emit: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     if operation not in OPERATIONS:
         raise UpdateError("bad_request", f"Unsupported update operation: {operation}")
     if "runningVersion" in payload:
@@ -111,7 +112,17 @@ def run(operation: str, payload: dict[str, Any],
     if operation == "approve":
         return {"ok": True, **service.approve(payload.get("approvalToken"), payload.get("secret"))}
     if operation == "launch":
-        return {"ok": True, "handoff": service.launch(payload.get("launchToken"))}
+        # The answer goes out as soon as the installer has started; this process then
+        # stays alive, holding the exclusion, until the installer ends (lifetime guard).
+        answered: list[bool] = []
+
+        def launched(handoff: dict[str, Any]) -> None:
+            if emit is not None:
+                emit({"ok": True, "handoff": handoff})
+                answered.append(True)
+
+        handoff = service.launch(payload.get("launchToken"), on_launched=launched)
+        return {"ok": True, "handoff": handoff, "answered": bool(answered)}
     if operation == "discard":
         service.discard()
         return {"ok": True}
@@ -123,6 +134,11 @@ def run(operation: str, payload: dict[str, Any],
                                     "recoveryPending": status["recoveryPending"]}}
 
 
+def _emit(result: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
 def main() -> int:
     operation = sys.argv[1].strip().lower() if len(sys.argv) > 1 else "status"
     try:
@@ -132,7 +148,9 @@ def main() -> int:
         payload = json.loads(raw) if raw.strip() else {}
         if not isinstance(payload, dict):
             raise UpdateError("bad_request", "The request must be a JSON object.")
-        result = run(operation, payload)
+        result = run(operation, payload, emit=_emit)
+        if result.pop("answered", False):
+            return 0  # already answered when the installer started
     except UpdateError as error:
         result = {"ok": False, "code": error.code, "error": str(error)}
     except json.JSONDecodeError:

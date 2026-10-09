@@ -106,7 +106,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from core import local_update, update_stores
+from core import local_update, store_admission, update_stores
 from core.local_update import (
     MANIFEST_SUFFIX,
     DataProfile,
@@ -139,6 +139,9 @@ RUNTIME_MUTEXES = (
 LAUNCH_DEPENDENCIES = (
     "Runtime: the bridge and supervisor own exclusive instance mutexes for their whole life "
     "(core/runtime_instance_guard.py is not used by the bridge today).",
+    "Runtime and Control: EVERY process that opens a Qronos store (bridge, settings/permissions/library/memory/"
+    "update services, standalone jobs) takes core.store_admission.admit_writer before its first store opens and "
+    "keeps it for its life.",
     "Runtime: every backend service entry (runtime_entry, sidecar guards) refuses while update_in_progress() is true.",
     "Runtime: recover_before_stores() runs and is awaited before any store opens, and its refusal stops start-up.",
     "Control: the desktop blocks and drains its own service writers during a launch and derives the stop result itself.",
@@ -160,7 +163,7 @@ _EVENTS = frozenset({"verified", "refused", "requested", "approved", "staged", "
 _KINDS = ("upgrade", "repair", "rollback")
 _OUTCOMES = ("applied", "not_applied", "unconfirmed")
 
-Launcher = Callable[[Path, tuple[str, ...], tuple[int, ...]], None]
+Launcher = Callable[[Path, tuple[str, ...], tuple[int, ...]], Any]
 
 
 # --------------------------------------------------------------- authorisation
@@ -353,6 +356,39 @@ class MutexHold:
 
 def hold_runtime_mutexes(names: tuple[str, ...] = (UPDATE_IN_PROGRESS_MUTEX, *RUNTIME_MUTEXES)) -> MutexHold:
     return MutexHold(names)
+
+
+class LaunchHold:
+    """The whole exclusion a launch needs: the EXCLUSIVE store admission, then the owned mutexes.
+
+    The admission is atomic against every cooperating writer (none inside a store,
+    none can start); the mutexes keep the runtime, supervisor and sidecars from
+    starting and mark the update for update_in_progress(). Not the default
+    quiescence: see LAUNCH_DEPENDENCIES.
+    """
+
+    def __init__(self, data_root: Path, names: tuple[str, ...] = (UPDATE_IN_PROGRESS_MUTEX, *RUNTIME_MUTEXES),
+                 admit: Callable[[Path], Any] = store_admission.admit_exclusive) -> None:
+        self._admission = admit(data_root)  # raises writers_active / update_in_progress
+        try:
+            self._mutexes = MutexHold(names)
+        except BaseException:
+            self._admission.release()
+            raise
+
+    def handles(self) -> tuple[int, ...]:
+        return self._mutexes.handles()
+
+    def release(self) -> None:
+        try:
+            self._mutexes.release()
+        finally:
+            self._admission.release()
+
+
+def owned_launch_hold(data_root: Path) -> Callable[[], LaunchHold]:
+    """A quiescence provider for when the launch dependencies are accepted (never the default)."""
+    return lambda: LaunchHold(data_root)
 
 
 def update_in_progress(name: str = UPDATE_IN_PROGRESS_MUTEX) -> bool:
@@ -678,7 +714,7 @@ def hold_and_hash(path: Path) -> tuple[Callable[[], None], str, int]:
     return stream.close, digest.hexdigest(), size
 
 
-def spawn_inheriting(argv: list[str], handles: tuple[int, ...], cwd: str | None = None):
+def spawn_inheriting(argv: list[str], handles: tuple[int, ...], cwd: str | None = None) -> Any:
     """Start a detached process that inherits exactly ``handles`` (plus null standard handles).
 
     The handles are made inheritable only for this call and restricted with the
@@ -706,9 +742,12 @@ def spawn_inheriting(argv: list[str], handles: tuple[int, ...], cwd: str | None 
                 pass
 
 
-def windows_launcher(path: Path, arguments: tuple[str, ...], handles: tuple[int, ...]) -> None:
-    """Start the verified installer as its own process; it inherits the update's exclusion handles."""
-    spawn_inheriting([str(path), *arguments], handles, cwd=str(path.parent))
+def windows_launcher(path: Path, arguments: tuple[str, ...], handles: tuple[int, ...]) -> Any:
+    """Start the verified installer as its own process; it inherits the update's exclusion handles.
+
+    Returns the process, so the launching process can guard the installer's whole lifetime.
+    """
+    return spawn_inheriting([str(path), *arguments], handles, cwd=str(path.parent))
 
 
 # ------------------------------------------------------------------- service
@@ -724,6 +763,7 @@ class UpdateService:
                  liveness: Callable[[], bool] = update_in_progress,
                  launcher: Launcher = windows_launcher,
                  hold: Callable[[Path], tuple[Callable[[], None], str, int]] = hold_and_hash,
+                 admit: Callable[[Path], Any] = store_admission.admit_exclusive,
                  environ: Any = None,
                  clock: Callable[[], float] = time.time) -> None:
         parse_version(running_version)
@@ -739,6 +779,7 @@ class UpdateService:
         self._liveness = liveness
         self._launcher = launcher
         self._hold = hold
+        self._admit = admit
         self._environ = os.environ if environ is None else environ
         self._clock = clock
 
@@ -1068,21 +1109,31 @@ class UpdateService:
 
     # -- launch
 
-    def launch(self, token: Any) -> dict[str, Any]:
-        """Hands the staged installer to Windows, once, under a quiescence hold the installer inherits.
+    def launch(self, token: Any, on_launched: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        """Hands the staged installer to Windows, once, and guards it until it ends.
 
         Refused by default (``launch_unavailable``) until the launch dependencies
-        exist and are accepted; see the module documentation.
+        exist and are accepted; see the module documentation. Once the installer
+        has started, ``on_launched(handoff)`` is called (the CLI answers the
+        desktop there), and this process keeps the whole exclusion until the
+        installer process exits: it is the installer's lifetime guard.
         """
         token_hash = _token_hash(token)
-        hold = self._quiesce()  # raises launch_unavailable / runtime_running / update_in_progress
+        hold = self._quiesce()  # raises launch_unavailable / runtime_running / writers_active / update_in_progress
         try:
             binding = self._claim_launch(token_hash)
             try:
-                return self._launch_claimed(binding, hold)
+                handoff, process = self._launch_claimed(binding, hold)
             except BaseException as error:
                 self._release_claim(binding, error)
                 raise
+            if on_launched is not None:
+                try:
+                    on_launched(handoff)
+                except Exception:
+                    pass  # the caller's channel may be gone; the guard still holds until the installer ends
+            _wait_for_exit(process)
+            return handoff
         finally:
             hold.release()
 
@@ -1157,7 +1208,7 @@ class UpdateService:
                        "launchedAt": self._clock(), "restoredSnapshot": restored, "safetySnapshot": safety,
                        "dataStores": {k: v["writes"] for k, v in sorted(payload["dataStores"].items())}}
             try:
-                self._launcher(installer, (), hold.handles())
+                process = self._launcher(installer, (), hold.handles())
             except UpdateError:
                 if safety is not None:  # the installer never ran: put the current data back
                     self._restore(self._snapshot_by_id(safety))
@@ -1171,7 +1222,7 @@ class UpdateService:
 
             self._change(record)
             self._authorizer.record("launched", binding)
-            return handoff
+            return handoff, process
         finally:
             closer()
 
@@ -1266,7 +1317,14 @@ class UpdateService:
         return self.recover_before_stores()
 
     def _restore_exclusively(self, state: dict[str, Any], snapshot_id: str, version: str) -> None:
-        """Inside the barrier, under the store lock: put a safety snapshot back, or refuse start-up."""
+        """Inside the barrier, under the store lock and the EXCLUSIVE store admission: put a safety
+        snapshot back, or refuse start-up. A writer still inside a store refuses it (writers_active)."""
+        try:
+            admission = self._admit(self.data_root)
+        except UpdateError as error:
+            raise UpdateError("recovery_pending", "Saved data must be put back while nothing else has Qronos's "
+                                                  f"data open ({error.code}); close Qronos and start it again.") \
+                from error
         try:
             self._restore(self._snapshot(state, snapshot_id))
         except UpdateError as error:
@@ -1277,6 +1335,8 @@ class UpdateService:
                 pass
             raise UpdateError("recovery_failed", "Saved data could not be put back; Qronos must not open its "
                                                  f"stores until this is resolved ({error.code}).") from error
+        finally:
+            admission.release()
         self._event(state, "restored", version, f"{snapshot_id} put back at start-up")
 
     def discard(self) -> None:
@@ -1428,6 +1488,20 @@ class UpdateService:
                 os.rmdir(folder)
             except OSError:
                 pass
+
+
+def _wait_for_exit(process: Any) -> None:
+    """The lifetime guard: wait for the installer process to end (no time limit: it is the installer's life)."""
+    wait = getattr(process, "wait", None)
+    if wait is None:
+        return
+    while True:
+        try:
+            wait(timeout=5)
+            return
+        except Exception as error:  # subprocess.TimeoutExpired: still running
+            if type(error).__name__ != "TimeoutExpired":
+                return
 
 
 # ------------------------------------------------------------ runtime entry points
