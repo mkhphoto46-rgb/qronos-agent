@@ -1,0 +1,484 @@
+"""The versioned processing graph (handoff s30, s31, s59) and its stages.
+
+Each stage has a version. Raising a version, or a change in a stage's inputs
+(a new sidecar subtitle beside the film), re-queues that stage and everything
+downstream of it, and nothing upstream: new subtitle parsing never re-runs
+shot detection.
+
+A stage collects its result outside the database, then hands back a
+``commit`` that the runner applies in the same transaction that marks the
+stage COMPLETED, so a stage is either fully present or not at all. Long
+stages (shot detection, keyframes) also record checkpoints between chunks and
+resume from them after a pause, a cancel-and-retry or a crash.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+from typing import Callable
+
+from qronos_media.identity import checked_asset_id, full_sha256
+from qronos_media.paths import UnsafeMediaPath, owned_child, readable_media_file
+from qronos_media.probe import ProbeResult, probe
+from qronos_media.resources import StageNeeds
+from qronos_media.subtitles import (
+    IMAGE_SUBTITLE_CODECS, TEXT_SUBTITLE_CODECS, Cue, SubtitleError, decode_subtitle_bytes, find_sidecars,
+    parse_srt, read_subtitle_file,
+)
+from qronos_media.text import normalise_for_search
+from qronos_media.tools import ASS_DEMUXERS, ChildCancelled, MediaTools, MediaToolUnavailable, run_bounded
+
+
+class StageFailed(RuntimeError):
+    """The stage cannot complete for this asset; the reason is stored."""
+
+
+@dataclass(frozen=True)
+class StageSpec:
+    name: str
+    version: int
+    depends: tuple[str, ...]
+    level: int
+    needs: StageNeeds
+
+
+STAGES: dict[str, StageSpec] = {
+    spec.name: spec
+    for spec in (
+        StageSpec("metadata", 1, (), 0, StageNeeds("metadata")),
+        StageSpec("subtitles", 1, ("metadata",), 1, StageNeeds("subtitles", disk_bytes=64 * 1024**2)),
+        StageSpec("scenes", 1, ("metadata",), 3, StageNeeds("scenes")),
+        StageSpec("keyframes", 1, ("scenes",), 3, StageNeeds("keyframes", disk_bytes=256 * 1024**2)),
+    )
+}
+
+# Handoff capabilities that do not exist yet. Status reports them so nobody
+# mistakes an empty result for "nothing there".
+PENDING_CAPABILITIES: tuple[dict[str, object], ...] = (
+    {"capability": "asr", "level": 1, "status": "pending",
+     "reason": "Speech recognition for files without subtitles needs a chunked, timestamped whisper.cpp media path "
+               "and a cross-process model lease with the Qronos governor."},
+    {"capability": "semantic_dialogue", "level": 2, "status": "pending",
+     "reason": "BGE-M3 text embeddings need a batch/lease contract with the existing CPU sidecar."},
+    {"capability": "visual_embeddings", "level": 3, "status": "decision_pending",
+     "reason": "No joint image-text embedding backend is specified for Qronos; adding one needs an explicit decision."},
+    {"capability": "vision_captions", "level": 4, "status": "pending",
+     "reason": "Captions from the specified Vision model would be model text, labelled as such, and need a model lease."},
+    {"capability": "ocr", "level": 4, "status": "pending", "reason": "Not implemented."},
+    {"capability": "topics", "level": 4, "status": "pending", "reason": "Not implemented."},
+    {"capability": "speaker_turns", "level": 5, "status": "pending", "reason": "Not implemented."},
+    {"capability": "actions_motion", "level": 5, "status": "not_supported",
+     "reason": "Sparse keyframes cannot establish actions or motion; no validated temporal model path exists."},
+)
+
+PAIR_MAX_GAP_MS = 2_000
+SCENE_CHUNK_SECONDS = 600.0
+SCENE_OVERLAP_SECONDS = 1.0
+SCENE_THRESHOLD = 10.0
+SCENE_EOF_SLACK_SECONDS = 0.5
+MAX_SCENE_CHUNKS = 2_000  # 2,000 x 10 min: far beyond any film
+MIN_SCENE_MS = 400
+LONG_SCENE_MS = 20_000
+MAX_KEYFRAMES_PER_ASSET = 3_000
+SUBTITLE_STDOUT_LIMIT = 32 * 1024 * 1024
+
+_SCDET = re.compile(rb"lavfi\.scd\.score:\s*([0-9.]+),\s*lavfi\.scd\.time:\s*([0-9.]+)")
+_PROGRESS_TIME = re.compile(rb"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+Commit = Callable[[sqlite3.Connection], None]
+
+
+def downstream(stage: str) -> list[str]:
+    """``stage`` and everything that depends on it, in graph order."""
+    affected = {stage}
+    for spec in STAGES.values():
+        if any(dep in affected for dep in spec.depends):
+            affected.add(spec.name)
+    return [name for name in STAGES if name in affected]
+
+
+@dataclass
+class StageContext:
+    db: sqlite3.Connection
+    asset_id: str
+    files: list[Path]
+    tools: MediaTools | None
+    cache_dir: Path
+    cache_quota_bytes: int
+    cancelled: Callable[[], bool]
+    renew: Callable[[], None]
+    save_checkpoint: Callable[[dict], None]
+    checkpoint: dict = field(default_factory=dict)
+    # Uncached pause/cancel check for chunk boundaries; ``cancelled`` is the
+    # cheap, rate-limited one polled while a child runs.
+    interrupted: Callable[[], bool] = lambda: False
+
+    def checkpoint_boundary(self) -> None:
+        if self.interrupted():
+            raise ChildCancelled("paused or cancelled at a checkpoint boundary")
+
+    def require_tools(self) -> MediaTools:
+        if self.tools is None:
+            raise MediaToolUnavailable("ffmpeg/ffprobe are not provisioned (set QRONOS_MEDIA_FFMPEG_DIR)")
+        return self.tools
+
+    def primary_file(self) -> Path:
+        """The copy a decoder may open: re-validated, no link anywhere on its path."""
+        for path in self.files:
+            try:
+                return readable_media_file(path)
+            except UnsafeMediaPath:
+                continue
+        raise StageFailed("no present, link-free copy of this asset")
+
+    def asset(self) -> sqlite3.Row:
+        return self.db.execute("SELECT * FROM assets WHERE asset_id = ?", (self.asset_id,)).fetchone()
+
+
+# ------------------------------------------------------------------ metadata
+
+def run_metadata(ctx: StageContext) -> Commit:
+    result: ProbeResult = probe(ctx.require_tools(), ctx.primary_file(), cancelled=ctx.cancelled)
+
+    def commit(db: sqlite3.Connection) -> None:
+        db.execute(
+            "UPDATE assets SET duration_ms = ?, start_offset_ms = ?, container = ?, title = ?, probe_json = ? "
+            "WHERE asset_id = ?",
+            (result.duration_ms, result.start_ms, result.container, result.title, json.dumps(result.as_json()),
+             ctx.asset_id),
+        )
+        db.execute("DELETE FROM streams WHERE asset_id = ?", (ctx.asset_id,))
+        db.executemany(
+            "INSERT INTO streams(asset_id, idx, kind, codec, language, title, is_default, forced, channels, "
+            "channel_layout, width, height, fps, start_ms, time_base) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (ctx.asset_id, s.index, s.kind, s.codec, s.language, s.title, int(s.default), int(s.forced),
+                 s.channels, s.channel_layout, s.width, s.height, s.fps, s.start_ms, s.time_base)
+                for s in result.streams
+            ],
+        )
+
+    return commit
+
+
+# ----------------------------------------------------------------- subtitles
+
+def subtitles_input_fingerprint(files: list[Path]) -> str:
+    """Changes when a sidecar subtitle beside any copy appears, changes or goes."""
+    parts = []
+    for video in files:
+        for sidecar in find_sidecars(video):
+            try:
+                info = sidecar.path.stat()
+            except OSError:
+                continue
+            parts.append(f"{os.path.normcase(str(sidecar.path))}|{info.st_size}|{info.st_mtime_ns}")
+    return "s1:" + hashlib.sha256("\n".join(sorted(parts)).encode("utf-8")).hexdigest()
+
+
+@dataclass
+class _Track:
+    track_id: str
+    source: str
+    stream_index: int | None = None
+    sidecar_path: str | None = None
+    sidecar_sha256: str | None = None
+    language: str | None = None
+    title: str | None = None
+    codec: str | None = None
+    forced: bool = False
+    encoding: str | None = None
+    status: str = "indexed"
+    detail: str | None = None
+    cues: list[Cue] = field(default_factory=list)
+
+
+def _extract_embedded(ctx: StageContext, path: Path, index: int, demuxers=None) -> list[Cue]:
+    tools = ctx.require_tools()
+    argv = tools.subtitle_argv(path, index) if demuxers is None else tools.subtitle_argv(path, index, demuxers=demuxers)
+    result = run_bounded(
+        argv, timeout_seconds=300.0, stdout_limit=SUBTITLE_STDOUT_LIMIT, stderr_limit=256 * 1024,
+        cancelled=ctx.cancelled, env=tools.child_env(),
+    )
+    if result.returncode != 0:
+        lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise SubtitleError(lines[-1][:200] if lines else f"ffmpeg exit {result.returncode}")
+    text, _ = decode_subtitle_bytes(result.stdout)
+    return parse_srt(text)
+
+
+def run_subtitles(ctx: StageContext) -> Commit:
+    tracks: list[_Track] = []
+    video = ctx.primary_file()
+    streams = ctx.db.execute(
+        "SELECT idx, codec, language, title, forced FROM streams WHERE asset_id = ? AND kind = 'subtitle' ORDER BY idx",
+        (ctx.asset_id,),
+    ).fetchall()
+    for row in streams:
+        track = _Track(
+            track_id=f"{ctx.asset_id}:e{row['idx']}", source="embedded", stream_index=row["idx"],
+            language=row["language"], title=row["title"], codec=row["codec"], forced=bool(row["forced"]),
+        )
+        if row["codec"] in IMAGE_SUBTITLE_CODECS:
+            track.status, track.detail = "unsupported_image", "image subtitles need OCR (pending)"
+        elif row["codec"] in TEXT_SUBTITLE_CODECS:
+            try:
+                track.cues = _extract_embedded(ctx, video, int(row["idx"]))
+                track.encoding = "utf-8"
+            except (SubtitleError, MediaToolUnavailable) as exc:
+                track.status, track.detail = "failed", str(exc)[:300]
+        else:
+            track.status, track.detail = "failed", f"unknown subtitle codec {row['codec']!r}"
+        tracks.append(track)
+
+    seen_hashes: set[str] = set()
+    for copy in ctx.files:
+        for sidecar in find_sidecars(copy):
+            if ctx.cancelled():
+                raise ChildCancelled("subtitles cancelled")
+            try:
+                digest = full_sha256(sidecar.path)
+            except OSError as exc:
+                tracks.append(_Track(f"{ctx.asset_id}:s-unreadable-{len(tracks)}", "sidecar",
+                                     sidecar_path=str(sidecar.path), status="failed", detail=type(exc).__name__))
+                continue
+            if digest in seen_hashes:
+                continue  # the same subtitle beside two copies of the same film
+            seen_hashes.add(digest)
+            track = _Track(
+                track_id=f"{ctx.asset_id}:s{digest[:16]}", source="sidecar", sidecar_path=str(sidecar.path),
+                sidecar_sha256=digest, language=sidecar.language, forced="forced" in sidecar.flags,
+                codec=sidecar.path.suffix.lower().lstrip("."),
+            )
+            try:
+                if sidecar.path.suffix.lower() in {".ass", ".ssa"}:
+                    track.cues = _extract_embedded(ctx, sidecar.path, 0, demuxers=ASS_DEMUXERS)
+                    track.encoding = "ffmpeg"
+                else:
+                    track.cues, track.encoding = read_subtitle_file(sidecar.path)
+            except (SubtitleError, MediaToolUnavailable, OSError) as exc:
+                track.status, track.detail = "failed", str(exc)[:300]
+            tracks.append(track)
+
+    def commit(db: sqlite3.Connection) -> None:
+        db.execute("DELETE FROM dialogue WHERE asset_id = ?", (ctx.asset_id,))
+        db.execute("DELETE FROM subtitle_tracks WHERE asset_id = ?", (ctx.asset_id,))
+        for track in tracks:
+            db.execute(
+                "INSERT INTO subtitle_tracks(track_id, asset_id, source, stream_index, sidecar_path, sidecar_sha256, "
+                "language, title, codec, forced, encoding, status, detail, cue_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (track.track_id, ctx.asset_id, track.source, track.stream_index, track.sidecar_path,
+                 track.sidecar_sha256, track.language, track.title, track.codec, int(track.forced),
+                 track.encoding, track.status, track.detail, len(track.cues)),
+            )
+            rows = []
+            normalised = [normalise_for_search(cue.text) for cue in track.cues]
+            for seq, (cue, norm) in enumerate(zip(track.cues, normalised)):
+                if norm:
+                    rows.append((ctx.asset_id, track.track_id, "cue", seq, cue.start_ms, cue.end_ms, cue.text, norm))
+                if seq + 1 < len(track.cues):
+                    following = track.cues[seq + 1]
+                    if 0 <= following.start_ms - cue.end_ms <= PAIR_MAX_GAP_MS and norm and normalised[seq + 1]:
+                        # A remembered line is often split across two cues.
+                        rows.append((ctx.asset_id, track.track_id, "pair", seq, cue.start_ms, following.end_ms,
+                                     f"{cue.text} {following.text}", f"{norm} {normalised[seq + 1]}"))
+            db.executemany(
+                "INSERT INTO dialogue(asset_id, track_id, kind, seq, start_ms, end_ms, text, norm_text) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                rows,
+            )
+
+    return commit
+
+
+# -------------------------------------------------------------------- scenes
+
+def parse_scene_cuts(stderr: bytes, offset_seconds: float) -> list[tuple[int, float]]:
+    cuts = []
+    for score, seconds in _SCDET.findall(stderr):
+        try:
+            cuts.append((int(round((offset_seconds + float(seconds)) * 1000)), float(score)))
+        except ValueError:
+            continue
+    return cuts
+
+
+def scenes_from_cuts(cuts: list[tuple[int, float]], duration_ms: int) -> list[tuple[int, int, float | None]]:
+    """Turn cut points into contiguous scenes covering ``[0, duration]``."""
+    boundaries: list[tuple[int, float | None]] = [(0, None)]
+    for at, score in sorted(cuts):
+        if at - boundaries[-1][0] >= MIN_SCENE_MS and duration_ms - at >= MIN_SCENE_MS:
+            boundaries.append((at, score))
+    scenes = []
+    for position, (start, score) in enumerate(boundaries):
+        end = boundaries[position + 1][0] if position + 1 < len(boundaries) else duration_ms
+        scenes.append((start, end, score))
+    return scenes
+
+
+def parse_decoded_seconds(stderr: bytes) -> float | None:
+    """The last progress ``time=`` ffmpeg printed: how far this chunk decoded."""
+    found = _PROGRESS_TIME.findall(stderr)
+    if not found:
+        return None
+    hours, minutes, seconds = found[-1]
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def run_scenes(ctx: StageContext) -> Commit:
+    """Shot boundaries on the asset timeline, chunked and checkpointed.
+
+    Times from each chunk are relative to the chunk's ``-ss`` position, which
+    ffmpeg measures from the container start, so ``chunk start + reported
+    time`` is asset time. The end of the last scene is where decoding actually
+    ended, not the container's duration claim.
+    """
+    has_video = ctx.db.execute(
+        "SELECT 1 FROM streams WHERE asset_id = ? AND kind = 'video' LIMIT 1", (ctx.asset_id,)
+    ).fetchone()
+    if not has_video:
+        return lambda db: db.execute("DELETE FROM scenes WHERE asset_id = ?", (ctx.asset_id,))
+    tools = ctx.require_tools()
+    video = ctx.primary_file()
+    cuts = [tuple(item) for item in ctx.checkpoint.get("cuts", [])]
+    start = float(ctx.checkpoint.get("next_start_ms", 0)) / 1000.0
+    decoded_end = ctx.checkpoint.get("decoded_end_ms")
+    for _ in range(MAX_SCENE_CHUNKS):
+        if ctx.checkpoint.get("eof"):
+            break
+        ctx.checkpoint_boundary()
+        ctx.renew()
+        begin = max(0.0, start - SCENE_OVERLAP_SECONDS) if start > 0 else 0.0
+        length = SCENE_CHUNK_SECONDS + (start - begin)
+        result = run_bounded(
+            tools.scenes_argv(video, start_seconds=begin, length_seconds=length, threshold=SCENE_THRESHOLD),
+            # A ceiling, not an estimate of decode speed.
+            timeout_seconds=max(120.0, length * 3.0),
+            stdout_limit=64 * 1024, stderr_limit=8 * 1024 * 1024,
+            cancelled=ctx.cancelled, env=tools.child_env(),
+        )
+        if result.returncode != 0:
+            lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
+            raise StageFailed(f"shot detection failed: {lines[-1][:200] if lines else result.returncode}")
+        for at, score in parse_scene_cuts(result.stderr, begin):
+            if all(abs(at - known) > 200 for known, _ in cuts):
+                cuts.append((at, score))
+        decoded = parse_decoded_seconds(result.stderr)
+        eof = decoded is None or decoded < length - SCENE_EOF_SLACK_SECONDS
+        if decoded is not None:
+            decoded_end = max(decoded_end or 0, int(round((begin + decoded) * 1000)))
+        start += SCENE_CHUNK_SECONDS
+        ctx.checkpoint = {"next_start_ms": int(start * 1000), "cuts": sorted(cuts),
+                          "decoded_end_ms": decoded_end, "eof": eof}
+        ctx.save_checkpoint(ctx.checkpoint)
+    else:
+        raise StageFailed("video did not end within the chunk limit")
+    if not decoded_end:
+        raise StageFailed("no video frames decoded")
+    scenes = scenes_from_cuts(cuts, decoded_end)
+
+    def commit(db: sqlite3.Connection) -> None:
+        db.execute("UPDATE assets SET video_end_ms = ? WHERE asset_id = ?", (decoded_end, ctx.asset_id))
+        db.execute("DELETE FROM scenes WHERE asset_id = ?", (ctx.asset_id,))
+        db.executemany(
+            "INSERT INTO scenes(asset_id, scene_index, start_ms, end_ms, cut_score) VALUES (?,?,?,?,?)",
+            [(ctx.asset_id, index, s, e, score) for index, (s, e, score) in enumerate(scenes)],
+        )
+
+    return commit
+
+
+# ----------------------------------------------------------------- keyframes
+
+def keyframe_times(start_ms: int, end_ms: int) -> list[int]:
+    """Adaptive v1 (handoff s15): middle; start/middle/end for long scenes."""
+    middle = start_ms + (end_ms - start_ms) // 2
+    if end_ms - start_ms < LONG_SCENE_MS:
+        return [middle]
+    return [start_ms + 1_000, middle, end_ms - 1_000]
+
+
+def cache_bytes(db: sqlite3.Connection) -> int:
+    return int(db.execute("SELECT COALESCE(SUM(bytes), 0) FROM keyframes").fetchone()[0])
+
+
+def run_keyframes(ctx: StageContext) -> Commit:
+    scenes = ctx.db.execute(
+        "SELECT scene_index, start_ms, end_ms FROM scenes WHERE asset_id = ? ORDER BY scene_index", (ctx.asset_id,)
+    ).fetchall()
+    directory = owned_child(ctx.cache_dir, "keyframes", checked_asset_id(ctx.asset_id))
+    resume_from = int(ctx.checkpoint.get("next_scene", 0))
+    ctx.db.execute("BEGIN IMMEDIATE")
+    try:
+        stale = ctx.db.execute(
+            "SELECT path FROM keyframes WHERE asset_id = ? AND scene_index >= ?", (ctx.asset_id, resume_from)
+        ).fetchall()
+        ctx.db.execute("DELETE FROM keyframes WHERE asset_id = ? AND scene_index >= ?", (ctx.asset_id, resume_from))
+        ctx.db.execute("COMMIT")
+    except BaseException:
+        ctx.db.execute("ROLLBACK")
+        raise
+    for row in stale:
+        owned_child(directory, Path(row["path"]).name).unlink(missing_ok=True)
+    # A decoder killed mid-write leaves a file with no row; remove anything
+    # this stage would rewrite, by name, so the cache never holds orphans.
+    if directory.is_dir():
+        for leftover in directory.glob("*.jpg*"):
+            match = re.fullmatch(r"(\d{6})_\d+\.jpg(\.part)?", leftover.name)
+            if match is None or int(match.group(1)) >= resume_from:
+                owned_child(directory, leftover.name).unlink(missing_ok=True)
+    if not scenes:
+        return lambda db: None
+    tools = ctx.require_tools()
+    video = ctx.primary_file()
+    directory.mkdir(parents=True, exist_ok=True)
+    produced = int(ctx.db.execute("SELECT COUNT(*) FROM keyframes WHERE asset_id = ?", (ctx.asset_id,)).fetchone()[0])
+    for scene in scenes:
+        index = scene["scene_index"]
+        if index < resume_from:
+            continue
+        ctx.checkpoint_boundary()
+        ctx.renew()
+        rows = []
+        for ordinal, at in enumerate(keyframe_times(scene["start_ms"], scene["end_ms"])):
+            if produced >= MAX_KEYFRAMES_PER_ASSET:
+                break
+            if cache_bytes(ctx.db) >= ctx.cache_quota_bytes:
+                raise StageFailed("keyframe cache quota reached")
+            target = owned_child(directory, f"{index:06d}_{ordinal}.jpg")
+            result = run_bounded(
+                tools.keyframe_argv(video, time_seconds=at / 1000.0, output=target),
+                timeout_seconds=60.0, stdout_limit=64 * 1024, stderr_limit=256 * 1024,
+                cancelled=ctx.cancelled, env=tools.child_env(),
+            )
+            if result.returncode != 0 or not target.is_file():
+                target.unlink(missing_ok=True)
+                continue  # a frame that will not decode is skipped, not invented
+            rows.append((ctx.asset_id, index, ordinal, at, str(target), target.stat().st_size))
+            produced += 1
+        ctx.db.execute("BEGIN IMMEDIATE")
+        try:
+            ctx.db.executemany(
+                "INSERT INTO keyframes(asset_id, scene_index, ordinal, time_ms, path, bytes) VALUES (?,?,?,?,?,?)", rows
+            )
+            ctx.db.execute("COMMIT")
+        except BaseException:
+            ctx.db.execute("ROLLBACK")
+            raise
+        ctx.checkpoint = {"next_scene": index + 1}
+        ctx.save_checkpoint(ctx.checkpoint)
+    return lambda db: None
+
+
+RUNNERS: dict[str, Callable[[StageContext], Commit]] = {
+    "metadata": run_metadata,
+    "subtitles": run_subtitles,
+    "scenes": run_scenes,
+    "keyframes": run_keyframes,
+}
