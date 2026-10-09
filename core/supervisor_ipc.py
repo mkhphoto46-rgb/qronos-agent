@@ -106,6 +106,10 @@ class _NothingWritten(ChannelTimeout):
     """Out of time before any byte was written; the channel is still whole."""
 
 
+class ChannelCancelled(ChannelError):
+    """The wait was interrupted on purpose (the owner is stopping); nobody was accepted."""
+
+
 class PeerRejected(ChannelError):
     """The peer is not the process this channel was opened for."""
 
@@ -510,6 +514,7 @@ class ChannelServer:
         # No authkey: multiprocessing's handshake reads without a deadline.
         self._listener = Listener(self.address, family="AF_PIPE")
         self._closed = False
+        self._interrupted = threading.Event()
         self.refused_peers = 0
 
     def accept(
@@ -535,9 +540,14 @@ class ChannelServer:
         deadline = _deadline(timeout)
 
         while True:
+            if self._interrupted.is_set():
+                raise ChannelCancelled("Stopped while waiting for the peer.")
+
             connection = self._accept_raw(_remaining(deadline))
 
             if connection is None:
+                if self._interrupted.is_set():
+                    raise ChannelCancelled("Stopped while waiting for the peer.")
                 if self.refused_peers:
                     raise PeerRejected("Only processes other than the launched one connected.")
                 raise ChannelTimeout("No peer connected in time.")
@@ -585,10 +595,17 @@ class ChannelServer:
 
         threading.Thread(target=wait_for_peer, name="qronos-ipc-accept", daemon=True).start()
 
-        if done.wait(remaining):
-            if "error" in result:
-                raise ChannelError("The listener failed.")
-            return result["connection"]
+        # Wait in short slices so ``interrupt`` ends the wait promptly. The
+        # slices are this thread's own waits: nothing extra connects to the
+        # pipe until the wait is over, so a peer arriving meanwhile is not lost.
+        until = time.monotonic() + remaining
+        while True:
+            if done.wait(max(0.0, min(0.05, until - time.monotonic()))):
+                if "error" in result:
+                    raise ChannelError("The listener failed.")
+                return result["connection"]
+            if self._interrupted.is_set() or time.monotonic() >= until:
+                break
 
         # Wake the waiting accept with a connection that never handshakes;
         # opening it is itself bounded.
@@ -602,6 +619,10 @@ class ChannelServer:
         if late is not None:
             late.close()
         return None
+
+    def interrupt(self) -> None:
+        """End a wait in ``accept`` promptly, from any thread; later accepts refuse."""
+        self._interrupted.set()
 
     def close(self) -> None:
         if self._closed:

@@ -46,6 +46,7 @@ from typing import BinaryIO, Callable, Optional, Protocol, Sequence
 from core.supervisor_ipc import (
     PROTOCOL_VERSION,
     Channel,
+    ChannelCancelled,
     ChannelError,
     ChannelServer,
     ChannelTimeout,
@@ -225,6 +226,7 @@ class Supervisor:
         self._stop = threading.Event()
         self._state = SupervisorState.STOPPED
         self._lock = threading.Lock()
+        self._connecting: Optional[ChannelServer] = None
         self.starts = 0
 
     @property
@@ -232,8 +234,17 @@ class Supervisor:
         return self._state
 
     def stop(self) -> None:
-        """Ask the run loop to shut the child down and return."""
+        """
+        Ask the run loop to shut the child down and return.
+
+        Prompt even while a new runtime is still connecting: the server it is
+        being accepted on is interrupted, and the hello wait polls this.
+        """
         self._stop.set()
+        with self._lock:
+            server = self._connecting
+        if server is not None:
+            server.interrupt()
 
     def run(self) -> SupervisorState:
         """Run until stopped or degraded. Returns the final state."""
@@ -294,23 +305,54 @@ class Supervisor:
         except Exception:
             return server, _NoChild(), None, "the runtime could not be launched"
 
+        with self._lock:
+            self._connecting = server
+        if self._stop.is_set():
+            server.interrupt()  # stop() came between launching and here
+
+        channel = None
         try:
             channel = server.accept(
                 self._policy.connect_timeout_seconds,
                 expected_pid=child.pid,
                 peer_pid=self._peer_pid,
             )
-            hello = channel.receive(self._policy.connect_timeout_seconds)
+            hello = self._receive_hello(channel)
+
+            if hello is None:
+                channel.close()
+                return server, child, None, "supervisor stopping"
 
             if hello["kind"] != "hello" or hello["pid"] != child.pid or hello["protocol"] != PROTOCOL_VERSION:
                 channel.close()
                 return server, child, None, "the runtime introduced itself wrongly"
 
             channel.send("welcome", protocol=PROTOCOL_VERSION, supervisor_pid=os.getpid())
+        except ChannelCancelled:
+            return server, child, None, "supervisor stopping"
         except ChannelError as error:
+            if channel is not None:
+                channel.close()
             return server, child, None, f"the runtime did not connect ({type(error).__name__})"
+        finally:
+            with self._lock:
+                self._connecting = None
 
         return server, child, channel, None
+
+    def _receive_hello(self, channel: Channel) -> Optional[dict]:
+        """The runtime's hello within the connect timeout; None if Stop came first."""
+        deadline = self._clock() + self._policy.connect_timeout_seconds
+        while True:
+            if self._stop.is_set():
+                return None
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                raise ChannelTimeout("The runtime did not say hello in time.")
+            try:
+                return channel.receive(min(0.25, remaining))
+            except ChannelTimeout:
+                continue
 
     def _watch(self, child: ChildProcess, channel: Channel) -> str:
         last_beat = self._clock()

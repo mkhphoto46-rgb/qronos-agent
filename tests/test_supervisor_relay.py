@@ -32,19 +32,15 @@ import pytest
 from core import supervisor_relay as relay_module
 from core.supervisor import SupervisorState
 from core.supervisor_relay import (
-    BUSY,
-    DELIVERY_UNCONFIRMED,
     GAVE_UP,
-    INCOMPLETE,
-    NOT_DELIVERED,
-    OUTPUT_TOO_LARGE,
+    NOTICES,
     RESTARTING,
-    TOO_LARGE,
     ChildInput,
     Delivery,
     DesktopRelay,
     DesktopRuntimeLauncher,
     Outbound,
+    Relayed,
     is_shutdown_command,
 )
 from tests.fixtures.child_python import child_python
@@ -61,6 +57,10 @@ def events_of(buffer: io.BytesIO, relay=None) -> list[dict]:
     if relay is not None:
         assert relay.out.drain(5)
     return [json.loads(line) for line in buffer.getvalue().splitlines() if line.strip()]
+
+
+def notice(kind: str, count: int) -> str:
+    return NOTICES[kind][2].format(count=count)
 
 
 class Gate(io.BytesIO):
@@ -85,7 +85,7 @@ def test_only_the_desktop_s_own_shutdown_command_is_recognised():
 def test_event_lines_are_whole_and_a_broken_desktop_stops_the_supervisor():
     out = io.BytesIO()
     outbound = Outbound(out)
-    outbound.event("supervisor_state", "running", "ok")
+    outbound.lifecycle("supervisor_state", "running", "ok", state=True)
     assert outbound.drain(5)
     assert events_of(out) == [{"eventType": "supervisor_state", "status": "running", "message": "ok"}]
 
@@ -95,27 +95,55 @@ def test_event_lines_are_whole_and_a_broken_desktop_stops_the_supervisor():
 
     stopped = []
     broken = Outbound(Broken(), on_broken=lambda: stopped.append(True))
-    broken.event("a", "b", "c")
+    broken.lifecycle("a", "b", "c")
     broken.drain(5)
-    broken.event("a", "b", "c")
+    broken.lifecycle("a", "b", "c")
     assert stopped == [True]  # told once; later events are dropped quietly
-    assert broken.relayed(b"line") is False
+    assert broken.relayed(b"line\n", 1) is Relayed.CLOSED
 
 
-def test_events_never_wait_for_a_desktop_that_stopped_reading(monkeypatch):
-    monkeypatch.setattr(relay_module, "EVENT_BUDGET_BYTES", 400)
+def test_refusals_coalesce_and_lifecycle_events_are_never_dropped_for_a_slow_desktop():
+    """F2: thousands of refusals cost one counted entry; every lifecycle event survives, in order."""
     desktop = Gate()
     outbound = Outbound(desktop)
     started = time.monotonic()
-    for index in range(1000):
-        outbound.event("supervisor_state", "running", f"event {index}")
+    outbound.lifecycle("supervisor_state", "running", "gen 1", state=True)
+    for _ in range(5000):
+        outbound.notice("busy")
+    outbound.lifecycle("supervisor_state", "stopping", "gen 1 died", state=True)
+    outbound.lifecycle("runtime_stopping", "stopping", RESTARTING)
+    for _ in range(5000):
+        outbound.notice("not_delivered")
+    outbound.lifecycle("supervisor_state", "restarting", "restarting", state=True)
+    outbound.lifecycle("supervisor_state", "running", "gen 2", state=True)
     assert time.monotonic() - started < 1.0  # the control loop is never held
     assert not outbound.drain(0.2)  # and an exit drain is bounded
     desktop.open.set()
     assert outbound.drain(5)
-    events = events_of(desktop)
-    assert 1 < len(events) < 20  # only what fitted the budget was kept
-    assert events[-1]["eventType"] == "runtime_warning" and "were dropped" in events[-1]["message"]
+    events = [(event["eventType"], event["message"]) for event in events_of(desktop)]
+    # The first state may already be in the blocked write; superseded unread states are coalesced.
+    assert ("runtime_stopping", RESTARTING) in events
+    assert events[-1] == ("supervisor_state", "gen 2")
+    assert events.index(("runtime_stopping", RESTARTING)) < events.index(("supervisor_state", "gen 2"))
+    assert ("runtime_error", notice("busy", 5000)) in events
+    assert ("runtime_error", notice("not_delivered", 5000)) in events
+    assert len(events) <= 6
+
+
+def test_beyond_its_cap_the_lifecycle_lane_merges_old_restart_notices_and_says_so(monkeypatch):
+    monkeypatch.setattr(relay_module, "MAX_LIFECYCLE_ENTRIES", 3)
+    desktop = Gate()
+    outbound = Outbound(desktop)
+    outbound.lifecycle("supervisor_state", "running", "blocked write", state=True)
+    time.sleep(0.2)  # the writer now holds that one, blocked
+    for index in range(5):
+        outbound.lifecycle("runtime_stopping", "stopping", f"restart {index}")
+    desktop.open.set()
+    assert outbound.drain(5)
+    events = [(event["eventType"], event["message"]) for event in events_of(desktop)]
+    assert [message for kind, message in events if kind == "runtime_stopping"] == [
+        "restart 2", "restart 3", "restart 4"]
+    assert ("runtime_warning", notice("lifecycle_merged", 2)) in events
 
 
 def test_relayed_output_pushes_back_within_its_byte_budget_and_never_past_close(monkeypatch):
@@ -126,7 +154,7 @@ def test_relayed_output_pushes_back_within_its_byte_budget_and_never_past_close(
 
     def produce():
         for index in range(100):
-            if not outbound.relayed(b"x" * 99):
+            if outbound.relayed(b"x" * 98 + b"\n", 1) is not Relayed.QUEUED:
                 break
             accepted.append(index)
 
@@ -140,12 +168,42 @@ def test_relayed_output_pushes_back_within_its_byte_budget_and_never_past_close(
     desktop.open.set()
 
 
+def test_an_ended_generation_can_never_put_output_after_its_end(monkeypatch):
+    """F1: a line blocked for room when its generation ends is dropped, never queued after the end."""
+    monkeypatch.setattr(relay_module, "OUTPUT_BUDGET_BYTES", 200)
+    desktop = Gate()
+    outbound = Outbound(desktop)
+    outbound.relayed(b'{"gen":1,"n":0}' + b"x" * 150 + b"\n", 1)
+    time.sleep(0.2)  # that one is in the blocked write
+    outbound.relayed(b'{"gen":1,"n":1}' + b"x" * 150 + b"\n", 1)  # fills the budget
+    results = []
+    blocked = threading.Thread(target=lambda: results.append(
+        outbound.relayed(b'{"gen":1,"n":2}' + b"x" * 100 + b"\n", 1)), daemon=True)
+    blocked.start()
+    time.sleep(0.2)
+    assert blocked.is_alive()  # waiting for room
+    outbound.end_generation(1)
+    blocked.join(5)
+    assert results == [Relayed.FENCED]
+    outbound.lifecycle("runtime_stopping", "stopping", RESTARTING)
+    assert outbound.relayed(b'{"gen":1,"n":3}\n', 1) is Relayed.FENCED
+    assert outbound.relayed(b'{"gen":2,"n":0}\n', 2) is Relayed.QUEUED
+    desktop.open.set()
+    assert outbound.drain(5)
+    lines = desktop.getvalue().splitlines()
+    order = [line[:15] for line in lines]
+    end = next(i for i, line in enumerate(lines) if RESTARTING.encode() in line)
+    assert all(b'"gen":1' not in line for line in lines[end:])  # nothing of gen 1 after its end
+    assert any(b'"gen":2' in line for line in lines[end:]), order  # the next generation still flows
+    assert any(notice("old_output", 2).encode() in line for line in lines)
+
+
 def test_commands_are_refused_out_loud_when_no_runtime_can_take_them():
     out = io.BytesIO()
     relay = DesktopRelay(io.BytesIO(), out)
     relay.set_accepting(False)
     relay._submit(b'{"command":"ping"}\n')
-    assert events_of(out, relay)[-1]["message"] == NOT_DELIVERED
+    assert events_of(out, relay)[-1]["message"] == notice("not_delivered", 1)
 
 
 @pytest.mark.parametrize("limit, value", [("MAX_PENDING_COMMANDS", 2), ("PENDING_COMMAND_BUDGET_BYTES", 50)])
@@ -155,10 +213,10 @@ def test_the_command_queue_is_bounded_by_count_and_bytes(monkeypatch, limit, val
     relay = DesktopRelay(io.BytesIO(), out)
     for _ in range(3):
         relay._submit(b'{"command":"ping","x":1}\n')  # 25 bytes each
-    assert events_of(out, relay)[-1]["message"] == BUSY
     assert len(relay._pending) == 2
     relay.set_accepting(False)  # the bridge went away with two still waiting
-    assert [event["message"] for event in events_of(out, relay)[-2:]] == [NOT_DELIVERED, NOT_DELIVERED]
+    messages = [event["message"] for event in events_of(out, relay)]
+    assert messages == [notice("busy", 1), notice("not_delivered", 2)]
     assert relay._pending_bytes == 0
 
 
@@ -182,22 +240,37 @@ def test_a_write_that_fails_part_way_is_unconfirmed_never_not_delivered():
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not out.getvalue():
         time.sleep(0.02)
-    assert events_of(out, relay)[-1]["message"] == DELIVERY_UNCONFIRMED
+    assert events_of(out, relay)[-1]["message"] == notice("unconfirmed", 1)
 
 
-def test_bridge_output_is_relayed_in_whole_bounded_lines(monkeypatch):
+def test_bridge_output_is_relayed_only_as_whole_valid_bounded_lines(monkeypatch):
+    """F4: an oversized, invalid or cut-off final line is dropped and counted; no newline is ever added."""
     monkeypatch.setattr(relay_module, "MAX_LINE_BYTES", 64)
     monkeypatch.setattr(relay_module, "_READ_CHUNK", 16)
     out = io.BytesIO()
     relay = DesktopRelay(io.BytesIO(), out)
     first = b'{"eventType":"a","status":"s","message":"' + b"y" * 5 + b'"}\n'
-    stream = io.BytesIO(first + b"z" * 200 + b"\n" + b'{"eventType":"b"}\n' + b"tail")
-    relay.pump_output(stream)
+    stream = io.BytesIO(first + b"z" * 200 + b"\n" + b'{"eventType":"bad\xff\xfe"}\n'
+                        + b'{"eventType":"b"}\n' + b'{"eventType":"cut_off","message":"tail')
+    relay.pump_output(stream, 1)
     assert relay.out.drain(5)
     lines = out.getvalue().splitlines()
     assert lines[0] == first.rstrip(b"\n")
-    assert json.loads(lines[1])["message"] == OUTPUT_TOO_LARGE
-    assert lines[2:] == [b'{"eventType":"b"}', b"tail"]
+    assert json.loads(lines[1])["message"] == notice("output_too_large", 1)
+    assert json.loads(lines[2])["message"] == notice("output_invalid", 1)
+    assert lines[3] == b'{"eventType":"b"}'
+    assert json.loads(lines[4])["message"] == notice("output_incomplete", 1)
+    assert b"cut_off" not in out.getvalue() and b"\xff" not in out.getvalue()
+
+
+def test_bridge_stderr_never_carries_a_pairing_secret_or_invalid_text():
+    """F8: the same Drop rule as the desktop's stdout routing, applied to stderr."""
+    out, err = io.BytesIO(), io.BytesIO()
+    relay = DesktopRelay(io.BytesIO(), out, err)
+    relay.pump_errors(io.BytesIO(b"Traceback\nopen qronos://pair?k=SECRET&n=1\nbad \xff byte\n"))
+    assert b"SECRET" not in err.getvalue() and b"pair?" not in err.getvalue()
+    assert err.getvalue().decode("utf-8") == "Traceback\nbad � byte\n"
+    assert events_of(out, relay)[-1]["message"] == notice("stderr_secret", 1)
 
 
 def test_desktop_input_is_framed_bounded_and_a_cut_off_command_is_never_delivered(monkeypatch):
@@ -211,7 +284,7 @@ def test_desktop_input_is_framed_bounded_and_a_cut_off_command_is_never_delivere
     relay._stop_requested = stops.append
     relay._read_desktop()
     messages = [event["message"] for event in events_of(out, relay)]
-    assert messages == [TOO_LARGE, INCOMPLETE]
+    assert messages == [notice("too_large", 1), notice("incomplete", 1)]
     assert list(relay._pending) == [b'{"command":"ping"}\n']  # the blank line, shutdown and cut-off are not relayed
     assert stops == ["the desktop asked the runtime to stop"]  # EOF afterwards does not ask twice
 
@@ -220,8 +293,9 @@ def test_state_changes_reach_the_desktop_as_runtime_events():
     out = io.BytesIO()
     relay = DesktopRelay(io.BytesIO(), out)
     relay.on_state(SupervisorState.BACKING_OFF, "the runtime exited with code 3; restarting in 1s")
-    relay.on_state(SupervisorState.DEGRADED, "stopped restarting")
     seen = [(event["eventType"], event["status"], event["message"]) for event in events_of(out, relay)]
+    relay.on_state(SupervisorState.DEGRADED, "stopped restarting")
+    seen += [(event["eventType"], event["status"], event["message"]) for event in events_of(out, relay)][2:]
     assert seen == [
         ("supervisor_state", "restarting", "the runtime exited with code 3; restarting in 1s"),
         ("runtime_stopping", "stopping", RESTARTING),
@@ -300,7 +374,8 @@ class SupervisedDesktop:
         self.events: "queue.Queue[dict]" = queue.Queue()
         self.seen: list[dict] = []
         self.pending: list[dict] = []
-        self.bridges: dict[int, object] = {}  # pid -> process handle, opened when announced
+        self.bridges: dict[int, object] = {}  # pid -> verified process handle, opened when announced
+        self.unverified: list[int] = []
         self.reading = threading.Event()
         self.reading.set()
         threading.Thread(target=self._read, daemon=True).start()
@@ -342,17 +417,54 @@ class SupervisedDesktop:
             self.pending.append(event)
             self._track(event)
 
+    def _drain_one(self, timeout: float) -> bool:
+        try:
+            event = self.events.get(timeout=timeout)
+        except queue.Empty:
+            return False
+        self.seen.append(event)
+        self.pending.append(event)
+        self._track(event)
+        return True
+
     def _track(self, event: dict) -> None:
         pid = None
         if event.get("eventType") == "supervisor_state" and event.get("status") == "running":
             pid = int(event["message"].rsplit(" ", 1)[-1])
         if pid and pid not in self.bridges:
-            import _winapi
+            self.bridges[pid] = self._owned_handle(pid)
 
-            try:
-                self.bridges[pid] = _winapi.OpenProcess(0x100000 | 0x1000 | 0x0001, False, pid)
-            except OSError:
-                self.bridges[pid] = None  # already gone and reaped
+    def _owned_handle(self, pid: int):
+        """
+        A handle to ``pid`` only if it is provably our supervisor's child.
+
+        The handle is opened first: while it is held, the process object (and
+        so its id) cannot be reused. Then, through that pinned id, the parent
+        must be our supervisor and the creation time must not precede it.
+        Anything else is never terminated by this fixture.
+        """
+        import _winapi
+
+        import psutil
+
+        try:
+            handle = _winapi.OpenProcess(0x100000 | 0x1000 | 0x0001, False, pid)
+        except OSError:
+            return None  # already gone and reaped
+        try:
+            child = psutil.Process(pid)
+            ours = psutil.Process(self.process.pid)
+            if child.ppid() == ours.pid and child.create_time() >= ours.create_time():
+                return handle
+        except psutil.Error:
+            pass
+        if _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_OBJECT_0:
+            # Already exited (its parent can no longer be read). Whatever process
+            # this handle names is dead, so holding or "terminating" it is harmless.
+            return handle
+        _winapi.CloseHandle(handle)
+        self.unverified.append(pid)
+        return None
 
     def bridge_exited(self, pid: int, timeout: float) -> bool:
         import _winapi
@@ -395,6 +507,7 @@ def desktop():
     yield start
     for instance in made:
         assert instance.close() == [], "a bridge outlived its test"
+        assert instance.unverified == [], "a announced bridge could not be verified as ours"
 
 
 @windows_only
@@ -475,7 +588,7 @@ def test_a_runtime_that_stops_beating_is_replaced(desktop):
 def test_an_oversized_output_line_is_dropped_whole_and_the_stream_continues(desktop):
     session = desktop("flood")
     session.wait_for("runtime_ready")
-    assert session.wait_for("runtime_error")["message"] == OUTPUT_TOO_LARGE
+    assert session.wait_for("runtime_warning")["message"] == notice("output_too_large", 1)
     assert session.wait_for("after_flood")["message"] == "still here"
     session.send({"command": "shutdown"})
     assert session.process.wait(15) == 0
@@ -523,7 +636,8 @@ def test_a_bridge_that_stops_reading_its_input_gets_refusals_not_a_backlog(deskt
     for index in range(120):  # ~12 MB against a 4 MiB pending budget
         session.send({"command": "echo", "text": "y" * 100_000})
     refused = session.wait_for("runtime_error", timeout=20)
-    assert refused["message"] == BUSY and "y" * 20 not in refused["message"]  # content is never echoed
+    assert refused["message"].endswith(NOTICES["busy"][2].split("}", 1)[1])
+    assert "y" * 20 not in refused["message"]  # content is never echoed
     started = time.monotonic()
     session.send({"command": "shutdown"})
     session.wait_for("supervisor_state", "stopped", timeout=20)
@@ -538,7 +652,7 @@ def test_a_command_cut_off_by_the_end_of_input_is_never_delivered(desktop):
     session.wait_for("runtime_ready")
     session.process.stdin.write(b'{"command":"echo","text":"cut')
     session.process.stdin.close()
-    assert session.wait_for("runtime_error")["message"] == INCOMPLETE
+    assert session.wait_for("runtime_error")["message"] == notice("incomplete", 1)
     session.wait_for("supervisor_state", "stopped")
     assert session.process.wait(10) == 0
     assert not any(event.get("eventType") == "echo" for event in session.seen)
@@ -577,6 +691,104 @@ def test_stop_does_not_depend_on_the_bridge_s_command_loop(desktop):
     assert time.monotonic() - started < 6  # within the 2 s grace and the terminate step
     assert session.process.wait(10) == 0
     assert session.bridge_exited(pid, 5)
+
+
+@windows_only
+def test_old_generation_output_never_follows_its_restart_notice_or_the_new_ready(desktop, tmp_path):
+    """F1: generation 1 floods past the output budget while the desktop is not reading, then dies."""
+    session = desktop("flood-then-die", QRONOS_TEST_RELAY_DIR=str(tmp_path))
+    session.reading.clear()
+    deadline = time.monotonic() + 60
+    while not (tmp_path / "gen-2-ready").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert (tmp_path / "gen-2-ready").exists()
+    time.sleep(1.0)
+    session.reading.set()
+    session.wait_for("runtime_ready", timeout=60)  # gen 1's
+    ready2 = session.wait_for("runtime_ready", timeout=60)
+    assert json.loads(ready2["message"])["generation"] == 2
+    session.send({"command": "shutdown"})
+    assert session.process.wait(20) == 0
+    while session._drain_one(0.5):
+        pass
+    order = [(event.get("eventType"), event.get("message", "")) for event in session.seen]
+    notice_at = order.index(("runtime_stopping", RESTARTING))
+    ready_at = next(i for i, (kind, message) in enumerate(order)
+                    if kind == "runtime_ready" and '"generation": 2' in message)
+    late = [i for i, (kind, _) in enumerate(order) if kind == "old_output" and i > notice_at]
+    assert late == [] and notice_at < ready_at
+    assert any(kind == "runtime_warning" and message.endswith("had already stopped were dropped.")
+               for kind, message in order)  # what was fenced is counted, not hidden
+
+
+@windows_only
+def test_the_restart_notice_survives_thousands_of_refusals_while_the_desktop_is_not_reading(desktop, tmp_path):
+    """F2: refusals coalesce into one counted notice; the lifecycle lane is never dropped for space."""
+    session = desktop("deaf-then-die", QRONOS_TEST_RELAY_DIR=str(tmp_path))
+    session.wait_for("runtime_ready")
+    session.reading.clear()
+    for index in range(3000):
+        session.send({"command": "echo", "text": f"c{index}"})
+    (tmp_path / "die").write_text("1")
+    deadline = time.monotonic() + 60
+    while not (tmp_path / "gen-2-ready").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(1.0)
+    session.reading.set()
+    assert session.wait_for("runtime_stopping", timeout=30)["message"] == RESTARTING
+    session.wait_for("supervisor_state", "running", timeout=30)
+    errors = [event for event in session.seen if event.get("eventType") == "runtime_error"]
+    assert len(errors) < 50  # counted, not one event per refused command
+    session.send({"command": "shutdown"})
+    assert session.process.wait(20) == 0
+
+
+@windows_only
+def test_stop_while_a_bridge_is_still_connecting_is_prompt(desktop, tmp_path):
+    """F3: a bridge that never joins cannot hold Stop for the connect timeout."""
+    session = desktop("noconnect", QRONOS_TEST_RELAY_DIR=str(tmp_path))
+    deadline = time.monotonic() + 30
+    while not (tmp_path / "gen-1").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.5)
+    started = time.monotonic()
+    session.send({"command": "shutdown"})
+    assert session.process.wait(15) == 0
+    assert time.monotonic() - started < 5.0  # the driver's connect timeout is 20 s
+
+
+@windows_only
+def test_the_desktop_closing_its_input_while_a_bridge_connects_is_prompt(desktop, tmp_path):
+    session = desktop("noconnect", QRONOS_TEST_RELAY_DIR=str(tmp_path))
+    deadline = time.monotonic() + 30
+    while not (tmp_path / "gen-1").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.5)
+    started = time.monotonic()
+    session.process.stdin.close()
+    assert session.process.wait(15) == 0
+    assert time.monotonic() - started < 5.0
+
+
+@windows_only
+def test_a_bridge_that_dies_mid_line_reaches_the_desktop_as_a_count_not_a_fragment(desktop, tmp_path):
+    """F4: never a newline added to a cut-off line; invalid UTF-8 never reaches the desktop."""
+    session = desktop("cut-then-die", QRONOS_TEST_RELAY_DIR=str(tmp_path))
+    session.wait_for("runtime_ready")
+    session.wait_for("runtime_stopping", timeout=30)
+    session.wait_for("supervisor_state", "running", timeout=30)
+    ready = session.wait_for("runtime_ready", timeout=30)
+    session.send({"command": "ping"})
+    session.wait_for("runtime_pong")  # routing goes on after the bad output
+    session.send({"command": "shutdown"})
+    assert session.process.wait(20) == 0
+    while session._drain_one(0.5):
+        pass
+    assert not any(event.get("eventType") in ("unparsed", "cut_off") for event in session.seen)
+    messages = [event.get("message", "") for event in session.seen]
+    assert any(message.startswith("1 output line(s) cut off") for message in messages)
+    assert any(message.startswith("1 output line(s) from the Qronos runtime were not valid text") for message in messages)
+    assert json.loads(ready["message"])["generation"] == 2
 
 
 @windows_only

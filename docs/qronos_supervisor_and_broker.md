@@ -209,29 +209,54 @@ desktop (Tauri start_runtime)
    recognising `{"command":"shutdown"}`. Pairing secrets are therefore still
    routed only by the desktop's existing targeted pairing delivery.
 2a. **Bounds and back-pressure.** The control loop never waits on a pipe.
-   - **Output.** One writer thread writes everything the desktop reads, in
-     arrival order.
-     - Lifecycle events have a 256 KiB budget and are never waited for.
-       When it is full they are counted, and the count is reported once the
-       desktop reads again.
-     - Bridge output lines are at most 4 MiB, and an oversized line is
-       dropped with an event. They share a 16 MiB budget; when it is full,
-       the relaying thread waits, which pushes back on the bridge and not on
-       supervision.
-     - On exit the output gets a 2 s drain and is then abandoned. The
-       process ends with `os._exit`, never with a flush that could wait.
+   - **Output.** One writer thread writes everything the desktop reads,
+     strictly in arrival order, from one queue with three kinds of entry:
+     - *Lifecycle* (`supervisor_state`, `runtime_stopping`, the final
+       `runtime_error`, the stall warning): never waited for and never
+       dropped for space. An unread `supervisor_state` is replaced by a
+       newer one. Only beyond 256 unread lifecycle entries are the oldest
+       restart notices merged, into a counted notice.
+     - *Notices*: one counted entry per kind, e.g. "N command(s) were not
+       delivered ...". Thousands of refusals therefore cost one entry and
+       can never crowd out a lifecycle event. No notice carries a command's
+       or a line's content.
+     - *Relayed bridge lines*: whole, valid UTF-8, at most 4 MiB, tagged
+       with the bridge's generation, within a 16 MiB budget. When the budget
+       is full, the relaying thread waits, which pushes back on that bridge
+       and not on supervision.
+   - **Generation fence.** When a bridge generation ends (restarting,
+     stopped or degraded), its output gets at most 0.5 s to drain. It is
+     then fenced *before* the events that announce the end. A line of an
+     ended generation, including one already waiting for room, is dropped
+     and counted. So nothing a dead bridge wrote can follow its restart
+     notice or the next bridge's `runtime_ready`.
+   - **Cut-off, invalid and oversized output.** A final line with no
+     newline, a line that is not valid UTF-8, and a line over 4 MiB are
+     each dropped and counted. A newline is never added to a fragment.
+   - **Exit.** The output gets a 2 s drain and is then abandoned. The process
+     ends with `os._exit`, never with a flush that could wait.
    - **Commands.** A command is at most 1 MiB. At most 256 commands and
      4 MiB may wait for the bridge. A bridge that stops reading fills that,
-     and further commands are refused with `BUSY`. Only the thread writing
-     to that bridge can block, and only until that exact bridge is stopped.
+     and further commands are refused with a counted `busy` notice. Only the
+     thread writing to that bridge can block, and only until that exact
+     bridge is stopped.
    - **Command fate.**
-     - `NOT_DELIVERED` / `BUSY` / `TOO_LARGE` / `INCOMPLETE`: refused before
-       any byte was written, so nothing ran. `INCOMPLETE` is a final line
-       cut off at the end of the desktop's input.
-     - `DELIVERY_UNCONFIRMED`: the write failed after it may have started.
+     - not delivered / busy / too large / incomplete: refused before any
+       byte was written, so nothing ran.
+     - unconfirmed: the write failed after it may have started.
      - A command written whole may still be lost if the bridge dies; the
        restart notice says so.
-     - No command is ever replayed. No event carries a command's content.
+     - No command is ever replayed.
+   - **Stop while a bridge is still connecting.** Stop or the desktop's
+     end-of-input interrupts the accept and the hello wait at once
+     (`ChannelServer.interrupt`, plus the hello wait polling the stop
+     event). Neither waits for the connect timeout.
+   - **stderr.** It is copied through as it comes. A line holding a pairing
+     URI is dropped and counted, and invalid UTF-8 is replaced.
+   - **Desktop readers** (`mod.rs`): read bounded byte lines. On stdout, an
+     invalid, oversized or cut-off line is skipped, and reading and routing
+     go on. On stderr, text is decoded lossily and the pairing Drop rule
+     applies.
 3. **Health.** The bridge's peer pid is checked first, then the HMAC
    handshake, then heartbeats (every 5 s, timeout 45 s). A bridge that
    exits, closes its channel or stops beating is stopped (exact child only)
@@ -264,6 +289,8 @@ desktop (Tauri start_runtime)
 - Command-loop progress is reported, not enforced. Stop does not depend on
   the bridge's command loop. The supervisor handles it and ends the exact
   bridge after the grace (tested with a loop stuck inside one command).
+- Stop and end-of-input are also prompt while a new bridge is still
+  connecting (tested with a bridge that never joins).
 - Work handed to other threads, such as conversation turns and queued work,
   is not watched by the supervisor.
 - The bridge is bound to the Job Object a moment after it starts, before it
