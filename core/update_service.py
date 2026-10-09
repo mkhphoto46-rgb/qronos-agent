@@ -48,9 +48,18 @@ Launch and quiescence
     holder thread, acquired by create-then-wait, so a holder that uses either
     "already exists" or "wait to acquire" semantics sees it as taken; an
     existing or un-acquirable mutex means that part of Qronos is running. The
-    hold's handles are inherited by the installer process, so the
-    update-in-progress mutex keeps existing for the installer's whole lifetime
-    after this short-lived process ends (``update_in_progress()`` tests that).
+    hold's handles are NOT inherited by the installer (round-7 contract,
+    work/opus-production-installer-contract-round7.txt): ``fenced_launcher``
+    gives the installer two private pipes, duplicates the update fence into it
+    as a non-inheritable handle and writes a one-time nonce on its standard
+    input. Once the installer acknowledges, it holds the fence and the
+    exclusive store admission itself, and this process lets go and returns,
+    so none of its files stay in use while they are replaced. The fence then
+    lives exactly as long as the installer (``update_in_progress()`` tests
+    that); nothing the installer starts can inherit it. Without an
+    acknowledgement this process keeps the whole exclusion until the
+    installer exits. A completed installation writes a receipt bound to the
+    nonce; only that receipt can confirm a same-version repair.
     The launch is claimed in the lifecycle file, the staged copy and manifest
     are re-verified, the installer is held open so it cannot be changed or
     replaced and re-hashed through that handle, and only that file is started,
@@ -122,10 +131,10 @@ from core.local_update import (
 APPROVAL_SECONDS = 10 * 60
 LAUNCH_SECONDS = 15 * 60
 LIFECYCLE_FILE = "update-lifecycle.json"
-LIFECYCLE_SCHEMA = 2
+LIFECYCLE_SCHEMA = 3
 SNAPSHOT_DIR = "snapshots"
-# Held for the whole launch, then kept existing by the installer's inherited
-# handle for the installer's lifetime. Every backend service must refuse to
+# Held for the launch, then kept existing by the installer's own (duplicated,
+# non-inheritable) handle for the installer's lifetime. Every backend service must refuse to
 # start while it exists (update_in_progress()); the start-up barrier refuses too.
 UPDATE_IN_PROGRESS_MUTEX = store_admission.UPDATE_IN_PROGRESS_MUTEX
 RUNTIME_MUTEXES = (
@@ -163,7 +172,7 @@ _EVENTS = frozenset({"verified", "refused", "requested", "approved", "staged", "
 _KINDS = ("upgrade", "repair", "rollback")
 _OUTCOMES = ("applied", "not_applied", "unconfirmed")
 
-Launcher = Callable[[Path, tuple[str, ...], tuple[int, ...]], Any]
+Launcher = Callable[[Path, tuple[str, ...], "Handover"], Any]
 
 
 # --------------------------------------------------------------- authorisation
@@ -262,7 +271,10 @@ class GateAuthorizer:
 
 class QuiescenceHold(Protocol):
     def handles(self) -> tuple[int, ...]:
-        """Handles the installer process inherits, keeping the exclusion for its lifetime."""
+        """Handles of the owned exclusion (never inherited by the installer; see fenced_launcher)."""
+
+    def fence_handle(self) -> int | None:
+        """This process's handle to the update fence (UPDATE_IN_PROGRESS_MUTEX), duplicated into the installer."""
 
     def release(self) -> None:
         """Give up this process's ownership (idempotent)."""
@@ -347,6 +359,10 @@ class MutexHold:
     def handles(self) -> tuple[int, ...]:
         return self._handles
 
+    def fence_handle(self) -> int | None:
+        """The FIRST name is the update fence (UPDATE_IN_PROGRESS_MUTEX by default; a unique name in tests)."""
+        return self._handles[0] if self._handles else None
+
     def release(self) -> None:
         self._release.set()
         self._thread.join(10)
@@ -378,6 +394,9 @@ class LaunchHold:
 
     def handles(self) -> tuple[int, ...]:
         return self._mutexes.handles()
+
+    def fence_handle(self) -> int | None:
+        return self._mutexes.fence_handle()
 
     def release(self) -> None:
         try:
@@ -445,8 +464,10 @@ _LAUNCHING_FIELDS = frozenset({"claimedAt", "pid", "version", "packageSha256", "
 _SNAPSHOT_FIELDS = frozenset({"id", "reason", "fromVersion", "forVersion", "createdAt", "stores"})
 _SNAPSHOT_STORE_FIELDS = frozenset({"version", "file", "present", "bytes", "sha256"})
 _HANDOFF_FIELDS = frozenset({"version", "fromVersion", "kind", "packageSha256", "manifestSha256", "launchedAt",
-                             "restoredSnapshot", "safetySnapshot", "dataStores"})
-_OUTCOME_FIELDS = frozenset({"result", "kind", "version", "runningVersion", "at", "dataMismatch", "dataRestored"})
+                             "restoredSnapshot", "safetySnapshot", "dataStores", "nonceSha256"})
+_OUTCOME_FIELDS = frozenset({"result", "kind", "version", "runningVersion", "at", "dataMismatch", "dataRestored",
+                             "receipt"})
+_RECEIPTS = ("verified", "absent", "invalid", "not_requested")
 _EVENT_FIELDS = frozenset({"at", "event", "version", "detail"})
 _STEPS = ("claimed", "restoring")
 
@@ -559,7 +580,8 @@ def _check_lifecycle(state: Any) -> dict[str, Any]:
                 or handoff["kind"] not in _KINDS or not _is_sha(handoff["packageSha256"]) \
                 or not _is_sha(handoff["manifestSha256"]) or not _is_time(handoff["launchedAt"]) \
                 or not _optional_snapshot(handoff["restoredSnapshot"]) \
-                or not _optional_snapshot(handoff["safetySnapshot"]):
+                or not _optional_snapshot(handoff["safetySnapshot"]) \
+                or not (handoff["nonceSha256"] is None or _is_sha(handoff["nonceSha256"])):
             raise _state_error()
         _check_data_stores(handoff["dataStores"])
     outcome = state["outcome"]
@@ -569,7 +591,7 @@ def _check_lifecycle(state: Any) -> dict[str, Any]:
                 or not _is_version(outcome["version"]) or not _is_version(outcome["runningVersion"]) \
                 or not _is_time(outcome["at"]) or type(outcome["dataRestored"]) is not bool \
                 or not isinstance(outcome["dataMismatch"], list) or len(outcome["dataMismatch"]) > 64 \
-                or not all(_is_str(v, 48) for v in outcome["dataMismatch"]):
+                or not all(_is_str(v, 48) for v in outcome["dataMismatch"]) or outcome["receipt"] not in _RECEIPTS:
             raise _state_error()
     if not isinstance(state["events"], list) or len(state["events"]) > _EVENT_LIMIT:
         raise _state_error()
@@ -729,12 +751,129 @@ def spawn_inheriting(argv: list[str], handles: tuple[int, ...], cwd: str | None 
                 pass
 
 
-def windows_launcher(path: Path, arguments: tuple[str, ...], handles: tuple[int, ...]) -> Any:
-    """Start the verified installer as its own process; it inherits the update's exclusion handles.
+@dataclass(frozen=True)
+class Handover:
+    """What the installer is handed (work/opus-production-installer-contract-round7.txt, B and G).
 
-    Returns the process, so the launching process can guard the installer's whole lifetime.
+    ``nonce`` exists only in this process and the installer; the lifecycle keeps
+    its SHA-256. ``fence`` is this process's handle to the update fence.
     """
-    return spawn_inheriting([str(path), *arguments], handles, cwd=str(path.parent))
+
+    nonce: bytes
+    fence: int | None
+    receipts: Path
+    version: str
+    package_sha256: str = ""
+    manifest_sha256: str = ""
+
+
+#: Passed on the installer's command line; the record itself travels on its standard input.
+UPDATE_SWITCH = "/QRONOSUPDATE"
+FENCE_RECORD_HEADER = "QRONOS-UPDATE-FENCE 1"
+ACK_HEADER = "QRONOS-UPDATE-ACK 1"
+RECEIPT_HEADER = "QRONOS-INSTALL-RECEIPT 1"
+RECEIPT_DIR = "receipts"
+HANDOVER_SECONDS = 30.0
+_RECEIPT_LIMIT = 4096
+_RECEIPT_FILES = 16
+_SYNCHRONIZE = 0x00100000
+
+
+def _process_creation_time(handle: int) -> int:
+    """The creation time (FILETIME as an integer) of a process, from its handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel.GetProcessTimes.restype = wintypes.BOOL
+    times = [wintypes.FILETIME() for _ in range(4)]
+    if not kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+        raise UpdateError("launch_failed", "Windows did not report this process's start time.")
+    return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+
+
+def fence_record(handover: Handover, fence_in_child: int, guard_pid: int, guard_created: int) -> bytes:
+    """The one record written to the installer's standard input (contract B4), at most 4 KiB."""
+    receipts = str(handover.receipts)
+    if any(ch in receipts for ch in "\r\n") or not handover.receipts.is_absolute():
+        raise UpdateError("launch_failed", "The receipts folder path cannot be handed over.")
+    if not (_is_sha(handover.package_sha256) and _is_sha(handover.manifest_sha256)):
+        raise UpdateError("launch_failed", "The installer hand-over needs the approved package and manifest.")
+    record = (f"{FENCE_RECORD_HEADER}\nnonce={handover.nonce.hex()}\nfence={fence_in_child}\n"
+              f"receipts={receipts}\nversion={handover.version}\npackage={handover.package_sha256}\n"
+              f"manifest={handover.manifest_sha256}\nguard={guard_pid}:{guard_created}\n")
+    data = record.encode("utf-8")
+    if len(data) > 4096:
+        raise UpdateError("launch_failed", "The installer hand-over record is too large.")
+    return data
+
+
+def fenced_launcher(path: Path, arguments: tuple[str, ...], handover: Handover) -> Any:
+    """Start the verified installer with NO inheritable handle except its two private pipes.
+
+    The update fence is duplicated into the installer as a NON-inheritable
+    handle, so it lives exactly as long as the installer and no grandchild (the
+    WebView2 installer, the app started from the finish page) can keep it
+    alive. Then the hand-over record is written to the installer's standard
+    input. Returns the process; its standard output carries the acknowledgement.
+    """
+    return start_fenced([str(path), UPDATE_SWITCH, *arguments], str(path.parent), handover)
+
+
+def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
+    """fenced_launcher for an exact command line (owned test fixtures start a stand-in installer this way)."""
+    import subprocess
+
+    if os.name != "nt":
+        raise UpdateError("unsupported_platform", "Updates are installed on Windows only.")
+    if handover.fence is None:
+        raise UpdateError("launch_failed", "There is no update fence to hand to the installer; nothing was started.")
+    import _winapi
+
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        # close_fds=True: only the three standard handles are inherited (an explicit handle list).
+        process = subprocess.Popen(argv, cwd=cwd, close_fds=True, creationflags=flags, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as error:
+        raise UpdateError("launch_failed", "Windows could not start the update installer.") from error
+    try:
+        me = _winapi.GetCurrentProcess()
+        fence_in_child = _winapi.DuplicateHandle(me, handover.fence, int(process._handle), _SYNCHRONIZE, False, 0)
+        record = fence_record(handover, fence_in_child, os.getpid(), _process_creation_time(me))
+        process.stdin.write(record)
+        process.stdin.close()
+    except BaseException as error:
+        # The installer is still waiting for its record and has changed nothing: end exactly this child.
+        process.kill()
+        process.wait(30)
+        if isinstance(error, UpdateError):
+            raise
+        raise UpdateError("launch_failed", "The update fence could not be handed to the installer; it was "
+                                           "stopped before changing anything.") from error
+    return process
+
+
+def read_acknowledgement(process: Any, nonce: bytes, timeout: float = HANDOVER_SECONDS) -> bool:
+    """True once the installer has taken the exclusion over (contract G3 step 2); bounded."""
+    stream = getattr(process, "stdout", None)
+    if stream is None:
+        return False
+    answer: list[bytes] = []
+    reader = threading.Thread(target=lambda: answer.append(stream.readline(256)), daemon=True,
+                              name="qronos-update-ack")
+    reader.start()
+    reader.join(timeout)
+    if reader.is_alive() or not answer:
+        return False
+    expected = f"{ACK_HEADER} {nonce.hex()}".encode("ascii")
+    return hmac.compare_digest(answer[0].rstrip(b"\r\n"), expected)
+
+
+def windows_launcher(path: Path, arguments: tuple[str, ...], handover: Handover) -> Any:
+    """The production launcher (kept under its earlier name): see fenced_launcher."""
+    return fenced_launcher(path, arguments, handover)
 
 
 # ------------------------------------------------------------------- service
@@ -748,7 +887,8 @@ class UpdateService:
                  profile: DataProfile | None = None, authorizer: Authorizer | None = None,
                  quiesce: Callable[[], QuiescenceHold] = launch_unavailable,
                  liveness: Callable[[], bool] = update_in_progress,
-                 launcher: Launcher = windows_launcher,
+                 launcher: Launcher = fenced_launcher,
+                 acknowledged: Callable[[Any, bytes], bool] = read_acknowledgement,
                  hold: Callable[[Path], tuple[Callable[[], None], str, int]] = hold_and_hash,
                  admit: Callable[[Path], Any] = store_admission.admit_exclusive,
                  environ: Any = None,
@@ -765,6 +905,7 @@ class UpdateService:
         self._quiesce = quiesce
         self._liveness = liveness
         self._launcher = launcher
+        self._acknowledged = acknowledged
         self._hold = hold
         self._admit = admit
         self._environ = os.environ if environ is None else environ
@@ -1097,30 +1238,45 @@ class UpdateService:
     # -- launch
 
     def launch(self, token: Any, on_launched: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
-        """Hands the staged installer to Windows, once, and guards it until it ends.
+        """Hands the staged installer to Windows, once, and hands it the exclusion.
 
         Refused by default (``launch_unavailable``) until the launch dependencies
-        exist and are accepted; see the module documentation. Once the installer
-        has started, ``on_launched(handoff)`` is called (the CLI answers the
-        desktop there), and this process keeps the whole exclusion until the
-        installer process exits: it is the installer's lifetime guard.
+        exist and are accepted; see the module documentation.
+
+        Hand-over (contract round 7, G): the installer acknowledges on its
+        standard output once it has validated its record, then takes the update
+        fence and the exclusive store admission over itself. Only after that
+        acknowledgement does this process release its exclusion and return, so
+        that none of its files stay in use while the installer replaces them.
+        Without a valid acknowledgement within HANDOVER_SECONDS, this process
+        keeps the whole exclusion until the installer exits (``handedOver``
+        false). ``on_launched(result)`` is called once that is decided.
         """
         token_hash = _token_hash(token)
         hold = self._quiesce()  # raises launch_unavailable / runtime_running / writers_active / update_in_progress
         try:
             binding = self._claim_launch(token_hash)
             try:
-                handoff, process = self._launch_claimed(binding, hold)
+                handoff, process, nonce = self._launch_claimed(binding, hold)
             except BaseException as error:
                 self._release_claim(binding, error)
                 raise
+            handed_over = bool(self._acknowledged(process, nonce))
+            nonce = b""
+            if handed_over:
+                hold.release()  # the installer now holds the fence and the admission itself
+            result = {**handoff, "handedOver": handed_over}
             if on_launched is not None:
                 try:
-                    on_launched(handoff)
+                    on_launched(result)
                 except Exception:
-                    pass  # the caller's channel may be gone; the guard still holds until the installer ends
-            _wait_for_exit(process)
-            return handoff
+                    pass  # the caller's channel may be gone; the exclusion is held either way
+            if not handed_over:
+                _wait_for_exit(process)
+            for stream in (getattr(process, "stdout", None),):
+                if stream is not None:
+                    stream.close()
+            return result
         finally:
             hold.release()
 
@@ -1190,12 +1346,17 @@ class UpdateService:
                 restored = snapshot["id"]
                 self._change(lambda s: self._event(s, "restored", binding["version"],
                                                    f"{restored} (current saved as {safety})"))
+            nonce = secrets.token_bytes(32)  # only here and in the installer; the lifecycle keeps its hash
+            receipts = self._receipts_dir(create=True)
             handoff = {"version": binding["version"], "fromVersion": self.running_version, "kind": binding["kind"],
                        "packageSha256": binding["packageSha256"], "manifestSha256": binding["manifestSha256"],
                        "launchedAt": self._clock(), "restoredSnapshot": restored, "safetySnapshot": safety,
-                       "dataStores": {k: v["writes"] for k, v in sorted(payload["dataStores"].items())}}
+                       "dataStores": {k: v["writes"] for k, v in sorted(payload["dataStores"].items())},
+                       "nonceSha256": hashlib.sha256(nonce).hexdigest()}
+            handover = Handover(nonce, getattr(hold, "fence_handle", lambda: None)(), receipts, binding["version"],
+                                binding["packageSha256"], binding["manifestSha256"])
             try:
-                process = self._launcher(installer, (), hold.handles())
+                process = self._launcher(installer, (), handover)
             except UpdateError:
                 if safety is not None:  # the installer never ran: put the current data back
                     self._restore(self._snapshot_by_id(safety))
@@ -1209,7 +1370,7 @@ class UpdateService:
 
             self._change(record)
             self._authorizer.record("launched", binding)
-            return handoff, process
+            return handoff, process, nonce
         finally:
             closer()
 
@@ -1249,6 +1410,9 @@ class UpdateService:
         if self._liveness():
             raise UpdateError("update_in_progress", "An update is being installed; Qronos starts when it ends.")
         with self.store._locked():
+            # Asked again under the lock: an update may have started between the first check and the lock.
+            if self._liveness():
+                raise UpdateError("update_in_progress", "An update is being installed; Qronos starts when it ends.")
             self._remove_partial_snapshots()
             state = self._read()
             recovered = False
@@ -1262,16 +1426,20 @@ class UpdateService:
                 recovered = True
             store_state = self.store.state()
             if store_state["phase"] != "handed_off":
+                self._consume_receipts(None)  # stale or foreign receipts are never kept for later
                 self._save(state)
                 return {"result": "nothing" if store_state["phase"] == "idle" else "staged",
                         "phase": store_state["phase"], "recovered": recovered}
             staged = store_state["staged"]
             target, kind = staged["version"], staged["kind"]
             handoff = state["handoff"]
-            result = self.store.confirm(self.running_version)
+            receipt = self._consume_receipts(handoff, staged)
+            # Only a receipt bound to this handoff's nonce and version is replacement evidence;
+            # never a version comparison, a caller flag or a file without the nonce.
+            result = self.store.confirm(self.running_version, replacement_evidence=receipt == "verified")
             mismatch: list[str] = []
             restored = False
-            if result in ("upgrade", "rollback"):
+            if result in ("upgrade", "rollback", "repair"):
                 outcome = "applied"
                 if handoff is not None:
                     mismatch = sorted(store_id for store_id, version in handoff["dataStores"].items()
@@ -1289,19 +1457,88 @@ class UpdateService:
                 state["handoff"] = None
             state["outcome"] = {"result": outcome, "kind": kind, "version": target,
                                 "runningVersion": self.running_version, "at": self._clock(),
-                                "dataMismatch": mismatch, "dataRestored": restored}
+                                "dataMismatch": mismatch, "dataRestored": restored, "receipt": receipt}
             self._event(state, outcome, target,
-                        result + (f"; data formats differ from the signed ones: {', '.join(mismatch)}"
-                                  if mismatch else "") + ("; current data put back" if restored else ""))
+                        result + f"; installation receipt {receipt}"
+                        + (f"; data formats differ from the signed ones: {', '.join(mismatch)}"
+                           if mismatch else "") + ("; current data put back" if restored else ""))
             self._save(state)
             return {"result": outcome, "kind": kind, "version": target, "phase": self.store.state()["phase"],
-                    "dataMismatch": mismatch, "dataRestored": restored, "recovered": recovered}
+                    "dataMismatch": mismatch, "dataRestored": restored, "receipt": receipt, "recovered": recovered}
 
     #: The same barrier under its earlier name, kept so existing callers and
     #: review fixtures exercise the repaired behaviour. The module-level
     #: ``startup_check(context)`` is the separate READ-ONLY status.
     def startup_check(self) -> dict[str, Any]:
         return self.recover_before_stores()
+
+    # -- installation receipts (contract round 7, D)
+
+    def _receipts_dir(self, create: bool = False) -> Path:
+        folder = self.store.root / RECEIPT_DIR
+        if create and not os.path.lexists(folder):
+            folder.mkdir()
+        if os.path.lexists(folder) and not _is_plain_dir(folder):
+            raise UpdateError("store", "The update receipts folder is a link or not a folder; nothing was started.")
+        return folder
+
+    def _receipt_verdict(self, path: Path, handoff: dict[str, Any] | None,
+                         staged: dict[str, Any] | None = None) -> str:
+        """'verified' only for this handoff's nonce, package, manifest and version, running now; else 'invalid'."""
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}\.receipt", path.name):
+            return "invalid"
+        try:
+            data = _read_bounded(path, _RECEIPT_LIMIT)
+            lines = data.decode("ascii").replace("\r\n", "\n").split("\n")
+        except (UpdateError, UnicodeDecodeError):
+            return "invalid"
+        if lines and lines[-1] == "":
+            lines.pop()
+        keys = ("nonce", "package", "manifest", "version")
+        if len(lines) != 6 or lines[0] != RECEIPT_HEADER or lines[5] != "result=installed" \
+                or [line.split("=", 1)[0] for line in lines[1:5]] != list(keys):
+            return "invalid"
+        fields = dict(line.split("=", 1) for line in lines[1:5])
+        if not re.fullmatch(r"[0-9a-f]{64}", fields["nonce"]) or handoff is None \
+                or handoff.get("nonceSha256") is None or staged is None:
+            return "invalid"
+        digest = hashlib.sha256(bytes.fromhex(fields["nonce"])).hexdigest()
+        if not hmac.compare_digest(digest, handoff["nonceSha256"]) \
+                or fields["package"] != handoff["packageSha256"] or fields["package"] != staged["packageSha256"] \
+                or fields["manifest"] != handoff["manifestSha256"] or fields["version"] != handoff["version"] \
+                or fields["version"] != self.running_version:
+            return "invalid"
+        return "verified"
+
+    def _consume_receipts(self, handoff: dict[str, Any] | None, staged: dict[str, Any] | None = None) -> str:
+        """Judge every receipt against this handoff, then remove them all (never kept for a later start).
+
+        Returns 'verified', 'invalid' (a receipt exists but proves nothing),
+        'absent', or 'not_requested' when the handoff carried no nonce.
+        """
+        expected = handoff is not None and handoff.get("nonceSha256") is not None
+        verdict = "absent"
+        folder = self.store.root / RECEIPT_DIR
+        if os.path.lexists(folder):
+            if not _is_plain_dir(folder):
+                verdict = "invalid"  # never read through a link; left in place
+            else:
+                names = sorted(os.listdir(folder))
+                if len(names) > _RECEIPT_FILES:
+                    verdict = "invalid"
+                for name in names[:_RECEIPT_FILES]:
+                    path = folder / name
+                    judged = self._receipt_verdict(path, handoff, staged)
+                    if judged == "verified":
+                        verdict = "verified"
+                    elif verdict != "verified":
+                        verdict = "invalid"
+                    try:
+                        if _plain_single_file(path) is not None:
+                            os.unlink(path)
+                    except (UpdateError, OSError):
+                        pass  # a link or a busy file is left; it never counts as evidence
+        return verdict if expected else "not_requested"
 
     def _restore_exclusively(self, state: dict[str, Any], snapshot_id: str, version: str) -> None:
         """Inside the barrier, under the store lock and the EXCLUSIVE store admission: put a safety
@@ -1478,7 +1715,7 @@ class UpdateService:
 
 
 def _wait_for_exit(process: Any) -> None:
-    """The lifetime guard: wait for the installer process to end (no time limit: it is the installer's life)."""
+    """Without a hand-over: wait for the installer process to end (no time limit: it is the installer's life)."""
     wait = getattr(process, "wait", None)
     if wait is None:
         return

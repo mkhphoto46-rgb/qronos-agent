@@ -257,21 +257,41 @@ source checkout. A packaged backend without it refuses (`version_unknown`).
    - It claims the launch, snapshots what an upgrade changes, re-verifies the
      staged installer and manifest, holds the installer open, re-hashes it, and
      starts only that file.
-   - The installer inherits the update mutex. The launching process answers the
-     desktop at once, then stays alive holding everything until the installer
-     exits: it is the installer's lifetime guard.
+   - Hand-over (`work/opus-production-installer-contract-round7.txt`):
+     - The installer gets two private pipes and no other inheritable handle.
+     - The update fence is duplicated into it as a NON-inheritable handle, so
+       nothing it starts (the WebView2 installer, the app from the finish page)
+       can keep the fence alive.
+     - A one-time nonce goes to it on its standard input; the lifecycle keeps
+       only the nonce's SHA-256.
+     - When the installer acknowledges, it takes the fence and the exclusive
+       admission over itself. The launching process then lets go, answers the
+       desktop and exits, so none of its files are in use during replacement.
+     - Without an acknowledgement, the launching process keeps everything until
+       the installer exits.
    - Completion is audited.
 6. **The start-up barrier**, `recover_before_stores` (mutating, exclusive,
    awaited; Runtime calls it in-process before any store opens, never in the
    post-ready hook):
    - It refuses while an update is in progress. Liveness is the update mutex,
-     never a timer.
+     never a timer, and it is asked again once the store lock is held.
    - It recovers an interrupted launch.
    - It resolves a handed-off update:
      - **applied** only on a version change;
-     - **unconfirmed** for a same-version repair, which stays staged until
-       there is reviewed evidence (an installer receipt, not built yet) or the
-       person discards it;
+     - for a same-version repair, **applied** only with that launch's
+       installation receipt: a file the installer writes after a successful
+       installation, holding the nonce it was handed, the approved package and
+       manifest SHA-256 and its version. The barrier accepts it only if the
+       nonce's SHA-256, the package (also the staged one), the manifest and
+       the version all match this handoff, and the receipt is a plain,
+       single-link file in the update store. A receipt from an earlier
+       same-version launch, or naming another package, proves nothing.
+       Otherwise the repair is **unconfirmed** and stays staged until the
+       person discards it. A version comparison or a caller value is never
+       evidence.
+     - Every receipt is removed once judged. The outcome records
+       `receipt: verified | absent | invalid | not_requested`; an upgrade
+       still applies on its version change.
      - **not applied** otherwise. A rollback that did not apply gets its pinned
        safety snapshot back, under the exclusive admission.
    - A failure is a typed refusal (`recovery_failed`, `recovery_pending`), and
@@ -295,18 +315,23 @@ Data rules for snapshots:
 
 Limits:
 
-- A same-version repair cannot be confirmed until a reviewed installer receipt
-  exists.
+- The receipt and the nonce protect against stale, foreign, replayed and
+  caller-supplied claims. They do not protect against other software running
+  as the same Windows account, which could read the installer's memory: the
+  same limit as DPAPI.
+- The installer's own half of the hand-over (the NSIS fence and the receipt)
+  is in `desktop/src-tauri/installer-hooks`; see that section's status.
 - `store.handoff` re-hashes the staged installer while holding the store lock
   (bounded by the 2 GiB package limit).
 - Snapshots cover only single-file stores, at most 64 MiB each and 256 MiB in
   total. Two upgrade snapshots are kept, plus pinned ones.
-- If the launching process (the lifetime guard) dies, its exclusive admission
+- If the launching process dies before the hand-over, its exclusive admission
   ends with it, because a byte-range lock belongs to its process. The update
-  mutex still exists in the installer's inherited handle, and every writer
-  admission checks that fence AFTER taking its shared lock. So no writer is
-  admitted until the installer ends. The updater creates the fence only while
-  it holds the exclusive admission, which makes the order atomic.
+  fence still exists through the installer's duplicated handle, and every
+  writer admission checks that fence AFTER taking its shared lock. So no
+  writer is admitted, and the installer takes the abandoned fence and the free
+  admission over. The updater creates the fence only while it holds the
+  exclusive admission, which makes the order atomic.
 
 ## Owner key and signing (`build_support/release_signing.py`)
 
@@ -349,7 +374,7 @@ worked around):
   (`S-1-12-1-...`), a service account or another user is refused.
 - **Path:** a new, plain, local folder given as a full long path. It must be
   outside every Git checkout (a `.git` file or folder above it counts). It must
-  not be synchronised (OneDrive or similar) or shared, and nothing on the way
+  not be in a cloud-synchronised or shared folder, and nothing on the way
   may be a junction or link. A path in 8.3 short form, or reached through a
   `SUBST` or mapped drive, is refused because the opened file's final path
   differs from the path given.

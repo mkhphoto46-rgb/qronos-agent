@@ -112,8 +112,9 @@ def run(operation: str, payload: dict[str, Any],
     if operation == "approve":
         return {"ok": True, **service.approve(payload.get("approvalToken"), payload.get("secret"))}
     if operation == "launch":
-        # The answer goes out as soon as the installer has started; this process then
-        # stays alive, holding the exclusion, until the installer ends (lifetime guard).
+        # The answer goes out once the installer has taken the exclusion over (handedOver
+        # true; this process then exits) or has not (this process keeps the exclusion until
+        # the installer ends). Either way, one JSON line, at most HANDOVER_SECONDS after start.
         answered: list[bool] = []
 
         def launched(handoff: dict[str, Any]) -> None:

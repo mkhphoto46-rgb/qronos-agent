@@ -80,33 +80,48 @@ def signed(installer: Path, secret: bytes, **changes) -> Path:
 class Recorder:
     """A fake installer launch: records the call and plays the installer process.
 
-    Real handles it is given (from a real MutexHold) are duplicated and kept until
-    ``finish()``, exactly as an installer that inherited them keeps them. ``stays``
+    A real fence handle it is handed (from a real MutexHold) is duplicated and kept
+    until ``finish()``, as the installer keeps the duplicate it is given. ``stays``
     makes the fake installer still be running after the launch returns.
+    ``receipt(service)`` writes the receipt a completed installation writes.
     """
 
     def __init__(self, fail: BaseException | None = None, stays: bool = False) -> None:
         self.calls: list[tuple[Path, tuple[str, ...]]] = []
         self.inherited: list[int] = []
+        self.handovers: list[update_service.Handover] = []
         self.fail = fail
         self.stays = stays
         self.running = False
 
-    def __call__(self, path: Path, arguments: tuple[str, ...], handles: tuple[int, ...] = ()) -> None:
+    def __call__(self, path: Path, arguments: tuple[str, ...], handover=None) -> None:
         self.calls.append((path, arguments))
+        if handover is not None:
+            self.handovers.append(handover)
         if self.fail is not None:
             raise self.fail
-        if handles and os.name == "nt":
+        if handover is not None and handover.fence is not None and os.name == "nt":
             import _winapi
 
             me = _winapi.GetCurrentProcess()
-            for handle in handles:
-                self.inherited.append(_winapi.DuplicateHandle(me, handle, me, 0, False,
-                                                              _winapi.DUPLICATE_SAME_ACCESS))
+            self.inherited.append(_winapi.DuplicateHandle(me, handover.fence, me, 0, False,
+                                                          _winapi.DUPLICATE_SAME_ACCESS))
         self.running = self.stays
 
+    def receipt(self, *, nonce: bytes | None = None, version: str | None = None, name: str = "fixture.receipt",
+                result: str = "installed", package: str | None = None, manifest: str | None = None,
+                handover=None) -> Path:
+        """The receipt the installer writes at the end of a successful installation (contract D1)."""
+        handover = handover or self.handovers[-1]
+        path = handover.receipts / name
+        path.write_bytes(f"QRONOS-INSTALL-RECEIPT 1\r\nnonce={(nonce or handover.nonce).hex()}\r\n"
+                         f"package={package or handover.package_sha256}\r\n"
+                         f"manifest={manifest or handover.manifest_sha256}\r\n"
+                         f"version={version or handover.version}\r\nresult={result}\r\n".encode("ascii"))
+        return path
+
     def finish(self) -> None:
-        """The fake installer ends: its inherited handles close."""
+        """The fake installer ends: its handles close."""
         import _winapi
 
         while self.inherited:
@@ -1149,6 +1164,108 @@ def test_a_cancelled_same_version_repair_is_unconfirmed_and_stays_staged(world):
     assert world.service("0.1.0").recover_before_stores()["result"] == "unconfirmed"  # stable across starts
     world.service("0.1.0").discard()
     assert world.service("0.1.0").status()["phase"] == "idle"
+
+
+# ------------------------------------- installation receipt (round-7 contract D)
+
+
+def test_a_completed_repair_is_confirmed_only_by_its_own_receipt(world):
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    receipt = world.launcher.receipt()  # the installer that was handed this nonce finished
+    result = world.service("0.1.0").recover_before_stores()
+    assert result["result"] == "applied" and result["receipt"] == "verified" and result["phase"] == "idle"
+    status = world.service("0.1.0").status()
+    assert status["outcome"]["receipt"] == "verified" and [h["version"] for h in status["history"]] == ["0.1.0"]
+    assert not receipt.exists()  # consumed: it can never count for a later start
+
+
+@pytest.mark.parametrize("forgery", ["another_nonce", "another_version", "another_package", "another_manifest",
+                                     "not_installed", "extra_line", "other_name", "second_link"])
+def test_a_receipt_that_proves_nothing_leaves_the_repair_unconfirmed(world, forgery):
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    if forgery == "another_nonce":
+        world.launcher.receipt(nonce=os.urandom(32))
+    elif forgery == "another_version":
+        world.launcher.receipt(version="0.1.1")
+    elif forgery == "another_package":  # a different same-version installer
+        world.launcher.receipt(package="a" * 64)
+    elif forgery == "another_manifest":
+        world.launcher.receipt(manifest="b" * 64)
+    elif forgery == "not_installed":
+        world.launcher.receipt(result="cancelled")
+    elif forgery == "extra_line":
+        path = world.launcher.receipt()
+        path.write_bytes(path.read_bytes() + b"trusted=yes\r\n")
+    elif forgery == "other_name":
+        world.launcher.receipt(name="fixture.txt")
+    else:
+        path = world.launcher.receipt()
+        os.link(path, world.tmp / "second-name.receipt")
+    result = world.service("0.1.0").recover_before_stores()
+    assert result["result"] == "unconfirmed" and result["receipt"] == "invalid" and result["phase"] == "handed_off"
+    assert world.service("0.1.0").status()["history"] == []
+
+
+def test_a_receipt_from_an_earlier_same_version_handoff_cannot_confirm_this_one(world):
+    """Replay: the first repair's installer finished late; its receipt names the same version and package."""
+    service = world.service("0.1.0")
+    launched(service, *world.release("0.1.0"))
+    first = world.launcher.handovers[-1]
+    service.discard()
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    second = world.launcher.handovers[-1]
+    assert first.nonce != second.nonce and first.package_sha256 == second.package_sha256
+    world.launcher.receipt(handover=first)
+    result = world.service("0.1.0").recover_before_stores()
+    assert result["result"] == "unconfirmed" and result["receipt"] == "invalid"
+
+
+def test_a_receipt_written_when_nothing_was_handed_off_is_discarded(world):
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    world.service("0.1.0").discard()  # the repair was given up; its installer's receipt arrives late
+    late = world.launcher.receipt()
+    assert world.service("0.1.0").recover_before_stores()["result"] == "nothing"
+    assert not late.exists()
+
+
+@pytest.mark.parametrize("with_receipt", [True, False])
+def test_an_upgrade_records_whether_its_receipt_was_verified(world, with_receipt):
+    launched(world.service(), *world.release("0.2.0", dataStores=stores(settings=3)))
+    if with_receipt:
+        world.launcher.receipt()
+    after = world.service("0.2.0", profile=DataProfile({**BASE.stores, "settings": 3}, 1))
+    result = after.recover_before_stores()
+    assert result["result"] == "applied" and result["receipt"] == ("verified" if with_receipt else "absent")
+
+
+def test_the_nonce_reaches_only_the_installer(world):
+    """The lifecycle keeps the nonce's SHA-256; the nonce itself is never stored, logged or shown."""
+    service = world.service("0.1.0")
+    result = launched(service, *world.release("0.1.0"))
+    handover = world.launcher.handovers[-1]
+    assert result["nonceSha256"] == hashlib.sha256(handover.nonce).hexdigest() and len(handover.nonce) == 32
+    assert handover.receipts == world.data / "Updates" / "receipts" and handover.receipts.is_dir()
+    shown = world.lifecycle_text() + json.dumps(service.status()) + json.dumps(result)
+    assert handover.nonce.hex() not in shown
+
+
+def test_no_caller_value_can_stand_in_for_a_receipt(world):
+    import inspect
+
+    assert list(inspect.signature(UpdateService.recover_before_stores).parameters) == ["self"]
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    assert world.service("0.1.0").recover_before_stores()["result"] == "unconfirmed"  # no receipt written
+
+
+def test_recovery_asks_again_under_the_store_lock(world):
+    """G6: an update that starts between the first liveness check and the store lock stops the barrier."""
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    answers = iter([False, True])
+    service = world.service("0.1.0", liveness=lambda: next(answers))
+    before = world.lifecycle_text()
+    with pytest.raises(UpdateError) as refused:
+        service.recover_before_stores()
+    assert refused.value.code == "update_in_progress" and world.lifecycle_text() == before
 
 
 def test_a_cancelled_rollback_puts_todays_data_back_before_stores_open(world):
