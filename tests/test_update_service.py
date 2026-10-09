@@ -367,15 +367,31 @@ def test_an_upgrade_changing_a_store_that_cannot_be_kept_is_refused(world, store
 # --------------------------------------------------------------- trust gates
 
 
-def test_with_the_shipped_empty_key_file_every_package_is_refused(world):
+#: The one reviewed entry in the shipped key file (public output of the owner's create-key, 2026-10-09).
+REVIEWED_OWNER_KEY_ID = "b0566b68ca6ee2887a8db62b3aff00e8"
+
+
+def test_with_the_shipped_key_file_a_package_not_signed_by_the_owner_key_is_refused(world):
     shipped = json.loads((ROOT / "config" / "update_trusted_keys.json").read_text(encoding="utf-8"))
-    assert shipped["keys"] == []
+    assert [entry["keyId"] for entry in shipped["keys"]] == [REVIEWED_OWNER_KEY_ID]
     service = world.service(keys_loader=local_update.load_trusted_keys)  # the real loader and file
+    with pytest.raises(UpdateError) as refused:
+        service.request(*world.release("0.2.0"))  # signed by a fixture key, not the owner's
+    assert refused.value.code == "untrusted_signature"
+    assert service.status()["trust"] == {"configured": True, "activeKeys": 1, "error": None}
+    assert service.status()["events"][-1]["event"] == "refused"
+    assert world.authorizer.asked == []
+    assert not (world.data / "Updates" / "staged").exists()
+
+
+def test_with_an_empty_key_file_every_package_is_refused(world):
+    empty = world.tmp / "empty_trusted_keys.json"
+    empty.write_text(json.dumps({"schema": 1, "keys": []}), encoding="utf-8")
+    service = world.service(keys_loader=lambda: local_update.load_trusted_keys(empty))
     with pytest.raises(UpdateError) as refused:
         service.request(*world.release("0.2.0"))
     assert refused.value.code == "no_trusted_key"
     assert service.status()["trust"] == {"configured": False, "activeKeys": 0, "error": None}
-    assert service.status()["events"][-1]["event"] == "refused"
     assert world.authorizer.asked == []
 
 
@@ -1047,10 +1063,10 @@ def test_the_cli_as_a_real_process_is_fail_closed_with_the_shipped_trust(world):
         return done.returncode, json.loads(done.stdout)
 
     code, status = run("status", {})
-    assert code == 0 and status["status"]["trust"]["configured"] is False
+    assert code == 0 and status["status"]["trust"] == {"configured": True, "activeKeys": 1, "error": None}
     assert status["status"]["runningVersion"] == "0.1.0"
     code, refused = run("request", {"installer": str(installer), "manifest": str(manifest)})
-    assert code == 1 and refused["code"] == "no_trusted_key"
+    assert code == 1 and refused["code"] == "untrusted_signature"  # signed by a fixture key, not the owner's
     # launch is not run here: it would create the real runtime's named mutexes on this PC.
     assert (world.data / "Updates").is_dir() and not (world.data / "Updates" / "staged").exists()
 

@@ -214,13 +214,45 @@ def test_the_cli_never_prints_the_private_key(tmp_path, capsys, monkeypatch):
     assert json.loads(printed.split("\n}\n")[0] + "\n}")["trustedKeyEntry"]["owner"] == "Owner"
 
 
-def test_preflight_reports_the_closed_gates_with_actions():
-    report = release_signing.preflight(signtool=lambda: None)
+def test_preflight_reports_the_closed_gates_with_actions(tmp_path):
+    root = product(tmp_path / "root")
+    (root / "config").mkdir()
+    (root / "config" / "update_trusted_keys.json").write_text(json.dumps({"schema": 1, "keys": []}),
+                                                              encoding="utf-8")
+    report = release_signing.preflight(root, signtool=lambda: None)
     gates = {gate["gate"]: gate for gate in report["gates"]}
     assert report["ok"] is False
     assert gates["version_authority"]["open"] is True
     assert gates["owner_update_key"]["open"] is False and "create-key" in gates["owner_update_key"]["detail"]
     assert gates["authenticode"]["open"] is False and "certificate authority" in gates["authenticode"]["detail"]
+
+
+def test_with_the_reviewed_owner_key_listed_the_release_stays_closed():
+    """The repository's own config: the key gate opens on the one reviewed entry; Authenticode keeps it closed."""
+    report = release_signing.preflight(signtool=lambda: None)
+    gates = {gate["gate"]: gate for gate in report["gates"]}
+    assert gates["owner_update_key"]["open"] is True
+    assert "1 active trusted entry" in gates["owner_update_key"]["detail"]
+    assert "custody of the private key file is not checked" in gates["owner_update_key"]["detail"]
+    assert gates["authenticode"]["open"] is False and report["ok"] is False
+    assert release_signing.main(["preflight"]) == 1
+
+
+@pytest.mark.parametrize("revoked_only", [True, False])
+def test_a_revoked_entry_never_opens_the_owner_key_gate(tmp_path, revoked_only):
+    root = product(tmp_path / "root")
+    (root / "config").mkdir()
+    shipped = json.loads(release_signing.TRUSTED_KEYS.read_text(encoding="utf-8"))
+    entries = [dict(entry, revoked=True) for entry in shipped["keys"]]
+    if not revoked_only:
+        public = ed25519.public_key(os.urandom(32))
+        entries.append({"keyId": local_update.key_id(public), "publicKey": base64.b64encode(public).decode(),
+                        "owner": "Fixture", "revoked": False})
+    (root / "config" / "update_trusted_keys.json").write_text(json.dumps({"schema": 1, "keys": entries}),
+                                                              encoding="utf-8")
+    gate = next(g for g in release_signing.preflight(root, signtool=lambda: None)["gates"]
+                if g["gate"] == "owner_update_key")
+    assert gate["open"] is (not revoked_only)
 
 
 @pytest.mark.parametrize("certificate", ["not-a-thumbprint", "0" * 40, "A1B2" * 10])
