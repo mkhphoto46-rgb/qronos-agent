@@ -810,8 +810,15 @@ class LocalUpdateStore:
             self._save(state)
         return package
 
-    def confirm(self, version: str) -> str:
-        """Called when Qronos starts: records a completed update. Returns what happened."""
+    def confirm(self, version: str, *, replacement_evidence: bool = False) -> str:
+        """Called when Qronos starts: records a completed update. Returns what happened.
+
+        A version change proves another build is running. A repair (the same
+        version) cannot be told apart from a cancelled one by the version, so it
+        is "unconfirmed" and stays staged unless the caller has reviewed evidence
+        that the replacement ran (``replacement_evidence``; no such receipt
+        exists yet, so the product never passes it).
+        """
         with self._locked():
             state = self._read_state()
             staged = state["staged"]
@@ -819,6 +826,8 @@ class LocalUpdateStore:
                 return "nothing staged"
             if compare_versions(version, staged["version"]) != 0:
                 return "not applied"
+            if staged["kind"] == "repair" and not replacement_evidence:
+                return "unconfirmed"
             floor = state["securityFloor"]
             if floor is None or compare_versions(staged["securityFloor"], floor) > 0:
                 floor = staged["securityFloor"]

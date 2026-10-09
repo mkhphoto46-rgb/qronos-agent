@@ -77,25 +77,57 @@ def signed(installer: Path, secret: bytes, **changes) -> Path:
 
 
 class Recorder:
-    def __init__(self, fail: BaseException | None = None) -> None:
-        self.calls: list[tuple[Path, tuple[str, ...]]] = []
-        self.fail = fail
+    """A fake installer launch: records the call and plays the installer process.
 
-    def __call__(self, path: Path, arguments: tuple[str, ...]) -> None:
+    Real handles it is given (from a real MutexHold) are duplicated and kept until
+    ``finish()``, exactly as an installer that inherited them keeps them. ``stays``
+    makes the fake installer still be running after the launch returns.
+    """
+
+    def __init__(self, fail: BaseException | None = None, stays: bool = False) -> None:
+        self.calls: list[tuple[Path, tuple[str, ...]]] = []
+        self.inherited: list[int] = []
+        self.fail = fail
+        self.stays = stays
+        self.running = False
+
+    def __call__(self, path: Path, arguments: tuple[str, ...], handles: tuple[int, ...] = ()) -> None:
         self.calls.append((path, arguments))
         if self.fail is not None:
             raise self.fail
+        if handles and os.name == "nt":
+            import _winapi
+
+            me = _winapi.GetCurrentProcess()
+            for handle in handles:
+                self.inherited.append(_winapi.DuplicateHandle(me, handle, me, 0, False,
+                                                              _winapi.DUPLICATE_SAME_ACCESS))
+        self.running = self.stays
+
+    def finish(self) -> None:
+        """The fake installer ends: its inherited handles close."""
+        import _winapi
+
+        while self.inherited:
+            _winapi.CloseHandle(self.inherited.pop())
+        self.running = False
 
 
 class FakeAuthorizer:
     def __init__(self, refuse: str | None = None, problem: str | None = None) -> None:
         self.refuse, self.problem = refuse, problem
         self.asked: list[str] = []
+        self.stages: list[str] = []
+        self.records: list[tuple[str, dict]] = []
         self.secrets: list[str] = []
 
-    def allowed(self, offer):
-        self.asked.append(offer.package_sha256)
+    def allowed(self, binding, stage):
+        self.asked.append(binding["packageSha256"])
+        self.stages.append(stage)
         return self.refuse
+
+    def record(self, event, binding):
+        self.records.append((event, dict(binding)))
 
     def secret_problem(self):
         return self.problem
@@ -116,10 +148,19 @@ class Quiesce:
         if self.running:
             raise UpdateError("runtime_running", "fixture runtime is running")
         self.held += 1
+        quiesce = self
 
-        def release():
-            self.held -= 1
-        return release
+        class Hold:
+            released = False
+
+            def handles(self):
+                return ()
+
+            def release(self):
+                if not self.released:
+                    self.released = True
+                    quiesce.held -= 1
+        return Hold()
 
 
 class Clock:
@@ -147,7 +188,11 @@ class World:
 
     def service(self, version: str = "0.1.0", profile: DataProfile = BASE, **overrides) -> UpdateService:
         options = {"keys_loader": lambda: self.keys, "profile": profile, "authorizer": self.authorizer,
-                   "quiesce": self.quiesce, "launcher": self.launcher, "clock": self.clock}
+                   "quiesce": self.quiesce, "launcher": self.launcher, "clock": self.clock,
+                   # Live while a launch holds the exclusion or the fake installer still runs.
+                   "liveness": lambda: self.quiesce.held > 0 or self.launcher.running,
+                   # This world's data root is the truth: no store is relocated by the environment.
+                   "environ": {}}
         options.update(overrides)
         return UpdateService(self.data, version, **options)
 
@@ -309,7 +354,8 @@ def test_a_rollback_naming_stores_this_build_does_not_have_is_refused(world):
     assert refused.value.code == "data_schema"
 
 
-@pytest.mark.parametrize("store_id", ["queue_state", "conversation_history", "approval_secret"])
+@pytest.mark.parametrize("store_id", ["queue_state", "conversation_history", "approval_secret",
+                                      "link_devices", "permissions"])  # M-2: security registries too
 def test_an_upgrade_changing_a_store_that_cannot_be_kept_is_refused(world, store_id):
     with pytest.raises(UpdateError) as refused:
         world.service().verify(*world.release("0.2.0", dataStores=stores(**{store_id: 2})))
@@ -406,7 +452,7 @@ def test_a_running_build_with_other_data_formats_than_signed_is_reported(world):
 
 
 def test_a_startup_with_nothing_handed_off_changes_nothing(world):
-    assert world.service().startup_check() == {"result": "nothing", "phase": "idle"}
+    assert world.service().startup_check() == {"result": "nothing", "phase": "idle", "recovered": False}
     assert not (world.data / "Updates").exists()
 
 
@@ -552,17 +598,53 @@ def test_the_same_package_re_signed_by_another_trusted_key_is_not_what_was_appro
     assert "approved" not in [event["event"] for event in service.status()["events"]]
 
 
-def test_the_real_gate_asks_for_install_software_and_allows_asking(world, monkeypatch, tmp_path):
-    """security.gate with the default policy (tmp policy file through its override): not refused."""
+def test_the_real_gate_asks_for_install_software_at_every_stage_and_audits_without_secrets(
+        world, monkeypatch, tmp_path):
+    """security.gate with the default policy (tmp policy file through its override), and the real
+    ActionAuditLog in tmp: every stage is decided, approval and completion are recorded, and no
+    token or secret reaches the audit trail."""
+    from core.action_audit import ActionAuditLog
+
     monkeypatch.setenv("QRONOS_PERMISSION_POLICY_PATH", str(tmp_path / "policy" / "permissions_v2.json"))
-    verdicts = []
-    authorizer = update_service.GateAuthorizer(audit=verdicts.append)
-    offer = world.service().verify(*world.release("0.2.0"))
-    assert authorizer.allowed(offer) is None
-    verdict, = verdicts
-    assert verdict.request.category.value == "install_software"
-    assert verdict.decision.value == "require_typed_secret"
-    assert verdict.request.parameters["packageSha256"] == offer.package_sha256
+    audit_path = tmp_path / "audit" / "actions.jsonl"
+    authorizer = update_service.GateAuthorizer(audit_log=ActionAuditLog(audit_path))
+    binding = world.service().verify(*world.release("0.2.0")).binding()
+    for stage in ("request", "approve", "launch"):
+        assert authorizer.allowed(binding, stage) is None
+    authorizer.record("approved", binding)
+    authorizer.record("launched", binding)
+    records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    events = [r["event"] for r in records]
+    assert events == ["decided", "decided", "decided", "approved", "completed"]
+    assert all(r["category"] == "install_software" for r in records)
+    assert {r["decision"] for r in records if r["event"] == "decided"} == {"require_typed_secret"}
+    text = audit_path.read_text(encoding="utf-8")
+    assert binding["packageSha256"] not in text or True  # the digest may be recorded; tokens never are
+    for forbidden in (SECRET, "approvalToken", "launchToken", "tokenHash"):
+        assert forbidden not in text
+
+
+def test_a_policy_that_refuses_after_the_request_stops_approve_and_launch(world):
+    """M-1: the gate is asked again at approve and at launch."""
+    service = world.service()
+    requested = service.request(*world.release("0.2.0"))
+    world.authorizer.refuse = "Installing software is now forbidden by policy."
+    with pytest.raises(UpdateError) as refused:
+        service.approve(requested["approvalToken"], SECRET)
+    assert refused.value.code == "permission_denied"
+    assert service.status()["phase"] == "idle" and service.status()["pending"] is None
+    assert world.authorizer.secrets == []  # refused before the secret was even checked
+
+    world.authorizer.refuse = None
+    requested = service.request(*world.release("0.2.0"))
+    approved = service.approve(requested["approvalToken"], SECRET)
+    world.authorizer.refuse = "Installing software is now forbidden by policy."
+    with pytest.raises(UpdateError) as refused:
+        service.launch(approved["launchToken"])
+    assert refused.value.code == "permission_denied"
+    assert world.launcher.calls == [] and service.status()["launchReady"] is None
+    assert world.authorizer.stages == ["request", "approve", "request", "approve", "launch"]
+    assert [event for event, _ in world.authorizer.records] == ["approved"]
 
 
 def test_the_real_secret_store_without_a_secret_refuses(monkeypatch, tmp_path):
@@ -783,7 +865,7 @@ def test_a_crash_after_restoring_is_undone_at_the_next_start(world, monkeypatch)
         crashing.launch(approved["launchToken"])
     assert voice(world) == "fixture" and after.status()["launching"] is True
 
-    world.clock.now += update_service.CLAIM_STALE_SECONDS + 1
+    # No timer: the launching process is gone (its hold was released), so recovery runs at once.
     result = after.startup_check()
 
     assert result["recovered"] is True and voice(world) == "after upgrade"
@@ -929,7 +1011,9 @@ def test_the_runtime_start_up_hook_is_bounded_and_never_raises(world, monkeypatc
 
     monkeypatch.setattr(config, "CONFIG", config.QronosConfig(paths=config.resolve_paths(
         environ={"QRONOS_DATA_ROOT": str(world.data), "LOCALAPPDATA": str(world.tmp)}, packaged=True)))
-    assert update_service.startup_check({"appVersion": "0.1.0"}) == {"result": "nothing", "phase": "idle"}
+    assert update_service.startup_check({"appVersion": "0.1.0"}) == {
+        "result": "nothing", "phase": "idle", "updateInProgress": False, "recoveryPending": False,
+        "dataMismatch": []}
     for context in (None, {}, {"appVersion": "0.1.0", "extra": 1}, {"appVersion": "nope"}):
         result = update_service.startup_check(context)
         assert result["result"] == "error" and set(result) == {"result", "code"}
@@ -1010,3 +1094,244 @@ def test_another_thread_holding_the_store_gives_busy_not_a_hang(world):
     with store._locked():  # the same thread may nest
         with store._locked():
             pass
+
+
+# ------------------------------------------------- round 5: review findings as regression tests
+#
+# Each case below states the REQUIRED behaviour from the independent Control review of c4db28b
+# (H-1..H-4, M-1, M-2, L-1, L-3). Real named mutexes use unique "Local\QronosUpdateTest-..." names;
+# real child processes are base-interpreter fixtures owned and waited here.
+
+
+def test_by_default_the_installer_launch_is_refused_and_nothing_happens(world):
+    """H-2/A8-P3: until the runtime, desktop and installer lifetime dependencies are accepted."""
+    service = world.service(quiesce=update_service.launch_unavailable)
+    _, approved = staged(service, *world.release("0.2.0", dataStores=stores(settings=3)))
+    with pytest.raises(UpdateError) as refused:
+        service.launch(approved["launchToken"])
+    assert refused.value.code == "launch_unavailable"
+    status = service.status()
+    assert world.launcher.calls == [] and not service.snapshot_root.exists()
+    assert status["launchAvailable"] is False and status["launchReady"] is not None  # token not spent
+    assert status["phase"] == "staged" and status["launching"] is False
+
+
+def test_the_production_default_service_refuses_the_launch():
+    """No injection: the UpdateService default is the refusing quiescence."""
+    import inspect
+
+    assert inspect.signature(UpdateService).parameters["quiesce"].default is update_service.launch_unavailable
+
+
+def test_a_cancelled_same_version_repair_is_unconfirmed_and_stays_staged(world):
+    """H-1: the same version running again does not prove the repair installer ran."""
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    result = world.service("0.1.0").recover_before_stores()
+    assert result["result"] == "unconfirmed" and result["phase"] == "handed_off"
+    status = world.service("0.1.0").status()
+    assert status["outcome"]["result"] == "unconfirmed" and status["staged"]["version"] == "0.1.0"
+    assert status["history"] == []  # nothing recorded as installed
+    assert world.service("0.1.0").recover_before_stores()["result"] == "unconfirmed"  # stable across starts
+    world.service("0.1.0").discard()
+    assert world.service("0.1.0").status()["phase"] == "idle"
+
+
+def test_a_cancelled_rollback_puts_todays_data_back_before_stores_open(world):
+    """H-3: the newer build that still runs must get its own data back, from the pinned safety snapshot."""
+    after = upgraded_world(world)
+    requested = after.request(*world.release("0.1.0", rollback=True, dataStores=stores()))
+    handoff = after.launch(after.approve(requested["approvalToken"], SECRET)["launchToken"])
+    assert voice(world) == "fixture" and handoff["safetySnapshot"]
+    assert handoff["safetySnapshot"] in update_service._pinned(json.loads(world.lifecycle_text()))
+    result = world.service("0.2.0", profile=after.profile).recover_before_stores()  # installer cancelled
+    assert result["result"] == "not_applied" and result["dataRestored"] is True
+    assert voice(world) == "after upgrade"
+    assert world.service("0.2.0", profile=after.profile).recover_before_stores()["dataRestored"] is False
+
+
+def test_start_up_is_refused_while_the_installer_still_runs_then_resolves(world):
+    """H-4: liveness is the update mutex / installer process, never elapsed time."""
+    world.launcher.stays = True
+    launched(world.service(), *world.release("0.2.0"))
+    world.clock.now += 3600  # an hour later, the installer is still running: still refused
+    with pytest.raises(UpdateError) as refused:
+        world.service("0.2.0").recover_before_stores()
+    assert refused.value.code == "update_in_progress"
+    assert update_service.recover_before_stores.__doc__  # module entry exists for the runtime
+    world.launcher.finish()
+    assert world.service("0.2.0").recover_before_stores()["result"] == "applied"
+
+
+def test_an_interrupted_launch_blocks_new_work_until_start_up_recovers_it(world, monkeypatch):
+    """H-4: a dead claim is never silently ignored or overwritten later."""
+    after = upgraded_world(world)
+    requested = after.request(*world.release("0.1.0", rollback=True, dataStores=stores()))
+    approved = after.approve(requested["approvalToken"], SECRET)
+    crashing = world.service("0.2.0", profile=after.profile, launcher=Recorder(fail=KeyboardInterrupt()))
+    monkeypatch.setattr(crashing, "_release_claim", lambda binding, error: None)  # the process died
+    with pytest.raises(KeyboardInterrupt):
+        crashing.launch(approved["launchToken"])
+    with pytest.raises(UpdateError) as refused:
+        after.request(*world.release("0.1.0", rollback=True, dataStores=stores()))
+    assert refused.value.code == "recovery_pending"
+    result = world.service("0.2.0", profile=after.profile).recover_before_stores()  # one second later
+    assert result["recovered"] is True and voice(world) == "after upgrade"
+
+
+def test_a_failed_safety_restore_refuses_start_up(world, monkeypatch):
+    after = upgraded_world(world)
+    requested = after.request(*world.release("0.1.0", rollback=True, dataStores=stores()))
+    handoff = after.launch(after.approve(requested["approvalToken"], SECRET)["launchToken"])
+    damaged = after.snapshot_root / handoff["safetySnapshot"] / "settings.json"
+    damaged.write_text("{}", encoding="utf-8")
+    with pytest.raises(UpdateError) as refused:
+        world.service("0.2.0", profile=after.profile).recover_before_stores()
+    assert refused.value.code == "recovery_failed"
+
+
+def test_a_store_relocated_by_the_environment_is_never_snapshotted(world):
+    """L-3: the snapshot must be of the file the store really uses."""
+    service = world.service(environ={"QRONOS_SETTINGS_PATH": str(world.tmp / "elsewhere" / "settings.json")})
+    with pytest.raises(UpdateError) as refused:
+        service.verify(*world.release("0.2.0", dataStores=stores(settings=3)))
+    assert refused.value.code == "unsupported_migration"
+
+
+def test_a_store_absent_before_the_upgrade_is_recorded_and_never_silently_skipped(world):
+    """L-3: absence is recorded; a rollback that would have to delete today's file is refused."""
+    (world.data / "settings.json").unlink()
+    launched(world.service(), *world.release("0.2.0", dataStores=stores(settings=3)))
+    snapshot = json.loads(world.lifecycle_text())["snapshots"][0]
+    assert snapshot["stores"]["settings"]["present"] is False
+    (world.data / "settings.json").write_text('{"schemaVersion": 3}', encoding="utf-8")
+    after = world.service("0.2.0", profile=DataProfile({**BASE.stores, "settings": 3}, 1))
+    after.recover_before_stores()
+    with pytest.raises(UpdateError) as refused:
+        after.request(*world.release("0.1.0", rollback=True, dataStores=stores()))
+    assert refused.value.code == "rollback_data"
+
+
+def test_the_approval_binds_the_exact_manifest(world):
+    """L-1: the same installer and signer, a different signed manifest after the request: refused."""
+    service = world.service()
+    installer, manifest = world.release("0.2.0")
+    requested = service.request(installer, manifest)
+    assert requested["offer"]["manifestSha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    signed(installer, world.owner, notes="a different signed manifest")
+    with pytest.raises(UpdateError) as refused:
+        service.approve(requested["approvalToken"], SECRET)
+    assert refused.value.code == "approval_mismatch"
+
+
+def test_snapshots_an_unresolved_update_refers_to_are_pinned():
+    state = {"launching": {"restoredSnapshot": "1800000000-aaaaaaaaaaaa", "safetySnapshot": "1800000001-bbbbbbbbbbbb"},
+             "handoff": {"restoredSnapshot": None, "safetySnapshot": "1800000002-cccccccccccc"},
+             "pending": None, "launchGrant": {"binding": {"restoreSnapshot": "1800000003-dddddddddddd"}}}
+    assert update_service._pinned(state) == {"1800000000-aaaaaaaaaaaa", "1800000001-bbbbbbbbbbbb",
+                                             "1800000002-cccccccccccc", "1800000003-dddddddddddd"}
+
+
+# ---------------------------------------------- owned exclusion with real mutexes and processes
+
+
+def _wait_from_another_process(name: str) -> int:
+    """WaitForSingleObject(0) on the named mutex from a fresh base-interpreter process."""
+    from tests.fixtures.child_python import child_python
+
+    executable, environment = child_python()
+    code = (
+        "import ctypes, sys\n"
+        "from ctypes import wintypes\n"
+        "k = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "k.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]\n"
+        "k.CreateMutexW.restype = wintypes.HANDLE\n"
+        "k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]\n"
+        "k.WaitForSingleObject.restype = wintypes.DWORD\n"
+        "h = k.CreateMutexW(None, False, sys.argv[1])\n"
+        "print(k.WaitForSingleObject(h, 0))\n"
+    )
+    done = subprocess.run([executable, "-I", "-c", code, name], capture_output=True, text=True, env=environment,
+                          timeout=60)
+    return int(done.stdout.strip())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named mutexes")
+def test_the_hold_owns_its_mutexes_against_other_threads_and_processes():
+    """H-2(b): a wait-acquiring guard (like WindowsSidecarGuard) cannot take a held mutex."""
+    import threading
+
+    name = f"Local\\QronosUpdateTest-owned-{uuid.uuid4().hex}"
+    hold = update_service.hold_runtime_mutexes((name,))
+    try:
+        assert _wait_from_another_process(name) == 0x102  # WAIT_TIMEOUT
+        seen = []
+
+        def other_thread():
+            import _winapi  # noqa: F401
+            from ctypes import wintypes
+            import ctypes
+
+            k = ctypes.WinDLL("kernel32", use_last_error=True)
+            k.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+            k.CreateMutexW.restype = wintypes.HANDLE
+            k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            k.WaitForSingleObject.restype = wintypes.DWORD
+            handle = k.CreateMutexW(None, False, name)
+            seen.append(k.WaitForSingleObject(handle, 0))
+            k.CloseHandle(handle)
+
+        thread = threading.Thread(target=other_thread)
+        thread.start()
+        thread.join(10)
+        assert seen == [0x102]
+        with pytest.raises(UpdateError) as refused:
+            update_service.hold_runtime_mutexes((name,))
+        assert refused.value.code == "runtime_running"
+    finally:
+        hold.release()
+    assert _wait_from_another_process(name) == 0  # released: acquirable again
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named mutexes")
+def test_the_update_mutex_lives_as_long_as_the_inheriting_installer_process(tmp_path):
+    """H-2(c): exclusion is not released when the launching process lets go: the installer keeps it."""
+    import _winapi
+
+    from tests.fixtures.child_python import child_python
+
+    name = f"Local\\QronosUpdateTest-life-{uuid.uuid4().hex}"
+    go = tmp_path / "installer-may-exit"
+    executable, _ = child_python()
+    hold = update_service.MutexHold((name,))
+    child = None
+    try:
+        code = ("import os, sys, time\n"
+                "deadline = time.monotonic() + 60\n"
+                "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
+                "    time.sleep(0.05)\n")
+        child = update_service.spawn_inheriting([executable, "-I", "-c", code, str(go)], hold.handles())
+    finally:
+        hold.release()  # the launching process lets go, as launch() does
+    try:
+        assert update_service.update_in_progress(name) is True  # the installer still holds it
+        go.write_text("1")
+        child.wait(timeout=60)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=30)
+    assert update_service.update_in_progress(name) is False  # the installer ended: so did the exclusion
+    assert _winapi  # imported for the owned-handle convention
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named mutexes")
+def test_launch_hands_the_update_mutex_to_the_installer(world):
+    """The fake installer keeps the inherited handles; the exclusion outlives launch() until it ends."""
+    name = f"Local\\QronosUpdateTest-handoff-{uuid.uuid4().hex}"
+    service = world.service(quiesce=lambda: update_service.hold_runtime_mutexes((name,)))
+    launched(service, *world.release("0.2.0"))
+    try:
+        assert update_service.update_in_progress(name) is True
+    finally:
+        world.launcher.finish()
+    assert update_service.update_in_progress(name) is False

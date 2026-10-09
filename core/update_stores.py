@@ -24,6 +24,17 @@ string in the module, whitespace-normalised, sorted). A test recomputes it, so
 changing such a layout without bumping the version here fails review. SQLite
 stores have no snapshot: they are never copied raw, so an upgrade that changes
 their format is refused by the updater (``unsupported_migration``).
+
+Security registries (``sensitive``: paired devices with their shared secrets, the
+permission policy) are never snapshotted either. Restoring an old copy would bring
+back a device the person revoked or a permission they tightened, so an upgrade
+that changes their format is refused rather than made "rollback-able" by a blind
+restore.
+
+A store whose file can be moved elsewhere by an environment variable
+(``relocation_env``) is snapshotted only while that variable is unset, so the
+snapshot is always of the file the store really uses; otherwise the update is
+refused instead of silently recording a missing store.
 """
 
 from __future__ import annotations
@@ -46,13 +57,16 @@ class StoreSpec:
     description: str
     ddl_sha256: str | None = None  # SQLite stores: fingerprint of the layout this version means
     reads_from: int = 1            # the oldest format this build's store code still reads (signed as reads[0])
+    sensitive: bool = False        # security state: never restored from an old copy
+    relocation_env: tuple[str, ...] = ()  # variables that move the store's file out of the data root
 
 
 STORES: tuple[StoreSpec, ...] = (
-    StoreSpec("settings", 2, "core.settings_service:SCHEMA_VERSION", "settings.json", "Settings"),
+    StoreSpec("settings", 2, "core.settings_service:SCHEMA_VERSION", "settings.json", "Settings",
+              relocation_env=("QRONOS_SETTINGS_PATH",)),
     StoreSpec("conversations", 1, "core.conversation_store:SCHEMA_VERSION", "conversations.json", "Conversations"),
-    StoreSpec("permissions", 1, "core.permission_control:SCHEMA_VERSION", "permissions_v2.json", "Permissions"),
-    StoreSpec("link_devices", 1, "core.link_devices:SCHEMA_VERSION", "link_devices.json", "Paired devices"),
+    StoreSpec("permissions", 1, "core.permission_control:SCHEMA_VERSION", None, "Permissions", sensitive=True),
+    StoreSpec("link_devices", 1, "core.link_devices:SCHEMA_VERSION", None, "Paired devices", sensitive=True),
     StoreSpec("artifact_ownership", 1, "core.artifact_ownership:REGISTRY_FORMAT_VERSION",
               "artifact_ownership.json", "Library file ownership"),
     StoreSpec("undo_journal", 1, "core.undo_journal:SCHEMA_VERSION", "undo_journal.jsonl", "Undo journal"),

@@ -18,9 +18,11 @@ startup_check.
 * ``approve`` {approvalToken, secret} checks the approval secret, re-verifies,
   stages, and returns a single-use ``launchToken``. The secret arrives only in
   this stdin JSON (never argv or the environment) and is never echoed.
-* ``launch`` {launchToken} proves the runtime is stopped itself (named
-  mutexes) and starts only the staged, re-verified installer. The desktop stops
-  the runtime first and exits after a successful launch.
+* ``launch`` {launchToken} is REFUSED (``launch_unavailable``) until the
+  launch dependencies in ``core.update_service.LAUNCH_DEPENDENCIES`` exist and
+  are accepted; nothing in a request can enable it.
+* ``startup_check`` is read-only status; the mutating start-up barrier runs
+  inside the runtime, before any store opens, not through this command.
 
 Refusals are ``{"ok": false, "code": ..., "error": ...}`` with the
 UpdateError code; nothing here downloads, and no path other than the staged,
@@ -94,7 +96,7 @@ def run(operation: str, payload: dict[str, Any],
 
         audit_path = os.environ.get("QRONOS_PERMISSION_AUDIT_PATH", "").strip() or DEFAULT_ACTION_AUDIT_PATH
         audit = ActionAuditLog(Path(audit_path).expanduser())
-        service = UpdateService(CONFIG.paths.data, version, authorizer=GateAuthorizer(audit=audit.record_verdict))
+        service = UpdateService(CONFIG.paths.data, version, authorizer=GateAuthorizer(audit_log=audit))
     else:
         service = service_factory(version)
     if operation == "status":
@@ -113,7 +115,12 @@ def run(operation: str, payload: dict[str, Any],
     if operation == "discard":
         service.discard()
         return {"ok": True}
-    return {"ok": True, "startup": service.startup_check()}
+    # Read-only status. The MUTATING start-up barrier (UpdateService.recover_before_stores)
+    # belongs inside the runtime's own start, before any store opens, never here.
+    status = service.status()
+    return {"ok": True, "startup": {"phase": status["phase"], "outcome": status["outcome"],
+                                    "updateInProgress": status["updateInProgress"],
+                                    "recoveryPending": status["recoveryPending"]}}
 
 
 def main() -> int:
