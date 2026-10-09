@@ -563,6 +563,8 @@ pub fn start_runtime(
     command
         .env("QRONOS_MEMORY_RUNTIME", "1")
         .env("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "1")
+        // The one product version (tauri.conf.json), for runtime status hooks.
+        .env("QRONOS_APP_VERSION", app.package_info().version.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
