@@ -6,7 +6,7 @@ the real bridge is: the supervisor bootstrap is the first line on standard
 input, the child joins the supervisor over the real authenticated channel
 (``core.supervisor.SupervisedRuntimeClient``), then speaks the bridge's newline
 JSON on standard input and output. It touches no device, model, application
-or user data.
+or user data; the only file it may write is the marker file the test names.
 
 Mode (first argument):
 
@@ -16,6 +16,10 @@ Mode (first argument):
     silent     say ready, then never beat again (a hung runtime)
     flood      say ready, then print one output line larger than the relay allows
     linger     like echo, but ignore "shutdown" on standard input
+    chatty     like echo, while another thread prints 4 KiB lines without end
+    deaf       say ready, keep beating, never read standard input again
+    act        like echo; "act" appends one line to $QRONOS_TEST_RELAY_MARKER
+               and then the process dies at once, before any reply
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -31,10 +36,19 @@ sys.path.insert(0, str(ROOT))
 
 from core.supervisor import SupervisedRuntimeClient, read_bootstrap  # noqa: E402
 
+_OUT = threading.Lock()
+
 
 def emit(event_type: str, status: str, message: str) -> None:
-    sys.stdout.write(json.dumps({"eventType": event_type, "status": status, "message": message}) + "\n")
-    sys.stdout.flush()
+    with _OUT:
+        sys.stdout.write(json.dumps({"eventType": event_type, "status": status, "message": message}) + "\n")
+        sys.stdout.flush()
+
+
+def chatter() -> None:
+    line = "c" * 4096
+    while True:
+        emit("chatter", "ready", line)
 
 
 def main() -> int:
@@ -60,6 +74,13 @@ def main() -> int:
         sys.stdout.flush()
         emit("after_flood", "ready", "still here")
 
+    if mode == "chatty":
+        threading.Thread(target=chatter, daemon=True).start()
+
+    if mode == "deaf":
+        while True:
+            time.sleep(1)
+
     try:
         for raw in stdin:
             payload = json.loads(raw)
@@ -71,6 +92,10 @@ def main() -> int:
                 time.sleep(3)
                 busy_since.clear()
                 emit("unblocked", "ready", "")
+            elif command == "act" and mode == "act":
+                with open(os.environ["QRONOS_TEST_RELAY_MARKER"], "a", encoding="utf-8") as marker:
+                    marker.write(f"{os.getpid()}\n")
+                os._exit(3)  # acted, then gone before any reply
             elif command == "echo":
                 emit("echo", "ready", payload.get("text", ""))
             elif command == "shutdown" and mode != "linger":

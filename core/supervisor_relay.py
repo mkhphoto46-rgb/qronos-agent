@@ -17,9 +17,9 @@ The supervisor:
     the supervisor bootstrap (channel address, key, supervisor pid); after it,
     the desktop's lines are relayed to the bridge and the bridge's lines back
     to the desktop. Relayed content is never parsed — except to recognise the
-    desktop's own ``shutdown`` command — and never logged. Lines are framed and
-    bounded, so the supervisor's lifecycle events are never spliced into the
-    middle of a relayed line.
+    desktop's own ``shutdown`` command — and never logged or echoed in any
+    event. Lines are framed, so the supervisor's own events are never spliced
+    into the middle of a relayed line.
 
     Binds the bridge to a kill-on-close Job Object. If the supervisor dies,
     Windows ends the bridge and everything the bridge started.
@@ -34,33 +34,62 @@ The supervisor:
     reported (``runtime_warning``) but not killed for it, because that
     command may be in the middle of changing something.
 
-    Reports its state to the desktop as ordinary runtime events (type
-    ``supervisor_state``), plus ``runtime_stopping`` when a bridge ended
-    without being asked and ``runtime_error`` when it gives up.
-
     Stops when the desktop says ``shutdown`` or closes its input: the bridge
     is asked to shut down (on its input and on the channel), given a bounded
     grace, then terminated, then killed.
 
-Commands that arrive while no bridge can take them (restarting, degraded,
-stopping) are not held for a later bridge: each is answered with a
-``runtime_error`` event saying it was not delivered. Nothing is retried.
+Nothing the supervisor's control loop does waits on the desktop or on the
+bridge's pipes:
+
+    Everything the desktop reads is written by ONE writer thread, in arrival
+    order, from one queue with two byte budgets. Lifecycle events are never
+    waited for: if the desktop stops reading and their small budget is full,
+    they are counted, and the count is reported once it reads again. Relayed
+    bridge output has its own larger budget; when that is full, the thread
+    relaying it waits, which pushes back on the bridge's own writes, not on
+    supervision. On exit the queue gets a short bounded drain and is then
+    abandoned.
+
+    The desktop's commands are read by their own thread and queued under an
+    item count AND a byte budget; each is at most ``MAX_COMMAND_BYTES``. A
+    bridge that stops reading its input fills the queue, and further commands
+    are refused out loud; the thread writing to the bridge may block, but
+    only it, and only until that exact bridge is stopped.
+
+What a command's fate is, as reported (never with its content):
+
+    ``NOT_DELIVERED``: refused before any byte was written — no bridge could
+    take it (restarting, degraded, stopping), the queue was full, it was too
+    large, or the desktop's input ended in the middle of it. Nothing ran.
+
+    ``DELIVERY_UNCONFIRMED``: writing it failed after it may have started to
+    leave, so the bridge may or may not have received it.
+
+    A command written whole may still be lost if the bridge stops before
+    acting on it; the restart notice says so. No command is ever replayed,
+    to a restarted bridge or otherwise.
 
 Limits, stated plainly: the heartbeat runs on its own thread, so beats prove
 the process and its interpreter are alive; the command loop's progress is
 only reported, as above, and work the loop handed to other threads (a
-conversation turn, queued work) is not watched by the supervisor. A bridge is bound to the Job Object a
-moment after it starts, before it can have started a sidecar of its own.
+conversation turn, queued work) is not watched by the supervisor. Stop never
+depends on the bridge's command loop: the supervisor handles it and ends the
+exact bridge after the grace. A bridge is bound to the Job Object a moment
+after it starts, before it can have started a sidecar of its own. The bridge's
+standard error is copied through as it comes; if the desktop stops reading
+it, the copying thread waits and the bridge's own error writes push back.
 """
 
 from __future__ import annotations
 
+import enum
 import json
 import os
-import queue
 import subprocess
 import sys
 import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import BinaryIO, Callable, Optional, Sequence
 
@@ -72,10 +101,19 @@ from core.supervisor import (
     SupervisorState,
 )
 
-#: A relayed line larger than this is dropped whole, and the desktop is told.
-MAX_LINE_BYTES = 16 * 1024 * 1024
-#: Desktop commands waiting for the bridge to read them.
+#: One bridge output line; a larger one is dropped whole, and the desktop told.
+MAX_LINE_BYTES = 4 * 1024 * 1024
+#: Bridge output waiting for the desktop to read it.
+OUTPUT_BUDGET_BYTES = 16 * 1024 * 1024
+#: Supervisor events waiting for the desktop; beyond this they are counted.
+EVENT_BUDGET_BYTES = 256 * 1024
+#: One desktop command (the largest, a 16 000-character text message, is far smaller).
+MAX_COMMAND_BYTES = 1024 * 1024
+#: Desktop commands waiting for the bridge to read them: both limits apply.
 MAX_PENDING_COMMANDS = 256
+PENDING_COMMAND_BUDGET_BYTES = 4 * 1024 * 1024
+#: How long queued output may take to reach the desktop when the supervisor exits.
+EXIT_DRAIN_SECONDS = 2.0
 _READ_CHUNK = 64 * 1024
 
 SHUTDOWN_LINE = b'{"command":"shutdown"}\n'
@@ -100,11 +138,20 @@ DESKTOP_POLICY = SupervisorPolicy(
 
 JOB_MUTEX_NAME = "Local\\QronosSupervisedRuntime"
 
-NOT_DELIVERED = "The Qronos runtime is not available right now; the command was not delivered."
-BUSY = "The Qronos runtime is busy; the command was not delivered."
-TOO_LARGE = "A command was too large and was not delivered."
+NOT_DELIVERED = "The Qronos runtime is not available right now; the command was not delivered and nothing ran."
+BUSY = "The Qronos runtime is not reading commands; the command was not delivered and nothing ran."
+TOO_LARGE = "A command was too large; it was not delivered and nothing ran."
+INCOMPLETE = "A command was cut off when the desktop's input ended; it was not delivered and nothing ran."
+DELIVERY_UNCONFIRMED = (
+    "Sending a command to the Qronos runtime failed part-way; it may or may not have been received. "
+    "It is not sent again."
+)
 OUTPUT_TOO_LARGE = "The Qronos runtime produced an output line that was too large; it was dropped."
-RESTARTING = "The Qronos runtime stopped unexpectedly and is restarting."
+EVENTS_DROPPED = "{count} supervisor event(s) were dropped while the desktop was not reading."
+RESTARTING = (
+    "The Qronos runtime stopped unexpectedly and is restarting. Commands it had already received may or may "
+    "not have been carried out; none are sent again."
+)
 STILL_STOPPABLE = " It is not restarted for this; Stop still works."
 GAVE_UP = "The Qronos runtime stopped after repeated failures. Start Qronos again to retry."
 
@@ -118,35 +165,131 @@ _STATUS = {
 }
 
 
-class EventWriter:
-    """The supervisor's standard output: whole lines only, one writer at a time."""
+def _event_line(event_type: str, status: str, message: str) -> bytes:
+    return json.dumps(
+        {"eventType": event_type, "status": status, "message": message}, ensure_ascii=True,
+    ).encode("ascii") + b"\n"
+
+
+class Outbound:
+    """
+    Everything the desktop reads, written by one thread.
+
+    ``event`` never waits. ``relayed`` waits only for room in its own byte
+    budget (back-pressure on the bridge's output), and gives up when the
+    outbound side is closed.
+    """
 
     def __init__(self, stream: BinaryIO, on_broken: Callable[[], None] = lambda: None) -> None:
         self._stream = stream
         self._on_broken = on_broken
-        self._lock = threading.Lock()
-        self._broken = False
-
-    def line(self, data: bytes) -> None:
-        if not data.endswith(b"\n"):
-            data += b"\n"
-
-        with self._lock:
-            if self._broken:
-                return
-            try:
-                self._stream.write(data)
-                self._stream.flush()
-                return
-            except (OSError, ValueError):
-                self._broken = True
-
-        self._on_broken()
+        self._cond = threading.Condition()
+        #: (is_event, line), in arrival order.
+        self._queue: deque[tuple[bool, bytes]] = deque()
+        self._event_bytes = 0
+        self._event_budget = EVENT_BUDGET_BYTES
+        self._dropped = 0
+        self._relayed_bytes = 0
+        self._relayed_budget = OUTPUT_BUDGET_BYTES
+        self._writing = False
+        self._closed = False
+        threading.Thread(target=self._write_loop, name="qronos-relay-stdout", daemon=True).start()
 
     def event(self, event_type: str, status: str, message: str) -> None:
-        self.line(json.dumps(
-            {"eventType": event_type, "status": status, "message": message}, ensure_ascii=True,
-        ).encode("ascii"))
+        line = _event_line(event_type, status, message)
+        with self._cond:
+            if self._closed:
+                return
+            if self._event_bytes + len(line) > self._event_budget:
+                self._dropped += 1
+                return
+            self._queue.append((True, line))
+            self._event_bytes += len(line)
+            self._cond.notify_all()
+
+    def relayed(self, line: bytes) -> bool:
+        """Queue one bridge output line; False when the desktop side is gone."""
+        if not line.endswith(b"\n"):
+            line += b"\n"
+        with self._cond:
+            while not self._closed and self._relayed_bytes and self._relayed_bytes + len(line) > self._relayed_budget:
+                self._cond.wait()
+            if self._closed:
+                return False
+            self._queue.append((False, line))
+            self._relayed_bytes += len(line)
+            self._cond.notify_all()
+            return True
+
+    def _pending(self) -> bool:
+        return bool(self._queue or self._dropped)
+
+    def _take(self) -> bytes:
+        if not self._queue:
+            # Whatever was dropped is reported once everything kept is out.
+            line = _event_line("runtime_warning", "warning", EVENTS_DROPPED.format(count=self._dropped))
+            self._dropped = 0
+            return line
+        is_event, line = self._queue.popleft()
+        if is_event:
+            self._event_bytes -= len(line)
+        else:
+            self._relayed_bytes -= len(line)
+        return line
+
+    def _write_loop(self) -> None:
+        while True:
+            with self._cond:
+                while not self._closed and not self._pending():
+                    self._cond.wait()
+                if self._closed:
+                    return
+                line = self._take()
+                self._writing = True
+                self._cond.notify_all()  # room for a waiting relayed() call
+            broken = False
+            try:
+                self._stream.write(line)
+                self._stream.flush()
+            except (OSError, ValueError):
+                broken = True
+            with self._cond:
+                self._writing = False
+                if broken:
+                    self._close_locked()
+                self._cond.notify_all()
+            if broken:
+                self._on_broken()
+                return
+
+    def _close_locked(self) -> None:
+        self._closed = True
+        self._queue.clear()
+        self._event_bytes = self._relayed_bytes = self._dropped = 0
+
+    def drain(self, timeout: float) -> bool:
+        """Wait at most ``timeout`` for everything queued to be written."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while not self._closed and (self._pending() or self._writing):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return not self._pending()
+
+    def close(self) -> None:
+        with self._cond:
+            self._close_locked()
+            self._cond.notify_all()
+
+
+class Delivery(enum.Enum):
+    WRITTEN = "written"
+    #: Nothing was written: the input was already closed.
+    REFUSED = "refused"
+    #: Writing failed after it may have started.
+    UNCONFIRMED = "unconfirmed"
 
 
 class ChildInput:
@@ -157,17 +300,17 @@ class ChildInput:
         self._lock = threading.Lock()
         self._closed = False
 
-    def write(self, line: bytes) -> bool:
+    def write(self, line: bytes) -> Delivery:
         with self._lock:
             if self._closed:
-                return False
+                return Delivery.REFUSED
             try:
                 self._stream.write(line)
                 self._stream.flush()
-                return True
+                return Delivery.WRITTEN
             except (OSError, ValueError):
                 self._closed = True
-                return False
+                return Delivery.UNCONFIRMED
 
     def finish(self, last_line: bytes) -> None:
         """Write a last line, then close. Later writes are refused."""
@@ -200,11 +343,14 @@ class DesktopRelay:
 
     def __init__(self, desktop_in: BinaryIO, desktop_out: BinaryIO, desktop_err: Optional[BinaryIO] = None) -> None:
         self._in = desktop_in
-        self.out = EventWriter(desktop_out, on_broken=lambda: self._request_stop("the desktop stopped reading"))
+        self.out = Outbound(desktop_out, on_broken=lambda: self._request_stop("the desktop stopped reading"))
         self._err = desktop_err
         self._err_lock = threading.Lock()
-        self._pending: "queue.Queue[bytes]" = queue.Queue(MAX_PENDING_COMMANDS)
         self._cond = threading.Condition()
+        self._pending: deque[bytes] = deque()
+        self._pending_bytes = 0
+        self._max_pending = MAX_PENDING_COMMANDS
+        self._pending_budget = PENDING_COMMAND_BUDGET_BYTES
         self._input: Optional[ChildInput] = None
         self._accepting = True
         self._stop_requested: Optional[Callable[[str], None]] = None
@@ -236,18 +382,15 @@ class DesktopRelay:
             self._cond.notify_all()
 
     def set_accepting(self, accepting: bool) -> None:
-        """While not accepting, waiting and new commands are answered as not delivered."""
+        """While not accepting, waiting and new commands are refused as not delivered."""
         dropped = 0
         with self._cond:
             self._accepting = accepting
             if not accepting:
                 self._input = None
-                while True:
-                    try:
-                        self._pending.get_nowait()
-                    except queue.Empty:
-                        break
-                    dropped += 1
+                dropped = len(self._pending)
+                self._pending.clear()
+                self._pending_bytes = 0
             self._cond.notify_all()
         for _ in range(dropped):
             self.out.event("runtime_error", "error", NOT_DELIVERED)
@@ -258,7 +401,7 @@ class DesktopRelay:
         oversized = False
         while True:
             try:
-                line = self._in.readline(MAX_LINE_BYTES + 1)
+                line = self._in.readline(MAX_COMMAND_BYTES + 1)
             except (OSError, ValueError):
                 line = b""
 
@@ -266,10 +409,18 @@ class DesktopRelay:
                 self._request_stop("the desktop closed the runtime's input")
                 return
 
-            if oversized or (len(line) > MAX_LINE_BYTES and not line.endswith(b"\n")):
-                if not oversized:
-                    self.out.event("runtime_error", "error", TOO_LARGE)
+            if oversized:
                 oversized = not line.endswith(b"\n")
+                continue
+
+            if not line.endswith(b"\n"):
+                if len(line) > MAX_COMMAND_BYTES:
+                    self.out.event("runtime_error", "error", TOO_LARGE)
+                    oversized = True
+                else:
+                    # Only the end of input ends a line without a newline: a
+                    # command cut off there is never delivered.
+                    self.out.event("runtime_error", "error", INCOMPLETE)
                 continue
 
             if not line.strip():
@@ -279,28 +430,32 @@ class DesktopRelay:
                 self._request_stop("the desktop asked the runtime to stop")
                 continue
 
-            self._submit(line if line.endswith(b"\n") else line + b"\n")
+            self._submit(line)
 
     def _submit(self, line: bytes) -> None:
         with self._cond:
             accepting = self._accepting
-            if accepting:
-                try:
-                    self._pending.put_nowait(line)
-                    return
-                except queue.Full:
-                    pass
+            if accepting and len(self._pending) < self._max_pending \
+                    and self._pending_bytes + len(line) <= self._pending_budget:
+                self._pending.append(line)
+                self._pending_bytes += len(line)
+                self._cond.notify_all()
+                return
         self.out.event("runtime_error", "error", BUSY if accepting else NOT_DELIVERED)
 
     def _deliver(self) -> None:
         while True:
-            line = self._pending.get()
             with self._cond:
-                while self._accepting and self._input is None:
+                while not self._pending or (self._accepting and self._input is None):
                     self._cond.wait()
+                line = self._pending.popleft()
+                self._pending_bytes -= len(line)
                 target = self._input if self._accepting else None
-            if target is None or not target.write(line):
+            outcome = target.write(line) if target is not None else Delivery.REFUSED
+            if outcome is Delivery.REFUSED:
                 self.out.event("runtime_error", "error", NOT_DELIVERED)
+            elif outcome is Delivery.UNCONFIRMED:
+                self.out.event("runtime_error", "error", DELIVERY_UNCONFIRMED)
 
     # ------------------------------------------------------ bridge -> desktop
 
@@ -325,10 +480,11 @@ class DesktopRelay:
                 self.out.event("runtime_error", "error", OUTPUT_TOO_LARGE)
                 continue
             if chunk.endswith(b"\n"):
-                self.out.line(bytes(partial))
+                if not self.out.relayed(bytes(partial)):
+                    return
                 partial.clear()
         if partial and not oversized:
-            self.out.line(bytes(partial))
+            self.out.relayed(bytes(partial))
 
     def pump_errors(self, stream: BinaryIO) -> None:
         """Forward the bridge's standard error as it comes; nothing else writes there."""
@@ -354,6 +510,7 @@ class DesktopRelay:
         self.out.event("runtime_warning", "warning", detail[:300] + STILL_STOPPABLE)
 
     def on_state(self, state: SupervisorState, detail: str) -> None:
+        """Called from the supervisor's control loop: queues events, never waits."""
         self.set_accepting(state in (SupervisorState.STARTING, SupervisorState.RUNNING))
         self.out.event("supervisor_state", _STATUS[state], detail[:300])
         if state is SupervisorState.BACKING_OFF:
@@ -417,6 +574,7 @@ class DesktopRuntimeLauncher:
             if self._job is not None:
                 self._job.bind_process(process.pid, process_handle=getattr(process, "_handle", None))
             assert process.stdin is not None
+            # The bootstrap (under 4 KiB) goes into the new, empty pipe.
             process.stdin.write(bootstrap)
             process.stdin.flush()
         except Exception:
@@ -486,9 +644,11 @@ def run_desktop(
         guard = instance_guard()
     except SupervisorAlreadyRunning:
         relay.out.event("runtime_error", "error", "Another Qronos runtime is already running in this Windows session.")
+        relay.out.drain(EXIT_DRAIN_SECONDS)
         return 2
 
     job = None
+    code = 1
     try:
         job = job_factory()
         if command is None:
@@ -497,16 +657,19 @@ def run_desktop(
         supervisor = Supervisor(launcher, policy, notify=relay.on_state, peer_pid=peer_pid, warn=relay.on_warning)
         relay.start(lambda reason: supervisor.stop())
         state = supervisor.run()
+        code = 0 if state is SupervisorState.STOPPED else 1
     except Exception as error:  # noqa: BLE001 - reported to the desktop, then exit
         relay.out.event("supervisor_state", "degraded", f"The supervisor could not run ({type(error).__name__}).")
         relay.out.event("runtime_error", "error", GAVE_UP)
-        return 1
     finally:
         if job is not None:
             job.close()  # the final fail-safe: nothing the bridge started outlives this
         guard.release()
+        # Bounded: a desktop that stopped reading cannot hold the exit.
+        relay.out.drain(EXIT_DRAIN_SECONDS)
+        relay.out.close()
 
-    return 0 if state is SupervisorState.STOPPED else 1
+    return code
 
 
 def exit_process(code: int) -> None:
@@ -514,13 +677,9 @@ def exit_process(code: int) -> None:
     End the supervisor process once ``run_desktop`` has cleaned up.
 
     The thread reading the desktop's input stays blocked in that read, and
-    Python's own shutdown would then fail fatally on the input's lock. Every
-    event has already been flushed, the Job Object closed and the instance
-    released, so the process ends here directly.
+    Python's own shutdown would then fail fatally on the input's lock. The
+    output has had its bounded drain, the Job Object is closed and the
+    instance released, so the process ends here directly — without a flush
+    that could wait on a desktop that stopped reading.
     """
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.flush()
-        except (OSError, ValueError, AttributeError):
-            pass
     os._exit(code)

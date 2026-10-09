@@ -182,12 +182,34 @@ desktop (Tauri start_runtime)
    most 5 s, then kill the supervisor. Its kill-on-close Job Object then
    ends the bridge as well.
 2. **Supervisor.** The supervisor owns the bridge's pipes. The first stdin
-   line is the bootstrap, and then the desktop's lines are relayed. The
-   bridge's stdout comes back as whole lines, at most 16 MiB each. An
-   oversized line is dropped, and the desktop is told. Relayed content is
-   not parsed or logged, apart from recognising `{"command":"shutdown"}`.
-   Pairing secrets are therefore still routed only by the desktop's
-   existing targeted pairing delivery.
+   line is the bootstrap, and then the desktop's lines are relayed. Relayed
+   content is not parsed, logged or echoed in any event, apart from
+   recognising `{"command":"shutdown"}`. Pairing secrets are therefore still
+   routed only by the desktop's existing targeted pairing delivery.
+2a. **Bounds and back-pressure.** The control loop never waits on a pipe.
+   - **Output.** One writer thread writes everything the desktop reads, in
+     arrival order.
+     - Lifecycle events have a 256 KiB budget and are never waited for.
+       When it is full they are counted, and the count is reported once the
+       desktop reads again.
+     - Bridge output lines are at most 4 MiB, and an oversized line is
+       dropped with an event. They share a 16 MiB budget; when it is full,
+       the relaying thread waits, which pushes back on the bridge and not on
+       supervision.
+     - On exit the output gets a 2 s drain and is then abandoned. The
+       process ends with `os._exit`, never with a flush that could wait.
+   - **Commands.** A command is at most 1 MiB. At most 256 commands and
+     4 MiB may wait for the bridge. A bridge that stops reading fills that,
+     and further commands are refused with `BUSY`. Only the thread writing
+     to that bridge can block, and only until that exact bridge is stopped.
+   - **Command fate.**
+     - `NOT_DELIVERED` / `BUSY` / `TOO_LARGE` / `INCOMPLETE`: refused before
+       any byte was written, so nothing ran. `INCOMPLETE` is a final line
+       cut off at the end of the desktop's input.
+     - `DELIVERY_UNCONFIRMED`: the write failed after it may have started.
+     - A command written whole may still be lost if the bridge dies; the
+       restart notice says so.
+     - No command is ever replayed. No event carries a command's content.
 3. **Health.** The bridge's peer pid is checked first, then the HMAC
    handshake, then heartbeats (every 5 s, timeout 45 s). A bridge that
    exits, closes its channel or stops beating is stopped (exact child only)
@@ -217,13 +239,21 @@ desktop (Tauri start_runtime)
 
 **Limits.**
 - Beats prove the process and its interpreter are alive.
-- Command-loop progress is reported, not enforced.
+- Command-loop progress is reported, not enforced. Stop does not depend on
+  the bridge's command loop. The supervisor handles it and ends the exact
+  bridge after the grace (tested with a loop stuck inside one command).
 - Work handed to other threads, such as conversation turns and queued work,
   is not watched by the supervisor.
 - The bridge is bound to the Job Object a moment after it starts, before it
   has started any sidecar.
+- The bridge's standard error is copied through as it comes. If the
+  desktop stops reading it, that copying thread waits, and the bridge's own
+  error writes push back.
 - Sign-in start, a persistent supervisor that outlives the desktop, and any
   Windows service remain installer/owner decisions. None of them exist.
+- The desktop UI has no case yet for `supervisor_state` or `runtime_warning`
+  (Control). `runtime_error` and `runtime_stopping` already reach existing
+  handling.
 
 **Elevated action (`core/elevated_actions.py`).** The person's own desktop
 chat turn reaches it, for example "سرویس چاپ را ری‌استارت کن" or "restart
@@ -298,7 +328,17 @@ simply expires.
   degraded; a hung bridge replaced; a command loop stuck in one command
   reported and not killed; an oversized output line; a bridge ignoring
   shutdown being terminated after the grace; and killing the supervisor
-  ending its bridge through the Job Object. One end-to-end test runs
+  ending its bridge through the Job Object. It also covers real full pipes:
+  - a desktop that stops reading while the bridge floods. Supervision and
+    Stop still finish within bounds, and the supervisor's memory stays
+    bounded;
+  - a bridge that stops reading its input, which gets `BUSY` refusals
+    rather than a backlog, and is ended after the grace;
+  - a command cut off by the end of input, which is never delivered;
+  - a bridge that acts and dies before replying. Its command is never sent
+    to the restarted bridge.
+  Unit tests cover the byte and count budgets, events never waiting, and a
+  part-way write being reported as unconfirmed. One end-to-end test runs
   `python -m core.supervisor --desktop` with the real bridge on throwaway
   state, through ping, pong and shutdown.
 - `tests/test_elevated_actions.py`: the request parser; the exact production

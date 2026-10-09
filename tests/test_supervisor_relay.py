@@ -22,7 +22,6 @@ import os
 import queue
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -34,14 +33,18 @@ from core import supervisor_relay as relay_module
 from core.supervisor import SupervisorState
 from core.supervisor_relay import (
     BUSY,
+    DELIVERY_UNCONFIRMED,
     GAVE_UP,
+    INCOMPLETE,
     NOT_DELIVERED,
     OUTPUT_TOO_LARGE,
     RESTARTING,
     TOO_LARGE,
+    ChildInput,
+    Delivery,
     DesktopRelay,
     DesktopRuntimeLauncher,
-    EventWriter,
+    Outbound,
     is_shutdown_command,
 )
 from tests.fixtures.child_python import child_python
@@ -54,8 +57,22 @@ windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Supervision r
 # ------------------------------------------------------------------ units
 
 
-def events_of(buffer: io.BytesIO) -> list[dict]:
+def events_of(buffer: io.BytesIO, relay=None) -> list[dict]:
+    if relay is not None:
+        assert relay.out.drain(5)
     return [json.loads(line) for line in buffer.getvalue().splitlines() if line.strip()]
+
+
+class Gate(io.BytesIO):
+    """A desktop pipe that blocks every write until opened: a desktop that stopped reading."""
+
+    def __init__(self):
+        super().__init__()
+        self.open = threading.Event()
+
+    def write(self, data):
+        self.open.wait(30)
+        return super().write(data)
 
 
 def test_only_the_desktop_s_own_shutdown_command_is_recognised():
@@ -67,7 +84,9 @@ def test_only_the_desktop_s_own_shutdown_command_is_recognised():
 
 def test_event_lines_are_whole_and_a_broken_desktop_stops_the_supervisor():
     out = io.BytesIO()
-    EventWriter(out).event("supervisor_state", "running", "ok")
+    outbound = Outbound(out)
+    outbound.event("supervisor_state", "running", "ok")
+    assert outbound.drain(5)
     assert events_of(out) == [{"eventType": "supervisor_state", "status": "running", "message": "ok"}]
 
     class Broken(io.BytesIO):
@@ -75,10 +94,50 @@ def test_event_lines_are_whole_and_a_broken_desktop_stops_the_supervisor():
             raise OSError("pipe closed")
 
     stopped = []
-    writer = EventWriter(Broken(), on_broken=lambda: stopped.append(True))
-    writer.event("a", "b", "c")
-    writer.event("a", "b", "c")
-    assert stopped == [True]  # told once; later writes are dropped quietly
+    broken = Outbound(Broken(), on_broken=lambda: stopped.append(True))
+    broken.event("a", "b", "c")
+    broken.drain(5)
+    broken.event("a", "b", "c")
+    assert stopped == [True]  # told once; later events are dropped quietly
+    assert broken.relayed(b"line") is False
+
+
+def test_events_never_wait_for_a_desktop_that_stopped_reading(monkeypatch):
+    monkeypatch.setattr(relay_module, "EVENT_BUDGET_BYTES", 400)
+    desktop = Gate()
+    outbound = Outbound(desktop)
+    started = time.monotonic()
+    for index in range(1000):
+        outbound.event("supervisor_state", "running", f"event {index}")
+    assert time.monotonic() - started < 1.0  # the control loop is never held
+    assert not outbound.drain(0.2)  # and an exit drain is bounded
+    desktop.open.set()
+    assert outbound.drain(5)
+    events = events_of(desktop)
+    assert 1 < len(events) < 20  # only what fitted the budget was kept
+    assert events[-1]["eventType"] == "runtime_warning" and "were dropped" in events[-1]["message"]
+
+
+def test_relayed_output_pushes_back_within_its_byte_budget_and_never_past_close(monkeypatch):
+    monkeypatch.setattr(relay_module, "OUTPUT_BUDGET_BYTES", 1000)
+    desktop = Gate()
+    outbound = Outbound(desktop)
+    accepted = []
+
+    def produce():
+        for index in range(100):
+            if not outbound.relayed(b"x" * 99):
+                break
+            accepted.append(index)
+
+    producer = threading.Thread(target=produce, daemon=True)
+    producer.start()
+    time.sleep(0.5)
+    assert 9 <= len(accepted) <= 12 and producer.is_alive()  # budget reached; the bridge's writer waits
+    outbound.close()
+    producer.join(5)
+    assert not producer.is_alive()  # closing releases it
+    desktop.open.set()
 
 
 def test_commands_are_refused_out_loud_when_no_runtime_can_take_them():
@@ -86,18 +145,44 @@ def test_commands_are_refused_out_loud_when_no_runtime_can_take_them():
     relay = DesktopRelay(io.BytesIO(), out)
     relay.set_accepting(False)
     relay._submit(b'{"command":"ping"}\n')
-    assert events_of(out)[-1]["message"] == NOT_DELIVERED
+    assert events_of(out, relay)[-1]["message"] == NOT_DELIVERED
 
 
-def test_a_full_command_queue_is_refused_as_busy_and_waiting_commands_are_dropped_on_restart(monkeypatch):
-    monkeypatch.setattr(relay_module, "MAX_PENDING_COMMANDS", 2)
+@pytest.mark.parametrize("limit, value", [("MAX_PENDING_COMMANDS", 2), ("PENDING_COMMAND_BUDGET_BYTES", 50)])
+def test_the_command_queue_is_bounded_by_count_and_bytes(monkeypatch, limit, value):
+    monkeypatch.setattr(relay_module, limit, value)
     out = io.BytesIO()
     relay = DesktopRelay(io.BytesIO(), out)
     for _ in range(3):
-        relay._submit(b'{"command":"ping"}\n')
-    assert events_of(out)[-1]["message"] == BUSY
+        relay._submit(b'{"command":"ping","x":1}\n')  # 25 bytes each
+    assert events_of(out, relay)[-1]["message"] == BUSY
+    assert len(relay._pending) == 2
     relay.set_accepting(False)  # the bridge went away with two still waiting
-    assert [event["message"] for event in events_of(out)[-2:]] == [NOT_DELIVERED, NOT_DELIVERED]
+    assert [event["message"] for event in events_of(out, relay)[-2:]] == [NOT_DELIVERED, NOT_DELIVERED]
+    assert relay._pending_bytes == 0
+
+
+def test_a_write_that_fails_part_way_is_unconfirmed_never_not_delivered():
+    class Failing(io.BytesIO):
+        def write(self, data):
+            raise OSError("broken pipe")
+
+    child = ChildInput(Failing())
+    assert child.write(b"x\n") is Delivery.UNCONFIRMED
+    assert child.write(b"x\n") is Delivery.REFUSED  # closed: nothing written now
+    finished = ChildInput(io.BytesIO())
+    finished.finish(b"last\n")
+    assert finished.write(b"x\n") is Delivery.REFUSED
+
+    out = io.BytesIO()
+    relay = DesktopRelay(io.BytesIO(), out)
+    relay.attach(ChildInput(Failing()))
+    relay.start(lambda reason: None)
+    relay._submit(b'{"command":"act"}\n')
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not out.getvalue():
+        time.sleep(0.02)
+    assert events_of(out, relay)[-1]["message"] == DELIVERY_UNCONFIRMED
 
 
 def test_bridge_output_is_relayed_in_whole_bounded_lines(monkeypatch):
@@ -105,26 +190,29 @@ def test_bridge_output_is_relayed_in_whole_bounded_lines(monkeypatch):
     monkeypatch.setattr(relay_module, "_READ_CHUNK", 16)
     out = io.BytesIO()
     relay = DesktopRelay(io.BytesIO(), out)
-    first = b'{"eventType":"a","status":"s","message":"' + b"y" * 5 +b'"}\n'
+    first = b'{"eventType":"a","status":"s","message":"' + b"y" * 5 + b'"}\n'
     stream = io.BytesIO(first + b"z" * 200 + b"\n" + b'{"eventType":"b"}\n' + b"tail")
     relay.pump_output(stream)
+    assert relay.out.drain(5)
     lines = out.getvalue().splitlines()
     assert lines[0] == first.rstrip(b"\n")
     assert json.loads(lines[1])["message"] == OUTPUT_TOO_LARGE
     assert lines[2:] == [b'{"eventType":"b"}', b"tail"]
 
 
-def test_desktop_input_is_framed_bounded_and_shutdown_or_eof_stops(monkeypatch):
-    monkeypatch.setattr(relay_module, "MAX_LINE_BYTES", 32)
+def test_desktop_input_is_framed_bounded_and_a_cut_off_command_is_never_delivered(monkeypatch):
+    monkeypatch.setattr(relay_module, "MAX_COMMAND_BYTES", 32)
     out = io.BytesIO()
-    desktop = io.BytesIO(b"q" * 100 + b"\n" + b'{"command":"ping"}\n' + b"\n" + b'{"command":"shutdown"}\n')
+    desktop = io.BytesIO(
+        b"q" * 100 + b"\n" + b'{"command":"ping"}\n' + b"\n" + b'{"command":"shutdown"}\n' + b'{"command":"ec'
+    )
     relay = DesktopRelay(desktop, out)
     stops: list[str] = []
     relay._stop_requested = stops.append
     relay._read_desktop()
-    assert events_of(out)[0]["message"] == TOO_LARGE
-    assert relay._pending.get_nowait() == b'{"command":"ping"}\n'
-    assert relay._pending.empty()  # the blank line and the shutdown are not relayed
+    messages = [event["message"] for event in events_of(out, relay)]
+    assert messages == [TOO_LARGE, INCOMPLETE]
+    assert list(relay._pending) == [b'{"command":"ping"}\n']  # the blank line, shutdown and cut-off are not relayed
     assert stops == ["the desktop asked the runtime to stop"]  # EOF afterwards does not ask twice
 
 
@@ -133,7 +221,7 @@ def test_state_changes_reach_the_desktop_as_runtime_events():
     relay = DesktopRelay(io.BytesIO(), out)
     relay.on_state(SupervisorState.BACKING_OFF, "the runtime exited with code 3; restarting in 1s")
     relay.on_state(SupervisorState.DEGRADED, "stopped restarting")
-    seen = [(event["eventType"], event["status"], event["message"]) for event in events_of(out)]
+    seen = [(event["eventType"], event["status"], event["message"]) for event in events_of(out, relay)]
     assert seen == [
         ("supervisor_state", "restarting", "the runtime exited with code 3; restarting in 1s"),
         ("runtime_stopping", "stopping", RESTARTING),
@@ -142,6 +230,7 @@ def test_state_changes_reach_the_desktop_as_runtime_events():
         ("runtime_error", "error", GAVE_UP),
     ]
     assert not relay._accepting
+    assert "none are sent again" in RESTARTING
 
 
 def test_the_bridge_command_is_fixed(monkeypatch):
@@ -212,11 +301,17 @@ class SupervisedDesktop:
         self.seen: list[dict] = []
         self.pending: list[dict] = []
         self.bridges: dict[int, object] = {}  # pid -> process handle, opened when announced
+        self.reading = threading.Event()
+        self.reading.set()
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self) -> None:
         assert self.process.stdout is not None
-        for raw in self.process.stdout:
+        while True:
+            self.reading.wait()  # cleared: the desktop stops reading and the pipe fills
+            raw = self.process.stdout.readline()
+            if not raw:
+                return
             if raw.strip():
                 try:
                     self.events.put(json.loads(raw))
@@ -288,8 +383,9 @@ class SupervisedDesktop:
 def desktop():
     made: list[SupervisedDesktop] = []
 
-    def start(mode: str) -> SupervisedDesktop:
+    def start(mode: str, **extra_environment: str) -> SupervisedDesktop:
         executable, environment = child_python()
+        environment.update(extra_environment)
         instance = SupervisedDesktop(
             [executable, "-B", str(DRIVER), mode, uuid.uuid4().hex[:12]], environment,
         )
@@ -399,6 +495,91 @@ def test_a_runtime_that_ignores_shutdown_is_terminated_after_the_grace(desktop):
 
 
 @windows_only
+def test_a_desktop_that_stops_reading_cannot_hold_supervision_or_stop(desktop):
+    import psutil
+
+    session = desktop("chatty")
+    session.wait_for("supervisor_state", "running")
+    session.wait_for("runtime_ready")
+    (pid,) = session.bridges
+    session.reading.clear()  # the UI stops reading; its pipe, then the queue, then the bridge fill
+    time.sleep(3)
+    supervisor_memory = psutil.Process(session.process.pid).memory_info().rss
+    assert supervisor_memory < 200 * 1024 * 1024, supervisor_memory  # bounded queues, not a backlog
+    started = time.monotonic()
+    session.send({"command": "shutdown"})  # its input is read by its own thread
+    assert session.process.wait(20) == 0  # grace, terminate, a bounded drain, exit
+    assert time.monotonic() - started < 15
+    assert session.bridge_exited(pid, 5)
+    session.reading.set()
+
+
+@windows_only
+def test_a_bridge_that_stops_reading_its_input_gets_refusals_not_a_backlog(desktop):
+    session = desktop("deaf")
+    session.wait_for("supervisor_state", "running")
+    session.wait_for("runtime_ready")
+    (pid,) = session.bridges
+    for index in range(120):  # ~12 MB against a 4 MiB pending budget
+        session.send({"command": "echo", "text": "y" * 100_000})
+    refused = session.wait_for("runtime_error", timeout=20)
+    assert refused["message"] == BUSY and "y" * 20 not in refused["message"]  # content is never echoed
+    started = time.monotonic()
+    session.send({"command": "shutdown"})
+    session.wait_for("supervisor_state", "stopped", timeout=20)
+    assert time.monotonic() - started < 10
+    assert session.process.wait(15) == 0
+    assert session.bridge_exited(pid, 5)
+
+
+@windows_only
+def test_a_command_cut_off_by_the_end_of_input_is_never_delivered(desktop):
+    session = desktop("echo")
+    session.wait_for("runtime_ready")
+    session.process.stdin.write(b'{"command":"echo","text":"cut')
+    session.process.stdin.close()
+    assert session.wait_for("runtime_error")["message"] == INCOMPLETE
+    session.wait_for("supervisor_state", "stopped")
+    assert session.process.wait(10) == 0
+    assert not any(event.get("eventType") == "echo" for event in session.seen)
+
+
+@windows_only
+def test_a_bridge_that_acts_then_dies_is_never_sent_the_command_again(desktop, tmp_path):
+    marker = tmp_path / "acted.txt"
+    session = desktop("act", QRONOS_TEST_RELAY_MARKER=str(marker))
+    session.wait_for("supervisor_state", "running")
+    session.wait_for("runtime_ready")
+    (first,) = session.bridges
+    session.send({"command": "act"})
+    assert session.wait_for("runtime_stopping")["message"] == RESTARTING  # "none are sent again"
+    session.wait_for("supervisor_state", "running", timeout=30)
+    session.wait_for("runtime_ready")
+    second = next(pid for pid in session.bridges if pid != first)
+    session.send({"command": "ping"})
+    assert session.wait_for("runtime_pong")["message"] == str(second)
+    assert marker.read_text(encoding="utf-8").splitlines() == [str(first)]  # once, by the first bridge only
+    session.send({"command": "shutdown"})
+    assert session.process.wait(15) == 0
+
+
+@windows_only
+def test_stop_does_not_depend_on_the_bridge_s_command_loop(desktop):
+    session = desktop("echo")
+    session.wait_for("supervisor_state", "running")
+    session.wait_for("runtime_ready")
+    (pid,) = session.bridges
+    session.send({"command": "block"})  # the loop sleeps 3 s inside one command
+    time.sleep(0.3)
+    started = time.monotonic()
+    session.send({"command": "shutdown"})
+    session.wait_for("supervisor_state", "stopped", timeout=15)
+    assert time.monotonic() - started < 6  # within the 2 s grace and the terminate step
+    assert session.process.wait(10) == 0
+    assert session.bridge_exited(pid, 5)
+
+
+@windows_only
 def test_killing_the_supervisor_ends_its_runtime_through_the_job_object(desktop):
     session = desktop("linger")
     session.wait_for("runtime_ready")
@@ -412,17 +593,21 @@ def test_killing_the_supervisor_ends_its_runtime_through_the_job_object(desktop)
 
 
 @windows_only
-def test_the_production_entry_supervises_the_real_bridge_end_to_end():
+def test_the_production_entry_supervises_the_real_bridge_end_to_end(tmp_path):
     """
     ``python -m core.supervisor --desktop`` starts the real bridge with
     ``--supervised`` (base interpreter, real peer check and handshake). The
     bridge runs on throwaway state with Ollama auto-start off; no wake
     bootstrap is requested, so no microphone is opened, and nothing is asked
     of a model.
+
+    Storage isolation comes from this suite's conftest (isolated LOCALAPPDATA,
+    APPDATA, USERPROFILE and permission state, inherited through
+    ``child_python``). Run outside pytest, a caller must establish the same
+    isolation first.
     """
-    scratch = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
     executable, environment = child_python()
-    state = Path(scratch.name)
+    state = tmp_path
     environment.update({
         "QRONOS_CONVERSATION_HISTORY_PATH": str(state / "conversation_history.sqlite3"),
         "QRONOS_QUEUE_STATE_PATH": str(state / "queue_state.json"),
@@ -445,4 +630,3 @@ def test_the_production_entry_supervises_the_real_bridge_end_to_end():
         assert session.bridge_exited(pid, 10)
     finally:
         assert session.close() == []
-        scratch.cleanup()
