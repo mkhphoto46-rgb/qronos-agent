@@ -29,16 +29,18 @@ import re
 import shutil
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Callable
 
-from qronos_media.identity import checked_asset_id, full_sha256
+from qronos_media.identity import FileState, HashCancelled, checked_asset_id, full_sha256
 from qronos_media.jobs import (
-    RunnerBusy, RunnerLock, StageRunner, ensure_stages, present_files, requeue, verified_files,
+    RunnerBusy, RunnerLock, StageRunner, Watch, admitted_files, ensure_stages, mark_changed, mark_out_of_scope,
+    requeue, verified_files,
 )
 from qronos_media.paths import UnsafeMediaPath, has_link_component, local_path, owned_child
 from qronos_media.permissions import Approval, MediaPermissionRefused, MediaPermissions, Pending
 from qronos_media.reports import FORMATS, KINDS, gather, levels, render, write_report
-from qronos_media.resources import MediaResourceAuthority
+from qronos_media.resources import MediaResourceAuthority, ResourceRefused, StageNeeds
+from qronos_media.scope import OUT_OF_SCOPE, RootScope, mark, outside_scope, root_inside_state
 from qronos_media.scan import DEFAULT_MAX_DEPTH, apply, collect, validate_root
 from qronos_media.search import search_dialogue
 from qronos_media.stages import PENDING_CAPABILITIES, STAGES, subtitles_input_fingerprint
@@ -46,6 +48,9 @@ from qronos_media.store import MediaStore, open_read_only
 from qronos_media.tools import MediaTools
 
 DEFAULT_CACHE_QUOTA_BYTES = 512 * 1024**2
+#: Strict verification is a full hash; these bound one interactive call.
+DEFAULT_VERIFY_SECONDS = 30.0
+MAX_VERIFY_SECONDS = 600.0
 MAX_CACHED_REPORTS = 50
 _PLAYERS = {"mpv": "--start={seconds}", "vlc": "--start-time={seconds}"}
 
@@ -98,6 +103,7 @@ class MediaService:
         authority: MediaResourceAuthority,
         permissions: MediaPermissions,
         cache_quota_bytes: int = DEFAULT_CACHE_QUOTA_BYTES,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.layout = MediaLayout(local_path(data_dir))
         if has_link_component(self.layout.root):
@@ -111,6 +117,14 @@ class MediaService:
         self.authority = authority
         self.permissions = permissions
         self.cache_quota_bytes = int(cache_quota_bytes)
+        # The index's own data folder is never an input (database, cache, reports).
+        self._excluded: tuple[Path, ...] = (self.layout.root,)
+        self._monotonic = monotonic
+
+    def _runner(self) -> StageRunner:
+        return StageRunner(self.store, tools=self.tools, authority=self.authority, permissions=self.permissions,
+                           cache_dir=self.layout.cache, cache_quota_bytes=self.cache_quota_bytes,
+                           excluded=self._excluded, monotonic=self._monotonic)
 
     def close(self) -> None:
         self.store.close()
@@ -125,6 +139,8 @@ class MediaService:
             raise MediaRequestError("max_depth must be between 0 and 64")
         root = local_path(path)
         validate_root(root, kind)
+        if root_inside_state(root, self._excluded):
+            raise MediaRequestError("that location is the media index's own data folder; choose another")
         decided = self.permissions.request_root(root, kind, int(max_depth))
         if isinstance(decided, Pending):
             return _pending_json(decided)
@@ -139,6 +155,8 @@ class MediaService:
         payload, approval = self.permissions.approve_root(approval_id, _decision(decision), secret)
         root = local_path(payload["path"])
         validate_root(root, payload["kind"])  # the folder may have changed while the question was open
+        if root_inside_state(root, self._excluded):
+            raise MediaRequestError("that location is the media index's own data folder; choose another")
         return self._record_root(root, payload["kind"], int(payload["maxDepth"]), approval)
 
     def _record_root(self, root: Path, kind: str, max_depth: int, approval: Approval) -> dict[str, Any]:
@@ -151,7 +169,16 @@ class MediaService:
                 (str(root), kind, approval.action_id, approval.decision, approval.approved_at, max_depth),
             )
             row = db.execute("SELECT * FROM roots WHERE path = ?", (str(root),)).fetchone()
-        return {"status": "added", **self._root_json(row)}
+            candidates = [r["path"] for r in db.execute(
+                "SELECT path FROM files WHERE root_id = ? AND NOT (status = 'missing' AND error = ?)",
+                (row["root_id"], OUT_OF_SCOPE))]
+        # A re-approval may narrow the scope (kind or depth): rows outside it stop
+        # being readable now, not at the next scan. Path checks run with no
+        # transaction open.
+        failing = outside_scope(candidates, RootScope.from_row(row), self._excluded)
+        with self.store.transaction() as db:
+            narrowed = mark(db, failing)
+        return {"status": "added", **self._root_json(row), "outOfScope": narrowed}
 
     def remove_root(self, root_id: int) -> dict[str, Any]:
         """Forget a root and every asset that no other root still has a file for.
@@ -216,15 +243,14 @@ class MediaService:
                 summaries.append({"root_id": root["root_id"], "root": root["path"], "refused": exc.reason,
                                   "detail": str(exc)})
                 continue
-            summary, entries = collect(root)
-            summaries.append(apply(self.store.transaction, root, summary, entries).as_json())
+            summary, entries = collect(root, excluded=self._excluded)
+            summaries.append(apply(self.store.transaction, root, summary, entries, excluded=self._excluded).as_json())
         return summaries
 
     # ------------------------------------------------------------- index
 
     def index(self, *, max_seconds: float = 60.0, max_stages: int = 100) -> dict[str, Any]:
-        runner = StageRunner(self.store, tools=self.tools, authority=self.authority, permissions=self.permissions,
-                             cache_dir=self.layout.cache, cache_quota_bytes=self.cache_quota_bytes)
+        runner = self._runner()
         lock = RunnerLock(self.layout.lock)
         try:
             lock.acquire()
@@ -279,7 +305,8 @@ class MediaService:
             raise MediaRequestError("unknown stage")
         if self.store.db.execute("SELECT 1 FROM assets WHERE asset_id = ?", (asset_id,)).fetchone() is None:
             raise MediaRequestError("unknown asset")
-        fingerprint = subtitles_input_fingerprint(present_files(self.store.db, asset_id))
+        copies, _ = admitted_files(self.store.db, asset_id, None, self._excluded)
+        fingerprint = subtitles_input_fingerprint(copies, self._excluded)
         with self.store.transaction() as db:
             ensure_stages(db, asset_id, {"subtitles": fingerprint})
             affected = requeue(db, asset_id, stage, "reindex requested")
@@ -325,7 +352,7 @@ class MediaService:
         except FileNotFoundError:
             raise MediaRequestError("the media index is empty") from None
         try:
-            return search_dialogue(db, query, **options)
+            return search_dialogue(db, query, excluded=self._excluded, **options)
         finally:
             db.close()
 
@@ -394,23 +421,126 @@ class MediaService:
 
     # ----------------------------------------------------------- outputs
 
-    def verify_asset(self, asset_id: str) -> dict[str, Any]:
-        """Strict check: re-hash every present copy and compare with the asset's hash.
+    def _allowed_roots_now(self, root_ids: set[int]) -> tuple[set[int], dict[str, str]]:
+        """Ask the gate now, for each root of interest; nothing is read before this."""
+        allowed: set[int] = set()
+        refused: dict[str, str] = {}
+        for row in self.store.db.execute("SELECT * FROM roots WHERE enabled = 1").fetchall():
+            if int(row["root_id"]) not in root_ids:
+                continue
+            approval = Approval(row["approval_action_id"], row["approval_decision"], row["approved_at"])
+            try:
+                self.permissions.recheck_root(Path(row["path"]), approval, row["kind"], row["max_depth"])
+            except MediaPermissionRefused as exc:
+                refused[row["path"]] = exc.reason
+                continue
+            allowed.add(int(row["root_id"]))
+        return allowed, refused
 
-        Search uses a cheap stat comparison; this is the full check used before
-        a playback plan or an export, because only the hash proves the
-        timestamps belong to these exact bytes.
+    def verify_asset(self, asset_id: str, *, max_seconds: float = DEFAULT_VERIFY_SECONDS,
+                     cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """Strict check: re-hash a copy in full and compare it with the asset's hash.
+
+        Search uses a cheap stat comparison; this is the proof used before a
+        playback plan or an export, because only the hash shows the timestamps
+        belong to these exact bytes. It is never replaced by a sample.
+
+        It is an owned, bounded operation like indexing: the gate is asked for
+        every root first (nothing is read for a refused or revoked root); each
+        candidate is admitted against its root's current scope; the read holds
+        a resource lease (so it defers to gaming/creator work); and while it
+        hashes it observes pause, ``cancelled`` (Stop), the time budget,
+        permission revocation and lease renewal. Outcomes:
+
+        ``verified``  a copy's bytes hash to the asset (``verified`` lists it);
+        ``mismatch``  every admitted copy hashed differently (sent for re-identity);
+        ``no_copy``   no present, in-scope copy whose stat still matches;
+        ``refused``   the gate refused every root holding a copy (``refusedRoots``);
+        ``deferred``  the resource authority said not now (``reason``);
+        ``incomplete`` stopped mid-hash (``reason``: paused, cancelled,
+                      time_budget, permission, deferred:...); nothing is claimed.
         """
-        asset = self.store.db.execute("SELECT sha256 FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()
+        if not (0.05 <= float(max_seconds) <= MAX_VERIFY_SECONDS):
+            raise MediaRequestError(f"max_seconds must be between 0.05 and {MAX_VERIFY_SECONDS}")
+        db = self.store.db
+        asset = db.execute("SELECT sha256 FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()
         if asset is None:
             raise MediaRequestError("unknown asset")
-        verified, mismatched = [], []
-        for path in verified_files(self.store.db, asset_id)[0]:
-            try:
-                (verified if full_sha256(path) == asset["sha256"] else mismatched).append(str(path))
-            except OSError:
-                mismatched.append(str(path))
-        return {"assetId": asset_id, "sha256": asset["sha256"], "verified": verified, "mismatched": mismatched}
+        result: dict[str, Any] = {"assetId": asset_id, "sha256": asset["sha256"], "status": "no_copy",
+                                  "verified": [], "mismatched": [], "outOfScope": [], "refusedRoots": {},
+                                  "refusedCopies": [],
+                                  "reason": ""}
+        root_ids = {int(r[0]) for r in db.execute(
+            "SELECT DISTINCT root_id FROM files WHERE asset_id = ? AND status = 'present'", (asset_id,))}
+        allowed, refused = self._allowed_roots_now(root_ids)
+        result["refusedRoots"] = refused
+        if root_ids and not allowed:
+            result["status"] = "refused"
+            return result
+        excluded = self._excluded
+        good, stale, outside = verified_files(db, asset_id, allowed, excluded)
+        result["outOfScope"] = outside
+        if stale or outside:
+            with self.store.transaction() as tx:
+                mark_changed(tx, stale)
+                mark_out_of_scope(tx, outside)
+        if not good:
+            return result
+        try:
+            lease = self.authority.reserve(f"media:verify:{asset_id}", StageNeeds("verify"))
+        except ResourceRefused as exc:
+            result["status"], result["reason"] = "deferred", str(exc)
+            return result
+        runner = self._runner()
+        holder = [lease]
+        # Roots are bound per copy as it is opened: the copy being hashed is
+        # carried only by its own root's permission.
+        watch = Watch(runner, deadline=self._monotonic() + float(max_seconds), holder=holder, roots=set())
+
+        def stop() -> bool:
+            if cancelled is not None and cancelled():
+                watch.reason = watch.reason or "cancelled"
+            return watch.poll()
+
+        try:
+            for path in good:
+                # Admitted and stat-matched a moment ago; check scope and a fresh
+                # gate answer for this copy's own root again at the open.
+                admitted, _ = admitted_files(db, asset_id, allowed, excluded)
+                if path not in admitted:
+                    result["outOfScope"].append(str(path))
+                    continue
+                row = db.execute("SELECT root_id FROM files WHERE path = ?", (str(path),)).fetchone()
+                if row is None or not runner.root_allowed_now(int(row["root_id"])):
+                    result["refusedCopies"].append(str(path))
+                    continue
+                watch.bind(int(row["root_id"]))
+                try:
+                    before = FileState.of(path)
+                    digest = full_sha256(path, cancelled=stop)
+                    unchanged = FileState.of(path) == before
+                except HashCancelled:
+                    result["status"], result["reason"] = "incomplete", watch.reason or "cancelled"
+                    result["verified"] = []
+                    return result
+                except OSError:
+                    digest, unchanged = "", False
+                if digest == asset["sha256"] and unchanged:
+                    result["verified"].append(str(path))
+                    result["status"] = "verified"
+                    return result
+                result["mismatched"].append(str(path))
+                with self.store.transaction() as tx:
+                    mark_changed(tx, [str(path)])
+            if result["mismatched"]:
+                result["status"] = "mismatch"
+            elif result["refusedCopies"]:
+                result["status"] = "refused"
+            else:
+                result["status"] = "no_copy"
+            return result
+        finally:
+            self.authority.release(holder[0])
 
     def generate_report(self, asset_id: str, *, fmt: str = "json", kind: str = "full") -> dict[str, Any]:
         if fmt not in FORMATS or kind not in KINDS:
@@ -429,19 +559,21 @@ class MediaService:
             owned_child(exports, old.name).unlink(missing_ok=True)
         return written
 
-    def export_report(self, asset_id: str, destination: str, *, fmt: str = "json",
-                      kind: str = "full") -> dict[str, Any]:
+    def export_report(self, asset_id: str, destination: str, *, fmt: str = "json", kind: str = "full",
+                      verify_seconds: float = DEFAULT_VERIFY_SECONDS,
+                      cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         """Write a report to a user-chosen new file, as a gated CREATE_OR_EDIT_FILE action.
 
-        The content is rendered now and its hash is part of the request the
-        gate sees; if approval is needed, exactly these bytes are what the
-        approval id can later write.
+        Order: destination checks, then the report is rendered from the index
+        (no media read), then the file-write gate decides on those exact bytes.
+        Only an allowed or approved export goes on to the strict verification
+        (which asks the read gate itself) and the write. A copy that cannot be
+        verified now returns ``status: "not_verified"`` with the verification
+        result, and nothing is written.
         """
         if fmt not in FORMATS or kind not in KINDS:
             raise MediaRequestError(f"format must be one of {FORMATS}; kind one of {KINDS}")
         target = self._export_target(destination, fmt)
-        if not self.verify_asset(asset_id)["verified"]:
-            raise MediaRequestError("no copy of this asset still matches its indexed hash; reindex first")
         try:
             content = render(gather(self.store.db, asset_id, kind), fmt).encode("utf-8")
         except KeyError:
@@ -451,15 +583,29 @@ class MediaService:
                                                   {"assetId": asset_id, "format": fmt, "kind": kind})
         if isinstance(decided, Pending):
             return _pending_json(decided)
-        return self._write_export(target, content, digest, fmt, kind, decided)
+        return self._verified_write(asset_id, target, content, digest, fmt, kind, decided, verify_seconds, cancelled)
 
-    def approve_export(self, approval_id: str, decision: str, *, secret: str | None = None) -> dict[str, Any]:
+    def approve_export(self, approval_id: str, decision: str, *, secret: str | None = None,
+                       verify_seconds: float = DEFAULT_VERIFY_SECONDS,
+                       cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         payload, approval = self.permissions.approve_export(approval_id, _decision(decision), secret)
         target = self._export_target(payload["destination"], payload["format"])
         content = payload["content"]
         if hashlib.sha256(content).hexdigest() != payload["sha256"]:
             raise MediaRequestError("prepared report content does not match its approved hash")
-        return self._write_export(target, content, payload["sha256"], payload["format"], payload["kind"], approval)
+        return self._verified_write(payload["assetId"], target, content, payload["sha256"], payload["format"],
+                                    payload["kind"], approval, verify_seconds, cancelled)
+
+    def _verified_write(self, asset_id: str, target: Path, content: bytes, digest: str, fmt: str, kind: str,
+                        approval: Approval, verify_seconds: float,
+                        cancelled: Callable[[], bool] | None) -> dict[str, Any]:
+        verification = self.verify_asset(asset_id, max_seconds=verify_seconds, cancelled=cancelled)
+        if verification["status"] != "verified":
+            return {"status": "not_verified", "assetId": asset_id, "verification": verification,
+                    "written": False}
+        written = self._write_export(target, content, digest, fmt, kind, approval)
+        written["verifiedCopy"] = verification["verified"][0]
+        return written
 
     @staticmethod
     def _export_target(destination: str, fmt: str) -> Path:
@@ -486,24 +632,31 @@ class MediaService:
         return {"status": "written", "path": str(target), "sha256": digest, "bytes": len(content), "format": fmt,
                 "kind": kind, "approval": {"actionId": approval.action_id, "decision": approval.decision}}
 
-    def open_timestamp(self, asset_id: str, start_ms: int, *, player: str | None = None) -> dict[str, Any]:
+    def open_timestamp(self, asset_id: str, start_ms: int, *, player: str | None = None,
+                       verify_seconds: float = DEFAULT_VERIFY_SECONDS,
+                       cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         """Plan opening a file at a time. Launching is left to Qronos's approval flow.
 
-        The copy offered is re-hashed first, so the timestamp refers to the
-        exact cut it was indexed from.
+        The copy offered must pass :meth:`verify_asset` now, so the timestamp
+        refers to the exact cut it was indexed from. Otherwise the result is
+        ``status: "not_verified"`` with the verification outcome and no path.
         """
-        verified = self.verify_asset(asset_id)["verified"]
-        if not verified:
-            raise MediaRequestError("no copy of this asset still matches its indexed hash")
-        seconds = max(0.0, int(start_ms) / 1000.0)
-        plan: dict[str, Any] = {"assetId": asset_id, "path": verified[0], "startSeconds": seconds,
-                                "hashVerified": True, "launch": "requires_qronos_approved_executor"}
+        executable = None
         if player:
             executable = local_path(player)
-            name = executable.stem.casefold()
-            if name not in _PLAYERS or not executable.is_file():
+            if executable.stem.casefold() not in _PLAYERS or not executable.is_file():
                 raise MediaRequestError("player must be an existing mpv or vlc executable")
-            plan["argv"] = [str(executable), _PLAYERS[name].format(seconds=f"{seconds:.3f}"), verified[0]]
+        verification = self.verify_asset(asset_id, max_seconds=verify_seconds, cancelled=cancelled)
+        if verification["status"] != "verified":
+            return {"status": "not_verified", "assetId": asset_id, "verification": verification,
+                    "launch": "not_planned"}
+        path = verification["verified"][0]
+        seconds = max(0.0, int(start_ms) / 1000.0)
+        plan: dict[str, Any] = {"status": "planned", "assetId": asset_id, "path": path, "startSeconds": seconds,
+                                "hashVerified": True, "launch": "requires_qronos_approved_executor"}
+        if executable is not None:
+            plan["argv"] = [str(executable), _PLAYERS[executable.stem.casefold()].format(seconds=f"{seconds:.3f}"),
+                            path]
         return plan
 
 

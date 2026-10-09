@@ -86,17 +86,24 @@ class _RootGrant:
     grant: ActionGrant
     kind: str
     max_depth: int
+    #: When the grant stops carrying background work, on this adapter's
+    #: monotonic clock: approval time plus the gate's own grant lifetime.
+    expires_at: float
 
 
 class GatePermissions:
     """The production adapter: every answer comes from ``security.gate``."""
 
     def __init__(self, *, audit: AuditSink | None = None, ledger: ApprovalLedger | None = None,
-                 secrets: ApprovalSecretStore | None = None, clock: Callable[[], float] = time.time) -> None:
+                 secrets: ApprovalSecretStore | None = None, clock: Callable[[], float] = time.time,
+                 monotonic: Callable[[], float] = time.monotonic) -> None:
         self.audit = audit
         self.ledger = ledger
         self.secrets = secrets
         self.clock = clock
+        # Grant expiry is measured on this clock (tests inject a fake one;
+        # the lifetime itself is always the gate's own).
+        self.monotonic = monotonic
         # Grants minted in this process for roots, by exact path, with the
         # scope they approved. They expire on the gate's own clock and die
         # with the process.
@@ -180,7 +187,9 @@ class GatePermissions:
         payload, grant, verdict = self._take(approval_id, ROOT_OPERATION, decision, secret)
         request: ActionRequest = payload["request"]
         if grant is not None:
-            self._root_grants[payload["path"]] = _RootGrant(grant, payload["kind"], int(payload["maxDepth"]))
+            lifetime = max(0.0, float(grant.expires_at) - float(grant.issued_at))
+            self._root_grants[payload["path"]] = _RootGrant(
+                grant, payload["kind"], int(payload["maxDepth"]), self.monotonic() + lifetime)
         label = "allow" if grant is None else f"grant:{verdict.decision.value}"
         return payload, Approval(request.action_id, label, self.clock())
 
@@ -195,7 +204,8 @@ class GatePermissions:
         if verdict.refused:
             raise MediaPermissionRefused("revoked", verdict.reason)
         held = self._root_grants.get(str(path))
-        if (held is None or not held.grant.active() or held.grant.action_id != approval.action_id
+        if (held is None or self.monotonic() >= held.expires_at or not held.grant.active()
+                or held.grant.action_id != approval.action_id
                 or (held.kind, held.max_depth) != (kind, int(max_depth))):
             self._root_grants.pop(str(path), None)
             raise MediaPermissionRefused("approval_required", "the Files policy asks before reading; approve again")

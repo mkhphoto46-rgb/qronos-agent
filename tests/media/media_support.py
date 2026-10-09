@@ -89,13 +89,14 @@ class FakePermissions:
 
 
 def make_service(data_dir: Path, *, tools: MediaTools | None = TOOLS, permissions=None, authority=None,
-                 cache_quota_bytes: int = 64 * 1024**2) -> MediaService:
+                 cache_quota_bytes: int = 64 * 1024**2, **options) -> MediaService:
     return MediaService(
         data_dir,
         tools=tools,
         authority=authority or StandaloneCpuAuthority(data_dir, activity=quiet_activity, reserve_bytes=0),
         permissions=permissions or FakePermissions(),
         cache_quota_bytes=cache_quota_bytes,
+        **options,
     )
 
 

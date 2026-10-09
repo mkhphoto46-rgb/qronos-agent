@@ -30,6 +30,7 @@ import time
 from typing import Any
 
 from qronos_media.jobs import file_matches_hash
+from qronos_media.scope import OutOfScope, admit, load_scopes
 from qronos_media.text import normalise_for_search
 
 MAX_LIMIT = 100
@@ -70,9 +71,10 @@ class BudgetExhausted(Exception):
 class Budget:
     """Wall-clock and work limits for one query."""
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, excluded: tuple = ()) -> None:
         self.deadline = time.monotonic() + seconds
         self.ratio_calls = 0
+        self.excluded = tuple(excluded)
 
     def check(self) -> None:
         if time.monotonic() >= self.deadline:
@@ -95,7 +97,12 @@ def _phrase(tokens: list[str]) -> str:
 
 
 def _filters(language: str | None, asset_id: str | None) -> tuple[str, list[Any]]:
-    clauses, params = [], []
+    # An asset whose every copy fell outside its root's current scope (a
+    # narrowed depth, a removed folder) is not offered any more.
+    clauses = ["NOT (EXISTS (SELECT 1 FROM files f WHERE f.asset_id = d.asset_id) "
+               "AND NOT EXISTS (SELECT 1 FROM files f WHERE f.asset_id = d.asset_id "
+               "AND (f.error IS NULL OR f.error != 'out_of_scope')))"]
+    params: list[Any] = []
     if language:
         clauses.append("t.language = ?")
         params.append(language)
@@ -223,11 +230,19 @@ def _evidence(db: sqlite3.Connection, item: dict, budget: Budget) -> dict[str, A
                        (row["asset_id"],)).fetchone()
     track = db.execute("SELECT * FROM subtitle_tracks WHERE track_id = ?", (row["track_id"],)).fetchone()
     paths, stale = [], []
+    scopes = load_scopes(db)
     copies = db.execute(
         f"SELECT * FROM files WHERE asset_id = ? AND status = 'present' ORDER BY path LIMIT {MAX_EVIDENCE_PATHS + 1}",
         (row["asset_id"],)).fetchall()
     for copy in copies[:MAX_EVIDENCE_PATHS]:
         budget.check()
+        scope = scopes.get(int(copy["root_id"]))
+        try:
+            if scope is None:
+                raise OutOfScope("no_root")
+            admit(scope, copy["path"], budget.excluded)
+        except OutOfScope:
+            continue  # not offered as a path to open
         (paths if file_matches_hash(copy) else stale).append(copy["path"])
     scene = db.execute(
         "SELECT scene_index, start_ms, end_ms FROM scenes WHERE asset_id = ? AND start_ms <= ? AND end_ms > ?",
@@ -278,6 +293,7 @@ def search_dialogue(
     asset_id: str | None = None,
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
+    excluded: tuple = (),
 ) -> dict[str, Any]:
     if mode not in {"auto", "exact", "fuzzy"}:
         raise SearchError("mode must be auto, exact or fuzzy")
@@ -293,7 +309,7 @@ def search_dialogue(
     norm = normalise_for_search(query)
     if not norm:
         raise SearchError("query has no searchable words")
-    budget = Budget(float(budget_seconds))
+    budget = Budget(float(budget_seconds), excluded)
     notes: list[str] = []
     stopped: str | None = None
     items: list[dict] = []

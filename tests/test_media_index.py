@@ -440,14 +440,15 @@ def test_open_timestamp_plans_only_verified_copies(tmp_path: Path, base_video: P
     player.parent.mkdir()
     player.write_bytes(b"")  # never executed; the plan is only built
     plan = service.open_timestamp(asset, 2_200, player=str(player))
-    assert plan["launch"] == "requires_qronos_approved_executor"
+    assert plan["status"] == "planned" and plan["launch"] == "requires_qronos_approved_executor"
     assert plan["argv"][:2] == [str(player), "--start=2.200"]
     with pytest.raises(MediaRequestError):
         service.open_timestamp(asset, 0, player=str(tmp_path / "players" / "cmd.exe"))
     for film in library.rglob("*.mkv"):
         film.write_bytes(film.read_bytes() + b"\0")
-    with pytest.raises(MediaRequestError):
-        service.open_timestamp(asset, 2_200)
+    refused = service.open_timestamp(asset, 2_200)
+    assert refused["status"] == "not_verified" and "path" not in refused
+    assert refused["verification"]["status"] == "no_copy"  # stat no longer matches: nothing was hashed
     service.close()
 
 
@@ -553,7 +554,6 @@ def test_permission_revoked_mid_decode_stops_and_requeues(tmp_path: Path, base_v
     service.add_root(str(library))
     service.scan()
     monkeypatch.setattr(stages_module, "SCENE_CHUNK_SECONDS", 1.5)
-    monkeypatch.setattr(jobs_module, "PERMISSION_RECHECK_SECONDS", 0.0)
     real = stages_module.run_bounded
     chunks = []
 
@@ -602,7 +602,8 @@ def test_verify_asset_rehashes_and_export_requires_a_matching_copy(tmp_path: Pat
     permissions = FakePermissions()
     service, library, _ = _indexed(tmp_path, base_video, permissions=permissions)
     asset = _only_asset(service)
-    assert len(service.verify_asset(asset)["verified"]) == 2
+    first = service.verify_asset(asset)
+    assert first["status"] == "verified" and len(first["verified"]) == 1  # one proven copy is enough
     permissions.ask = True
     destination = tmp_path / "report.json"
     pending = service.export_report(asset, str(destination))
@@ -617,9 +618,10 @@ def test_verify_asset_rehashes_and_export_requires_a_matching_copy(tmp_path: Pat
         stat = film.stat()
         film.write_bytes(bytes(data))
         os.utime(film, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # same size, same mtime, same file id
-    assert service.verify_asset(asset)["verified"] == []  # only the re-hash notices
-    with pytest.raises(MediaRequestError):
-        service.export_report(asset, str(tmp_path / "second.json"))
-    with pytest.raises(MediaRequestError):
-        service.open_timestamp(asset, 0)
+    after = service.verify_asset(asset)  # only the re-hash notices
+    assert after["status"] == "mismatch" and after["verified"] == [] and len(after["mismatched"]) == 2
+    permissions.ask = False
+    refused = service.export_report(asset, str(tmp_path / "second.json"))
+    assert refused["status"] == "not_verified" and not (tmp_path / "second.json").exists()
+    assert service.open_timestamp(asset, 0)["status"] == "not_verified"
     service.close()

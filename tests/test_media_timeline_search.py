@@ -173,7 +173,7 @@ def test_evidence_for_many_copies_is_bounded(tmp_path: Path) -> None:
     store = _bulk_index(tmp_path / "i.sqlite3", ["he left when i was nine"])
     with store.transaction() as db:
         db.execute("INSERT INTO roots(root_id, path, kind, approval_action_id, approval_decision, approved_at, "
-                   "max_depth) VALUES (1, 'C:/fixture', 'folder', 'a', 'allow', 0, 1)")
+                   "max_depth) VALUES (1, ?, 'folder', 'a', 'allow', 0, 1)", (str(tmp_path),))
         db.executemany(
             "INSERT INTO files(path, root_id, size, mtime_ns, file_id, asset_id, status, seen_at) "
             "VALUES (?, 1, 1, 1, 1, 'a_00000000000000000000000000000001', 'present', 0)",

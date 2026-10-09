@@ -24,6 +24,7 @@ from typing import Callable
 
 from qronos_media.identity import checked_asset_id, full_sha256
 from qronos_media.paths import UnsafeMediaPath, owned_child, readable_media_file
+from qronos_media.scope import OutOfScope, admit_sidecar
 from qronos_media.probe import ProbeResult, probe
 from qronos_media.resources import StageNeeds
 from qronos_media.subtitles import (
@@ -117,6 +118,11 @@ class StageContext:
     # Uncached pause/cancel check for chunk boundaries; ``cancelled`` is the
     # cheap, rate-limited one polled while a child runs.
     interrupted: Callable[[], bool] = lambda: False
+    #: The media index's own data folder: never an input.
+    excluded: tuple = ()
+    #: Re-admission of a copy right before a decoder opens it (scope and a
+    #: fresh gate answer for its root). Production always sets it; None refuses.
+    admit: Callable[[Path], Path] = None  # type: ignore[assignment]
 
     def checkpoint_boundary(self) -> None:
         if self.interrupted():
@@ -128,13 +134,15 @@ class StageContext:
         return self.tools
 
     def primary_file(self) -> Path:
-        """The copy a decoder may open: re-validated, no link anywhere on its path."""
+        """The copy a decoder may open: admitted again now, no link anywhere on its path."""
+        if self.admit is None:
+            raise StageFailed("no admission check was provided; refusing to open any copy")
         for path in self.files:
             try:
-                return readable_media_file(path)
-            except UnsafeMediaPath:
+                return readable_media_file(self.admit(path))
+            except (UnsafeMediaPath, OutOfScope):
                 continue
-        raise StageFailed("no present, link-free copy of this asset")
+        raise StageFailed("no present, in-scope, link-free copy of this asset")
 
     def asset(self) -> sqlite3.Row:
         return self.db.execute("SELECT * FROM assets WHERE asset_id = ?", (self.asset_id,)).fetchone()
@@ -168,11 +176,23 @@ def run_metadata(ctx: StageContext) -> Commit:
 
 # ----------------------------------------------------------------- subtitles
 
-def subtitles_input_fingerprint(files: list[Path]) -> str:
-    """Changes when a sidecar subtitle beside any copy appears, changes or goes."""
+def admitted_sidecars(video: Path, excluded: tuple) -> list:
+    """Sidecars beside an admitted video that are themselves admitted (same folder, no link, not media state)."""
+    found = []
+    for sidecar in find_sidecars(video):
+        try:
+            admit_sidecar(video, sidecar.path, excluded)
+        except OutOfScope:
+            continue
+        found.append(sidecar)
+    return found
+
+
+def subtitles_input_fingerprint(files: list[Path], excluded: tuple) -> str:
+    """Changes when an admitted sidecar beside any admitted copy appears, changes or goes."""
     parts = []
     for video in files:
-        for sidecar in find_sidecars(video):
+        for sidecar in admitted_sidecars(video, excluded):
             try:
                 info = sidecar.path.stat()
             except OSError:
@@ -238,7 +258,7 @@ def run_subtitles(ctx: StageContext) -> Commit:
 
     seen_hashes: set[str] = set()
     for copy in ctx.files:
-        for sidecar in find_sidecars(copy):
+        for sidecar in admitted_sidecars(ctx.admit(copy), ctx.excluded):
             if ctx.cancelled():
                 raise ChildCancelled("subtitles cancelled")
             try:

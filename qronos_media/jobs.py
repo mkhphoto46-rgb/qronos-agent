@@ -39,6 +39,7 @@ from typing import Callable
 from qronos_media.identity import FileState, HashCancelled, asset_id_for, full_sha256
 from qronos_media.permissions import Approval, MediaPermissionRefused, MediaPermissions
 from qronos_media.resources import MediaResourceAuthority, ResourceRefused, StageNeeds
+from qronos_media.scope import OUT_OF_SCOPE, OutOfScope, admit, load_scopes
 from qronos_media.stages import RUNNERS, STAGES, StageContext, StageFailed, downstream, subtitles_input_fingerprint
 from qronos_media.store import MediaStore
 from qronos_media.tools import ChildCancelled, MediaToolError, MediaTools
@@ -188,18 +189,52 @@ def file_matches_hash(row: sqlite3.Row) -> bool:
         row["hashed_size"], row["hashed_mtime_ns"], row["hashed_file_id"])
 
 
-def verified_files(db: sqlite3.Connection, asset_id: str, roots: set[int] | None = None) -> tuple[list[Path], list[str]]:
-    """Copies of an asset that still match its hash, and the paths that do not."""
-    good: list[Path] = []
-    stale: list[str] = []
+def admitted_files(db: sqlite3.Connection, asset_id: str, roots: set[int] | None,
+                   excluded: tuple[Path, ...]) -> tuple[list[Path], list[str]]:
+    """Present copies the index may read now (qronos_media.scope.admit), and the ones it may not.
+
+    ``roots`` limits the answer to roots the gate allows; ``None`` skips only
+    that filter, never the path admission. ``excluded`` is the media index's
+    own data folder.
+    """
+    scopes = load_scopes(db)
+    shield = excluded
+    inside: list[Path] = []
+    outside: list[str] = []
     for row in db.execute("SELECT * FROM files WHERE asset_id = ? AND status = 'present' ORDER BY path", (asset_id,)):
         if roots is not None and row["root_id"] not in roots:
             continue
-        if file_matches_hash(row):
-            good.append(Path(row["path"]))
+        scope = scopes.get(int(row["root_id"]))
+        try:
+            if scope is None:
+                raise OutOfScope("no_root")
+            inside.append(admit(scope, row["path"], shield))
+        except OutOfScope:
+            outside.append(row["path"])
+    return inside, outside
+
+
+def verified_files(db: sqlite3.Connection, asset_id: str, roots: set[int] | None,
+                   excluded: tuple[Path, ...]) -> tuple[list[Path], list[str], list[str]]:
+    """Admitted copies that still match their hash; admitted ones that do not; out-of-scope paths."""
+    inside, outside = admitted_files(db, asset_id, roots, excluded)
+    rows = {Path(row["path"]): row for row in db.execute(
+        "SELECT * FROM files WHERE asset_id = ? AND status = 'present'", (asset_id,))}
+    good: list[Path] = []
+    stale: list[str] = []
+    for path in inside:
+        row = rows.get(path)
+        if row is not None and file_matches_hash(row):
+            good.append(path)
         else:
-            stale.append(row["path"])
-    return good, stale
+            stale.append(str(path))
+    return good, stale, outside
+
+
+def mark_out_of_scope(db: sqlite3.Connection, paths: list[str]) -> None:
+    """Rows the index must not read any more; in a transaction. The asset is kept."""
+    for path in paths:
+        db.execute("UPDATE files SET status = 'missing', error = ? WHERE path = ?", (OUT_OF_SCOPE, path))
 
 
 def mark_changed(db: sqlite3.Connection, paths: list[str]) -> None:
@@ -231,17 +266,24 @@ class RunReport:
     completed: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     identity_changed: list[str] = field(default_factory=list)
+    out_of_scope: list[str] = field(default_factory=list)
     refused_roots: dict[str, str] = field(default_factory=dict)
     stopped: str = "idle"
     detail: str = ""
 
     def as_json(self) -> dict[str, object]:
         return {"hashed": self.hashed, "completed": self.completed, "failed": self.failed,
-                "identityChanged": self.identity_changed, "refusedRoots": self.refused_roots,
+                "identityChanged": self.identity_changed, "outOfScope": self.out_of_scope,
+                "refusedRoots": self.refused_roots,
                 "stopped": self.stopped, "detail": self.detail}
 
 
-PERMISSION_RECHECK_SECONDS = 60.0
+#: Production default: while a hash or decoder runs, the gate is asked again
+#: for every root actually in use at least this often (a Files DENY or an
+#: expired approval stops the work within about this long). At every read
+#: handoff (before a file is stat'ed for hashing, before a stage starts,
+#: before a decoder opens a copy) the gate is asked fresh, with no cache.
+REVOCATION_CHECK_SECONDS = 2.0
 LEASE_RENEW_SECONDS = 30.0
 
 
@@ -252,6 +294,10 @@ class Watch:
     for chunk boundaries. Once tripped it stays tripped, and ``reason`` says
     why: paused, cancelled (job row changed), time_budget, permission or
     deferred (the resource lease could not be renewed).
+
+    ``roots`` are the roots of the copies *actually opened* under this watch
+    (:meth:`bind`). Every one of them must still be allowed; a different
+    copy's root that is still allowed never carries a revoked one.
     """
 
     def __init__(self, runner: "StageRunner", *, deadline: float, holder: list, roots: set[int],
@@ -259,24 +305,28 @@ class Watch:
         self.runner = runner
         self.deadline = deadline
         self.holder = holder
-        self.roots = roots
+        self.roots = set(roots)
         self.job = job
         self.reason: str | None = None
         self._last = -math.inf
-        self._renewed = time.monotonic()
+        self._renewed = runner.monotonic()
+
+    def bind(self, root_id: int) -> None:
+        """A copy under ``root_id`` is being opened under this watch."""
+        self.roots.add(int(root_id))
 
     def now(self) -> bool:
         if self.reason is not None:
             return True
         runner = self.runner
-        clock = time.monotonic()
+        clock = runner.monotonic()
         if runner.paused():
             self.reason = "paused"
         elif self.job is not None and runner._state(*self.job) != "RUNNING":
             self.reason = "cancelled"
         elif clock >= self.deadline:
             self.reason = "time_budget"
-        elif self.roots and not (self.roots & runner.allowed_roots()):
+        elif self.roots and not self.roots <= runner.allowed_roots(max_age=REVOCATION_CHECK_SECONDS):
             self.reason = "permission"
         elif clock - self._renewed >= LEASE_RENEW_SECONDS:
             try:
@@ -289,7 +339,7 @@ class Watch:
     def poll(self) -> bool:
         if self.reason is not None:
             return True
-        clock = time.monotonic()
+        clock = self.runner.monotonic()
         if clock - self._last < CONTROL_POLL_SECONDS:
             return False
         self._last = clock
@@ -299,7 +349,8 @@ class Watch:
 class StageRunner:
     def __init__(self, store: MediaStore, *, tools: MediaTools | None, authority: MediaResourceAuthority,
                  permissions: MediaPermissions, cache_dir: Path, cache_quota_bytes: int,
-                 clock: Callable[[], float] = time.time) -> None:
+                 excluded: tuple[Path, ...] = (), clock: Callable[[], float] = time.time,
+                 monotonic: Callable[[], float] = time.monotonic) -> None:
         self.store = store
         self.db = store.db
         self.tools = tools
@@ -311,6 +362,26 @@ class StageRunner:
         self._roots: set[int] = set()
         self._roots_checked = -math.inf
         self._report: RunReport | None = None
+        # The media index's own data folder: never an input.
+        self._excluded: tuple[Path, ...] = tuple(excluded) or (cache_dir.parent,)
+        self.monotonic = monotonic
+        self._watch: Watch | None = None
+
+    def _admit_now(self, path: Path) -> Path:
+        """Admit a copy immediately before a decoder opens it: scope, and a fresh gate answer.
+
+        The root asked is the root of *this* copy, and that root is bound to
+        the current watch, so its revocation stops the work in progress.
+        """
+        row = self.db.execute("SELECT root_id FROM files WHERE path = ? AND status = 'present'",
+                              (str(path),)).fetchone()
+        scope = load_scopes(self.db).get(int(row["root_id"])) if row is not None else None
+        if scope is None or not self.root_allowed_now(scope.root_id):
+            raise OutOfScope("not_allowed")
+        admitted = admit(scope, path, self._excluded)
+        if self._watch is not None:
+            self._watch.bind(scope.root_id)
+        return admitted
 
     # ---- control as seen by other processes
 
@@ -327,22 +398,34 @@ class StageRunner:
                 "UPDATE stages SET state = 'QUEUED', note = 'interrupted' WHERE state = 'RUNNING'"
             ).rowcount
 
-    def allowed_roots(self) -> set[int]:
-        """Roots the gate still allows, re-asked at most every minute."""
-        now = time.monotonic()
-        if now - self._roots_checked < PERMISSION_RECHECK_SECONDS:
-            return self._roots
-        allowed = set()
-        for row in self.db.execute("SELECT * FROM roots WHERE enabled = 1").fetchall():
-            approval = Approval(row["approval_action_id"], row["approval_decision"], row["approved_at"])
-            try:
-                self.permissions.recheck_root(Path(row["path"]), approval, row["kind"], row["max_depth"])
-            except MediaPermissionRefused as exc:
-                if self._report is not None:
-                    self._report.refused_roots[row["path"]] = exc.reason
-                continue
-            allowed.add(row["root_id"])
+    def _ask(self, row: sqlite3.Row) -> bool:
+        approval = Approval(row["approval_action_id"], row["approval_decision"], row["approved_at"])
+        try:
+            self.permissions.recheck_root(Path(row["path"]), approval, row["kind"], row["max_depth"])
+        except MediaPermissionRefused as exc:
+            if self._report is not None:
+                self._report.refused_roots[row["path"]] = exc.reason
+            return False
+        return True
+
+    def allowed_roots(self, *, max_age: float = REVOCATION_CHECK_SECONDS) -> set[int]:
+        """Roots the gate allows, from an answer no older than ``max_age`` seconds (0 = ask now)."""
+        now = self.monotonic()
+        if max_age > 0 and now - self._roots_checked < max_age:
+            return set(self._roots)
+        allowed = {int(row["root_id"]) for row in self.db.execute("SELECT * FROM roots WHERE enabled = 1").fetchall()
+                   if self._ask(row)}
         self._roots, self._roots_checked = allowed, now
+        return set(allowed)
+
+    def root_allowed_now(self, root_id: int) -> bool:
+        """A fresh gate answer for one root, used at every read handoff (no cache)."""
+        row = self.db.execute("SELECT * FROM roots WHERE root_id = ? AND enabled = 1", (int(root_id),)).fetchone()
+        allowed = row is not None and self._ask(row)
+        if allowed:
+            self._roots.add(int(root_id))
+        else:
+            self._roots.discard(int(root_id))
         return allowed
 
     def _roots_sql(self) -> tuple[str, list[int]]:
@@ -356,7 +439,7 @@ class StageRunner:
     def _hash_pending(self, deadline: float, report: RunReport) -> bool:
         """Hash files found by scan. Returns False if the run must stop."""
         skipped: set[str] = set()
-        while time.monotonic() < deadline:
+        while self.monotonic() < deadline:
             if self.paused():
                 report.stopped = "paused"
                 return False
@@ -368,13 +451,30 @@ class StageRunner:
             row = next((r for r in rows if r["path"] not in skipped), None)
             if row is None:
                 return True
+            # The row is a record, not permission: the path must be inside its
+            # root's current scope before it is even stat'ed for hashing.
+            scope = load_scopes(self.db).get(int(row["root_id"]))
+            try:
+                if scope is None:
+                    raise OutOfScope("no_root")
+                admit(scope, row["path"], self._excluded)
+            except OutOfScope as exc:
+                skipped.add(row["path"])
+                report.out_of_scope.append(f"{row['path']}:{exc.reason}")
+                with self.store.transaction() as db:
+                    mark_out_of_scope(db, [row["path"]])
+                continue
+            # A fresh gate answer for this file's own root, right before the read.
+            if not self.root_allowed_now(int(row["root_id"])):
+                skipped.add(row["path"])
+                continue
             try:
                 lease = self.authority.reserve(f"media:identity:{row['path']}", StageNeeds("identity"))
             except ResourceRefused as exc:
                 report.stopped, report.detail = "deferred", str(exc)
                 return False
             holder = [lease]
-            watch = Watch(self, deadline=deadline, holder=holder, roots={row["root_id"]})
+            watch = Watch(self, deadline=deadline, holder=holder, roots={int(row["root_id"])})
             try:
                 path = Path(row["path"])
                 try:
@@ -407,7 +507,8 @@ class StageRunner:
                         "hashed_mtime_ns = ?, hashed_file_id = ? WHERE path = ?",
                         (asset_id, before.size, before.mtime_ns, before.file_id, row["path"]),
                     )
-                    ensure_stages(db, asset_id, {"subtitles": subtitles_input_fingerprint(present_files(db, asset_id))}, now)
+                    copies, _ = admitted_files(db, asset_id, None, self._excluded)
+                    ensure_stages(db, asset_id, {"subtitles": subtitles_input_fingerprint(copies, self._excluded)}, now)
                 report.hashed += 1
             finally:
                 self.authority.release(holder[0])
@@ -443,7 +544,7 @@ class StageRunner:
         report = RunReport()
         self._report = report
         self._roots_checked = -math.inf
-        deadline = time.monotonic() + max(0.1, max_seconds)
+        deadline = self.monotonic() + max(0.1, max_seconds)
         if self.paused():
             report.stopped = "paused"
             return report
@@ -451,7 +552,7 @@ class StageRunner:
             return report
         skip: set[str] = set()
         while len(report.completed) + len(report.failed) < max_stages:
-            if time.monotonic() >= deadline:
+            if self.monotonic() >= deadline:
                 report.stopped = "time_budget"
                 return report
             if self.paused():
@@ -470,10 +571,14 @@ class StageRunner:
         return report
 
     def _verified(self, asset_id: str) -> list[Path]:
-        good, stale = verified_files(self.db, asset_id, self.allowed_roots())
-        if stale:
+        # A stage is a read handoff: ask the gate fresh for every root.
+        good, stale, outside = verified_files(self.db, asset_id, self.allowed_roots(max_age=0), self._excluded)
+        if stale or outside:
             with self.store.transaction() as db:
                 mark_changed(db, stale)
+                mark_out_of_scope(db, outside)
+        if self._report is not None:
+            self._report.out_of_scope.extend(f"{path}:{OUT_OF_SCOPE}" for path in outside)
         return good
 
     def _run_one(self, asset_id: str, stage: str, checkpoint: str | None, report: RunReport,
@@ -493,10 +598,9 @@ class StageRunner:
             report.stopped, report.detail = "deferred", str(exc)
             return "deferred"
         holder = [lease]
-        roots = {r[0] for r in self.db.execute(
-            "SELECT DISTINCT root_id FROM files WHERE asset_id = ? AND status = 'present'", (asset_id,))}
-        watch = Watch(self, deadline=deadline, holder=holder, roots=roots & self.allowed_roots(),
-                      job=(asset_id, stage))
+        # Roots are bound as copies are actually opened (_admit_now).
+        watch = Watch(self, deadline=deadline, holder=holder, roots=set(), job=(asset_id, stage))
+        self._watch = watch
         try:
             with self.store.transaction() as db:
                 db.execute(
@@ -519,6 +623,8 @@ class StageRunner:
                 cancelled=watch.poll, renew=renew, save_checkpoint=save,
                 checkpoint=json.loads(checkpoint) if checkpoint else {},
                 interrupted=watch.now,
+                excluded=self._excluded,
+                admit=self._admit_now,
             )
             try:
                 commit = RUNNERS[stage](ctx)
@@ -533,7 +639,7 @@ class StageRunner:
                 report.failed.append(key)
                 return "failed"
             # The decoder opened files by name; make sure they were still the hashed ones.
-            _, stale = verified_files(self.db, asset_id, None)
+            _, stale, _ = verified_files(self.db, asset_id, None, self._excluded)
             if any(Path(path) in files for path in stale):
                 with self.store.transaction() as db:
                     mark_changed(db, stale)
@@ -558,6 +664,7 @@ class StageRunner:
         except _Superseded:
             return self._interrupted(asset_id, stage, report, "cancelled")
         finally:
+            self._watch = None
             self.authority.release(holder[0])
 
     def _interrupted(self, asset_id: str, stage: str, report: RunReport, reason: str | None) -> str:

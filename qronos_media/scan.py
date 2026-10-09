@@ -11,6 +11,10 @@ are never blocked behind a large directory tree.
 
 Bounded: depth and entries visited have caps. A scan that hit a cap says so
 and does **not** mark unseen files missing, because it did not look for them.
+Every scan, capped or not, does sweep the root's rows against its current
+scope (qronos_media.scope): rows beyond a narrowed depth, outside the root or
+inside the media index's own data folder are marked ``missing``/``out_of_scope`` and are
+never read again unless a later scope admits them.
 """
 from __future__ import annotations
 
@@ -24,8 +28,9 @@ import time
 from typing import Callable, ContextManager
 
 from qronos_media.identity import FileState
-from qronos_media.jobs import ensure_stages, present_files
+from qronos_media.jobs import admitted_files, ensure_stages
 from qronos_media.paths import VIDEO_EXTENSIONS, UnsafeMediaPath, has_link_component
+from qronos_media.scope import OUT_OF_SCOPE, RootScope, inside, mark, outside_scope, root_inside_state
 from qronos_media.stages import subtitles_input_fingerprint
 
 DEFAULT_MAX_DEPTH = 12
@@ -46,6 +51,8 @@ class ScanSummary:
     errors: int = 0
     truncated: bool = False
     requeued_stages: int = 0
+    out_of_scope: int = 0
+    skipped_media_state: int = 0
     notes: list[str] = field(default_factory=list)
 
     def as_json(self) -> dict[str, object]:
@@ -62,7 +69,12 @@ def _entry_is_link(entry: os.DirEntry) -> bool:
     return bool(getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
-def walk_videos(root: Path, *, max_depth: int, max_entries: int, summary: ScanSummary) -> list[Path]:
+def _under(path: str, excluded: tuple[Path, ...]) -> bool:
+    return any(inside(path, root) for root in excluded)
+
+
+def walk_videos(root: Path, *, max_depth: int, max_entries: int, summary: ScanSummary,
+                excluded: tuple[Path, ...] = ()) -> list[Path]:
     found: list[Path] = []
     stack: list[tuple[Path, int]] = [(root, 0)]
     visited = 0
@@ -79,6 +91,9 @@ def walk_videos(root: Path, *, max_depth: int, max_entries: int, summary: ScanSu
                     if _entry_is_link(entry):
                         summary.skipped_links += 1
                         continue
+                    if _under(entry.path, excluded):
+                        summary.skipped_media_state += 1
+                        continue
                     if entry.is_dir(follow_symlinks=False):
                         if depth + 1 <= max_depth:
                             stack.append((Path(entry.path), depth + 1))
@@ -94,10 +109,16 @@ def walk_videos(root: Path, *, max_depth: int, max_entries: int, summary: ScanSu
     return found
 
 
-def collect(root: sqlite3.Row, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> tuple[ScanSummary, list[tuple[Path, FileState]]]:
+def collect(root: sqlite3.Row, *, max_entries: int = DEFAULT_MAX_ENTRIES,
+            excluded: tuple[Path, ...] = ()) -> tuple[ScanSummary, list[tuple[Path, FileState]]]:
     """Walk and stat one root. Touches the filesystem only, never the database."""
     root_path = Path(root["path"])
     summary = ScanSummary(root_id=root["root_id"], root=root["path"])
+    shield = tuple(excluded)
+    if root_inside_state(root_path, shield):
+        summary.truncated = True
+        summary.notes.append("root is inside the media index's own data folder; not scanned")
+        return summary, []
     if has_link_component(root_path):
         summary.errors += 1
         summary.truncated = True
@@ -108,7 +129,8 @@ def collect(root: sqlite3.Row, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> tup
         if not paths:
             summary.notes.append("approved file is not present")
     elif root_path.is_dir():
-        paths = walk_videos(root_path, max_depth=root["max_depth"], max_entries=max_entries, summary=summary)
+        paths = walk_videos(root_path, max_depth=root["max_depth"], max_entries=max_entries, summary=summary,
+                            excluded=shield)
     else:
         summary.notes.append("approved folder is not present; files were not marked missing")
         summary.truncated = True
@@ -124,9 +146,11 @@ def collect(root: sqlite3.Row, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> tup
 
 
 def apply(transaction: Callable[[], ContextManager[sqlite3.Connection]], root: sqlite3.Row,
-          summary: ScanSummary, entries: list[tuple[Path, FileState]], now: float | None = None) -> ScanSummary:
+          summary: ScanSummary, entries: list[tuple[Path, FileState]], now: float | None = None,
+          excluded: tuple[Path, ...] = ()) -> ScanSummary:
     """Write one root's scan results in short transactions."""
     now = time.time() if now is None else now
+    shield = tuple(excluded)
     touched: set[str] = set()
     seen: set[str] = set()
     for start in range(0, len(entries), WRITE_BATCH):
@@ -166,9 +190,17 @@ def apply(transaction: Callable[[], ContextManager[sqlite3.Connection]], root: s
                 if row["path"] not in seen:
                     db.execute("UPDATE files SET status = 'missing', seen_at = ? WHERE path = ?", (now, row["path"]))
                     summary.missing += 1
-        copies = {asset: present_files(db, asset) for asset in sorted(touched)}
-    # Sidecar fingerprints list directories; do that outside any transaction.
-    fingerprints = {asset: subtitles_input_fingerprint(files) for asset, files in copies.items() if files}
+        candidates = [row["path"] for row in db.execute(
+            "SELECT path FROM files WHERE root_id = ? AND NOT (status = 'missing' AND error = ?)",
+            (root["root_id"], OUT_OF_SCOPE))]
+    # Truncated or not, nothing outside the root's current scope stays readable.
+    # The path checks touch the filesystem, so they run with no transaction open.
+    failing = outside_scope(candidates, RootScope.from_row(root), shield)
+    with transaction() as db:
+        summary.out_of_scope = mark(db, failing)
+    # Admission and sidecar fingerprints touch the filesystem: no transaction open.
+    copies = {asset: admitted_files(db, asset, None, shield)[0] for asset in sorted(touched)}
+    fingerprints = {asset: subtitles_input_fingerprint(files, shield) for asset, files in copies.items() if files}
     with transaction() as db:
         for asset, fingerprint in fingerprints.items():
             summary.requeued_stages += len(ensure_stages(db, asset, {"subtitles": fingerprint}, now))
