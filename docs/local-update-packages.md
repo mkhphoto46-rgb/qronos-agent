@@ -12,8 +12,8 @@ installed. Signatures are Ed25519, verified by `core/ed25519.py`, a strict RFC
 8032 implementation tested against the RFC's own test vectors. No network
 library is imported.
 
-This is software that is ready to be wired in. No owner key exists yet, so today
-it accepts no package at all; see the owner steps below.
+One reviewed owner public key is trusted; see "Keys". No package has been signed
+with it yet. The product update launch and its production wiring remain pending.
 
 ## What a signed manifest binds
 
@@ -34,9 +34,35 @@ Unknown or missing fields are refused.
 
 ## Keys
 
-`config/update_trusted_keys.json` lists the owner's public keys. It ships empty,
-and while it is empty every package is refused with `no_trusted_key`. The
-following are also refused:
+`config/update_trusted_keys.json` lists the owner's public keys. While it is
+empty, every package is refused with `no_trusted_key`.
+
+It lists exactly one key: the owner key created on 2026-10-09.
+
+| Field | Value |
+| --- | --- |
+| `keyId` | `b0566b68ca6ee2887a8db62b3aff00e8` |
+| `publicKey` | `JvjHULywOhnnREKqgUZmYXXqYHXpKrq9s6yYnXlq8bY=` |
+| `owner` | `Qronos Owner` |
+| `revoked` | `false` |
+
+Provenance:
+- The entry is the public `trustedKeyEntry` printed by `create-key` from the
+  reviewed `b76a904` signer, on the owner's own Windows account, under Root's
+  authorization.
+- The public output was saved as
+  `work/qronos-owner-update-key-public-2026-10-09.json` (sha256
+  `e1a545b98d694c83ec1b3e03116e3647a89c8fe2ec0ae0cddf0af2324e53776d`).
+- The entry was copied from that file. The change that added it did not read
+  the private key file.
+- The key id matches the public key, and the key is a canonical prime-order
+  Ed25519 point.
+
+Listing this public key does not add an update launch path or public Windows
+release signing. The creation tool was reviewed separately; the production
+signing and update lifecycle tooling still require integration and review.
+
+The following are also refused:
 - a signature by an unknown key (`untrusted_signature`);
 - a signature by a key marked `revoked` (`revoked_key`);
 - a payload changed after signing.

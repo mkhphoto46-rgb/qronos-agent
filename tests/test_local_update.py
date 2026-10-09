@@ -8,6 +8,7 @@ file holds no key, and the tests prove that this refuses every package.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import pytest
 from core import ed25519
 from core import local_update
 from core.local_update import InstalledState, LocalUpdateStore, UpdateError
+from tests.fixtures.owned_junction import owned_junction
 
 # ------------------------------------------------------------- fixtures
 
@@ -77,8 +79,31 @@ def test_an_owner_signed_upgrade_is_verified(tmp_path):
     assert update.key_id == local_update.key_id(ed25519.public_key(owner))
 
 
-def test_the_committed_key_file_holds_no_key_and_refuses_everything(tmp_path):
+#: The one reviewed trusted entry: the public output of create-key when the real
+#: owner key was created on 2026-10-09 (work/qronos-owner-update-key-public-2026-10-09.json).
+REVIEWED_OWNER_KEY = {"keyId": "b0566b68ca6ee2887a8db62b3aff00e8",
+                      "publicKey": "JvjHULywOhnnREKqgUZmYXXqYHXpKrq9s6yYnXlq8bY=",
+                      "owner": "Qronos Owner", "revoked": False}
+
+
+def test_the_committed_key_file_lists_exactly_the_reviewed_owner_key(tmp_path):
+    shipped = json.loads((local_update.TRUSTED_KEYS_PATH).read_text(encoding="utf-8"))
+    assert set(shipped) == {"schema", "comment", "keys"} and shipped["schema"] == 1
+    assert shipped["keys"] == [REVIEWED_OWNER_KEY]  # nothing else, no private field
     keys = local_update.load_trusted_keys()  # config/update_trusted_keys.json
+    assert list(keys) == [REVIEWED_OWNER_KEY["keyId"]] and keys[REVIEWED_OWNER_KEY["keyId"]].revoked is False
+    public = keys[REVIEWED_OWNER_KEY["keyId"]].public_key
+    assert ed25519.check_public_key(public) and local_update.key_id(public) == REVIEWED_OWNER_KEY["keyId"]
+
+    installer = package(tmp_path)  # a package signed by any other key is still refused
+    envelope = local_update.build_envelope(payload_for(installer), [new_key()])
+    with pytest.raises(UpdateError) as refused:
+        verify(envelope, installer, keys)
+    assert refused.value.code == "untrusted_signature"
+
+
+def test_an_empty_key_file_still_refuses_everything(tmp_path):
+    keys = local_update.load_trusted_keys(write_keys(tmp_path, []))
     installer = package(tmp_path)
     envelope = local_update.build_envelope(payload_for(installer), [new_key()])
 
@@ -86,6 +111,39 @@ def test_the_committed_key_file_holds_no_key_and_refuses_everything(tmp_path):
     with pytest.raises(UpdateError) as refused:
         verify(envelope, installer, keys)
     assert refused.value.code == "no_trusted_key"
+
+
+@pytest.mark.parametrize("tamper", ["id_of_another_key", "another_key_under_its_id", "listed_twice",
+                                    "private_field", "empty_owner", "revoked_as_text"])
+def test_a_tampered_copy_of_the_reviewed_entry_is_refused(tmp_path, tamper):
+    entry = dict(REVIEWED_OWNER_KEY)
+    other = ed25519.public_key(new_key())
+    entries = [entry]
+    if tamper == "id_of_another_key":
+        entry["keyId"] = local_update.key_id(other)
+    elif tamper == "another_key_under_its_id":
+        entry["publicKey"] = base64.b64encode(other).decode()
+    elif tamper == "listed_twice":
+        entries = [entry, dict(REVIEWED_OWNER_KEY)]
+    elif tamper == "private_field":
+        entry["privateKey"] = base64.b64encode(bytes(32)).decode()
+    elif tamper == "empty_owner":
+        entry["owner"] = ""
+    else:
+        entry["revoked"] = "false"
+    with pytest.raises(UpdateError) as refused:
+        local_update.load_trusted_keys(write_keys(tmp_path, entries))
+    assert refused.value.code == "key_file"
+
+
+def test_the_reviewed_key_once_revoked_signs_nothing(tmp_path):
+    keys = local_update.load_trusted_keys(write_keys(tmp_path, [dict(REVIEWED_OWNER_KEY, revoked=True)]))
+    assert keys[REVIEWED_OWNER_KEY["keyId"]].revoked is True
+    installer = package(tmp_path)
+    forged = forged_envelope(payload_for(installer), base64.b64decode(REVIEWED_OWNER_KEY["publicKey"]))
+    with pytest.raises(UpdateError) as refused:
+        verify(forged, installer, keys)
+    assert refused.value.code in {"revoked_key", "untrusted_signature"}
 
 
 def test_a_missing_key_file_means_no_key(tmp_path):
@@ -169,11 +227,12 @@ def test_something_other_than_a_regular_file_is_refused(tmp_path, chosen):
     installer = package(tmp_path)
     envelope = local_update.build_envelope(payload_for(installer), [owner])
     target = {"folder": installer.parent, "missing": tmp_path / "absent.exe", "junction": tmp_path / "linked"}[chosen]
-    if chosen == "junction":
-        pytest.importorskip("_winapi").CreateJunction(str(installer.parent), str(target))
+    with contextlib.ExitStack() as fixtures:
+        if chosen == "junction":
+            fixtures.enter_context(owned_junction(installer.parent, target))
 
-    with pytest.raises(UpdateError) as refused:
-        verify(envelope, target, trusted(owner))
+        with pytest.raises(UpdateError) as refused:
+            verify(envelope, target, trusted(owner))
     assert refused.value.code == "not_a_file"
 
 
@@ -369,15 +428,14 @@ def test_a_state_file_naming_foreign_files_is_refused(tmp_path):
 
 
 def test_a_junctioned_update_folder_is_refused(tmp_path):
-    winapi = pytest.importorskip("_winapi")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (tmp_path / "data").mkdir()
-    winapi.CreateJunction(str(elsewhere), str(tmp_path / "data" / "Updates"))
-    store, manifest, installer, keys = stage_fixture(tmp_path)
+    with owned_junction(elsewhere, tmp_path / "data" / "Updates"):
+        store, manifest, installer, keys = stage_fixture(tmp_path)
 
-    with pytest.raises(UpdateError) as refused:
-        store.stage(manifest, installer, keys, "0.1.0", 3)
+        with pytest.raises(UpdateError) as refused:
+            store.stage(manifest, installer, keys, "0.1.0", 3)
     assert refused.value.code == "store"
     assert list(elsewhere.iterdir()) == []
 
@@ -736,15 +794,14 @@ def test_history_is_capped(tmp_path):
 
 
 def test_a_store_below_a_junctioned_ancestor_is_refused(tmp_path):
-    winapi = pytest.importorskip("_winapi")
     real = tmp_path / "real-data"
     real.mkdir()
-    winapi.CreateJunction(str(real), str(tmp_path / "data-link"))
-    _, manifest, installer, keys = stage_fixture(tmp_path)
-    store = LocalUpdateStore(tmp_path / "data-link" / "Updates")
+    with owned_junction(real, tmp_path / "data-link"):
+        _, manifest, installer, keys = stage_fixture(tmp_path)
+        store = LocalUpdateStore(tmp_path / "data-link" / "Updates")
 
-    with pytest.raises(UpdateError, match="above the update store"):
-        store.stage(manifest, installer, keys, "0.1.0", 3)
+        with pytest.raises(UpdateError, match="above the update store"):
+            store.stage(manifest, installer, keys, "0.1.0", 3)
     assert not (real / "Updates").exists()
 
 

@@ -10,8 +10,9 @@ This module checks them entirely offline:
 
 * The envelope's payload must carry a valid Ed25519 signature (RFC 8032, see
   ``core.ed25519``) by a key listed in ``config/update_trusted_keys.json``. That
-  file holds only OWNER-provided public keys and ships empty: with no key
-  configured, every package is refused. Unknown and revoked keys are refused.
+  file holds only OWNER-provided public keys (one reviewed owner key since
+  2026-10-09); with no key configured, every package is refused. Unknown and
+  revoked keys are refused.
 * The signed payload binds the product, version, architecture and build target,
   and the installer's file size and SHA-256; the chosen installer must match.
 * Version policy, against the installed version and the recorded security floor:
