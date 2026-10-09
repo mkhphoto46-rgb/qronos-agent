@@ -20,9 +20,11 @@ reviewed step-by-step procedure):
       (desktop/src-tauri/tauri.conf.json), which must agree with the other
       version fields and with the installer's file name; data formats come
       from core.update_stores. The result is verified before it is kept.
-  preflight
+  preflight [--authenticode-config JSON --artifact EXE]
       Reports the release gates (owner key configured, version authority,
-      Authenticode signing) and exits non-zero while any is closed.
+      Authenticode signing) and exits non-zero while any is closed. The
+      Authenticode gate opens only when the given built installer verifies now
+      (build_support/authenticode_release.py).
 
 The private key never appears on the command line, in the environment, in
 output, logs or reports; it exists decrypted only in this process's memory.
@@ -31,8 +33,9 @@ Nothing here reaches the network, installs a certificate or touches a trust stor
 Limits: DPAPI CurrentUser protects against other accounts and offline copies,
 not against software running as the owner's own account. Wiping is best effort:
 the ctypes buffers and byte arrays this module controls are zeroed, but Python's
-own copies of bytes objects cannot be. The Authenticode gate cannot open here:
-no reviewed sign-and-verify step exists.
+own copies of bytes objects cannot be. Without a public-CA code-signing
+certificate and a signed installer that verifies now, the Authenticode gate
+stays closed.
 """
 
 from __future__ import annotations
@@ -534,9 +537,35 @@ def _find_signtool() -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def _authenticode_gate(root: Path, config: Path, artifact: Path,
+                       verify: Callable[..., dict[str, Any]] | None) -> dict[str, Any]:
+    """Open only if the built installer verifies NOW (build_support.authenticode_release.verify_signed)."""
+    from build_support import authenticode_release  # build tooling; imported only when asked
+
+    try:
+        loaded = authenticode_release.load_config(config)
+        result = (verify or authenticode_release.verify_signed)(loaded, artifact, root=root)
+    except (authenticode_release.AuthenticodeError, SigningError, UpdateError, OSError, ValueError) as error:
+        return {"gate": "authenticode", "open": False,
+                "detail": f"The installer {artifact.name} did not verify now: {error} A provenance file, a thumbprint "
+                          "or a signtool binary is not used as evidence; a self-signed certificate is never a "
+                          "substitute."}
+    return {"gate": "authenticode", "open": True,
+            "detail": f"{result['artifact']} (sha256 {result['sha256']}) verified now: signtool verify /pa /all /tw "
+                      f"exit 0 and WinVerifyTrust, signer {result['signer'].get('subject')} "
+                      f"{result['signer'].get('thumbprintSha1')}, chain root in the local machine store. Revocation "
+                      "was not checked offline; the listed chain needs the human release review."}
+
+
 def preflight(root: Path = ROOT, *, signtool: Callable[[], Path | None] = _find_signtool,
-              certificate: str | None = None) -> dict[str, Any]:
-    """The release gates, each open or closed with the exact action that would open it."""
+              certificate: str | None = None, authenticode_config: Path | None = None,
+              artifact: Path | None = None,
+              authenticode_verify: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The release gates, each open or closed with the exact action that would open it.
+
+    The Authenticode gate is checked only against a built installer given with
+    its Authenticode config, by verifying that file now; otherwise it is closed.
+    """
     gates: list[dict[str, Any]] = []
     try:
         version = product_version(root)
@@ -554,19 +583,21 @@ def preflight(root: Path = ROOT, *, signtool: Callable[[], Path | None] = _find_
                       "owner's account, then add the printed public entry in a reviewed change."})
     except UpdateError as error:
         gates.append({"gate": "owner_update_key", "open": False, "detail": str(error)})
+    if authenticode_config is not None and artifact is not None:
+        gates.append(_authenticode_gate(root, Path(authenticode_config), Path(artifact), authenticode_verify))
+        return {"ok": all(g["open"] for g in gates), "gates": gates}
     tool = signtool()
     configured = bool(certificate or os.environ.get("QRONOS_AUTHENTICODE_THUMBPRINT", "").strip())
-    # Always closed in this repository: nothing here signs a built installer, verifies the signature
-    # (signtool verify /pa /all), checks the certificate's code-signing EKU and its chain to a public
-    # root, or rejects a self-signed certificate. A thumbprint setting or a signtool binary is not evidence.
+    # Closed unless a built installer is verified now (above). A thumbprint setting or a signtool
+    # binary is not evidence.
     gates.append({"gate": "authenticode", "open": False, "detail": (
-        "No reviewed Authenticode signing-and-verification step exists yet, so this gate cannot open. "
+        "Closed: no signed installer was given to verify (preflight --authenticode-config CONFIG --artifact EXE). "
         f"Detected: {'signtool at the fixed Windows SDK path' if tool else 'no signtool at the fixed Windows SDK path'}; "
         f"{'a thumbprint setting (not used as evidence)' if configured else 'no certificate setting'}. "
         "Needed: an Authenticode code-signing certificate from a public certificate authority (an external, paid "
-        "step for the owner), then a reviewed build step that signs the installer with timestamping and verifies "
-        "it (chain to a public root, code-signing EKU, not self-signed). A self-signed certificate is never a "
-        "substitute.")})
+        "step for the owner), then build_support.authenticode_release sign on the exact built installer (time "
+        "stamp, signtool verify /pa /all, code-signing usage, chain to a root in the local machine store, not "
+        "self-signed). A self-signed certificate is never a substitute.")})
     return {"ok": all(g["open"] for g in gates), "gates": gates}
 
 
@@ -588,7 +619,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     signing.add_argument("--minimum-version")
     signing.add_argument("--rollback", action="store_true")
     signing.add_argument("--notes-file", type=Path)
-    commands.add_parser("preflight")
+    checks = commands.add_parser("preflight")
+    checks.add_argument("--authenticode-config", type=Path)
+    checks.add_argument("--artifact", type=Path)
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "create-key":
@@ -601,7 +634,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             minimum_version=arguments.minimum_version, rollback=arguments.rollback, notes=notes)
             result = {"ok": True, "manifest": str(manifest)}
         else:
-            result = preflight()
+            if (arguments.authenticode_config is None) != (arguments.artifact is None):
+                raise SigningError("Give both --authenticode-config and --artifact, or neither.")
+            result = preflight(authenticode_config=arguments.authenticode_config, artifact=arguments.artifact)
     except (SigningError, UpdateError, OSError) as error:
         result = {"ok": False, "error": str(error)}
     print(json.dumps(result, indent=1, ensure_ascii=False))

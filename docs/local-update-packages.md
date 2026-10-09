@@ -409,16 +409,81 @@ exits non-zero while any is closed:
   least one active (not revoked) entry. It counts the public entries only; it
   does not check the custody of any private key file.
 - **version authority:** open when the three version fields agree.
-- **Authenticode:** always closed for now. No step in this repository signs a
-  built installer, verifies the signature (`signtool verify /pa /all`), or
-  checks that the certificate is for code signing, chains to a public root and
-  is not self-signed, so nothing can show readiness. A thumbprint setting
-  (`QRONOS_AUTHENTICODE_THUMBPRINT`) or a `signtool` binary is reported but is
-  not evidence. `signtool` is only looked for at the fixed Windows SDK path,
-  never through `PATH`. Opening this gate needs a certificate from a public
-  certificate authority (an external, paid step for the owner) and a reviewed
-  sign-and-verify build step. A self-signed certificate is never a substitute,
-  and nothing here installs certificates or touches trust stores.
+- **Authenticode:** closed unless a signed installer is given and verifies
+  NOW: `preflight --authenticode-config CONFIG --artifact EXE`. Without them,
+  or without a public-CA certificate (today), it stays closed. A thumbprint
+  setting (`QRONOS_AUTHENTICODE_THUMBPRINT`), a `signtool` binary or a
+  provenance file is reported but is never evidence. A self-signed certificate
+  is never a substitute.
+
+### Authenticode signing step (`build_support/authenticode_release.py`)
+
+Build tooling on the owner's release machine; never part of Qronos and never a
+Qronos network route. It needs two things the project does not have yet:
+
+- a code-signing certificate from a public certificate authority (an external,
+  paid step for the owner), installed in the owner's own certificate store by
+  the owner;
+- the Windows SDK `signtool.exe`.
+
+Its only input is one JSON config file. No environment variable is read and
+`PATH` is never searched.
+
+```json
+{"schema": 1,
+ "signtool": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\signtool.exe",
+ "certificate": "C:\\Users\\<owner>\\QronosOwnerKey\\codesign.cer",
+ "thumbprintSha1": "<40 hex digits>",
+ "timestampUrl": "https://<the CA's RFC 3161 time-stamp service>"}
+```
+
+`check --config CONFIG` signs nothing. `sign` and `verify` refuse unless all of
+the following hold.
+
+- **signtool:** under `Windows Kits\10\bin\<10.0.x.y>\x64` of Program
+  Files (x86) as Windows reports it (not `%SystemDrive%`), with no link on the
+  way, and with a valid Microsoft signature.
+- **Certificate:** the file is the public certificate only (no `.pfx` or
+  private key), equals the configured thumbprint, and is valid now. It has the
+  Code Signing usage and is not self-signed. Its chain, built offline, passes
+  the Authenticode chain policy to a root in the local machine's root stores. A
+  root that only the current user added is refused. An administrator-installed
+  enterprise root would also pass, so the provenance lists the whole chain for
+  the human release review.
+- **Installer:** `qronos-desktop_<version>_x64-setup.exe` for the version
+  authority. Its unsigned SHA-256 matches `installer-provenance.json` from
+  `build_desktop`, which must be attributable to a clean commit, the one
+  checked out now.
+
+`sign --config CONFIG --artifact EXE --build-provenance installer-provenance.json`
+then runs:
+
+1. `signtool sign /fd sha256 /sha1 <thumbprint> /tr <timestampUrl> /td sha256`
+2. `signtool verify /pa /all /tw /v`, which must exit 0. Exit 2, a warning such
+   as a missing time stamp, is a failure.
+3. An offline WinVerifyTrust check, whose signer must be the configured
+   certificate.
+
+It then writes `EXE.authenticode.json`, never over an existing one. That file
+binds:
+
+- the build provenance and the source commit;
+- the unsigned and signed SHA-256;
+- the signtool path, hash and signer;
+- the certificate and its chain;
+- the time-stamp service and the verify results.
+
+Sign the update manifest (`release_signing sign`) after this, over the signed
+bytes.
+
+Limits:
+
+- Revocation is not checked offline by this tool. `signtool verify` on the
+  build machine may contact revocation and time-stamp services; that is the
+  build machine's network use, not Qronos's.
+- Nothing installs certificates or writes any certificate store.
+- The tests use synthetic runners and certificates; no real signing has been
+  done.
 
 Signing in pure Python is not constant-time, so the owner signs only on their
 own trusted machine.
