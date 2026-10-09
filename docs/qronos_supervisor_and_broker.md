@@ -111,13 +111,27 @@ All waits in the channel have deadlines.
    HMAC under a fresh session key.
 3. **Launch and connect.** It listens on a fresh pipe and launches the broker
    (`UacBrokerLauncher` in production: the normal UAC prompt, which the user
-   can decline). It accepts only the launched process id, sends one request,
-   reads one result, and waits for the broker to exit.
+   can decline). The broker's command line carries only public identifiers:
+   `action-broker --pipe NAME --runtime-pid PID`. The session key never goes
+   on a command line, in the environment or in a log. The session accepts
+   only the launched process id and releases the key to it on the pipe. It
+   then runs the mutual handshake and sends one request: the typed action,
+   the envelope and the person's typed secret. It reads one result and waits
+   for the broker to exit.
+4. **Cancellation.** Stop, Pause and shutdown are checked at every handoff
+   before the request leaves: before launching, after the UAC prompt
+   returns, and immediately before sending (`BrokerCancelled`). A broker
+   started after a cancellation gets no key and exits on its own. Once the
+   request has left it is not interrupted. The broker performs one action or
+   none, and the result, or "unknown", is reported. The broker's process
+   handle is released on every path.
 
 The broker (`serve_once`) does the following, in order:
 
-1. **Peer.** It refuses unless the launching runtime runs as the same user,
-   then connects back and requires the pipe server to be that runtime's pid.
+1. **Peer.** It refuses unless the named launching process runs as the same
+   user and runs the broker's own installed executable. Then it connects,
+   requires the pipe server to be exactly that process, receives the session
+   key on the pipe, and runs the mutual handshake.
 2. **Envelope.** It checks the envelope shape, then the HMAC.
 3. **Freshness.** Not issued in the future (5 s skew), not expired, and a
    lifetime of at most 180 s.
@@ -129,6 +143,12 @@ The broker (`serve_once`) does the following, in order:
    or shell syntax.
 7. **Category and target.** Both are re-derived from the parameters and must
    match the approval.
+7a. **Typed secret, checked here.** The person's typed approval secret is
+   checked in the broker itself, against the same per-profile store and
+   shared lockout, whatever the permission settings say. The pipe, the key
+   and the envelope are all chosen by whoever launched the broker, so a
+   local program that is not Qronos could forge every one of them. It cannot
+   type the person's secret. A refusal does not use up the approval.
 8. **Permission gate.** It re-asks `security.gate`. A category the policy
    forbids is refused even with an approval.
 9. **Single use.** The nonce is claimed with an atomic exclusive create in
@@ -280,10 +300,12 @@ The prompt uses the existing app-workflow protocol:
 Outcomes are reported once and never retried:
 - `succeeded`.
 - `failed`: the adapter's reviewed message.
-- `refused`: declined, UAC declined, unavailable, forbidden, or not the
-  installed build.
+- `refused`: declined, UAC declined, cancelled by Stop/Pause/shutdown
+  before the request left, unavailable, forbidden, or not the installed
+  build.
 - `uncertain`: `BrokerOutcomeUnknown`. The request left but the answer was
-  lost, so the person is told to check the service.
+  lost, so the person is told to check the service. An unexpected error
+  also ends here, so every path gives exactly one visible result.
 
 Only one elevated action runs at a time. From source, elevation is refused
 before any prompt.
@@ -379,8 +401,27 @@ refuses that indirection.
   administrator's credentials, runs the broker as another user. The broker's
   same-user check then refuses it. This fails closed, but it means such users
   cannot use elevated actions.
-- The broker's session key is on its command line. Another process of the
-  same user could read it. The pid checks in both directions mean such a
-  process can neither impersonate the runtime nor receive the action, but the
-  key is not secret from the same user.
+- **Trust boundary.** Another program running as the same user cannot get
+  an elevated action without the person's typed secret, and without the
+  UAC prompt. The test for this is a hostile local "runtime" with its own
+  pipe, key and correctly MAC'd envelope. Nothing here defends against a
+  same-user account that is already fully compromised: malware that reads
+  what the person types, or injects into the Qronos runtime.
+- **Profile binding.** The elevated broker takes its authority from the
+  installed profile, `<Local AppData>\Qronos`. It finds that folder through
+  Windows' known-folder API for its own token
+  (`SHGetKnownFolderPath(FOLDERID_LocalAppData)`), never from environment
+  values a launcher may have chosen, such as `QRONOS_APPROVAL_SECRET_PATH`,
+  `QRONOS_DATA_ROOT` or `QRONOS_PERMISSION_AUDIT_PATH`. Its authority there
+  is the approval-secret store with its lockout and audit, the single-use
+  journal, and its own audit.
+  - Tested: a launcher pointing those variables at its own store with
+    secret B is refused, and only the profile's secret A works.
+  - If the runtime was configured to keep its secret elsewhere, the broker
+    refuses and fails closed.
+  - Not checked: how Windows passes, or does not pass, a caller's
+    environment to an elevated process. The design does not depend on it.
+  - The broker's gate re-check still reads the permission policy through
+    the ordinary configuration. A launcher could only make that check
+    stricter or looser; the typed-secret floor binds either way.
 - Off Windows, sessions are refused by design.

@@ -585,3 +585,74 @@ def test_a_peer_process_that_stops_reading_cannot_hang_send_or_close():
     assert serialized["first_still_waiting"]
     assert serialized["first_finished"] and serialized["first_released_seconds"] < 2.0
     assert all(peer["exited"] for peer in report["peers"])
+
+
+# ------------------------------------------------------------ key release
+
+
+@windows_only
+def test_a_session_key_is_released_only_to_the_checked_peer_and_never_on_a_command_line(server):
+    srv = server()
+    holder = {}
+    peer = Peer(lambda: holder.setdefault("pair", ipc.connect_for_key(srv.address, DOWN, UP, expected_server_pid=ME)))
+    peer.start()
+    channel = bounded(lambda: srv.accept(5, expected_pid=ME, release_key=True), 5)
+    peer.join(5)
+    client, key = holder["pair"]
+    assert key == srv.key
+    client.send("hello", pid=ME, protocol=1)
+    assert channel.receive(5)["kind"] == "hello"
+    channel.close()
+    client.close()
+
+
+@windows_only
+def test_no_key_is_released_to_an_unexpected_process(server):
+    srv = server()
+    received = {}
+
+    def raw_peer():
+        # A raw client records whatever the server sends it, before any check of its own.
+        connection = Client(srv.address, family="AF_PIPE")
+        try:
+            if connection.poll(3):
+                received["data"] = connection.recv_bytes(256)
+        except (EOFError, OSError):
+            received["closed"] = True
+        finally:
+            connection.close()
+
+    peer = Peer(raw_peer)
+    peer.start()
+    with pytest.raises(PeerRejected):
+        bounded(lambda: srv.accept(1.0, expected_pid=ME + 1, release_key=True), 3)
+    peer.join(5)
+    assert "data" not in received and received.get("closed")  # closed without a byte: no key
+
+
+@windows_only
+def test_a_client_reads_no_key_from_an_unexpected_server(server):
+    srv = server()
+    with pytest.raises(PeerRejected):
+        bounded(lambda: ipc.connect_for_key(srv.address, DOWN, UP, expected_server_pid=ME + 1, timeout=1.0), 3)
+
+
+@windows_only
+def test_a_server_that_sends_anything_but_a_key_is_refused():
+    address = ipc.new_address("supervisor")
+    listener = Listener(address, family="AF_PIPE")
+
+    def serve():
+        connection = listener.accept()
+        connection.send_bytes(b"QIPC1-NOTAKEY:" + b"x" * 32)
+        time.sleep(1)
+        connection.close()
+
+    held = Peer(serve)
+    held.start()
+    try:
+        with pytest.raises(ChannelError):
+            bounded(lambda: ipc.connect_for_key(address, DOWN, UP, expected_server_pid=ME, timeout=2.0), 3)
+    finally:
+        held.join(5)
+        listener.close()

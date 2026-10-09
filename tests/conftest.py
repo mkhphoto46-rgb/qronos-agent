@@ -403,3 +403,9 @@ def block_real_windows_computer_side_effects(
 
     monkeypatch.setattr(uac_launch, "_real_win32_calls", blocked_side_effect)
     monkeypatch.setattr(spooler_service, "_real_advapi32", blocked_side_effect)
+    # The broker's installed profile is a real known folder, not an
+    # environment value, so the isolated test profile cannot redirect it:
+    # tests must inject where it is.
+    from core import action_broker
+
+    monkeypatch.setattr(action_broker, "_known_local_appdata", blocked_side_effect)

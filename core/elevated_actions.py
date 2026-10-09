@@ -23,14 +23,25 @@ Approval layers, all of which must agree, in order:
        fixed and it has no parameters.
     5. Windows' UAC prompt, which the person can decline.
     6. The broker re-checks the envelope, freshness, digest, registry,
-       category/target and gate, and claims the nonce once.
+       category/target, the typed secret ITSELF (the secret the person typed
+       travels to it over the authenticated pipe, never a command line, and
+       is never kept or logged here), and the gate, and claims the nonce once.
 
-Outcomes are reported, never retried: declined or unavailable means nothing
-was done; a lost answer after the request left means the outcome is unknown,
-and the person is told to check the service. One elevated action runs at a
-time. Prompts expire after ``APPROVAL_TTL_SECONDS`` and are revoked by Stop,
-Pause and shutdown. Remote (Device Link) text never reaches this coordinator:
-the bridge only routes the desktop's own chat turns here.
+Outcomes are reported, never retried: declined, cancelled or unavailable
+means nothing was done; a lost answer after the request left means the
+outcome is unknown, and the person is told to check the service. One elevated
+action runs at a time. Prompts expire after ``APPROVAL_TTL_SECONDS``.
+
+Stop, Pause and shutdown revoke open prompts AND cancel an approved action
+that has not been sent yet: each approval carries the epoch it was given in,
+and the session re-checks it at every handoff — before launching, after the
+UAC prompt returns, and immediately before the request is sent. Once the
+request has left, it is not interrupted: the broker performs one action or
+none, and its outcome (or "unknown") is reported. Every path ends in exactly
+one visible result, including unexpected errors.
+
+Remote (Device Link) text never reaches this coordinator: the bridge only
+routes the desktop's own chat turns here.
 
 Elevation exists only in the installed (frozen) Qronos, whose bundled
 executable is the broker; from source it is refused before any prompt.
@@ -44,13 +55,19 @@ import sys
 import threading
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
 import security.gate as gate
 from core.action_broker import PRODUCTION_ACTIONS
-from core.action_broker_client import BrokerOutcomeUnknown, BrokerSession, BrokerUnavailable, TypedAction
+from core.action_broker_client import (
+    BrokerCancelled,
+    BrokerOutcomeUnknown,
+    BrokerSession,
+    BrokerUnavailable,
+    TypedAction,
+)
 from core.actions import ActionRequest
 from core.approval_ledger import ApprovalKind, ApprovalLedger, StaleApproval
 from security.permissions import PermissionDecision
@@ -94,6 +111,11 @@ FA = {
     "done": "سرویس چاپ ویندوز دوباره راه‌اندازی شد.",
     "failed": "سرویس چاپ دوباره راه‌اندازی نشد. دوباره به‌طور خودکار تلاش نمی‌شود.",
     "refused": "کمک‌رسان مدیریتی این درخواست را نپذیرفت؛ کاری انجام نشد.",
+    "cancelled": "لغو شد (توقف یا مکث کرونوس)؛ درخواستی به کمک‌رسان مدیریتی فرستاده نشد و کاری انجام نشد.",
+    "error": (
+        "خطای پیش‌بینی‌نشده؛ معلوم نیست درخواستی فرستاده شده باشد. "
+        "دوباره به‌طور خودکار تلاش نمی‌شود؛ وضعیت سرویس چاپ را بررسی کنید."
+    ),
 }
 _SECRET_STATES = {"not_configured": "secret_not_configured", "locked": "secret_locked"}
 
@@ -131,6 +153,11 @@ def bundled_launcher():
 class PendingElevation:
     request_id: str
     request: ActionRequest
+    #: The typed secret, set only once it was accepted here; the broker checks
+    #: it again itself. Never in a repr, event or log.
+    secret: str = field(default="", repr=False)
+    #: The cancellation epoch the approval was given in.
+    epoch: int = 0
 
 
 def _json(payload: dict) -> str:
@@ -165,6 +192,8 @@ class ElevatedActionCoordinator:
         self._run_async = run_async
         self._ledger = ledger if ledger is not None else ApprovalLedger(ttl_seconds=APPROVAL_TTL_SECONDS)
         self._busy = threading.Lock()
+        self._epoch_lock = threading.Lock()
+        self._epoch = 0
         spec = PRODUCTION_ACTIONS.get(KIND)
         assert spec is not None, "the spooler restart must be a registered broker action"
         self._spec = spec
@@ -254,10 +283,22 @@ class ElevatedActionCoordinator:
         if not approved:
             self._finish(pending.request_id, "refused", FA["declined"], "declined")
             return
+        with self._epoch_lock:
+            pending = replace(pending, secret=secret or "", epoch=self._epoch)
         self._run_async(lambda: self._perform(pending))
 
+    def _cancelled(self, pending: PendingElevation) -> bool:
+        with self._epoch_lock:
+            current = self._epoch
+        return current != pending.epoch or self._paused()
+
     def discard(self, reason: str) -> int:
-        """Revoke every open elevation prompt (Stop/Pause/shutdown). Idempotent."""
+        """
+        Revoke every open elevation prompt and cancel every approved action
+        not yet sent (Stop/Pause/shutdown). Idempotent.
+        """
+        with self._epoch_lock:
+            self._epoch += 1
         revoked = self._ledger.revoke_kinds((ApprovalKind.APP_WORKFLOW,), reason)
         for ticket in revoked:
             self._notify("app_workflow_stale", "ready", _json({
@@ -273,13 +314,15 @@ class ElevatedActionCoordinator:
             return
         try:
             outcome, message, detail = self._run(pending)
+        except Exception as error:  # noqa: BLE001 - every path ends in one visible result
+            outcome, message, detail = "uncertain", FA["error"], f"unexpected {type(error).__name__}"
         finally:
             self._busy.release()
         self._finish(pending.request_id, outcome, message, detail)
 
     def _run(self, pending: PendingElevation) -> tuple[str, str, str]:
-        if self._paused():
-            return "stopped", FA["paused"], "runtime paused"
+        if self._cancelled(pending):
+            return "refused", FA["cancelled"], "cancelled before the broker was started"
 
         verdict = self._gate(pending.request)  # fresh: settings may have changed
         if verdict.refused:
@@ -299,7 +342,12 @@ class ElevatedActionCoordinator:
             return "refused", FA["not_installed"], "not the installed executable"
 
         try:
-            result = self._session_factory(launcher).perform(TypedAction(KIND, {}), pending.request, grant)
+            result = self._session_factory(launcher).perform(
+                TypedAction(KIND, {}), pending.request, grant,
+                secret=pending.secret, cancelled=lambda: self._cancelled(pending),
+            )
+        except BrokerCancelled as error:
+            return "refused", FA["cancelled"], str(error)[:200]
         except BrokerOutcomeUnknown as error:
             return "uncertain", FA["unknown"], str(error)[:200]
         except BrokerUnavailable as error:

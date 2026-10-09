@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import sys
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,6 +32,7 @@ from core.action_broker import (
     verify_request,
 )
 from core.action_broker_client import (
+    BrokerCancelled,
     BrokerOutcomeUnknown,
     BrokerResult,
     BrokerSession,
@@ -102,6 +106,9 @@ def test_the_production_action_is_exact_and_has_nothing_to_choose():
     assert spooler_service.SERVICE_NAME == "Spooler"
 
 
+SECRET_OK = dict(secret="right", verify_secret=lambda secret: secret == "right")
+
+
 def envelope(params, key=b"k" * 32, decision=PermissionDecision.REQUIRE_TYPED_SECRET):
     request = ActionRequest(category=SPEC.category, target=SPEC.target({}), summary=SPEC.summary)
     outcome = ActionOutcome.AWAITING_APPROVAL if decision is not PermissionDecision.ALLOW else ActionOutcome.SUCCEEDED
@@ -113,7 +120,7 @@ def envelope(params, key=b"k" * 32, decision=PermissionDecision.REQUIRE_TYPED_SE
 def test_the_broker_accepts_exactly_the_approved_spooler_restart(tmp_path):
     action, approval, verdict = envelope({})
     verified = verify_request(action, approval, b"k" * 32, PRODUCTION_ACTIONS, ConsumedApprovals(tmp_path),
-                              gate_check=lambda request: verdict)
+                              gate_check=lambda request: verdict, **SECRET_OK)
     assert verified.spec.kind == KIND and verified.params == {}
 
 
@@ -122,7 +129,7 @@ def test_the_service_can_never_be_chosen_by_the_caller(tmp_path, params):
     action, approval, verdict = envelope(params)
     with pytest.raises(BrokerRefusal) as refusal:
         verify_request(action, approval, b"k" * 32, PRODUCTION_ACTIONS, ConsumedApprovals(tmp_path),
-                       gate_check=lambda request: verdict)
+                       gate_check=lambda request: verdict, **SECRET_OK)
     assert refusal.value.outcome == "bad_parameters"
 
 
@@ -136,8 +143,9 @@ def test_a_failed_restart_reports_its_reviewed_message_and_nothing_else(tmp_path
     for perform, expected in ((failing, "did not stop in time"), (crashing, "The action failed: OSError.")):
         action, approval, verdict = envelope({})
         registry = ActionRegistry([replace(SPEC, perform=perform)])
-        result = handle_request({"action": action, "approval": approval}, b"k" * 32, registry,
-                                ConsumedApprovals(tmp_path / perform.__name__), gate_check=lambda request: verdict)
+        result = handle_request({"action": action, "approval": approval, "secret": "right"}, b"k" * 32, registry,
+                                ConsumedApprovals(tmp_path / perform.__name__), gate_check=lambda request: verdict,
+                                verify_secret=SECRET_OK["verify_secret"])
         assert result["ok"] is False and result["outcome"] == "failed" and expected in result["detail"]
         assert "secret" not in result["detail"]
 
@@ -263,6 +271,8 @@ class Harness:
                  session_result=None, session_error=None, launcher_error=None, verify=True):
         self.events = []
         self.performed = []
+        self.secrets = []
+        self.cancel_checks = []
         self.decision = verdict_decision
         self.paused = False
         self.session_result = session_result or BrokerResult(True, "performed", "done")
@@ -273,8 +283,10 @@ class Harness:
             harness = self
 
             class Session:
-                def perform(self, action, request, grant):
+                def perform(self, action, request, grant, secret="", cancelled=lambda: False):
                     harness.performed.append((action, request, grant))
+                    harness.secrets.append(secret)
+                    harness.cancel_checks.append(cancelled)
                     assert isinstance(grant, gate.ActionGrant) and grant.action_id == request.action_id
                     if harness.session_error is not None:
                         raise harness.session_error
@@ -327,6 +339,8 @@ def test_the_prompt_always_asks_for_the_typed_secret_even_if_settings_lowered_de
         harness.coordinator.resolve(harness.token(), approved=True, secret="correct")
         (action, request, grant), = harness.performed
         assert action == TypedAction(KIND, {}) and request.target == SERVICE_DISPLAY
+        assert harness.secrets == ["correct"]  # forwarded for the broker's own check
+        assert "correct" not in json.dumps([event[2] for event in harness.events])  # never in an event
         assert harness.finished()[-1]["outcome"] == "succeeded"
 
 
@@ -402,6 +416,32 @@ def test_pause_refuses_both_new_requests_and_answers():
     assert harness.coordinator.try_begin("restart the print spooler", "req-2") == FA["paused"]
 
 
+def test_the_secret_never_appears_in_a_pending_approval_s_repr():
+    from core.elevated_actions import PendingElevation
+
+    pending = PendingElevation("req", ActionRequest(category=SPEC.category, target="t", summary="s"),
+                               secret="hunter2", epoch=3)
+    assert "hunter2" not in repr(pending)
+
+
+def test_stop_after_approval_cancels_a_session_that_has_not_sent_anything():
+    harness = Harness()
+    harness.begin()
+    harness.coordinator.resolve(harness.token(), approved=True, secret="correct")
+    (cancelled,) = harness.cancel_checks
+    assert cancelled() is False
+    harness.coordinator.discard("runtime_paused")
+    assert cancelled() is True  # every later handoff in the session now refuses to send
+
+
+def test_an_unexpected_error_still_ends_in_one_visible_result():
+    harness = Harness(session_error=RuntimeError("boom"))
+    harness.begin()
+    harness.coordinator.resolve(harness.token(), approved=True, secret="correct")
+    (finished,) = harness.finished()
+    assert finished["outcome"] == "uncertain" and finished["message"] == FA["error"]
+
+
 def test_elevation_is_refused_from_source(monkeypatch):
     monkeypatch.delattr(sys, "frozen", raising=False)
     with pytest.raises(ElevationUnavailable):
@@ -414,14 +454,84 @@ def test_elevation_is_refused_from_source(monkeypatch):
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Broker sessions are Windows named pipes.")
 
 
+class BlockingLauncher:
+    """Holds "UAC" open until released; then starts a real non-elevated broker child (or nothing)."""
+
+    def __init__(self, inner=None):
+        self.inner = inner
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.closed = []
+
+    def launch(self, address, runtime_pid):
+        self.entered.set()
+        assert self.release.wait(20)
+        if self.inner is not None:
+            return self.inner.launch(address, runtime_pid)
+        launcher = self
+
+        class Process:
+            pid = 999_999
+
+            def wait(self, timeout):
+                return None
+
+            def close(self):
+                launcher.closed.append(True)
+
+        return Process()
+
+
+def threaded_coordinator(launcher, events, session_timeout=20):
+    from tests.test_action_broker_session import SECRET
+
+    return ElevatedActionCoordinator(
+        notify=lambda kind, status, message: events.append((kind, json.loads(message))),
+        verify_secret=lambda secret: secret == SECRET,
+        secret_status=lambda: "ready",
+        paused=lambda: False,
+        launcher_factory=lambda: launcher,
+        session_factory=lambda chosen: BrokerSession(chosen, accept_timeout_seconds=session_timeout,
+                                                     reply_timeout_seconds=session_timeout),
+    )
+
+
+def wait_finished(events, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        finished = [body for kind, body in events if kind == "app_workflow_finished"]
+        if finished:
+            return finished
+        time.sleep(0.05)
+    raise AssertionError(f"no result; saw {events}")
+
+
+@windows_only
+def test_stop_while_uac_is_pending_sends_nothing_even_after_the_prompt_is_accepted():
+    from tests.test_action_broker_session import SECRET
+
+    launcher = BlockingLauncher()
+    events = []
+    coordinator = threaded_coordinator(launcher, events)
+    coordinator.try_begin("restart the print spooler", "req-cancel")
+    token = next(body["actionToken"] for kind, body in events if kind == "app_workflow_approval_required")
+    coordinator.resolve(token, approved=True, secret=SECRET)
+    assert launcher.entered.wait(10)  # the "UAC prompt" is up
+    coordinator.discard("runtime_paused")  # Stop/Pause now
+    launcher.release.set()  # the person then accepts the prompt
+    (finished,) = wait_finished(events)
+    assert finished["outcome"] == "refused" and finished["message"] == FA["cancelled"]
+    assert launcher.closed == [True]  # the broker's handle was released
+
+
 @pytest.fixture
 def child_launchers():
     from tests.test_action_broker_session import ChildLauncher
 
     made = []
 
-    def make(work, *extra):
-        launcher = ChildLauncher(work, extra=extra)
+    def make(work, *extra, environment=None):
+        launcher = ChildLauncher(work, extra=extra, environment=environment)
         made.append(launcher)
         return launcher
 
@@ -432,21 +542,15 @@ def child_launchers():
 
 @windows_only
 def test_the_production_spec_runs_end_to_end_through_a_real_broker_process(tmp_path, child_launchers):
+    from tests.test_action_broker_session import SECRET
+
     launcher = child_launchers(tmp_path, "--spooler")
     events = []
-    coordinator = ElevatedActionCoordinator(
-        notify=lambda kind, status, message: events.append((kind, json.loads(message))),
-        verify_secret=lambda secret: secret == "correct",
-        secret_status=lambda: "ready",
-        paused=lambda: False,
-        launcher_factory=lambda: launcher,
-        session_factory=lambda chosen: BrokerSession(chosen, accept_timeout_seconds=30, reply_timeout_seconds=30),
-        run_async=lambda target: target(),
-    )
+    coordinator = threaded_coordinator(launcher, events, session_timeout=30)
     assert coordinator.try_begin("Restart the print spooler", "req-e2e") == FA["asked"]
     token = next(body["actionToken"] for kind, body in events if kind == "app_workflow_approval_required")
-    coordinator.resolve(token, approved=True, secret="correct")
-    finished = [body for kind, body in events if kind == "app_workflow_finished"]
+    coordinator.resolve(token, approved=True, secret=SECRET)
+    finished = wait_finished(events)
     assert finished[-1]["outcome"] == "succeeded", finished
     assert (tmp_path / "markers" / "spooler.done").read_text(encoding="utf-8") == "performed"
     audit = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -460,9 +564,133 @@ def test_a_lost_answer_after_the_request_left_is_outcome_unknown(tmp_path, child
 
     launcher = child_launchers(tmp_path, "--vanish")
     action, request, grant = marker_request("vanish")
+    from tests.test_action_broker_session import SECRET
+
     with pytest.raises(BrokerOutcomeUnknown):
-        BrokerSession(launcher, accept_timeout_seconds=30, reply_timeout_seconds=30).perform(action, request, grant)
+        BrokerSession(launcher, accept_timeout_seconds=30, reply_timeout_seconds=30).perform(
+            action, request, grant, secret=SECRET)
     assert (tmp_path / "markers" / "vanish.done").exists()  # it did act: hence "unknown", never "refused"
+
+
+@windows_only
+def test_a_real_broker_started_after_stop_gets_no_key_and_does_nothing(tmp_path, child_launchers):
+    from tests.test_action_broker_session import SECRET
+
+    launcher = BlockingLauncher(inner=child_launchers(tmp_path, "--spooler"))
+    events = []
+    coordinator = threaded_coordinator(launcher, events)
+    coordinator.try_begin("restart the print spooler", "req-late")
+    token = next(body["actionToken"] for kind, body in events if kind == "app_workflow_approval_required")
+    coordinator.resolve(token, approved=True, secret=SECRET)
+    assert launcher.entered.wait(10)
+    coordinator.discard("runtime_shutdown")
+    launcher.release.set()  # the broker really starts now
+    (finished,) = wait_finished(events)
+    assert finished["outcome"] == "refused" and finished["message"] == FA["cancelled"]
+    (broker,) = launcher.inner.processes
+    assert broker.wait(30) != 0  # it found no key and gave up on its own
+    assert not (tmp_path / "markers").exists()
+
+
+@windows_only
+def test_cancelled_just_before_sending_nothing_is_sent(tmp_path, child_launchers):
+    from tests.test_action_broker_session import SECRET, marker_request
+
+    launcher = child_launchers(tmp_path)
+    action, request, grant = marker_request("late")
+    checks = iter([False, False, True])  # before launch, after launch, before send
+    with pytest.raises(BrokerCancelled):
+        BrokerSession(launcher, accept_timeout_seconds=20, reply_timeout_seconds=20).perform(
+            action, request, grant, secret=SECRET, cancelled=lambda: next(checks))
+    (broker,) = launcher.processes
+    assert broker.wait(30) != 0
+    assert not (tmp_path / "markers").exists()
+
+
+def hostile_request(launcher, secret: str) -> dict:
+    """
+    Play a hostile local "runtime": its own pipe, its own key, a perfectly
+    formed envelope MAC'd under that key, a (simulated) UAC launch of the
+    broker — and whatever secret it likes. Returns the broker's answer.
+    """
+    import secrets as random
+    import time as clock
+
+    from core.action_broker import FROM_RUNTIME, TO_RUNTIME, action_digest, approval_mac
+    from core.supervisor_ipc import ChannelServer, new_key
+
+    key = new_key()
+    server = ChannelServer("action-broker", key, receive=TO_RUNTIME, send=FROM_RUNTIME)
+    try:
+        broker = launcher.launch(server.address, os.getpid())
+        channel = server.accept(20, expected_pid=broker.pid, release_key=True)
+        assert channel.receive(20)["kind"] == "hello"
+        now = clock.time()
+        approval = {"actionId": "forged", "category": "device_control", "target": SERVICE_DISPLAY,
+                    "digest": action_digest(KIND, {}), "issuedAt": now, "expiresAt": now + 60,
+                    "nonce": random.token_hex(16)}
+        approval["mac"] = approval_mac(key, approval)
+        channel.send("request", action={"kind": KIND, "params": {}}, approval=approval, secret=secret)
+        reply = channel.receive(20)
+        channel.close()
+        return reply
+    finally:
+        server.close()
+
+
+@windows_only
+def test_a_non_qronos_process_cannot_get_an_elevated_action_without_the_typed_secret(tmp_path, child_launchers):
+    for guess in ("", "1234", "password"):
+        work = tmp_path / f"guess-{len(guess)}"
+        work.mkdir()
+        reply = hostile_request(child_launchers(work, "--spooler"), guess)
+        assert reply["ok"] is False and reply["outcome"] == "secret_rejected", reply
+        assert not (work / "markers").exists()
+
+
+@windows_only
+def test_a_launcher_cannot_point_the_broker_at_a_secret_store_it_chose(tmp_path, child_launchers):
+    """
+    The legitimate profile's secret is A. The launcher sets
+    QRONOS_APPROVAL_SECRET_PATH and QRONOS_DATA_ROOT to its own store with
+    secret B. The broker child runs the PRODUCTION store check; only the
+    known Local AppData folder is redirected to a test directory.
+    """
+    from core.approval_secret import ApprovalSecretStore
+
+    legit = tmp_path / "known-local-appdata"
+    (legit / "Qronos").mkdir(parents=True)
+    ApprovalSecretStore(legit / "Qronos" / "approval_secret.sqlite3",
+                        audit_path=tmp_path / "legit-audit.jsonl").set_secret("legitimate owner secret A")
+    evil = tmp_path / "evil" / "approval_secret.sqlite3"
+    evil.parent.mkdir()
+    ApprovalSecretStore(evil, audit_path=tmp_path / "evil-audit.jsonl").set_secret("attacker chosen secret B")
+    environment = {
+        "QRONOS_TEST_KNOWN_LOCALAPPDATA": str(legit),
+        "QRONOS_APPROVAL_SECRET_PATH": str(evil),
+        "QRONOS_DATA_ROOT": str(evil.parent),
+        "QRONOS_PERMISSION_AUDIT_PATH": str(tmp_path / "evil-chosen-audit.jsonl"),
+    }
+    for secret, outcome in (("attacker chosen secret B", "secret_rejected"), ("legitimate owner secret A", "performed")):
+        work = tmp_path / outcome
+        work.mkdir()
+        launcher = child_launchers(work, "--spooler", "--profile-store", environment=environment)
+        reply = hostile_request(launcher, secret)
+        assert reply["outcome"] == outcome, reply
+        assert (work / "markers").exists() is (outcome == "performed")
+    assert not (tmp_path / "evil-chosen-audit.jsonl").exists()  # nothing the launcher chose was used
+
+
+def test_the_broker_profile_comes_from_the_known_folder_not_the_environment(monkeypatch, tmp_path):
+    from core import action_broker
+
+    with pytest.raises(AssertionError, match="real Windows computer side effect"):
+        action_broker.installed_profile()  # the suite refuses the real known folder
+    monkeypatch.setattr(action_broker, "_known_local_appdata", lambda: tmp_path)
+    monkeypatch.setenv("QRONOS_DATA_ROOT", str(tmp_path / "chosen"))
+    monkeypatch.setenv("QRONOS_APPROVAL_SECRET_PATH", str(tmp_path / "chosen.sqlite3"))
+    assert action_broker.installed_profile() == tmp_path / "Qronos"
+    assert action_broker.default_consumed_directory() == tmp_path / "Qronos" / "ActionBroker" / "consumed"
 
 
 # ------------------------------------------------------------ the bridge

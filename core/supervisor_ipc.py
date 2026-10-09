@@ -89,6 +89,7 @@ _FIELD_TYPES = {"int": int, "float": (int, float), "str": str, "bool": bool, "ob
 _CHALLENGE = b"QIPC1-CHALLENGE:"
 _RESPONSE = b"QIPC1-RESPONSE:"
 _CONFIRM = b"QIPC1-CONFIRM:"
+_KEY = b"QIPC1-KEY:"
 
 PeerPid = Callable[[object], Optional[int]]
 
@@ -511,7 +512,13 @@ class ChannelServer:
         self._closed = False
         self.refused_peers = 0
 
-    def accept(self, timeout: float, expected_pid: Optional[int] = None, peer_pid: Optional[PeerPid] = None) -> Channel:
+    def accept(
+        self,
+        timeout: float,
+        expected_pid: Optional[int] = None,
+        peer_pid: Optional[PeerPid] = None,
+        release_key: bool = False,
+    ) -> Channel:
         """
         The expected, authenticated peer within ``timeout``, or an error.
 
@@ -519,6 +526,11 @@ class ChannelServer:
         one whose process id cannot be read, is closed before anything is read
         from it, and waiting continues until the deadline. ``peer_pid`` stands
         in for the Win32 query in tests.
+
+        With ``release_key``, the session key itself is sent to that exact
+        peer — only after its process id was checked, before anything else —
+        for a peer that could not be given the key any other way without
+        putting it on a command line (``connect_for_key``).
         """
         deadline = _deadline(timeout)
 
@@ -536,6 +548,8 @@ class ChannelServer:
                 continue
 
             try:
+                if release_key:
+                    _send_raw(connection, _KEY + self.key, deadline)
                 _server_handshake(connection, self.key, deadline)
             except ChannelError:
                 connection.close()
@@ -599,6 +613,24 @@ class ChannelServer:
             pass
 
 
+def _open_checked(address: str, expected_server_pid: Optional[int], peer_pid: Optional[PeerPid], deadline: float):
+    connection = _open_pipe(address, deadline)
+
+    if expected_server_pid is None:
+        connection.close()
+        raise PeerRejected("The expected server process must be named.")
+
+    from core.pipe_peer import server_pid
+
+    actual = (peer_pid or server_pid)(connection)
+
+    if actual is None or actual != expected_server_pid:
+        connection.close()
+        raise PeerRejected("The pipe is not served by the expected process.")
+
+    return connection
+
+
 def connect(
     address: str,
     key: bytes,
@@ -618,19 +650,7 @@ def connect(
     address = require_local_address(address)
     key = _require_key(key)
     deadline = _deadline(timeout)
-    connection = _open_pipe(address, deadline)
-
-    if expected_server_pid is None:
-        connection.close()
-        raise PeerRejected("The expected server process must be named.")
-
-    from core.pipe_peer import server_pid
-
-    actual = (peer_pid or server_pid)(connection)
-
-    if actual is None or actual != expected_server_pid:
-        connection.close()
-        raise PeerRejected("The pipe is not served by the expected process.")
+    connection = _open_checked(address, expected_server_pid, peer_pid, deadline)
 
     try:
         _client_handshake(connection, key, deadline)
@@ -639,6 +659,43 @@ def connect(
         raise
 
     return Channel(connection, receive, send)
+
+
+def connect_for_key(
+    address: str,
+    receive: MessageSchema,
+    send: MessageSchema,
+    expected_server_pid: Optional[int] = None,
+    peer_pid: Optional[PeerPid] = None,
+    timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+) -> tuple[Channel, bytes]:
+    """
+    Connect to a server that releases the session key on the pipe.
+
+    For a peer started with only public identifiers on its command line (the
+    elevated Action Broker): the server's process id is checked first, and
+    only then is the first message read — the key — followed by the same
+    mutual handshake under it. The server sends the key only after checking
+    this process's id (``ChannelServer.accept(release_key=True)``), so the
+    key never appears on a command line, in the environment or in a log.
+    Returns the channel and the key.
+    """
+    _require_sessions_supported()
+    address = require_local_address(address)
+    deadline = _deadline(timeout)
+    connection = _open_checked(address, expected_server_pid, peer_pid, deadline)
+
+    try:
+        message = _receive_raw(connection, deadline, HANDSHAKE_BYTES)
+        if len(message) != len(_KEY) + KEY_BYTES or not message.startswith(_KEY):
+            raise ChannelError("The server did not release a session key.")
+        key = message[len(_KEY):]
+        _client_handshake(connection, key, deadline)
+    except ChannelError:
+        connection.close()
+        raise
+
+    return Channel(connection, receive, send), key
 
 
 def hmac_sha256(key: bytes, data: bytes) -> str:

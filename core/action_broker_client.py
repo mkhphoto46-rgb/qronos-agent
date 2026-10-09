@@ -16,10 +16,22 @@ Then, for that one action:
     1. listen on a fresh named pipe (first instance, unguessable name) with a
        fresh session key;
     2. launch the broker through the injected launcher — in production
-       ``core/uac_launch.py``, the normal UAC prompt; the person can say no;
+       ``core/uac_launch.py``, the normal UAC prompt; the person can say no.
+       Its command line carries only the pipe name and this process's id,
+       never the key;
     3. accept one connection, only from the exact process launched (process id
-       checked on Windows), and require its hello to name that process;
-    4. send the request, wait for the result, and wait for the broker to exit.
+       checked on Windows), release the session key to it on the pipe, run
+       the mutual handshake, and require its hello to name that process;
+    4. send the request — the typed action, the approval envelope and the
+       person's typed approval secret, which the broker checks itself —
+       wait for the result, and wait for the broker to exit.
+
+Cancellation (Stop, Pause, shutdown) is checked at every handoff before the
+request leaves: before launching, after the launcher returns (the UAC prompt
+may have been up for a while), and immediately before sending. A cancelled
+session sends nothing (``BrokerCancelled``); the broker it may have started
+finds no key and exits. Once the request has left, nothing is cancelled: the
+outcome is reported, or is unknown.
 
 A grant is used once by this session: a second attempt with the same grant
 is refused here before anything is launched, and the broker's own single-use
@@ -56,6 +68,10 @@ class BrokerUnavailable(RuntimeError):
     """The broker could not be asked; nothing was performed by this session."""
 
 
+class BrokerCancelled(BrokerUnavailable):
+    """Stop, Pause or shutdown came first; the request was never sent."""
+
+
 class BrokerOutcomeUnknown(BrokerUnavailable):
     """
     The request was sent but its answer was lost: the broker may have acted.
@@ -72,10 +88,13 @@ class ElevatedProcess(Protocol):
     def wait(self, timeout: float) -> Optional[int]:
         """The exit code, or None if still running after ``timeout``."""
 
+    def close(self) -> None:
+        """Release the process handle, if any; idempotent."""
+
 
 class BrokerLauncher(Protocol):
-    def launch(self, address: str, key: bytes, runtime_pid: int) -> ElevatedProcess:
-        """Start the broker so that it connects to ``address`` with ``key``."""
+    def launch(self, address: str, runtime_pid: int) -> ElevatedProcess:
+        """Start the broker so that it connects to ``address``; the key comes over the pipe."""
 
 
 @dataclass(frozen=True)
@@ -142,27 +161,44 @@ class BrokerSession:
         self._peer_pid = peer_pid
         self._used: set[str] = set()
 
-    def perform(self, action: TypedAction, request: ActionRequest, grant: ActionGrant) -> BrokerResult:
+    def perform(
+        self,
+        action: TypedAction,
+        request: ActionRequest,
+        grant: ActionGrant,
+        secret: str = "",
+        cancelled: Callable[[], bool] = lambda: False,
+    ) -> BrokerResult:
         if not isinstance(grant, ActionGrant):
             raise BrokerUnavailable("Only a permission-gate grant can authorize the broker.")
 
         if request.action_id in self._used:
             raise BrokerUnavailable("This approval has already been used.")
 
+        if cancelled():
+            raise BrokerCancelled("Cancelled before the broker was started; nothing was sent.")
+
         key = new_key()
         approval = build_approval(action, request, grant, key)
         self._used.add(request.action_id)
 
         server = ChannelServer("action-broker", key, receive=BROKER_SENDS, send=BROKER_RECEIVES)
+        process = None
 
         try:
             try:
-                process = self._launcher.launch(server.address, key, os.getpid())
+                process = self._launcher.launch(server.address, os.getpid())
             except Exception as error:
                 raise BrokerUnavailable(f"The broker was not started ({type(error).__name__}).") from error
 
+            if cancelled():
+                # The UAC prompt may have been up a long time. The broker it
+                # started gets no key and exits on its own deadline.
+                raise BrokerCancelled("Cancelled while the broker was being started; nothing was sent.")
+
             try:
-                channel = server.accept(self._accept_timeout, expected_pid=process.pid, peer_pid=self._peer_pid)
+                channel = server.accept(self._accept_timeout, expected_pid=process.pid, peer_pid=self._peer_pid,
+                                        release_key=True)
             except ChannelError as error:
                 raise BrokerUnavailable(f"The broker did not connect ({type(error).__name__}).") from error
 
@@ -172,10 +208,14 @@ class BrokerSession:
                 if hello["kind"] != "hello" or hello["pid"] != process.pid or hello["protocol"] != PROTOCOL_VERSION:
                     raise BrokerUnavailable("The broker introduced itself wrongly.")
 
+                if cancelled():
+                    raise BrokerCancelled("Cancelled just before the request was sent; nothing was sent.")
+
                 # From here the request may have left, so a failure means the
                 # broker may have acted: the outcome is unknown, not "refused".
                 sent = True
-                channel.send("request", action={"kind": action.kind, "params": dict(action.params)}, approval=approval)
+                channel.send("request", action={"kind": action.kind, "params": dict(action.params)},
+                             approval=approval, secret=secret)
                 reply = channel.receive(self._reply_timeout)
                 if reply["kind"] != "result":
                     raise BrokerOutcomeUnknown("The broker answered wrongly; the outcome is unknown.")
@@ -192,11 +232,23 @@ class BrokerSession:
             return BrokerResult(ok=reply["ok"], outcome=reply["outcome"], detail=reply["detail"])
         finally:
             server.close()
+            close = getattr(process, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
 
-def broker_arguments(address: str, key: bytes, runtime_pid: int) -> list[str]:
-    """The broker's exact command-line arguments; nothing else is ever passed."""
-    return ["action-broker", "--pipe", address, "--key", key.hex(), "--runtime-pid", str(int(runtime_pid))]
+def broker_arguments(address: str, runtime_pid: int) -> list[str]:
+    """
+    The broker's exact command-line arguments; nothing else is ever passed.
+
+    Only public identifiers: the pipe's name and the runtime's process id.
+    The session key reaches the broker over the pipe, after both process ids
+    are checked.
+    """
+    return ["action-broker", "--pipe", address, "--runtime-pid", str(int(runtime_pid))]
 
 
 def bundled_executable() -> Path:

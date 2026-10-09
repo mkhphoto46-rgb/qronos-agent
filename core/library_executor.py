@@ -1287,6 +1287,18 @@ class WorkflowSecretCheck:
     def __init__(self, store: ApprovalSecretStore | None = None) -> None:
         self._store = store
 
+    @classmethod
+    def in_profile(cls, profile: Path) -> "WorkflowSecretCheck":
+        """
+        The check against one explicit installed profile's store, lockout and
+        audit, ignoring environment overrides. For the elevated Action
+        Broker, whose launcher may have chosen its environment
+        (core/action_broker.py ``installed_profile``).
+        """
+        profile = Path(profile)
+        return cls(ApprovalSecretStore(profile / "approval_secret.sqlite3",
+                                       audit_path=profile / "Logs" / "action_audit.jsonl"))
+
     @property
     def store(self) -> ApprovalSecretStore:
         if self._store is None:

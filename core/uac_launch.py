@@ -130,9 +130,14 @@ class ElevatedBroker:
             return None
         code = wintypes.DWORD(0)
         ok = self._win32.get_exit_code_process(self._handle, ctypes.byref(code))
-        self._win32.close_handle(self._handle)
-        self._handle = None
+        self.close()
         return int(code.value) if ok else None
+
+    def close(self) -> None:
+        """Release the process handle (it is never used to change the process)."""
+        if self._handle is not None:
+            self._win32.close_handle(self._handle)
+            self._handle = None
 
 
 class UacBrokerLauncher:
@@ -145,14 +150,14 @@ class UacBrokerLauncher:
         self._executable = executable
         self._win32 = win32
 
-    def launch(self, address: str, key: bytes, runtime_pid: int) -> ElevatedBroker:
+    def launch(self, address: str, runtime_pid: int) -> ElevatedBroker:
         win32 = self._win32 or Win32()
         info = SHELLEXECUTEINFOW()
         info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
         info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
         info.lpVerb = "runas"
         info.lpFile = str(self._executable)
-        info.lpParameters = command_parameters(broker_arguments(address, key, runtime_pid))
+        info.lpParameters = command_parameters(broker_arguments(address, runtime_pid))
         info.lpDirectory = str(self._executable.parent)
         info.nShow = SW_HIDE
 
