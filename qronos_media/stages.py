@@ -22,7 +22,7 @@ import re
 import sqlite3
 from typing import Callable
 
-from qronos_media.identity import FileState, HashCancelled, checked_asset_id, full_sha256
+from qronos_media.identity import FileState, HashCancelled, HashLimitExceeded, checked_asset_id, full_sha256
 from qronos_media.paths import UnsafeMediaPath, owned_child, readable_media_file
 from qronos_media.scope import OutOfScope, admit_sidecar
 from qronos_media.probe import ProbeResult, probe
@@ -285,6 +285,9 @@ def _read_sidecar(ctx: StageContext, copy: Path, sidecar, n: int, seen_hashes: s
     2. Its identity hash streams through ``full_sha256`` with the stage's
        cancellation, so pause, Stop, the deadline, permission loss and lease
        loss stop it between chunks (a typed ChildCancelled, never success).
+       The hash read itself is bounded to MAX_SUBTITLE_BYTES + 1 bytes: a file
+       that grew after the size check is refused there, with no parse or
+       decoder open.
     3. SRT/VTT are then read in bounded chunks (at most the size limit) and
        must hash to that same digest, so the stored hash is of exactly the
        bytes parsed. ASS/SSA are decoded by ffmpeg with bounded output.
@@ -301,9 +304,11 @@ def _read_sidecar(ctx: StageContext, copy: Path, sidecar, n: int, seen_hashes: s
     if before.size > MAX_SUBTITLE_BYTES:
         return _refused_track(ctx, sidecar, n, f"too large: {before.size} bytes (limit {MAX_SUBTITLE_BYTES})")
     try:
-        digest = full_sha256(sidecar.path, cancelled=ctx.cancelled)
+        digest = full_sha256(sidecar.path, cancelled=ctx.cancelled, limit=MAX_SUBTITLE_BYTES)
     except HashCancelled:
         raise ChildCancelled("subtitle hash stopped") from None
+    except HashLimitExceeded:
+        return _refused_track(ctx, sidecar, n, f"too large: grew past {MAX_SUBTITLE_BYTES} bytes while hashed")
     except OSError as exc:
         return _refused_track(ctx, sidecar, n, f"unreadable: {type(exc).__name__}")
     try:

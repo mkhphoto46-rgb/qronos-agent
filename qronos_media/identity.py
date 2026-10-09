@@ -24,20 +24,34 @@ class HashCancelled(RuntimeError):
     pass
 
 
-def full_sha256(path: Path, *, cancelled: Callable[[], bool] | None = None) -> str:
+class HashLimitExceeded(ValueError):
+    """The file holds more than the byte limit; no digest is returned."""
+
+
+def full_sha256(path: Path, *, cancelled: Callable[[], bool] | None = None, limit: int | None = None) -> str:
     """Stream the whole file. Checks ``cancelled`` between chunks.
 
     hashlib state cannot be persisted, so an interrupted hash restarts; that is
     I/O cost only and is accepted for this stage.
+
+    With ``limit`` (small files such as subtitles), the read itself is bounded:
+    no more than ``limit + 1`` bytes are ever requested, and a file holding more
+    than ``limit`` bytes (for example one that grew after its size was checked)
+    raises HashLimitExceeded. Video identity passes no limit.
     """
     digest = hashlib.sha256()
+    total = 0
     with open(path, "rb") as handle:
         while True:
             if cancelled is not None and cancelled():
                 raise HashCancelled(str(path))
-            chunk = handle.read(CHUNK * 4)
+            size = CHUNK * 4 if limit is None else min(CHUNK * 4, limit + 1 - total)
+            chunk = handle.read(size)
             if not chunk:
                 break
+            total += len(chunk)
+            if limit is not None and total > limit:
+                raise HashLimitExceeded(f"{path}: more than {limit} bytes")
             digest.update(chunk)
     return digest.hexdigest()
 

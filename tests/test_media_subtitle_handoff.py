@@ -11,6 +11,8 @@
   ``refused`` (typed, with the reason), never a crash or a stuck RUNNING row.
 - Work that finishes under a tripped watch (pause, revocation) is requeued,
   not committed.
+- The sidecar hash read itself never asks for a byte past the cap + 1: a
+  sidecar that grows at or during its hash is refused there (round 9).
 
 Production limits and guards are unchanged; time is a fake monotonic clock
 where it matters. Synthetic fixtures only.
@@ -356,3 +358,154 @@ def test_work_finished_under_a_tripped_watch_is_requeued_not_committed(tmp_path,
     assert _stage(service, asset, "scenes")[0] == "QUEUED"
     other.close()
     service.close()
+
+
+# ---------------------------------------- the sidecar hash read itself is byte-bounded (round 9, R1)
+
+_ASS = (
+    "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\n"
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, "
+    "Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, "
+    "MarginR, MarginV, Encoding\n"
+    "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1\n"
+    "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    "Dialogue: 0,0:00:00.20,0:00:00.90,Default,,0,0,0,,small ass line\n"
+)
+
+
+class _CountingHandle:
+    """Wraps the REAL file object identity.full_sha256 opened; records every request and delivered byte.
+
+    ``furthest`` is the furthest file offset any read asked for (bytes already delivered + bytes requested):
+    the bound is that no read ever asks for a byte beyond ``limit + 1``. ``requested`` (a sum over short
+    reads) is kept as evidence only."""
+
+    def __init__(self, real, record: dict, after_first_read) -> None:
+        self._real, self._record, self._after_first_read = real, record, after_first_read
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._real.close()
+
+    def read(self, size=-1):
+        asked = size if size is not None and size >= 0 else 1 << 62
+        self._record["requested"] += asked
+        self._record["furthest"] = max(self._record["furthest"], self._record["delivered"] + asked)
+        data = self._real.read(size)
+        self._record["delivered"] += len(data)
+        self._record["reads"] += 1
+        if self._record["reads"] == 1 and self._after_first_read is not None:
+            self._after_first_read()
+        return data
+
+
+def _watch_hash_opens(monkeypatch, target: Path, grow_to: int, when: str) -> dict:
+    """Every open identity makes of ``target`` is counted; the file grows (sparse) AT the hash open or
+    IN FLIGHT after the first chunk. Below the cap when its size was checked."""
+    from qronos_media import identity as identity_module
+
+    record = {"opens": 0, "requested": 0, "furthest": 0, "delivered": 0, "reads": 0}
+
+    def grow() -> None:
+        os.truncate(target, grow_to)
+
+    def counting_open(path, mode="r", *args, **kwargs):
+        if Path(path) == target:
+            record["opens"] += 1
+            if when == "at_handoff":
+                grow()
+            return _CountingHandle(open(path, mode, *args, **kwargs), record,
+                                   grow if when == "in_flight" else None)
+        return open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(identity_module, "open", counting_open, raising=False)
+    return record
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("suffix", [".srt", ".ass"])
+@pytest.mark.parametrize("when", ["at_handoff", "in_flight"])
+def test_a_sidecar_that_grows_during_its_hash_is_refused_within_cap_plus_one_bytes(tmp_path, base_video, monkeypatch,
+                                                                                  suffix, when) -> None:
+    import hashlib
+
+    library = tmp_path / "library"
+    copy_video(base_video, library / "Film.mkv")
+    write_srt(library / "Film.en.srt", [("00:00:00,500", "00:00:01,500", "small srt line")])
+    (library / "Film.ja.ass").write_text(_ASS, encoding="utf-8")
+    grower = library / f"Film.grow{suffix}"
+    if suffix == ".srt":
+        write_srt(grower, [("00:00:00,500", "00:00:01,500", "growing line")])
+    else:
+        grower.write_text(_ASS, encoding="utf-8")
+    service = make_service(tmp_path / "data")
+    service.scan(service.add_root(str(library))["rootId"])
+    _index(service)
+    asset = service.store.db.execute("SELECT asset_id FROM files").fetchone()["asset_id"]
+    assert grower.stat().st_size < MAX_SUBTITLE_BYTES
+
+    service.reindex(asset, "subtitles")
+    record = _watch_hash_opens(monkeypatch, grower, 2 * MAX_SUBTITLE_BYTES, when)
+    reads, spawned = [], []
+    real_read, real_run = stages_module.read_bounded, stages_module.run_bounded
+
+    def counting_read(path, *args, **kwargs):
+        reads.append(Path(path).name)
+        return real_read(path, *args, **kwargs)
+
+    def recording_run(argv, **kwargs):
+        spawned.append(" ".join(argv))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(stages_module, "read_bounded", counting_read)
+    monkeypatch.setattr(stages_module, "run_bounded", recording_run)
+    report = service.index(max_seconds=60)
+    tracks = {Path(row["sidecar_path"]).name: dict(row) for row in service.store.db.execute(
+        "SELECT * FROM subtitle_tracks WHERE source = 'sidecar'")}
+
+    assert record["opens"] == 1  # the hash opened it once; nothing reopened it
+    assert record["furthest"] <= MAX_SUBTITLE_BYTES + 1, record
+    assert record["delivered"] <= MAX_SUBTITLE_BYTES + 1, record
+    assert tracks[grower.name]["status"] == "failed" and "too large" in tracks[grower.name]["detail"]
+    assert tracks[grower.name]["cue_count"] == 0
+    assert grower.name not in reads and not any(grower.name in argv for argv in spawned)
+    # The run is clean and the unchanged small sidecars keep their exact digest and cues.
+    assert f"{asset}/subtitles" in report["completed"] and _stage(service, asset, "subtitles")[0] == "COMPLETED"
+    for name in ("Film.en.srt", "Film.ja.ass"):
+        assert tracks[name]["status"] != "failed" and tracks[name]["cue_count"] == 1, tracks[name]
+        assert tracks[name]["sidecar_sha256"] == hashlib.sha256((library / name).read_bytes()).hexdigest()
+    service.close()
+
+
+def test_the_bounded_hash_is_exact_up_to_the_limit_and_requests_at_most_limit_plus_one(tmp_path, monkeypatch) -> None:
+    import hashlib
+
+    from qronos_media import identity as identity_module
+    from qronos_media.identity import HashCancelled, HashLimitExceeded, full_sha256
+
+    exact = tmp_path / "exact.bin"
+    exact.write_bytes(os.urandom(1000))
+    over = tmp_path / "over.bin"
+    over.write_bytes(os.urandom(5000))
+    record = {"opens": 0, "requested": 0, "furthest": 0, "delivered": 0, "reads": 0}
+
+    def counting_open(path, mode="r", *args, **kwargs):
+        record["opens"] += 1
+        return _CountingHandle(open(path, mode, *args, **kwargs), record, None)
+
+    monkeypatch.setattr(identity_module, "open", counting_open, raising=False)
+    assert full_sha256(exact, limit=1000) == hashlib.sha256(exact.read_bytes()).hexdigest()
+    assert record["furthest"] <= 1001
+    for key in ("requested", "furthest", "delivered", "reads"):
+        record[key] = 0
+    with pytest.raises(HashLimitExceeded):
+        full_sha256(over, limit=1000)
+    assert record["furthest"] <= 1001 and record["delivered"] <= 1001, record
+    with pytest.raises(HashCancelled):
+        full_sha256(exact, limit=1000, cancelled=lambda: True)
+    # No limit: the video identity semantics, a whole multi-chunk file.
+    big = tmp_path / "video-like.bin"
+    big.write_bytes(os.urandom(5 * 1024 * 1024))
+    assert full_sha256(big) == hashlib.sha256(big.read_bytes()).hexdigest()

@@ -173,8 +173,14 @@ single place a future path-scoped rule would apply.
   refused from its size alone, before any hash, read or ffmpeg spawn.
 - **Hashing:** the sidecar's identity hash streams through `full_sha256` with
   the stage's cancellation. Pause, Stop, the deadline, revocation and lease
-  loss stop it between chunks and requeue the stage. A sidecar that grows past
-  the limit or disappears by the time the hash ends is refused.
+  loss stop it between chunks and requeue the stage.
+- **Hash byte bound (round 9):** the hash read itself is bounded by
+  `full_sha256(..., limit=16 MiB)`. No read ever asks for a byte past
+  16 MiB + 1. A sidecar that grew after its size check, at the hash or during
+  it, is refused there as a failed track ("too large: grew past ... while
+  hashed"), with no parse read and no ffmpeg run. The stage still completes.
+  The size check after the hash is only a second check. Video asset identity
+  passes no limit and is still a full hash.
 - **Reading:** SRT and VTT are then read in 256 KiB chunks, at most 16 MiB,
   with the same cancellation. The bytes read must hash to the same digest, so
   the stored sidecar hash is of exactly the bytes parsed. A file that changes
