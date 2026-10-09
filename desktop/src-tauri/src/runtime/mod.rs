@@ -1,7 +1,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Stdio};
+use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -56,7 +58,104 @@ pub struct RuntimeStatus {
 
 struct RuntimeProcess {
     child: Child,
-    stdin: ChildStdin,
+    input: RuntimeInput,
+}
+
+// ------------------------------------------------------------ command input
+
+const MAX_QUEUED_COMMANDS: usize = 64;
+const MAX_QUEUED_COMMAND_BYTES: usize = 4 * 1024 * 1024;
+const MAX_COMMAND_BYTES: usize = 1024 * 1024;
+const COMMAND_NOT_READ: &str =
+    "The Qronos runtime is not reading commands; the command was not delivered and nothing ran.";
+const COMMAND_TOO_LARGE: &str = "The command is too large; it was not delivered and nothing ran.";
+const COMMAND_INPUT_CLOSED: &str =
+    "The Qronos runtime is not accepting commands; the command was not delivered and nothing ran.";
+const COMMAND_UNCONFIRMED: &str = "Sending a command to the Qronos runtime failed part-way; \
+it may or may not have been received. It is not sent again.";
+
+/// The runtime's standard input, written by one dedicated thread.
+///
+/// Nothing that holds the manager lock ever writes to the pipe: a command is
+/// queued (at most `MAX_QUEUED_COMMANDS` and `MAX_QUEUED_COMMAND_BYTES`) and
+/// the writer thread writes it. A runtime that stops reading fills the
+/// queue, and further commands are refused at once, before any byte is
+/// written. A write that fails part-way is reported once as unconfirmed and
+/// ends the input; nothing is ever re-sent.
+struct RuntimeInput {
+    sender: Option<SyncSender<Vec<u8>>>,
+    queued_bytes: Arc<AtomicUsize>,
+    broken: Arc<AtomicBool>,
+}
+
+impl RuntimeInput {
+    fn spawn<W, F>(mut writer: W, on_unconfirmed: F) -> Self
+    where
+        W: Write + Send + 'static,
+        F: Fn() + Send + 'static,
+    {
+        let (sender, receiver) = sync_channel::<Vec<u8>>(MAX_QUEUED_COMMANDS);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let broken = Arc::new(AtomicBool::new(false));
+        let (bytes, failed) = (queued_bytes.clone(), broken.clone());
+
+        std::thread::spawn(move || {
+            for line in receiver {
+                let size = line.len();
+                let written = writer.write_all(&line).and_then(|_| writer.flush());
+                bytes.fetch_sub(size, Ordering::SeqCst);
+                if written.is_err() {
+                    failed.store(true, Ordering::SeqCst);
+                    on_unconfirmed();
+                    // Dropping the receiver refuses every later command.
+                    return;
+                }
+            }
+        });
+
+        Self {
+            sender: Some(sender),
+            queued_bytes,
+            broken,
+        }
+    }
+
+    /// Queue one command, or refuse it without writing anything. Never waits.
+    fn send(&self, payload: &serde_json::Value) -> Result<(), String> {
+        let mut line = payload.to_string().into_bytes();
+        line.push(b'\n');
+        if line.len() > MAX_COMMAND_BYTES {
+            return Err(COMMAND_TOO_LARGE.to_string());
+        }
+        let Some(sender) = self.sender.as_ref() else {
+            return Err(COMMAND_INPUT_CLOSED.to_string());
+        };
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(COMMAND_INPUT_CLOSED.to_string());
+        }
+
+        let size = line.len();
+        if self.queued_bytes.fetch_add(size, Ordering::SeqCst) + size > MAX_QUEUED_COMMAND_BYTES {
+            self.queued_bytes.fetch_sub(size, Ordering::SeqCst);
+            return Err(COMMAND_NOT_READ.to_string());
+        }
+        match sender.try_send(line) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                self.queued_bytes.fetch_sub(size, Ordering::SeqCst);
+                Err(COMMAND_NOT_READ.to_string())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.queued_bytes.fetch_sub(size, Ordering::SeqCst);
+                Err(COMMAND_INPUT_CLOSED.to_string())
+            }
+        }
+    }
+
+    /// No more commands. Ones already queued still go out.
+    fn close(&mut self) {
+        self.sender = None;
+    }
 }
 
 struct NativeAudioPlaybackState {
@@ -384,13 +483,7 @@ fn write_runtime_payload(
     process: &mut RuntimeProcess,
     payload: serde_json::Value,
 ) -> Result<(), String> {
-    writeln!(process.stdin, "{payload}")
-        .map_err(|error| format!("Could not write to Qronos runtime: {error}"))?;
-
-    process
-        .stdin
-        .flush()
-        .map_err(|error| format!("Could not flush Qronos runtime command: {error}"))
+    process.input.send(&payload)
 }
 
 fn write_runtime_command(process: &mut RuntimeProcess, command: &str) -> Result<(), String> {
@@ -625,7 +718,7 @@ pub fn start_runtime(
         });
     }
 
-    spawn_runtime_reader(app, stdout);
+    spawn_runtime_reader(app.clone(), stdout);
 
     /*
      * Wake listening is a runtime invariant, not a frontend timing concern.
@@ -637,7 +730,18 @@ pub fn start_runtime(
      * The frontend may still send the same action after runtime_ready as a
      * recovery path; start_wake_listener() is idempotent.
      */
-    let mut runtime_process = RuntimeProcess { child, stdin };
+    let app_for_input = app.clone();
+    let input = RuntimeInput::spawn(stdin, move || {
+        emit_runtime_event(
+            &app_for_input,
+            RuntimeEvent {
+                event_type: "runtime_error".to_string(),
+                status: "error".to_string(),
+                message: COMMAND_UNCONFIRMED.to_string(),
+            },
+        );
+    });
+    let mut runtime_process = RuntimeProcess { child, input };
 
     if let Err(error) = write_runtime_payload(
         &mut runtime_process,
@@ -1423,8 +1527,13 @@ pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStat
             message: "Qronos runtime is already stopped.".to_string(),
         });
     };
+    // Status and other commands are answered while this waits.
+    drop(guard);
 
+    // Queued, never written here: a runtime that is not reading cannot hold
+    // Stop. If even the queue is full, the bounded wait and kill still run.
     let _ = write_runtime_command(&mut process, "shutdown");
+    process.input.close();
 
     for _ in 0..STOP_WAIT_STEPS {
         match process.child.try_wait() {
@@ -1470,6 +1579,7 @@ pub fn shutdown(app: &AppHandle) {
     let Some(mut process) = guard.take() else {
         return;
     };
+    drop(guard);
 
     // Give the Python runtime the same graceful-shutdown opportunity used by
     // stop_runtime(). This matters because Python owns child resources such as
@@ -1477,6 +1587,7 @@ pub fn shutdown(app: &AppHandle) {
     // writing "shutdown" can orphan those children and leave GPU memory and
     // localhost ports allocated after the desktop has exited.
     let _ = write_runtime_command(&mut process, "shutdown");
+    process.input.close();
 
     for _ in 0..STOP_WAIT_STEPS {
         match process.child.try_wait() {
@@ -1496,6 +1607,132 @@ pub fn shutdown(app: &AppHandle) {
     // STOP_WAIT_STEPS x 50 ms, force-stop only the process owned by this
     // manager. Its kill-on-close Job Object then ends the bridge too.
     let _ = process.child.kill();
+}
+
+#[cfg(test)]
+mod runtime_input_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn command(size: usize) -> serde_json::Value {
+        serde_json::json!({ "command": "echo", "text": "y".repeat(size) })
+    }
+
+    #[test]
+    fn a_runtime_that_stops_reading_gets_refusals_and_never_holds_the_caller() {
+        // A real anonymous pipe whose reading end is kept open and never read.
+        let (_reader, writer) = std::io::pipe().unwrap();
+        let input = RuntimeInput::spawn(writer, || {});
+        let started = Instant::now();
+        let mut refused = 0;
+        for _ in 0..500 {
+            match input.send(&command(16 * 1024)) {
+                Ok(()) => {}
+                Err(message) => {
+                    assert_eq!(message, COMMAND_NOT_READ);
+                    refused += 1;
+                }
+            }
+        }
+        assert!(refused > 0, "a full pipe must be refused, not queued without end");
+        assert!(started.elapsed() < Duration::from_secs(2), "sending must never wait on the pipe");
+        assert!(input.queued_bytes.load(Ordering::SeqCst) <= MAX_QUEUED_COMMAND_BYTES);
+    }
+
+    #[test]
+    fn the_queue_is_bounded_by_bytes_as_well_as_count() {
+        let (_reader, writer) = std::io::pipe().unwrap();
+        let input = RuntimeInput::spawn(writer, || {});
+        // Each is just under the per-command limit; the byte budget refuses
+        // long before MAX_QUEUED_COMMANDS is reached.
+        let accepted = (0..MAX_QUEUED_COMMANDS)
+            .filter(|_| input.send(&command(MAX_COMMAND_BYTES - 100)).is_ok())
+            .count();
+        assert!(accepted <= MAX_QUEUED_COMMAND_BYTES / (MAX_COMMAND_BYTES - 100) + 1);
+        assert_eq!(input.send(&command(MAX_COMMAND_BYTES)).unwrap_err(), COMMAND_TOO_LARGE);
+    }
+
+    #[test]
+    fn a_write_that_fails_is_unconfirmed_once_and_later_commands_are_refused() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader); // the runtime is gone
+        let reported = Arc::new(AtomicUsize::new(0));
+        let counter = reported.clone();
+        let input = RuntimeInput::spawn(writer, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        input.send(&command(10)).unwrap(); // queued; the write then fails
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reported.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+        assert_eq!(input.send(&command(10)).unwrap_err(), COMMAND_INPUT_CLOSED);
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+    }
+
+    /// Run only as a child of the test below: an owned process that never
+    /// reads its standard input, and exits on its own after 30 s.
+    #[test]
+    #[ignore]
+    fn helper_child_that_never_reads_its_input() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn an_owned_child_that_never_reads_cannot_hold_commands_or_its_stop() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::runtime_input_tests::helper_child_that_never_reads_its_input",
+                "--ignored",
+                "--quiet",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let reported = Arc::new(AtomicUsize::new(0));
+        let counter = reported.clone();
+        let mut input = RuntimeInput::spawn(stdin, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let refused = (0..500).filter(|_| input.send(&command(16 * 1024)).is_err()).count();
+        assert!(refused > 0 && started.elapsed() < Duration::from_secs(2));
+
+        // Stop: queue the shutdown (or have it refused), close, kill after a
+        // bounded wait. Nothing here waits on the child's full pipe.
+        let started = Instant::now();
+        let _ = input.send(&serde_json::json!({ "command": "shutdown" }));
+        input.close();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // The writer, blocked on the full pipe, is released by the exit and
+        // reports the command it was writing as unconfirmed, once.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reported.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_closed_input_refuses_without_writing_and_queued_commands_still_go_out() {
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let mut input = RuntimeInput::spawn(writer, || {});
+        input.send(&serde_json::json!({ "command": "shutdown" })).unwrap();
+        input.close();
+        assert_eq!(input.send(&command(1)).unwrap_err(), COMMAND_INPUT_CLOSED);
+        let mut received = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut received).unwrap();
+        assert_eq!(received, "{\"command\":\"shutdown\"}\n");
+    }
 }
 
 #[cfg(test)]
