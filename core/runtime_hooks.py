@@ -7,8 +7,10 @@ which reports whether a verified update is waiting. They must never hold up
 or break chat, wake or Device Link, whatever state they are in — including
 an unconfigured update trust store.
 
-So a hook here is a closed record (event type, module, function), not code
-from a caller. All hooks run on one daemon thread after ``runtime_ready``.
+So a hook here is a closed record — an event type and a function defined in
+this module that imports its service by a literal, lazy import — never a
+module name computed at run time. All hooks run on one daemon thread after
+``runtime_ready``.
 Each is called with a small read-only context, must return a JSON object of
 at most ``MAX_STATUS_BYTES`` within ``HOOK_TIMEOUT_SECONDS``, and becomes one
 event of its own type with status ``ready``. A hook that raises, returns
@@ -26,7 +28,6 @@ there is no second hard-coded version here.
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import re
@@ -38,8 +39,6 @@ HOOK_TIMEOUT_SECONDS = 10.0
 MAX_STATUS_BYTES = 64 * 1024
 _VERSION = re.compile(r"^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$")
 _EVENT_TYPE = re.compile(r"^[a-z][a-z_]{2,39}$")
-_MODULE = re.compile(r"^core\.[a-z][a-z0-9_]{0,63}$")
-_FUNCTION = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 #: Event types a hook may never use: they mean something to the desktop already.
 _RESERVED = frozenset({
     "runtime_ready", "runtime_stopping", "runtime_error", "runtime_warning", "runtime_log",
@@ -47,24 +46,31 @@ _RESERVED = frozenset({
 })
 
 Emit = Callable[[str, str, str], None]
+StatusCheck = Callable[[dict], object]
 
 
 @dataclass(frozen=True)
 class StartupStatusHook:
     event_type: str
-    module: str
-    function: str
+    check: StatusCheck
 
     def __post_init__(self) -> None:
         if not _EVENT_TYPE.fullmatch(self.event_type) or self.event_type in _RESERVED:
             raise ValueError(f"Invalid hook event type {self.event_type!r}.")
-        if not _MODULE.fullmatch(self.module) or not _FUNCTION.fullmatch(self.function):
-            raise ValueError("A hook names one function of one core module.")
+        if not callable(self.check):
+            raise ValueError("A hook's check must be a function.")
 
 
 #: Reviewed hooks only. Installer's update check is added here once
-#: core.update_service exists in an accepted commit:
-#:     StartupStatusHook("update_status", "core.update_service", "startup_check")
+#: core.update_service exists in an accepted commit, as a function in this
+#: module with a literal, lazy import (so a missing or failing service only
+#: makes its event "unavailable"):
+#:
+#:     def _update_status(context: dict) -> object:
+#:         from core.update_service import startup_check
+#:         return startup_check(context)
+#:
+#:     STARTUP_STATUS_HOOKS = (StartupStatusHook("update_status", _update_status),)
 STARTUP_STATUS_HOOKS: tuple[StartupStatusHook, ...] = ()
 
 
@@ -79,8 +85,7 @@ def _status(hook: StartupStatusHook, context: Mapping[str, str], timeout: float)
 
     def call() -> None:
         try:
-            function = getattr(importlib.import_module(hook.module), hook.function)
-            outcome["value"] = function(dict(context))
+            outcome["value"] = hook.check(dict(context))
         except BaseException as error:  # noqa: BLE001 - reported by type only
             outcome["error"] = type(error).__name__
 
