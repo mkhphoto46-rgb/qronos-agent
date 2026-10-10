@@ -1,13 +1,13 @@
 ; Qronos update fence, hand-over and installation receipt
 ; (work/opus-production-installer-contract-round10.txt section 3; docs/local-update-packages.md).
 ;
-; NOT YET INCLUDED by webview2-offline.nsh. Tauri 2.9.4's stock template runs
-; SetOutPath $INSTDIR and the reinstall page's old-uninstaller ExecWait before
-; NSIS_HOOK_PREINSTALL, so wiring waits for the pinned custom template
-; (work/opus-production-installer-contract-round10.txt, addendum A). Proven so
-; far with compiled probes only (tests/test_update_fence_nsis.py).
+; Included by webview2-offline.nsh and used ONLY with the pinned Qronos template
+; (desktop/src-tauri/installer-template/installer.nsi). That template runs
+; NSIS_HOOK_PREINSTALL before SetOutPath and never runs a previous uninstaller;
+; Tauri's stock template does both the other way round and is refused by
+; build_desktop (work/opus-production-installer-contract-round11.txt).
 ;
-; What it guarantees, once called first, while this installer or uninstaller runs:
+; What it guarantees while this installer or uninstaller runs:
 ;
 ; * Fence and exclusive admission first. Before anything is checked, killed,
 ;   copied, registered or deleted, this process holds the update fence (the
@@ -30,10 +30,16 @@
 ; * Manual install and uninstall: the fence must be free at once and the
 ;   admission free at once; otherwise Qronos (or another installation) is
 ;   running and nothing is done.
-; * Receipt (update mode, after every install step succeeded): a CREATE_NEW
+; * Receipt (update mode, only when $QronosInstallComplete is "1"): a CREATE_NEW
 ;   file in the receipts folder binding the nonce, the approved package and
 ;   manifest SHA-256 and this installer's version. Only the start-up barrier
 ;   judges it (core/update_service.py _receipt_verdict).
+; * Explicit install success: NSIS commands that fail in a silent install only
+;   set the error flag and continue (File, WriteUninstaller, WriteRegStr,
+;   CreateShortcut), and ${GetSize} clears it. The template therefore checks
+;   the flag right after every material step (QRONOS_STEP, which aborts) and
+;   sets $QronosInstallComplete only at QRONOS_INSTALL_COMPLETE, immediately
+;   before NSIS_HOOK_POSTINSTALL.
 ;
 ; A probe harness may define QRONOS_UPDATE_FENCE_NAME, QRONOS_PROBE_DATA_ROOT
 ; and QRONOS_PROBE_RESULT (private test values); build_desktop never does.
@@ -68,6 +74,37 @@ Var QronosFenceSet
 Var QronosFenceOk
 Var QronosFenceMessage   ; "" when the fence step passed, otherwise why it refused
 Var QronosFenceVersion   ; this installer's own version, set by QRONOS_FENCE_INSTALL ("" refuses update mode)
+Var QronosInstallComplete ; "1" only after every material install step succeeded (QRONOS_INSTALL_COMPLETE)
+
+; After a material install step (the Qronos template inserts it right after each one): a failed
+; command only set the error flag, so the installation stops here and no receipt can follow.
+; IfErrors also clears the flag for the next step.
+!macro QRONOS_STEP STEP
+  ${If} ${Errors}
+    StrCpy $QronosInstallComplete "0"
+    !ifdef QRONOS_PROBE_RESULT
+      Push "${STEP}"
+      Call QronosProbeStepFailed
+    !endif
+    Abort "Qronos was not completely installed: ${STEP} failed. Run the installer again."
+  ${EndIf}
+!macroend
+
+; Immediately before NSIS_HOOK_POSTINSTALL: every step above passed its QRONOS_STEP.
+!macro QRONOS_INSTALL_COMPLETE
+  !insertmacro QRONOS_STEP "the last install step"
+  StrCpy $QronosInstallComplete "1"
+!macroend
+
+!ifdef QRONOS_PROBE_RESULT
+Function QronosProbeStepFailed
+  Exch $R6
+  FileOpen $R7 "${QRONOS_PROBE_RESULT}" w
+  FileWrite $R7 "step failed: $R6"
+  FileClose $R7
+  Pop $R6
+FunctionEnd
+!endif
 
 ; Refuse: record the reason for a probe harness, then stop this installer or uninstaller.
 !macro QRONOS_FENCE_REFUSE MESSAGE
@@ -628,6 +665,7 @@ FunctionEnd
 ; NSIS_HOOK_PREINSTALL, first. A macro, not a Function, for the version: Tauri's template includes the
 ; hooks BEFORE it defines VERSION, so only text inserted into a section sees the compiled version.
 !macro QRONOS_FENCE_INSTALL
+  StrCpy $QronosInstallComplete "0"
   !ifdef VERSION
     StrCpy $QronosFenceVersion "${VERSION}"
   !else
@@ -705,6 +743,10 @@ FunctionEnd
 ; NSIS_HOOK_POSTINSTALL (update mode only): the installation receipt, CREATE_NEW, digits-only name.
 Function QronosWriteReceipt
   ${If} $QronosFenceUpdate != "1"
+    Return
+  ${EndIf}
+  ${If} $QronosInstallComplete != "1"
+    StrCpy $QronosFenceMessage "Not every install step succeeded; no installation receipt was written."
     Return
   ${EndIf}
   Push $0

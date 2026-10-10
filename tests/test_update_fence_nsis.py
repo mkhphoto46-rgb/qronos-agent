@@ -510,6 +510,40 @@ def test_a_guard_that_crashes_leaves_the_compiled_installer_fenced_until_it_ends
         after.finish()
 
 
+def test_without_the_install_complete_step_a_real_hand_over_writes_no_receipt(tmp_path):
+    """The receipt's own guard: update mode, a valid hand-over, but the install-complete step never ran."""
+    import _winapi
+
+    from tests.test_installer_template import MINI_GUARD
+
+    probe, data, fence = make_probe(tmp_path, "incomplete", complete=False)
+    (data / "Updates" / "receipts").mkdir(parents=True)
+    probe.go.write_text("1")
+    out = tmp_path / "guard.json"
+    executable, environment = child_python()
+    started = time.time()
+    guard = subprocess.Popen([executable, "-B", "-I", "-c", MINI_GUARD, str(ROOT), str(data), fence,
+                              json.dumps([str(probe.exe), "/S", "/QRONOSUPDATE"]), str(out)], env=environment)
+    installer = None
+    try:
+        assert guard.wait(timeout=120) == 0
+        result = json.loads(out.read_text())
+        assert result["ack"] is True
+        installer = _open_owned(result["pid"], started)
+        assert _winapi.WaitForSingleObject(installer, 60_000) == _winapi.WAIT_OBJECT_0
+    finally:
+        if guard.poll() is None:
+            guard.kill()
+            guard.wait(30)
+        if installer is not None:
+            if _winapi.WaitForSingleObject(installer, 0) != _winapi.WAIT_OBJECT_0:
+                _winapi.TerminateProcess(installer, 1)  # verified above as this test's own probe
+            _winapi.CloseHandle(installer)
+    assert probe.read_result() == ("installed receipt=[Not every install step succeeded; "
+                                   "no installation receipt was written.]")
+    assert list((data / "Updates" / "receipts").glob("*.receipt")) == []
+
+
 def _controller() -> str:
     """This test process as the unopenable guard's exact controller (pid:creation FILETIME)."""
     import _winapi
@@ -648,6 +682,71 @@ def test_compiler_identities_were_recorded():
 HOOKS = ROOT / "desktop" / "src-tauri" / "installer-hooks"
 
 
+def _macro(text: str, name: str) -> str:
+    body = text[text.index(f"!macro {name}"):]
+    return body[:body.index("!macroend")]
+
+
+def test_the_fence_runs_first_in_preinstall_and_preuninstall_and_the_receipt_last():
+    hook = (HOOKS / "webview2-offline.nsh").read_text(encoding="utf-8")
+    assert '!include "${__FILEDIR__}\\qronos-update-fence.nsh"' in hook
+    preinstall = _macro(hook, "NSIS_HOOK_PREINSTALL")
+    # Round 12 (Root's order; adapted from round 10, where the WebView2 child came before the app check and the
+    # removal): fence, install root, whole-list validation, app check, owned removal, then the WebView2 child.
+    validate = preinstall.index('StrCpy $QronosValidateOnly "1"')
+    order = [preinstall.index("!insertmacro QRONOS_FENCE_INSTALL"), preinstall.index("Call QronosCheckInstallRoot"),
+             validate, preinstall.index("Call QronosRemoveOwnedPayload", validate),
+             preinstall.index("CheckIfAppIsRunning"),
+             preinstall.index("Call QronosRemoveOwnedPayload", preinstall.index("CheckIfAppIsRunning")),
+             preinstall.index("QRONOS_WEBVIEW2_VERSION_TO_R9"), preinstall.index("QRONOS_WEBVIEW2_RUN_INSTALLER")]
+    assert order == sorted(order) and len(set(order)) == len(order)
+    first = [line.strip() for line in preinstall.splitlines()[1:] if line.strip() and not line.strip().startswith(";")]
+    assert first[:5] == ["Push $R7", "Push $R8", "Push $R9", "!insertmacro QRONOS_FENCE_INSTALL",
+                         '${If} $QronosFenceMessage != ""']
+    assert _macro(hook, "NSIS_HOOK_POSTINSTALL").split("\n")[1].strip() == "Call QronosWriteReceipt"
+    assert "Abort" not in _macro(hook, "NSIS_HOOK_POSTINSTALL")  # a receipt failure never undoes an install
+    preuninstall = _macro(hook, "NSIS_HOOK_PREUNINSTALL")
+    assert preuninstall.split("\n")[1].strip() == "Call un.QronosFenceUninstall"
+    assert 'QRONOS_REFUSE "$QronosFenceMessage"' in preuninstall
+    uninstall_order = [preuninstall.index(step) for step in (
+        "Call un.QronosFenceUninstall", "Call un.QronosCheckInstallRoot", 'StrCpy $QronosValidateOnly "1"',
+        "CheckIfAppIsRunning")]
+    assert uninstall_order == sorted(uninstall_order)
+    assert preuninstall.rindex("Call un.QronosRemoveOwnedPayload") > preuninstall.index("CheckIfAppIsRunning")
+    assert "un.QronosRemoveOwnedPayload" not in _macro(hook, "NSIS_HOOK_POSTUNINSTALL")  # moved before deletion
+
+
+def test_the_production_hook_compiles_in_tauris_include_order_and_is_never_run(tmp_path):
+    from build_support import desktop_prerequisites as prerequisites
+
+    payload = tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    payload.write_bytes(b"never run")
+    pin = prerequisites.load_pin()
+    (tmp_path / "hooks.nsh").write_text(prerequisites.hook_wrapper(payload, pin), encoding="utf-8")
+    script = tmp_path / "tauri-order.nsi"
+    script.write_text("\n".join((
+        "Unicode true", 'Name "compile-only"', f'OutFile "{tmp_path / "compile-only.exe"}"',
+        "RequestExecutionLevel user", f'!include "{tmp_path / "hooks.nsh"}"',
+        '!define VERSION "0.1.0"',  # after the hooks, as in Tauri 2.9.4's installer.nsi
+        "Section Install", '  SetOutPath "$INSTDIR"', "  !insertmacro NSIS_HOOK_PREINSTALL",
+        '  WriteUninstaller "$INSTDIR\\uninstall.exe"',"  !insertmacro NSIS_HOOK_POSTINSTALL", "SectionEnd",
+        "Section Uninstall", "  !insertmacro NSIS_HOOK_PREUNINSTALL", "  !insertmacro NSIS_HOOK_POSTUNINSTALL",
+        "SectionEnd", "")), encoding="utf-8-sig")
+    compiler = subprocess.Popen([str(MAKENSIS), "/V3", str(script)], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+    COMPILES.append({"pid": compiler.pid, "startedAt": time.time(), "script": str(script)})
+    try:
+        output, _ = compiler.communicate(timeout=120)
+    finally:
+        if compiler.poll() is None:
+            compiler.kill()
+            compiler.wait(30)
+    text = output.decode("utf-8", "replace")
+    assert compiler.returncode == 0, text[-4000:]
+    assert (tmp_path / "compile-only.exe").is_file()  # compiled only; never run
+    assert "{VERSION}" not in text and "unknown variable" not in text.lower(), text[-4000:]
+
+
 def test_no_fence_function_depends_on_a_define_made_after_the_hooks_are_included():
     """Tauri's template includes the hooks before !define VERSION: a Function body is expanded at that point."""
     fence = (HOOKS / "qronos-update-fence.nsh").read_text(encoding="utf-8")
@@ -664,7 +763,9 @@ def test_the_build_wrapper_never_sets_a_probe_only_define(tmp_path):
     for name in ("QRONOS_UPDATE_FENCE_NAME", "QRONOS_PROBE_"):
         assert name not in wrapper
         for source in (ROOT / "build_support").rglob("*.py"):
-            assert name not in source.read_text(encoding="utf-8"), source
+            # build_support may NAME them only to refuse them (verify_hook_wrapper/verify_generated_order);
+            # it never emits a define of one.
+            assert not re.search(r"!define\s+" + name, source.read_text(encoding="utf-8")), source
     for hook in HOOKS.glob("*.nsh"):  # only the fence file's own default and !ifdef guards name them
         text = hook.read_text(encoding="utf-8")
         assert "!define QRONOS_PROBE_" not in text

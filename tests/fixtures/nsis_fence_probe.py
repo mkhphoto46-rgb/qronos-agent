@@ -60,7 +60,8 @@ def _nsis_string(value: str) -> str:
 
 
 def build_probe(work: Path, *, fence: str, data_root: Path, version: str | None, python: str | None = None,
-                grandchild: bool = False, uninstaller: bool = False, compile_log: list | None = None) -> Probe:
+                grandchild: bool = False, uninstaller: bool = False, compile_log: list | None = None,
+                complete: bool = True) -> Probe:
     """Write and compile the probe into ``work`` (which must be inside a pytest tmp folder)."""
     if MAKENSIS is None or not MAKENSIS.is_file():
         raise FileNotFoundError("Tauri's NSIS compiler is not installed on this machine.")
@@ -82,6 +83,7 @@ def build_probe(work: Path, *, fence: str, data_root: Path, version: str | None,
         '  ${If} $QronosFenceMessage != ""',
         '    !insertmacro QRONOS_FENCE_REFUSE "$QronosFenceMessage"',
         "  ${EndIf}",
+        "  ClearErrors",  # as the Qronos template does right after NSIS_HOOK_PREINSTALL
         f'  FileOpen $R0 "{_nsis_string(str(work / "state.txt"))}" w',
         '  FileWrite $R0 "fenced update=$QronosFenceUpdate"',
         "  FileClose $R0",
@@ -106,6 +108,8 @@ def build_probe(work: Path, *, fence: str, data_root: Path, version: str | None,
     if uninstaller:
         lines.append(f'  WriteUninstaller "{_nsis_string(str(work / "uninstall.exe"))}"')
     lines += [
+        # As the Qronos template does right before POSTINSTALL (complete=False: a probe that never reaches it).
+        *(["  !insertmacro QRONOS_INSTALL_COMPLETE"] if complete else []),
         "  Call QronosWriteReceipt",
         f'  FileOpen $R0 "{_nsis_string(str(work / "result.txt"))}" w',
         '  FileWrite $R0 "installed receipt=[$QronosFenceMessage]"',

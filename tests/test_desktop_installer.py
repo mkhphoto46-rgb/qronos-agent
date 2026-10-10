@@ -444,6 +444,8 @@ def test_the_committed_tauri_config_never_downloads_webview2():
     assert windows["webviewInstallMode"] == {"type": "skip"}
     assert (build_desktop.ROOT / "desktop" / "src-tauri" / windows["nsis"]["installerHooks"]).resolve() == \
         prerequisites.HOOK_PATH.resolve()
+    assert (build_desktop.ROOT / "desktop" / "src-tauri" / windows["nsis"]["template"]).resolve() == \
+        (prerequisites.TEMPLATE_DIR / "installer.nsi").resolve()
 
 
 @pytest.mark.parametrize("change", [
@@ -455,6 +457,8 @@ def test_the_committed_tauri_config_never_downloads_webview2():
     lambda c: c["bundle"].update(targets="all"),
     lambda c: c["bundle"].update(targets=["nsis", "msi"]),
     lambda c: c["bundle"]["windows"]["nsis"].pop("installerHooks"),
+    lambda c: c["bundle"]["windows"]["nsis"].pop("template"),  # Tauri's stock template: unsafe order
+    lambda c: c["bundle"]["windows"]["nsis"].update(template="installer-template/upstream/installer.nsi"),
     lambda c: c["bundle"].update(createUpdaterArtifacts=True),
     lambda c: c.setdefault("plugins", {}).update(updater={"pubkey": "x"}),
     lambda c: c["bundle"]["windows"].update(minimumWebview2Version="120.0.0.0"),
@@ -565,12 +569,24 @@ class FakeBuild:
         release = Path(kwargs["env"]["CARGO_TARGET_DIR"]) / "release"
         (release / "nsis" / "x64").mkdir(parents=True, exist_ok=True)
         wrapper = overlay["bundle"]["windows"]["nsis"]["installerHooks"]
-        (release / "nsis" / "x64" / "installer.nsi").write_text(
-            GOOD_SCRIPT.format(wrapper=wrapper).replace('INSTALLWEBVIEW2MODE ""', f'INSTALLWEBVIEW2MODE "{self.mode}"'),
-            encoding="utf-8")
+        (release / "nsis" / "x64" / "installer.nsi").write_text(rendered_template(wrapper, self.mode),
+                                                                encoding="utf-8-sig")
         (release / "bundle" / "nsis").mkdir(parents=True, exist_ok=True)
         (release / "bundle" / "nsis" / "qronos-desktop_0.1.0_x64-setup.exe").write_bytes(b"MZ installer")
         return subprocess.CompletedProcess(command, 0)
+
+
+def rendered_template(wrapper: str, mode: str = "") -> str:
+    """The committed Qronos template rendered the way Tauri does (tests/fixtures/nsis_template.py)."""
+    from tests.fixtures.nsis_template import render
+
+    template = (prerequisites.TEMPLATE_DIR / "installer.nsi").read_text(encoding="utf-8")
+    context = {name: "" for name in re.findall(r"\{\{(\w+)\}\}", template)}
+    context.update({"compression": "lzma", "languages": ["English"], "language_files": [], "resources_dirs": [],
+                    "resources": {}, "binaries": {}, "file_associations": [], "deep_link_protocols": [],
+                    "resources_ancestors": [], "installer_hooks": str(wrapper), "install_webview2_mode": mode,
+                    "version": "0.1.0", "product_name": "qronos-desktop"})
+    return render(template, context)
 
 
 def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
@@ -941,7 +957,7 @@ def run_probe(tmp_path: Path, payload: Path) -> tuple[str, Path]:
         "RequestExecutionLevel user", "SilentInstall silent", f'InstallDir "{install_dir}"',
         f'!define QRONOS_WEBVIEW2_INSTALLER "{payload}"', '!define QRONOS_WEBVIEW2_VERSION "1.2.3.4"',
         f'!define QRONOS_PROBE_RESULT "{result_file}"', f'!include "{prerequisites.HOOK_PATH}"',
-        "Section", '  SetOutPath "$INSTDIR"', "  !insertmacro QRONOS_WEBVIEW2_RUN_INSTALLER",
+        "Section", "  !insertmacro QRONOS_WEBVIEW2_RUN_INSTALLER",  # before SetOutPath (Qronos template)
         '  FileOpen $R7 "${QRONOS_PROBE_RESULT}" w', '  FileWrite $R7 "ran, exit code $R8"', "  FileClose $R7",
         "SectionEnd", "")), encoding="utf-8")
     makensis(script)
@@ -960,7 +976,7 @@ def test_an_installer_that_cannot_start_is_reported_as_such(tmp_path):
 
     assert message == ("The Microsoft Edge WebView2 Runtime installer could not be started. "
                        "Qronos was not installed.")
-    assert not install_dir.exists()  # the empty folder SetOutPath created is removed again
+    assert not install_dir.exists()  # nothing was created: the Qronos template runs this before SetOutPath
 
 
 @pytest.mark.skipif(os.name != "nt", reason="NSIS probes run on Windows only.")
@@ -977,7 +993,7 @@ def test_a_successful_run_continues_to_the_registry_check(tmp_path):
     message, install_dir = run_probe(tmp_path, exit_code_stub(tmp_path, 0))
 
     assert message == "ran, exit code 0"
-    assert install_dir.is_dir()
+    assert not install_dir.exists()  # the install folder is created only later, by the template's SetOutPath
 
 
 @pytest.mark.skipif(os.name != "nt", reason="NSIS probes run on Windows only.")
