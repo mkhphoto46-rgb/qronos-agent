@@ -546,8 +546,18 @@ Function QronosFenceUpdateMode
     StrCpy $QronosFenceMessage "The update hand-over does not come from this installer's own parent; nothing was changed."
     Return
   ${EndIf}
-  System::Call 'kernel32::OpenProcess(i 0x101000, i 0, i $QronosFenceGuardPid) p .r0'  ; SYNCHRONIZE|QUERY_LIMITED
+  ; Only PROVEN non-existence (ERROR_INVALID_PARAMETER, 87) lets a parent that cannot be opened count as gone;
+  ; then the fence identity below is the proof (guard crash). Access denied or any other failure means the
+  ; parent may be alive with its image loaded: refuse before the acknowledgement and before any change
+  ; (Media15 F15-1).
+  System::Call 'kernel32::OpenProcess(i 0x101000, i 0, i $QronosFenceGuardPid) p .r0 ?e'  ; SYNCHRONIZE|QUERY_LIMITED
+  Pop $1
   StrCpy $QronosFenceGuardHandle $0
+  ${If} $0 = 0
+  ${AndIf} $1 <> 87
+    StrCpy $QronosFenceMessage "The update guard is running but cannot be checked (error $1); nothing was changed."
+    Return
+  ${EndIf}
   ${If} $0 <> 0
     System::Call 'kernel32::GetProcessTimes(p r0, *l .r4, *l .r5, *l .r6, *l .r7) i .r2'
     ${If} $2 = 0

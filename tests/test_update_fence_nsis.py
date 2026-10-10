@@ -510,6 +510,133 @@ def test_a_guard_that_crashes_leaves_the_compiled_installer_fenced_until_it_ends
         after.finish()
 
 
+def _controller() -> str:
+    """This test process as the unopenable guard's exact controller (pid:creation FILETIME)."""
+    import _winapi
+
+    return f"{os.getpid()}:{update_service._process_creation_time(_winapi.GetCurrentProcess())}"
+
+
+CONTROLLER = r"""
+import json, os, subprocess, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import _winapi
+from core import update_service
+argv = json.loads(sys.argv[2])
+argv.append(f"{os.getpid()}:{update_service._process_creation_time(_winapi.GetCurrentProcess())}")
+guard = subprocess.Popen(argv)
+Path(sys.argv[3]).write_text(str(guard.pid))
+time.sleep(300)  # killed by the test through its own handle
+"""
+
+
+def test_the_unopenable_guard_fixture_ends_itself_and_only_its_child_when_its_controller_dies(tmp_path):
+    """Root round 12, fixture stop safety: nobody can open the guard, so it must end by itself (bounded) when its
+    exact controller dies, killing ONLY its own installer child (here a stand-in that never reads its input)."""
+    import _winapi
+
+    work = tmp_path / "guardwork"
+    work.mkdir()
+    data = tmp_path / "data"
+    data.mkdir()
+    executable, environment = child_python()
+    stand_in = [executable, "-B", "-I", "-c", "import time; time.sleep(200)"]
+    guard_argv = [executable, "-B", "-I", str(ROOT / "tests" / "fixtures" / "unopenable_guard_child.py"), str(ROOT),
+                  unique_fence(), str(data), VERSION, str(work), json.dumps(stand_in)]
+    started = time.time()
+    controller = subprocess.Popen([executable, "-B", "-I", "-c", CONTROLLER, str(ROOT), json.dumps(guard_argv),
+                                   str(tmp_path / "guard.pid")], env=environment)
+    child = None
+    try:
+        deadline = time.monotonic() + 60
+        while not (work / "guard.ready").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        ready = json.loads((work / "guard.ready").read_text(encoding="utf-8"))
+        child = _open_owned(ready["probePid"], started)
+        with pytest.raises(OSError) as denied:
+            _winapi.OpenProcess(0x101000, False, ready["guardPid"])
+        assert denied.value.winerror == 5  # alive and unopenable: no outside stop can reach it
+        assert _winapi.WaitForSingleObject(child, 0) == _winapi.WAIT_TIMEOUT
+        controller.kill()  # the exact controller, by its own handle
+        controller.wait(30)
+        assert _winapi.WaitForSingleObject(child, 20_000) == _winapi.WAIT_OBJECT_0, "its child outlived the guard"
+        deadline = time.monotonic() + 20
+        while not (work / "guard.report").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        report = json.loads((work / "guard.report").read_text(encoding="utf-8"))
+        assert report["ended"] == "controller gone" and report.get("probeKilled") is True
+        gone = False
+        while time.monotonic() < deadline and not gone:
+            try:
+                _winapi.CloseHandle(_winapi.OpenProcess(0x101000, False, ready["guardPid"]))
+            except OSError as error:
+                gone = error.winerror == 87  # proved gone (not merely unopenable)
+            time.sleep(0.1)
+        assert gone, "the guard is still alive"
+    finally:
+        (work / "guard.stop").write_text("1")
+        if controller.poll() is None:
+            controller.kill()
+            controller.wait(30)
+        if child is not None:
+            if _winapi.WaitForSingleObject(child, 0) != _winapi.WAIT_OBJECT_0:
+                _winapi.TerminateProcess(child, 1)  # verified above as this test's own stand-in
+            _winapi.CloseHandle(child)
+
+
+def run_unopenable_guard(tmp_path: Path, fence: str, data: Path, argv: list[str], go: Path | None = None) -> dict:
+    """Media15 F15-1 (adapted, see tests/fixtures/unopenable_guard_child.py): an ALIVE guard nobody can open hands
+    over to `argv`. Returns what happened while that guard was still alive."""
+    import ctypes
+
+    work = tmp_path / "guardwork"
+    work.mkdir()
+    executable, environment = child_python()
+    guard = subprocess.Popen([executable, "-B", "-I", str(ROOT / "tests" / "fixtures" / "unopenable_guard_child.py"),
+                              str(ROOT), fence, str(data), VERSION, str(work), json.dumps(argv), _controller()],
+                             env=environment)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not (work / "guard.ready").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        ready = json.loads((work / "guard.ready").read_text(encoding="utf-8"))
+        handle = kernel32.OpenProcess(0x101000, False, ready["guardPid"])
+        denied = (handle == 0, ctypes.get_last_error())
+        if handle:
+            kernel32.CloseHandle(handle)
+        deadline = time.monotonic() + 120
+        while not (work / "guard.report").exists() and time.monotonic() < deadline:
+            time.sleep(0.1)  # the installer must have ENDED while the guard still lives
+        if go is not None:
+            go.write_text("1")  # let a wrongly-passing installer finish instead of waiting for its go-file
+        alive = guard.poll() is None
+    finally:
+        (work / "guard.stop").write_text("1")
+        try:
+            guard.wait(timeout=180)
+        finally:
+            if guard.poll() is None:
+                guard.kill()  # exactly this test's own guard, by the handle held since creation
+                guard.wait(30)
+    report = json.loads((work / "guard.report").read_text(encoding="utf-8"))
+    return {"denied": denied, "guardAliveAfterInstallerEnded": alive, "report": report}
+
+
+def test_an_alive_guard_that_cannot_be_opened_is_refused_before_the_acknowledgement(tmp_path):
+    """Media15 F15-1: OpenProcess(parent) failing with ACCESS_DENIED is not proof the guard exited. The installer
+    refuses before the ACK and before any change while that guard (and its image) is alive."""
+    probe, data, fence = make_probe(tmp_path, "unopenable")
+    (data / "Updates" / "receipts").mkdir(parents=True)
+    outcome = run_unopenable_guard(tmp_path, fence, data, [str(probe.exe), "/S", "/QRONOSUPDATE"], probe.go)
+    assert outcome["denied"] == (True, 5), f"precondition (an alive guard nobody can open) not met: {outcome}"
+    assert outcome["guardAliveAfterInstallerEnded"] is True and outcome["report"].get("guardAliveAtProbeExit")
+    assert outcome["report"]["ack"] == "" and outcome["report"]["probeExit"] != 0
+    assert "cannot be checked (error 5)" in probe.read_result(), probe.read_result()
+    assert not probe.state.exists() and list((data / "Updates" / "receipts").iterdir()) == []
+
+
 def test_compiler_identities_were_recorded():
     """Quota bookkeeping: every native compiler started by this module was recorded at start (pid, time, script)."""
     assert all({"pid", "startedAt", "script"} <= set(entry) for entry in COMPILES)
