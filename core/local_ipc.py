@@ -366,8 +366,12 @@ def _local_request_url(url: str) -> str:
     return base + parsed.path
 
 
-def request_json(method: str, url: str, *, timeout: float, json=None, owner=None):
-    """JSON HTTP without redirects, environment proxies/netrc, or raw failures."""
+def request_json(method: str, url: str, *, timeout: float, json=None, owner=None, max_bytes: int | None = None):
+    """JSON HTTP without redirects, environment proxies/netrc, or raw failures.
+
+    ``max_bytes``: refuse a response body larger than this (read at most max_bytes + 1); None keeps the
+    previous unbounded read for existing callers.
+    """
     url = _local_request_url(url)
     timeout = local_timeout(timeout)
     if method not in {"GET", "POST"}:
@@ -377,7 +381,7 @@ def request_json(method: str, url: str, *, timeout: float, json=None, owner=None
         url, data=body, method=method, headers={"Content-Type": "application/json"},
     )
     try:
-        raw = request_bytes(request, timeout=timeout, owner=owner)
+        raw = request_bytes(request, timeout=timeout, owner=owner, max_bytes=max_bytes)
         return json_module.loads(raw.decode("utf-8"))
     except LocalInferenceCancelled:
         raise
@@ -391,7 +395,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise LocalIpcError("Local sidecar redirects are refused.")
 
 
-def request_bytes(request: urllib.request.Request, *, timeout: float, owner=None) -> bytes:
+def request_bytes(request: urllib.request.Request, *, timeout: float, owner=None,
+                  max_bytes: int | None = None) -> bytes:
     # Rebuild only the URL: local_host canonicalizes localhost to numeric IPv4.
     inference_checkpoint()
     request.full_url = _local_request_url(request.full_url)
@@ -418,7 +423,12 @@ def request_bytes(request: urllib.request.Request, *, timeout: float, owner=None
         with opener.open(request, timeout=timeout) as response:
             if not 200 <= response.status < 300:
                 raise LocalIpcError("Local sidecar returned a non-success response.")
-            result = response.read()
+            if max_bytes is None:
+                result = response.read()
+            else:
+                result = response.read(int(max_bytes) + 1)
+                if len(result) > int(max_bytes):
+                    raise LocalIpcError("Local sidecar response exceeds its bound.")
             inference_checkpoint()
             return result
     except LocalInferenceCancelled:
