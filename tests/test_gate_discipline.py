@@ -89,11 +89,15 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "mutex exists (OpenMutexW); it launches nothing."
     ),
     "core.update_service": (
-        "Starts only the verified staged Qronos installer (/S /QRONOSUPDATE), "
-        "after the person's typed approval secret and only when the launch is "
-        "available, which it is not by default (launch_unavailable). Uses ctypes "
-        "for the update fence and runtime-singleton mutex waits, a share-read "
-        "lock on the staged installer and process start times."
+        "Starts only the verified staged Qronos installer (/S /QRONOSUPDATE) "
+        "through fenced_launcher, after the person's typed approval secret and "
+        "only when the launch is available, which it is not by default "
+        "(launch_unavailable); only that child receives a duplicate of the "
+        "update fence handle. spawn_inheriting, a handle-list spawn helper, has "
+        "no product caller (an owned test uses it). ctypes: the update fence and "
+        "runtime-singleton mutexes (CreateMutexW, WaitForSingleObject with no "
+        "wait), a share-read CreateFileW lock on the staged installer and "
+        "GetProcessTimes."
     ),
     "core.windows_accessibility": (
         "Reads UI Automation focus, geometry, properties and RuntimeIds. "
