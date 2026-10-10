@@ -453,6 +453,25 @@ real installer, registry, shortcut or user folder):
 - None of this has run as a real Tauri-built installer on a real machine; see
   below. The default updater launch stays refused.
 
+**Open decisions for the next owned installer repair** (independent review
+Media18; nothing here is activated):
+- **O-A, availability.** Step 5 removes the previous installation's listed
+  files before the WebView2 child and before every later checked step. If the
+  WebView2 child or any later step fails, neither the old nor the new program
+  is left installed. The installer stops with an honest message, and user data
+  is untouched. Qronos does not restore the previous program. Reinstalling is
+  the recovery today. Whether to keep the old program until the new one is
+  complete is an open product decision.
+- **O-B, defence in depth.** `verify_generated_order` does not inspect the
+  sections that run before the Install section. That they do nothing rests on
+  the configuration checks: `check_tauri_config` (WebView2 "skip", no minimum
+  WebView2 version) and the empty-define check.
+- **O-C, shortcuts.** The updater starts the installer with
+  `/S /QRONOSUPDATE` but not `/UPDATE`, so Tauri's update mode stays off. A
+  silent Qronos update therefore creates or refreshes the Start-menu and
+  desktop shortcuts, including one the person deleted. Whether to pass
+  `/UPDATE` (or `/NS`) is an open product decision.
+
 ## Updates and rollback
 
 Qronos does not use Tauri's network updater. Updates are new installers that a
