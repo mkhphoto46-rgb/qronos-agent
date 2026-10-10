@@ -20,6 +20,13 @@ audio stream, the language and that the text is unverified and uncalibrated.
 ``asr_chunks`` holds each finished chunk's segments with the stage checkpoint,
 so a resumed run never transcribes a chunk twice. A schema-1 file is migrated
 forward once, in one transaction; a newer file is refused untouched.
+
+Schema 3 adds semantic dialogue retrieval. ``semantic_cache`` holds embedding
+vectors keyed by a hash of (model, version, dimension, text); it is filled per
+batch with the stage checkpoint and is never searched. ``semantic_windows``,
+the searchable index, is written only in the stage's result+COMPLETED
+transaction, references its track (deleted with it) and keeps the original
+window text and lineage. The schema-2 to 3 step only adds tables.
 """
 from __future__ import annotations
 
@@ -28,7 +35,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -117,6 +124,31 @@ CREATE TABLE IF NOT EXISTS subtitle_tracks (
     provenance_json TEXT
 );
 CREATE INDEX IF NOT EXISTS tracks_by_asset ON subtitle_tracks(asset_id);
+
+CREATE TABLE IF NOT EXISTS semantic_cache (
+    cache_key TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS semantic_windows (
+    asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+    window_key TEXT NOT NULL,
+    track_id TEXT NOT NULL REFERENCES subtitle_tracks(track_id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    language TEXT,
+    seq_from INTEGER NOT NULL,
+    seq_to INTEGER NOT NULL,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    PRIMARY KEY (asset_id, window_key)
+);
+CREATE INDEX IF NOT EXISTS semantic_windows_by_track ON semantic_windows(track_id);
 
 CREATE TABLE IF NOT EXISTS asr_chunks (
     asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
