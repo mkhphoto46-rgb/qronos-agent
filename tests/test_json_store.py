@@ -218,7 +218,7 @@ def test_concurrent_saves_from_two_processes_never_fail_or_corrupt(tmp_path):
         print("OK")
     """)
     writers = [
-        subprocess.Popen([sys.executable, "-I", "-c", child, str(root), str(target), str(go), name],
+        subprocess.Popen([sys.executable, "-B", "-I", "-c", child, str(root), str(target), str(go), name],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         for name in ("a", "b")
     ]

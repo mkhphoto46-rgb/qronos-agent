@@ -342,7 +342,7 @@ def test_separate_processes_begin_one_content_exactly_once(tmp_path):
         content = content_key("print", "file-sha", "printer")
         children = [
             subprocess.Popen(
-                [sys.executable, "-I", "-c", _CHILD, str(ROOT), str(path), f"op-{index}", content, str(go)],
+                [sys.executable, "-B", "-I", "-c", _CHILD, str(ROOT), str(path), f"op-{index}", content, str(go)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
             for index in range(3)
@@ -357,7 +357,7 @@ def test_lock_held_by_another_process_times_out_without_writing(tmp_path):
     path = tmp_path / "side-effects.json"
     SideEffectJournal(path).begin("op-0", "content-0")
     holder = subprocess.Popen(
-        [sys.executable, "-I", "-c", textwrap.dedent("""
+        [sys.executable, "-B", "-I", "-c", textwrap.dedent("""
             import sys, time
             sys.path.insert(0, sys.argv[1])
             from core.app_workflow import SideEffectJournal
@@ -455,7 +455,7 @@ def test_journal_in_a_linked_folder_is_refused(tmp_path):
 def test_an_attempt_left_by_a_crashed_process_becomes_uncertain_and_can_be_released(tmp_path):
     path = tmp_path / "side-effects.json"
     crashed = subprocess.run(
-        [sys.executable, "-I", "-c", textwrap.dedent("""
+        [sys.executable, "-B", "-I", "-c", textwrap.dedent("""
             import os, sys
             sys.path.insert(0, sys.argv[1])
             from core.app_workflow import SideEffectJournal
@@ -488,7 +488,7 @@ def test_a_live_owner_without_a_readable_start_time_is_never_released_w7(tmp_pat
     """Reviewer W7: a running child whose start time psutil cannot read."""
     path = tmp_path / "side-effects.json"
     child = subprocess.Popen(
-        [sys.executable, "-I", "-c", textwrap.dedent("""
+        [sys.executable, "-B", "-I", "-c", textwrap.dedent("""
             import sys, time
             sys.path.insert(0, sys.argv[1])
             import psutil
