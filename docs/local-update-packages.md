@@ -354,10 +354,16 @@ Limits:
 - The installer's own half of the hand-over (the NSIS fence, manual-install
   and uninstall fence, and the receipt) is
   `desktop/src-tauri/installer-hooks/qronos-update-fence.nsh`, described in
-  `offline-windows-installer.md`. It is proven with compiled probes only. The
-  installer does not include it yet: wiring it so that it runs before Tauri's
-  `SetOutPath` and the reinstall page's old uninstaller needs the pinned
-  custom template, which is the next owned step.
+  `offline-windows-installer.md`. It is wired through the pinned installer
+  template (`desktop/src-tauri/installer-template/`), which runs it before
+  anything is created, stopped, removed or registered. That template never runs
+  a previous uninstaller and writes the receipt only after every install step
+  succeeded. It is proven with the whole template compiled into inert probes,
+  NOT yet as a real installer on a real machine. The default launch stays
+  refused.
+- A repair whose launch was recorded before receipts were requested (no nonce)
+  resolves as unconfirmed with `receipt: not_requested`. The UI shows it with
+  discard/retry like any other unconfirmed repair; it is never confirmed.
 - `store.handoff` re-hashes the staged installer while holding the store lock
   (bounded by the 2 GiB package limit).
 - Snapshots cover only single-file stores, at most 64 MiB each and 256 MiB in
