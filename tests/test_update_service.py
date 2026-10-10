@@ -1669,6 +1669,7 @@ def test_the_update_mutex_lives_as_long_as_the_inheriting_installer_process(tmp_
     import _winapi
 
     from tests.fixtures.child_python import child_python
+    from tests.fixtures.handle_list_spawn import spawn_inheriting
 
     name = f"Local\\QronosUpdateTest-life-{uuid.uuid4().hex}"
     go = tmp_path / "installer-may-exit"
@@ -1680,7 +1681,7 @@ def test_the_update_mutex_lives_as_long_as_the_inheriting_installer_process(tmp_
                 "deadline = time.monotonic() + 60\n"
                 "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
                 "    time.sleep(0.05)\n")
-        child = update_service.spawn_inheriting([executable, "-B", "-I", "-c", code, str(go)], hold.handles())
+        child = spawn_inheriting([executable, "-B", "-I", "-c", code, str(go)], hold.handles())
     finally:
         hold.release()  # the launching process lets go, as launch() does
     try:
