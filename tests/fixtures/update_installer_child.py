@@ -90,15 +90,15 @@ def main() -> int:
 
     record: dict[str, str] = {}
     if "update" in modes:
-        data = os.read(0, 4097)  # blocks until the guard has duplicated the fence and written the record (B6)
-        while len(data) <= 4096:
-            more = os.read(0, 4097 - len(data))
+        data = os.read(0, 1024)  # blocks until the guard has duplicated the fence and written the record (B6)
+        while len(data) <= 1023:  # the NSIS installer's bound (qronos-update-fence.nsh)
+            more = os.read(0, 1024 - len(data))
             if not more:
                 break
             data += more
         os.close(0)  # C0: the record channel is gone before anything else happens
         lines = data.decode("utf-8", "replace").split("\n")
-        if len(data) > 4096 or not lines or lines[0] != "QRONOS-UPDATE-FENCE 1":
+        if len(data) > 1023 or not lines or lines[0] != "QRONOS-UPDATE-FENCE 1":
             return done("bad_record", 3)
         for line in lines[1:]:
             if "=" in line:

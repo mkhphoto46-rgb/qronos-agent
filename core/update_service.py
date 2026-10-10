@@ -793,11 +793,18 @@ class NotStarted(UpdateError):
 
 #: Passed on the installer's command line; the record itself travels on its standard input.
 UPDATE_SWITCH = "/QRONOSUPDATE"
+#: NSIS silent mode: no wizard page can delay the hand-over past HANDOVER_SECONDS. The installer
+#: refuses /QRONOSUPDATE without it (installer-hooks/qronos-update-fence.nsh).
+SILENT_SWITCH = "/S"
 FENCE_RECORD_HEADER = "QRONOS-UPDATE-FENCE 1"
 ACK_HEADER = "QRONOS-UPDATE-ACK 1"
 RECEIPT_HEADER = "QRONOS-INSTALL-RECEIPT 1"
 RECEIPT_DIR = "receipts"
 HANDOVER_SECONDS = 30.0
+#: The installer reads at most this many bytes (NSIS_MAX_STRLEN 1024 minus its terminator).
+FENCE_RECORD_LIMIT = 1023
+#: The longest values the guard cannot know before the installer exists (a handle value is 32 bits).
+_FENCE_PLACEHOLDER = 0xFFFFFFFF
 _RECEIPT_LIMIT = 4096
 _RECEIPT_FILES = 16
 _SYNCHRONIZE = 0x00100000
@@ -818,7 +825,7 @@ def _process_creation_time(handle: int) -> int:
 
 
 def fence_record(handover: Handover, fence_in_child: int, guard_pid: int, guard_created: int) -> bytes:
-    """The one record written to the installer's standard input (contract B4), at most 4 KiB."""
+    """The one record written to the installer's standard input (contract B4), at most FENCE_RECORD_LIMIT."""
     receipts = str(handover.receipts)
     if any(ch in receipts for ch in "\r\n") or not handover.receipts.is_absolute():
         raise UpdateError("launch_failed", "The receipts folder path cannot be handed over.")
@@ -828,7 +835,7 @@ def fence_record(handover: Handover, fence_in_child: int, guard_pid: int, guard_
               f"receipts={receipts}\nversion={handover.version}\npackage={handover.package_sha256}\n"
               f"manifest={handover.manifest_sha256}\nguard={guard_pid}:{guard_created}\n")
     data = record.encode("utf-8")
-    if len(data) > 4096:
+    if len(data) > FENCE_RECORD_LIMIT:
         raise UpdateError("launch_failed", "The installer hand-over record is too large.")
     return data
 
@@ -842,7 +849,7 @@ def fenced_launcher(path: Path, arguments: tuple[str, ...], handover: Handover) 
     alive. Then the hand-over record is written to the installer's standard
     input. Returns the process; its standard output carries the acknowledgement.
     """
-    return start_fenced([str(path), UPDATE_SWITCH, *arguments], str(path.parent), handover)
+    return start_fenced([str(path), SILENT_SWITCH, UPDATE_SWITCH, *arguments], str(path.parent), handover)
 
 
 def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
@@ -855,6 +862,12 @@ def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
         raise NotStarted("There is no update fence to hand to the installer; nothing was started.")
     import _winapi
 
+    me = _winapi.GetCurrentProcess()
+    try:
+        # Before anything starts: the record fits even with the longest fence handle value.
+        fence_record(handover, _FENCE_PLACEHOLDER, os.getpid(), _process_creation_time(me))
+    except UpdateError as error:
+        raise NotStarted(str(error)) from error
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
         # close_fds=True: only the three standard handles are inherited (an explicit handle list).
@@ -863,7 +876,6 @@ def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
     except OSError as error:
         raise NotStarted("Windows could not start the update installer.") from error
     try:
-        me = _winapi.GetCurrentProcess()
         fence_in_child = _winapi.DuplicateHandle(me, handover.fence, int(process._handle), _SYNCHRONIZE, False, 0)
         record = fence_record(handover, fence_in_child, os.getpid(), _process_creation_time(me))
         process.stdin.write(record)
@@ -871,10 +883,11 @@ def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
     except BaseException as error:
         # The process exists, so this is NOT a verified non-start. Closing its input makes the installer
         # read an incomplete record and refuse by itself; the outcome is left to the start-up barrier.
-        try:
-            process.stdin.close()
-        except OSError:
-            pass
+        for stream in (process.stdin, process.stdout):  # no acknowledgement is read on this path
+            try:
+                stream.close()
+            except OSError:
+                pass
         if not isinstance(error, Exception):
             raise
         raise UpdateError("launch_outcome_unknown", "The update fence could not be handed to the installer; "

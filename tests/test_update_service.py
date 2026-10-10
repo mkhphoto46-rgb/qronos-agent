@@ -1476,7 +1476,34 @@ def test_a_hand_over_that_fails_after_the_child_exists_is_not_a_verified_non_sta
             update_service.start_fenced(argv, str(tmp_path), handover)
     assert refused.value.code == "launch_outcome_unknown" and not isinstance(refused.value, update_service.NotStarted)
     assert started and started[0].wait(60) == 3  # the stand-in refused by itself; it was not killed
+    assert started[0].stdin.closed and started[0].stdout.closed  # N4-a: no pipe is left to the collector
     assert json.loads(report.read_text(encoding="utf-8"))["refused"] == "bad_record"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows processes and handles")
+def test_a_record_the_installer_cannot_read_is_refused_before_anything_starts(world, tmp_path):
+    """The NSIS installer reads at most 1023 bytes. A record that could exceed it (with the longest handle
+    value) is a verified non-start: Windows is never asked to create the process."""
+    import unittest.mock
+
+    deep = world.data / ("x" * 200) / ("y" * 200) / ("z" * 200) / "Updates" / "receipts"
+    handover = update_service.Handover(os.urandom(32), 4, deep, "0.2.0", "a" * 64, "b" * 64)
+    with unittest.mock.patch("subprocess.Popen", side_effect=AssertionError("must not start")):
+        with pytest.raises(update_service.NotStarted):
+            update_service.start_fenced(["never.exe"], str(tmp_path), handover)
+    longest = update_service.fence_record(
+        update_service.Handover(os.urandom(32), 4, world.data / "Updates" / "receipts", "0.2.0", "a" * 64, "b" * 64),
+        0xFFFFFFFF, 2 ** 32 - 1, 2 ** 64 - 1)
+    assert len(longest) <= update_service.FENCE_RECORD_LIMIT == 1023
+
+
+def test_the_production_launcher_starts_the_installer_silently_in_update_mode(tmp_path, monkeypatch):
+    """/S: no wizard page can delay the hand-over; the installer refuses /QRONOSUPDATE without it."""
+    seen = []
+    monkeypatch.setattr(update_service, "start_fenced", lambda argv, cwd, handover: seen.append((argv, cwd)))
+    installer = tmp_path / "Qronos-setup.exe"
+    update_service.fenced_launcher(installer, ("/extra",), None)
+    assert seen == [([str(installer), "/S", "/QRONOSUPDATE", "/extra"], str(tmp_path))]
 
 
 @pytest.mark.parametrize("damage", ["no_handoff", "other_package", "other_snapshot", "store_not_handed_off"])
