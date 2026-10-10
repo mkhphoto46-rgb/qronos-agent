@@ -867,7 +867,7 @@ def test_the_sweep_never_deletes_a_copy_held_by_a_live_owner_and_says_so(tmp_pat
     stale.write_bytes(b"stale")
     executable, environment = child_python()
     holder = subprocess.Popen(
-        [executable, "-I", "-c",
+        [executable, "-B", "-I", "-c",
          "import sys; sys.path[:0] = sys.argv[2:3]; from pathlib import Path\n"
          "from qronos_media.decoder_copy import _LockedFile\n"
          "locked = _LockedFile(Path(sys.argv[1])); locked.write_all(b'live'); print('held', flush=True)\n"
