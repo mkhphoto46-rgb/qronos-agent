@@ -27,10 +27,11 @@ READ-ONLY ONLY. A hook runs after the runtime has opened its settings,
 history and stores, and a timeout merely abandons a thread that is still
 running: it cancels nothing. So a hook may only read and report. Work that
 changes data at startup — for example restoring files after an interrupted
-update — is NOT a status hook: it needs a bounded, exclusive barrier that
-completes BEFORE any store opens, and fails closed (the runtime does not
-start over data that may still be changing) when it cannot finish. That
-barrier does not exist yet; it is a separate contract to agree after review.
+update — is NOT a status hook: it is the bounded, exclusive barrier in
+``core/startup_admission.py``, which completes BEFORE any store opens (the
+frozen entry point runs it before importing the service) and fails closed
+(the runtime does not start over data that may still be changing) when it
+cannot finish.
 
 ``STARTUP_STATUS_HOOKS`` is empty until a reviewed read-only service exists.
 """
