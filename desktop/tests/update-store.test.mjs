@@ -244,6 +244,10 @@ test("nested status shapes are validated, including the resolved unconfirmed rep
     { version: "0.1.0", kind: "repair", receipt: "absent", actions: ["discard", "retry"] });
   assert.equal(status.recoveryPending, false);
   assert.equal(update.parseStatus({ ...STATUS, unconfirmed: null }).unconfirmed, null);
+  // Media14 C1: a launch recorded before receipts were requested resolves with receipt "not_requested".
+  const legacy = update.parseStatus({ ...resolved, unconfirmed: { ...resolved.unconfirmed, receipt: "not_requested" } });
+  assert.equal(legacy.unconfirmed.receipt, "not_requested");
+  assert.deepEqual(JSON.parse(JSON.stringify(legacy.unconfirmed.actions)), ["discard", "retry"]);
   for (const broken of [
     { unconfirmed: { ...resolved.unconfirmed, kind: "upgrade" } },
     { unconfirmed: { ...resolved.unconfirmed, receipt: "verified" } },

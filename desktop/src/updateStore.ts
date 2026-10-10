@@ -58,11 +58,14 @@ export type UpdateOutcome = {
 
 /** A repair the start-up barrier resolved as unconfirmed (no valid installation receipt). A restart
  *  cannot change it; the person discards it, or retries: discard, then check the package again
- *  (a new request, approval and launch). The old launch is never replayed. */
+ *  (a new request, approval and launch). The old launch is never replayed.
+ *  receipt "not_requested": the launch was recorded before receipts were requested (no nonce), so no
+ *  receipt could ever confirm it (Media14 C1). It is never "verified": that would be a confirmed repair. */
+export type UpdateUnconfirmedReceipt = "absent" | "invalid" | "not_requested";
 export type UpdateUnconfirmed = {
   version: string;
   kind: UpdateKind;
-  receipt: "absent" | "invalid";
+  receipt: UpdateUnconfirmedReceipt;
   actions: Array<"discard" | "retry">;
 };
 
@@ -238,7 +241,7 @@ function bad(what: string): never {
 
 const PHASES: ReadonlySet<string> = new Set(["idle", "staged", "handed_off"]);
 const RESULTS: ReadonlySet<string> = new Set(["applied", "not_applied", "unconfirmed"]);
-const UNCONFIRMED_RECEIPTS: ReadonlySet<string> = new Set(["absent", "invalid"]);
+const UNCONFIRMED_RECEIPTS: ReadonlySet<string> = new Set(["absent", "invalid", "not_requested"]);
 
 function bool(value: unknown, what: string): boolean {
   return typeof value === "boolean" ? value : bad(what);
@@ -266,7 +269,7 @@ function parseUnconfirmed(value: unknown): UpdateUnconfirmed | null {
       || !Array.isArray(actions) || actions.length !== 2 || actions[0] !== "discard" || actions[1] !== "retry") {
     bad("unconfirmed update");
   }
-  return { version: item.version as string, kind: "repair", receipt: item.receipt as "absent" | "invalid",
+  return { version: item.version as string, kind: "repair", receipt: item.receipt as UpdateUnconfirmedReceipt,
            actions: ["discard", "retry"] };
 }
 

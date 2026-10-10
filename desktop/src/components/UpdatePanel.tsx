@@ -172,7 +172,10 @@ function UpdatePanel(props: UpdatePanelProps) {
           <p role="status">
             {status.unconfirmed.receipt === "invalid"
               ? `رسید نصب تعمیر ${status.unconfirmed.version} معتبر نبود؛ انجام شدن آن تأیید نمی‌شود.`
-              : `برای تعمیر ${status.unconfirmed.version} هیچ رسید نصبی نرسید؛ انجام شدن آن تأیید نمی‌شود.`}
+              : status.unconfirmed.receipt === "not_requested"
+                ? `تعمیر ${status.unconfirmed.version} پیش از آن آغاز شد که Qronos رسید نصب درخواست کند؛ `
+                  + "انجام شدن آن تأیید نمی‌شود."
+                : `برای تعمیر ${status.unconfirmed.version} هیچ رسید نصبی نرسید؛ انجام شدن آن تأیید نمی‌شود.`}
             {" "}شروع دوبارهٔ Qronos این وضعیت را تغییر نمی‌دهد. می‌توانید آن را کنار بگذارید یا دوباره تلاش کنید
             (فایل نصب‌کننده دوباره بررسی و تأیید می‌شود).
           </p>
