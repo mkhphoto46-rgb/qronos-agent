@@ -81,6 +81,7 @@ class MediaHost:
         permissions: Callable[[], Any],
         admit_store: Callable[[Path], Any] = media_store_admission,
         service_factory: Callable[..., Any] | None = None,
+        embedder: Callable[[], Any] = lambda: None,
     ) -> None:
         if not is_issued(authority):
             # A DTO, a Boolean, a flag or a home-made object is never a model authority.
@@ -91,6 +92,7 @@ class MediaHost:
         self._permissions = permissions
         self._admit_store = admit_store
         self._service_factory = service_factory
+        self._embedder = embedder
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._requests: deque[dict[str, Any]] = deque()
@@ -186,7 +188,7 @@ class MediaHost:
         self._admit_store(root)  # StartupRefused: nothing below runs, nothing opens
         factory = self._service_factory or MediaService
         self._service = factory(root, tools=self._tools(), authority=self.authority,
-                                permissions=self._permissions())
+                                permissions=self._permissions(), embedder=self._embedder())
         return self._service
 
     def _run(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -211,6 +213,7 @@ def build_bridge_media_host(
     approvals: Any,
     audit: Any,
     activity: Any = None,
+    embedding_owner: Callable[[], Any] = lambda: None,
 ) -> MediaHost:
     """The bridge's one media host, bound to the bridge's own governor, ledger, approvals and audit."""
     from qronos_media.service import default_data_dir, tools_from_environment
@@ -224,4 +227,11 @@ def build_bridge_media_host(
 
         return GatePermissions(audit=audit, ledger=approvals)
 
-    return MediaHost(authority, data_dir=default_data_dir, tools=tools_from_environment, permissions=permissions)
+    def embedder() -> Any:
+        # The runtime's EXISTING bge-m3 memory sidecar (core/memory_runtime.py); media never starts a server.
+        from qronos_media.semantic import MediaEmbedder
+
+        return MediaEmbedder(embedding_owner)
+
+    return MediaHost(authority, data_dir=default_data_dir, tools=tools_from_environment, permissions=permissions,
+                     embedder=embedder)

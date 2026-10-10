@@ -24,10 +24,11 @@ returning empty results that look like answers.
 | 1 | Speech recognition when no subtitle exists (whisper.cpp large-v3-turbo q5_0, chunked, timestamped) | **implemented, unverified**: runs only in the runtime's media host with the pinned assets provisioned; never in the standalone tool; no real-model run accepted, no accuracy claim |
 | 1 | Subtitle/ASR agreement labels (handoff s9) | **pending** |
 | 1 | Exact phrase search (FTS5, Persian/Arabic normalisation, split-line pairs) and fuzzy search (rare trigrams + similarity) | done |
-| 2 | Semantic / cross-language dialogue search | **pending** |
+| 2 | Semantic / cross-language dialogue search (bge-m3 F16, 1024 dims, via the runtime's CPU memory sidecar) | **implemented, unverified**: runs only in the runtime's media host with the memory sidecar running (`QRONOS_MEMORY_RUNTIME=1`) and bge-m3 installed; never in the standalone tool; scores are uncalibrated similarities; no real-model run accepted |
 | 3 | Shot boundaries (`scdet`, chunked and checkpointed) and adaptive keyframes under a cache quota | done |
 | 3 | Visual embeddings | **decision pending**: no joint image–text embedding backend is specified |
-| 4–5 | Captions, OCR, topics, speaker turns | **pending** |
+| 4–5 | Captions, OCR, speaker turns | **pending** |
+| 4 | Topics | **deferred**: labels would come from a brain model and no specified brain authority is wired to media; none are generated |
 | 5 | Actions and motion | **not supported**: sparse keyframes cannot establish them |
 
 Reports (JSON, HTML, CSV) are built from the index only and always include the
@@ -457,6 +458,49 @@ compiles in network protocols (kept unused by the whitelist).
 
 `python -m qronos_media tools` prints the located build's version and licence
 flags.
+
+## Semantic dialogue retrieval (Level 2)
+
+`qronos_media/semantic.py`, stage `semantic` (after `subtitles`; an ASR
+change requeues it), `MediaService.search_semantic`.
+
+- **Model and server are not chosen here.** Qronos already owns one CPU-only
+  Ollama sidecar for bge-m3 (`core/memory_runtime.py`: 127.0.0.1:11435,
+  `num_gpu 0`, `keep_alive 1h`, one loaded model, an exact process identity).
+  `MediaEmbedder` sends exactly that provider's request
+  (`{"model": "bge-m3", "truncate": false, "keep_alive": "1h", "options":
+  {"num_gpu": 0}}`) to that fixed endpoint, through `core.local_ipc` with the
+  owned process as `owner`. No URL, port or model comes from a caller; media
+  never starts a server and never unloads a model. Without an owned sidecar
+  (the memory runtime is off by default) semantic is `unavailable`.
+- **Checks before storage:** the sidecar must list bge-m3 with quantization
+  F16; every answer must name bge-m3, hold one vector per text, exactly 1024
+  finite numeric values, non-zero length; the response body is byte-bounded
+  (new optional `max_bytes` in `core.local_ipc`, default unchanged).
+- **Ownership:** a declared model (`BGE_M3`: CPU, 2048 MiB declared RAM, LIGHT
+  managed governor reservation) through the same `HostedModelAuthority` as ASR.
+  There is no child process: the lease ends after the synchronous request
+  returned or failed. Yielding is checked between batches (8 texts); one
+  in-flight batch is bounded by its timeout (30 s).
+- **Index:** windows of consecutive cues of one track (at most 600 characters
+  and 30 s, one cue of overlap) keep the original text, track, seq range and
+  times. Vectors go to `semantic_cache` (keyed by model, version, dimension and
+  text) with the stage checkpoint; the searchable `semantic_windows` rows are
+  written only in the result+COMPLETED transaction. A stopped, preempted,
+  revoked or failed run leaves nothing searchable. Unchanged text is never
+  embedded again; no ASR, scene or keyframe work reruns. Deleting a track or
+  an asset deletes its windows.
+- **Query:** the exact lexical answer comes first; semantic matches follow as a
+  separate block with asset, times, the original window text, track
+  provenance, `similarity` and the note "uncalibrated, not a probability,
+  percentage or accuracy". The query vector needs the same model slot (busy or
+  unavailable is reported; the lexical answer is still returned). Vectors are
+  scanned in bounded chunks under the search budget and a 200,000-window cap.
+  Assets whose copies all left scope are not offered.
+- **Cross-language:** bge-m3 is multilingual, so a Persian query may match
+  English dialogue; results report the track language and whether query and
+  window scripts differ. Nothing is translated and no accuracy is claimed.
+- **Topics:** deferred (above).
 
 ## Integration state
 

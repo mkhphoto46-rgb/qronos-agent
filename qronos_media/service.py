@@ -105,6 +105,7 @@ class MediaService:
         cache_quota_bytes: int = DEFAULT_CACHE_QUOTA_BYTES,
         monotonic: Callable[[], float] = time.monotonic,
         admit_store: Callable[[Path], object] | None = None,
+        embedder: object = None,
     ) -> None:
         self.layout = MediaLayout(local_path(data_dir))
         if admit_store is not None:
@@ -125,11 +126,13 @@ class MediaService:
         # The index's own data folder is never an input (database, cache, reports).
         self._excluded: tuple[Path, ...] = (self.layout.root,)
         self._monotonic = monotonic
+        # The runtime's bge-m3 embedder (qronos_media.semantic.MediaEmbedder) or None: semantic stays unavailable.
+        self.embedder = embedder
 
     def _runner(self) -> StageRunner:
         return StageRunner(self.store, tools=self.tools, authority=self.authority, permissions=self.permissions,
                            cache_dir=self.layout.cache, cache_quota_bytes=self.cache_quota_bytes,
-                           excluded=self._excluded, monotonic=self._monotonic)
+                           excluded=self._excluded, monotonic=self._monotonic, embedder=self.embedder)
 
     def close(self) -> None:
         self.store.close()
@@ -350,6 +353,70 @@ class MediaService:
         }
 
     # ------------------------------------------------------------ search
+
+    def search_semantic(self, query: str, *, limit: int = 10, language: str | None = None,
+                        asset_id: str | None = None, budget_seconds: float = 3.0) -> dict[str, Any]:
+        """Exact dialogue first (lexical), then bge-m3 semantic matches as a separate, uncalibrated block.
+
+        The query vector needs the model, so it goes through the same authority as indexing (one declared
+        model slot; busy or unavailable is reported and the lexical answer still returned). The index is
+        read through a read-only connection; nothing is scanned, hashed or decoded.
+        """
+        from qronos_media import semantic
+        from qronos_media.resources import BGE_M3
+        from qronos_media.search import Budget, BudgetExhausted, _evidence
+
+        if not isinstance(query, str) or not query.strip() or len(query) > semantic.MAX_TEXT_CHARS:
+            raise MediaRequestError("query must be 1..1200 characters")
+        limit = max(1, min(50, int(limit)))
+        budget_seconds = max(0.2, min(10.0, float(budget_seconds)))
+        exact = self.search_dialogue(query, mode="exact", limit=limit, language=language, asset_id=asset_id)
+        block: dict[str, Any] = {"status": "unavailable", "results": [], "scoreNote": semantic.SCORE_NOTE,
+                                 "queryScript": semantic.script_of(query)}
+        if self.embedder is None:
+            block["reason"] = "no bge-m3 sidecar capability in this process"
+            return {"query": query, "exact": exact, "semantic": block}
+        try:
+            lease = self.authority.reserve(f"media:semantic_query:{time.monotonic_ns()}",
+                                           StageNeeds("semantic_query", model=BGE_M3))
+        except ResourceRefused as exc:
+            block["reason"] = exc.reason
+            return {"query": query, "exact": exact, "semantic": block}
+        try:
+            vector = self.embedder.embed([query.strip()], timeout=semantic.QUERY_TIMEOUT_SECONDS)[0]
+        except (ResourceRefused, semantic.EmbeddingInvalid) as exc:
+            block["reason"] = getattr(exc, "reason", "embedding_invalid")
+            return {"query": query, "exact": exact, "semantic": block}
+        finally:
+            self.authority.release(lease)  # the synchronous request has returned: drained
+        try:
+            db = open_read_only(self.layout.database)
+        except FileNotFoundError:
+            raise MediaRequestError("the media index is empty") from None
+        budget = Budget(budget_seconds, self._excluded)
+        try:
+            try:
+                found, scan = semantic.semantic_candidates(db, vector, limit=limit, language=language,
+                                                           asset_id=asset_id, check=budget.check)
+                results = []
+                for row in found:
+                    item = {"row": {"asset_id": row["asset_id"], "track_id": row["track_id"],
+                                    "start_ms": row["start_ms"], "end_ms": row["end_ms"], "text": row["text"],
+                                    "kind": "window"},
+                            "match": "semantic", "score": row["score"], "scoreKind": "cosine_uncalibrated"}
+                    evidence = _evidence(db, item, budget)
+                    evidence.pop("lexicalScore", None)
+                    evidence.update({"similarity": row["score"], "seqFrom": row["seq_from"], "seqTo": row["seq_to"],
+                                     "windowScript": semantic.script_of(row["text"]),
+                                     "crossScript": semantic.script_of(row["text"]) != block["queryScript"]})
+                    results.append(evidence)
+                block.update({"status": "partial" if scan["truncated"] else "complete", "results": results,
+                              "scanned": scan["scanned"]})
+            except BudgetExhausted as exc:
+                block.update({"status": "partial", "stoppedBy": exc.reason})
+        finally:
+            db.close()
+        return {"query": query, "exact": exact, "semantic": block}
 
     def search_dialogue(self, query: str, **options: Any) -> dict[str, Any]:
         try:

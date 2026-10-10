@@ -354,5 +354,7 @@ def search_dialogue(
         "budgetMs": int(float(budget_seconds) * 1000),
         "results": results,
         "truncated": len(items) > limit,
-        "pending": ["semantic_dialogue", "asr"],
+        # Semantic matches are a separate, model-bearing call (MediaService.search_semantic); ASR dialogue is
+        # searched here once indexed. Still not built: subtitle/ASR agreement labels and topics.
+        "pending": ["semantic_dialogue", "subtitle_asr_fusion", "topics"],  # not covered by THIS call
     }

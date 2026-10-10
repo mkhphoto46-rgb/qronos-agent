@@ -1611,8 +1611,15 @@ class QronosRuntime:
                 paused=lambda: self.runtime_paused,
                 approvals=self._approvals,
                 audit=audit,
+                embedding_owner=self._memory_sidecar_owner,
             )
             return self._media_host
+
+    def _memory_sidecar_owner(self) -> Any:
+        """The owned bge-m3 memory sidecar process, if the memory runtime runs one (else None: unavailable)."""
+        memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
+        sidecar = getattr(memory, "sidecar", None)
+        return getattr(sidecar, "owned_process", None) if sidecar is not None else None
 
     def _preempt_media(self, reason: str) -> None:
         host = self._media_host
