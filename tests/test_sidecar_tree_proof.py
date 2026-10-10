@@ -218,6 +218,23 @@ def test_a_proof_bearing_guard_admits_no_later_member_and_its_proof_stays_true(g
         newcomer.wait(timeout=15)
 
 
+def test_the_process_executes_nothing_until_it_is_a_member(guard, tree, monkeypatch):
+    real_resume = guard_module._resume_only_thread
+    seen = {}
+
+    def checking_resume(kernel32, pid):
+        time.sleep(0.5)  # a process that was not created suspended would already be running its script here
+        seen["ran_before_resume"] = (tree / "child.pid").exists() or (tree / "runner.pid").exists()
+        seen["member_before_resume"] = pid in members(guard)
+        real_resume(kernel32, pid)
+
+    monkeypatch.setattr(guard_module, "_resume_only_thread", checking_resume)
+    contained(guard, "spawn-first", tree)
+    assert seen == {"ran_before_resume": False, "member_before_resume": True}
+    wait_for(tree, "child.pid", "runner.pid")
+    assert only_fixture_and_console_hosts(members(guard), pids(tree, "child", "runner"))
+
+
 def test_a_process_that_cannot_be_contained_is_ended_before_it_ever_runs(guard, tree, monkeypatch):
     real = guard_module._kernel32()
     started = []
