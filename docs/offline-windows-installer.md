@@ -213,7 +213,7 @@ the Qronos source. None of this has been run on a real machine.
 | Program files (per-user install, Tauri's default) | `%LOCALAPPDATA%\qronos-desktop` | Only the files the installer itself placed there, then the empty folders |
 | Settings, history, memory, permissions, approval secret, runtime assets | `%LOCALAPPDATA%\Qronos` (from `core/config.py` and the desktop's `local_data_dir()`) | No |
 | Library and other user documents | the folders the user chose, by default under `Documents` | No |
-| WebView2 caches | `%LOCALAPPDATA%\com.qronos.agent` | Only when the user ticks "Delete the application data". The UI keeps no state there (no `localStorage`, `sessionStorage` or IndexedDB). |
+| WebView2 caches | `%LOCALAPPDATA%\com.qronos.agent` | No. The pinned template does not offer Tauri's "Delete the application data" choice. The UI keeps no state there (no `localStorage`, `sessionStorage` or IndexedDB). |
 | WebView2 Runtime | Windows (shared by many apps) | No |
 
 - **Uninstalling keeps Qronos user data.** Removing it is a manual step, which
@@ -225,7 +225,9 @@ the Qronos source. None of this has been run on a real machine.
   - a `productName` that is, or that Windows resolves to, "Qronos" (for
     example `Qronos.` or `QRONOS~1`), which would make the per-user install
     folder `%LOCALAPPDATA%\Qronos`;
-  - such an identifier, which "Delete the application data" would remove.
+  - such an identifier, which stock Tauri's "Delete the application data"
+    would remove. The pinned template does not offer that choice; the guard
+    stays.
 
 **What the installer enforces**
 
@@ -312,9 +314,10 @@ Documents. It never runs the Qronos installer or reads real user folders.
 
 **Limits**
 - An installation from before this manifest existed, such as the 7584 review
-  build, has no manifest. Its folder is refused as "not a Qronos installation"
-  unless Tauri's "uninstall first" choice has emptied it. Uninstall such a
-  build first.
+  build has no manifest. Its folder is refused as "not a Qronos installation".
+  The installer refuses the "uninstall first" choice and never runs an old
+  uninstaller, so remove such a build first with its own uninstaller (Windows
+  Settings > Apps).
 - The desktop's startup check still confirms only the runtime executable, its
   folder and protocol version, not every file in the runtime manifest.
   Stopping at startup when there are stray runtime files belongs to the
@@ -488,9 +491,10 @@ acceptance testing is allowed:
 4. An ARM64 machine without WebView2. The refusal message should appear.
 5. A Windows SmartScreen warning is expected while the Qronos installer is
    unsigned.
-6. Upgrading over an older Qronos, with both "uninstall first" choices.
+6. Upgrading over an older Qronos in place. Choosing "uninstall first" on the
+   reinstall page should be refused visibly, with nothing changed.
    `%LOCALAPPDATA%\Qronos` and the Library should be unchanged afterwards.
-7. Uninstalling with and without "Delete the application data".
+7. Uninstalling. No "Delete the application data" choice should be shown.
    `%LOCALAPPDATA%\Qronos` and the Library should remain; WebView2 should
    remain installed.
 8. The update fence inside a real Tauri-built installer:
