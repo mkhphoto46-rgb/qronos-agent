@@ -124,6 +124,26 @@ def test_an_unauthenticated_parent_never_reaches_admission(tmp_path):
     assert admitted == [] and recorder.events == []
 
 
+def test_a_same_user_parent_whose_image_is_not_the_installed_runtime_never_reaches_admission(tmp_path):
+    """Media17 G1: the owner check passes (same user) but the image proof fails. The image proof alone must stop
+    it: nothing is admitted, stored or audited, and the runtime side never gets a hello."""
+    recorder = Recorder(tmp_path)
+    server = ChannelServer("action-broker", new_key(), receive=TO_RUNTIME, send=FROM_RUNTIME)
+    seen: dict = {}
+    admitted = []
+    try:
+        thread = runtime_side(server, seen)
+        with pytest.raises(ChannelError):
+            serve_once(server.address, os.getpid(), consumed=recorder.journal(), audit=recorder.audit,
+                       owner_check=lambda pid: True, identity_check=lambda pid: False,
+                       verify_secret=recorder.secret, admit=lambda: admitted.append(True))
+        thread.join(15)
+    finally:
+        server.close()
+    assert admitted == [] and recorder.events == [] and not recorder.consumed_dir.exists()
+    assert not recorder.audit_file.exists() and "hello" not in seen
+
+
 def test_a_pipe_that_releases_no_key_never_reaches_admission(tmp_path):
     """A pipe whose server is not an admitted bridge's broker session (no key released) is refused first."""
     recorder = Recorder(tmp_path)
