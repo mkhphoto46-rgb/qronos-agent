@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
+from core.grounding_freshness import advance_state_epoch
 from core.window_binding import WindowBinder, WindowBinding, WindowRect, WindowSnapshot
 from security.gate import ActionGrant
 from security.permissions import ActionCategory
@@ -142,6 +143,10 @@ class BoundInputAuthorization:
 class BoundInputGuard:
     def __init__(self, binder: WindowBinder) -> None:
         self._binder = binder
+
+    def note_state_change(self, binding: WindowBinding) -> None:
+        """A native input was delivered: grounded coordinates from earlier frames expire."""
+        advance_state_epoch(binding.identity_token)
 
     @staticmethod
     def require_authorization(

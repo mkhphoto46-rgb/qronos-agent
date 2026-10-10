@@ -17,9 +17,9 @@ from core.vision_grounding import (
     GroundingStale,
     ground_structured_response,
     grounding_prompt,
-    revalidate_grounded_target,
     validate_grounding_capture,
 )
+from core.confirmed_press import press_grounded_target
 from core.window_binding import WindowBinder, WindowBinding, WindowRect
 
 
@@ -86,6 +86,10 @@ class PaintStateNormalization:
     pencil_selected_confidence: float
     black_selected_confidence: float
     minimum_size_selected_confidence: float
+    #: The screen boxes of the verified selected-tool, colour and size
+    #: indicators. Drawing watches them before every stroke: if the tool,
+    #: colour or size changes during the drawing, it stops.
+    control_boxes: tuple[WindowRect, ...] = ()
 
 
 SleepFn = Callable[[float], None]
@@ -247,6 +251,11 @@ class PaintStateNormalizer:
                 pencil_selected_confidence=selected_pencil.confidence,
                 black_selected_confidence=selected_black.confidence,
                 minimum_size_selected_confidence=selected_minimum_size.confidence,
+                control_boxes=(
+                    selected_pencil.screen_box,
+                    selected_black.screen_box,
+                    selected_minimum_size.screen_box,
+                ),
             )
         finally:
             self._cancel_token = None
@@ -270,33 +279,39 @@ class PaintStateNormalizer:
             screen_approved,
         )
         grounded = self._locate(target, frame, step=target)
+        if not _contains(allowed_rect, grounded.point.screen_x, grounded.point.screen_y):
+            raise PaintStateError(
+                f"Paint UI target fell outside its verified safe control region: {target}."
+            )
+
+        # Vision inference can take seconds; honour Stop before anything moves.
+        checkpoint(self._cancel_token)
+
+        def count_click() -> None:
+            self.toolbar_clicks_attempted += 1
+
         try:
-            x, y = revalidate_grounded_target(
+            # A fresh frame must show the control (its row/column and the
+            # window) unchanged; then the cursor moves to it, one more frame
+            # must show nothing opened because of the motion, and only then
+            # is the button pressed, with no further motion.
+            press_grounded_target(
                 grounded,
                 binding,
                 self._binder,
-                require_foreground=True,
+                self._capture,
+                self._inputs,
+                authorization=authorization,
+                allowed_rect=allowed_rect,
+                screen_approved=screen_approved,
+                reason=f"Confirm the Paint control is still in place before clicking: {target}",
+                cancel_token=self._cancel_token,
+                before_press=count_click,
             )
         except GroundingStale as exc:
             raise PaintStateError(
                 f"Paint toolbar target expired before click: {target}. {exc}"
             ) from exc
-
-        if not _contains(allowed_rect, x, y):
-            raise PaintStateError(
-                f"Paint UI target fell outside its verified safe control region: {target}."
-            )
-
-        # Vision inference can take seconds; honour Stop before the click.
-        checkpoint(self._cancel_token)
-        self.toolbar_clicks_attempted += 1
-        self._inputs.click.click_at(
-            binding,
-            x,
-            y,
-            authorization=authorization,
-            allowed_rect=allowed_rect,
-        )
         if self._settle_seconds:
             if self._cancel_token is not None:
                 self._cancel_token.sleep(self._settle_seconds)

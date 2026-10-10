@@ -3,6 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from core.action_cancellation import CancellationToken, checkpoint
+from core.grounding_freshness import (
+    CANVAS_MAX_AGE_SECONDS,
+    Clock,
+    FreshnessExpired,
+    RegionFingerprint,
+    monotonic,
+    require_fresh,
+)
+from core.paint_canvas_watch import CanvasChanged, PaintCanvasWatch
 from core.input_capabilities import InputCapabilities
 from core.input_safety import BoundInputAuthorization
 from core.pointer_stroke import PointerStrokeResult, StrokeProgress
@@ -16,6 +25,23 @@ class PaintAdapterError(RuntimeError):
     """Paint-specific execution preconditions were not satisfied."""
 
 
+class PaintCanvasExpired(PaintAdapterError):
+    """The grounded canvas is too old, or Qronos used Paint after it was grounded."""
+
+
+class PaintCanvasChanged(PaintAdapterError):
+    """Paint's canvas, its surroundings or its selected tools changed during drawing."""
+
+
+class PaintVerificationUnavailable(PaintAdapterError):
+    """The drawing cannot be verified stroke by stroke (no capture or no tool regions)."""
+
+
+class PaintPlanNotApproved(PaintAdapterError):
+    """The plan to draw is not exactly the visually approved one; nothing about the window."""
+
+
+
 @dataclass(frozen=True)
 class PaintCanvasRegion:
     """A short-lived canvas capability tied to one verified Paint layout."""
@@ -24,12 +50,23 @@ class PaintCanvasRegion:
     hwnd: int
     identity_token: str
     layout_token: str
+    #: Provenance of the frame the canvas was found in (core.grounding_freshness).
+    #: A region without it is refused before any stroke.
+    captured_at: float = 0.0
+    state_epoch: int = 0
+    #: Full-resolution canvas pixels from the grounding frame; the canvas must
+    #: still look like this immediately before the first stroke.
+    fingerprint: RegionFingerprint | None = None
 
     @classmethod
     def verified(
         cls,
         binding: WindowBinding,
         rect: WindowRect,
+        *,
+        captured_at: float,
+        state_epoch: int,
+        fingerprint: RegionFingerprint | None,
     ) -> "PaintCanvasRegion":
         if binding.app_id != "paint":
             raise PaintAdapterError("A Paint canvas region requires a Paint binding.")
@@ -47,6 +84,9 @@ class PaintCanvasRegion:
             hwnd=binding.hwnd,
             identity_token=binding.identity_token,
             layout_token=binding.layout_token,
+            captured_at=float(captured_at),
+            state_epoch=int(state_epoch),
+            fingerprint=fingerprint,
         )
 
     def matches(self, binding: WindowBinding) -> bool:
@@ -110,9 +150,17 @@ class PaintAdapter:
         binder: WindowBinder,
         *,
         inputs: InputCapabilities | None = None,
+        capture=None,
+        clock: Clock = monotonic,
+        canvas_max_age_seconds: float = CANVAS_MAX_AGE_SECONDS,
     ) -> None:
         self._binder = binder
+        # The bound, permission-gated window capture used to verify the canvas
+        # before every stroke. Without one, drawing is refused.
+        self._capture = capture
         self._inputs = inputs if inputs is not None else InputCapabilities.for_binder(binder)
+        self._clock = clock
+        self._canvas_max_age_seconds = float(canvas_max_age_seconds)
 
     def execute_approved(
         self,
@@ -128,6 +176,8 @@ class PaintAdapter:
         release_settle_seconds: float = 0.012,
         cancel_token: CancellationToken | None = None,
         progress: PaintCanvasProgress | None = None,
+        screen_approved: bool = False,
+        tool_regions: tuple[WindowRect, ...] = (),
     ) -> PaintDrawResult:
         """
         Production sketch path: only a visually approved frozen plan may reach Paint.
@@ -136,11 +186,11 @@ class PaintAdapter:
         trusted callers, but agent sketch execution should use this gate.
         """
         if not isinstance(approved_sketch, VisualApprovedSketch):
-            raise PaintAdapterError(
+            raise PaintPlanNotApproved(
                 "Paint sketch execution requires a VisualApprovedSketch capability."
             )
         if digest_shape_plan(approved_sketch.plan) != approved_sketch.plan_digest:
-            raise PaintAdapterError(
+            raise PaintPlanNotApproved(
                 "VisualApprovedSketch plan digest does not match the frozen approved plan."
             )
 
@@ -156,6 +206,8 @@ class PaintAdapter:
             release_settle_seconds=release_settle_seconds,
             cancel_token=cancel_token,
             progress=progress,
+            screen_approved=screen_approved,
+            tool_regions=tool_regions,
         )
 
     def execute(
@@ -172,6 +224,8 @@ class PaintAdapter:
         release_settle_seconds: float = 0.012,
         cancel_token: CancellationToken | None = None,
         progress: PaintCanvasProgress | None = None,
+        screen_approved: bool = False,
+        tool_regions: tuple[WindowRect, ...] = (),
     ) -> PaintDrawResult:
         tracker = progress if progress is not None else PaintCanvasProgress()
         checkpoint(cancel_token)
@@ -181,6 +235,20 @@ class PaintAdapter:
             raise PaintAdapterError(
                 "Paint canvas capability does not match the current window binding/layout."
             )
+        # The canvas must come from a recent frame taken after Qronos's last
+        # input to Paint (toolbar clicks included). The strokes below advance
+        # the epoch themselves, so this is checked once, before the first one.
+        try:
+            require_fresh(
+                captured_at=canvas.captured_at,
+                captured_epoch=canvas.state_epoch,
+                identity_token=binding.identity_token,
+                max_age_seconds=self._canvas_max_age_seconds,
+                clock=self._clock,
+                what="The grounded Paint canvas bounds",
+            )
+        except FreshnessExpired as exc:
+            raise PaintCanvasExpired(str(exc)) from exc
 
         fresh = self._binder.revalidate(
             binding,
@@ -198,11 +266,41 @@ class PaintAdapter:
             preserve_aspect=True,
         )
 
+        if self._capture is None:
+            raise PaintVerificationUnavailable(
+                "Paint drawing needs a bound window capture to verify the canvas before each stroke."
+            )
+        if not tool_regions:
+            raise PaintVerificationUnavailable(
+                "Paint drawing needs the verified tool, colour and size indicators to watch before each stroke."
+            )
+        if not all(_rect_inside(fresh.client_rect, region) for region in tool_regions):
+            raise PaintVerificationUnavailable(
+                "A watched Paint tool indicator lies outside the verified client area."
+            )
+        watch = PaintCanvasWatch(
+            self._capture, self._binder, binding, canvas, screen_approved=screen_approved,
+            tool_regions=tuple(tool_regions),
+        )
+        try:
+            watch.start()
+        except CanvasChanged as exc:
+            raise PaintCanvasChanged(str(exc)) from exc
+
         tracker.planned_strokes = len(screen_strokes)
         results: list[PointerStrokeResult] = []
-        for points in screen_strokes:
+        for index, points in enumerate(screen_strokes):
             # Stop is honoured between strokes as well as inside each stroke.
             checkpoint(cancel_token)
+            if index > 0:
+                # Each stroke is authorised by its own fresh frame: anything
+                # other than Qronos's earlier strokes changed means stop now,
+                # with the button up.
+                try:
+                    watch.before_stroke()
+                except CanvasChanged as exc:
+                    raise PaintCanvasChanged(str(exc)) from exc
+                checkpoint(cancel_token)
             stroke_progress = StrokeProgress()
             try:
                 # No automatic retry: a completed earlier stroke is a real side effect.
@@ -227,6 +325,7 @@ class PaintAdapter:
                 raise
             tracker.completed_strokes += 1
             tracker.committed_marks += 1
+            watch.stroke_drawn(points)
             results.append(result)
 
         return PaintDrawResult(

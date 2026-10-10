@@ -1,7 +1,9 @@
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -56,7 +58,104 @@ pub struct RuntimeStatus {
 
 struct RuntimeProcess {
     child: Child,
-    stdin: ChildStdin,
+    input: RuntimeInput,
+}
+
+// ------------------------------------------------------------ command input
+
+const MAX_QUEUED_COMMANDS: usize = 64;
+const MAX_QUEUED_COMMAND_BYTES: usize = 4 * 1024 * 1024;
+const MAX_COMMAND_BYTES: usize = 1024 * 1024;
+const COMMAND_NOT_READ: &str =
+    "The Qronos runtime is not reading commands; the command was not delivered and nothing ran.";
+const COMMAND_TOO_LARGE: &str = "The command is too large; it was not delivered and nothing ran.";
+const COMMAND_INPUT_CLOSED: &str =
+    "The Qronos runtime is not accepting commands; the command was not delivered and nothing ran.";
+const COMMAND_UNCONFIRMED: &str = "Sending a command to the Qronos runtime failed part-way; \
+it may or may not have been received. It is not sent again.";
+
+/// The runtime's standard input, written by one dedicated thread.
+///
+/// Nothing that holds the manager lock ever writes to the pipe: a command is
+/// queued (at most `MAX_QUEUED_COMMANDS` and `MAX_QUEUED_COMMAND_BYTES`) and
+/// the writer thread writes it. A runtime that stops reading fills the
+/// queue, and further commands are refused at once, before any byte is
+/// written. A write that fails part-way is reported once as unconfirmed and
+/// ends the input; nothing is ever re-sent.
+struct RuntimeInput {
+    sender: Option<SyncSender<Vec<u8>>>,
+    queued_bytes: Arc<AtomicUsize>,
+    broken: Arc<AtomicBool>,
+}
+
+impl RuntimeInput {
+    fn spawn<W, F>(mut writer: W, on_unconfirmed: F) -> Self
+    where
+        W: Write + Send + 'static,
+        F: Fn() + Send + 'static,
+    {
+        let (sender, receiver) = sync_channel::<Vec<u8>>(MAX_QUEUED_COMMANDS);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let broken = Arc::new(AtomicBool::new(false));
+        let (bytes, failed) = (queued_bytes.clone(), broken.clone());
+
+        std::thread::spawn(move || {
+            for line in receiver {
+                let size = line.len();
+                let written = writer.write_all(&line).and_then(|_| writer.flush());
+                bytes.fetch_sub(size, Ordering::SeqCst);
+                if written.is_err() {
+                    failed.store(true, Ordering::SeqCst);
+                    on_unconfirmed();
+                    // Dropping the receiver refuses every later command.
+                    return;
+                }
+            }
+        });
+
+        Self {
+            sender: Some(sender),
+            queued_bytes,
+            broken,
+        }
+    }
+
+    /// Queue one command, or refuse it without writing anything. Never waits.
+    fn send(&self, payload: &serde_json::Value) -> Result<(), String> {
+        let mut line = payload.to_string().into_bytes();
+        line.push(b'\n');
+        if line.len() > MAX_COMMAND_BYTES {
+            return Err(COMMAND_TOO_LARGE.to_string());
+        }
+        let Some(sender) = self.sender.as_ref() else {
+            return Err(COMMAND_INPUT_CLOSED.to_string());
+        };
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(COMMAND_INPUT_CLOSED.to_string());
+        }
+
+        let size = line.len();
+        if self.queued_bytes.fetch_add(size, Ordering::SeqCst) + size > MAX_QUEUED_COMMAND_BYTES {
+            self.queued_bytes.fetch_sub(size, Ordering::SeqCst);
+            return Err(COMMAND_NOT_READ.to_string());
+        }
+        match sender.try_send(line) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                self.queued_bytes.fetch_sub(size, Ordering::SeqCst);
+                Err(COMMAND_NOT_READ.to_string())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.queued_bytes.fetch_sub(size, Ordering::SeqCst);
+                Err(COMMAND_INPUT_CLOSED.to_string())
+            }
+        }
+    }
+
+    /// No more commands. Ones already queued still go out.
+    fn close(&mut self) {
+        self.sender = None;
+    }
 }
 
 struct NativeAudioPlaybackState {
@@ -266,8 +365,14 @@ fn clear_pairings(app: &AppHandle) {
     }
 }
 
+/// The bridge that took a pairing request is gone: it stopped, or its
+/// supervisor is replacing it. A new bridge cannot answer the old request.
+fn ends_runtime_session(event: &RuntimeEvent) -> bool {
+    event.event_type == "runtime_stopping"
+}
+
 fn deliver_runtime_event(app: &AppHandle, event: RuntimeEvent) {
-    if ends_pairing_requests(&event) {
+    if ends_pairing_requests(&event) || ends_runtime_session(&event) {
         clear_pairings(app);
     }
 
@@ -326,22 +431,92 @@ pub async fn runtime_setup_snapshot(
     service_ipc::request(state.require_backend()?, Service::Doctor, "", None, None).await
 }
 
+/// The largest runtime output line read; the supervisor relays at most 4 MiB.
+const MAX_RUNTIME_LINE_BYTES: u64 = 4 * 1024 * 1024 + 1024;
+
+/// One line from the runtime's output.
+#[derive(Debug, PartialEq)]
+enum RuntimeLine {
+    Line(String),
+    /// Not delivered: not valid UTF-8, longer than the bound, or cut off by
+    /// the end of the stream (no newline). Reading goes on.
+    Skipped,
+    End,
+    Failed,
+}
+
+/// Read the next newline-terminated line as bytes, bounded. With `lossy`,
+/// invalid UTF-8 is replaced (diagnostics); without it, such a line is
+/// skipped, so one bad line never stops the reader or reaches routing.
+fn read_runtime_line<R: BufRead>(reader: &mut R, buffer: &mut Vec<u8>, lossy: bool) -> RuntimeLine {
+    buffer.clear();
+    match Read::take(&mut *reader, MAX_RUNTIME_LINE_BYTES).read_until(b'\n', buffer) {
+        Ok(0) => RuntimeLine::End,
+        Ok(_) if buffer.last() != Some(&b'\n') => {
+            if buffer.len() as u64 >= MAX_RUNTIME_LINE_BYTES {
+                // Too long: discard the rest of this line, then carry on.
+                loop {
+                    buffer.clear();
+                    match Read::take(&mut *reader, MAX_RUNTIME_LINE_BYTES).read_until(b'\n', buffer) {
+                        Ok(0) => return RuntimeLine::End,
+                        Ok(_) if buffer.last() == Some(&b'\n') => return RuntimeLine::Skipped,
+                        Ok(_) => continue,
+                        Err(_) => return RuntimeLine::Failed,
+                    }
+                }
+            }
+            RuntimeLine::Skipped // cut off by the end of the stream
+        }
+        Ok(_) => match String::from_utf8(buffer.clone()) {
+            Ok(text) => RuntimeLine::Line(text),
+            Err(_) if lossy => RuntimeLine::Line(String::from_utf8_lossy(buffer).into_owned()),
+            Err(_) => RuntimeLine::Skipped,
+        },
+        Err(_) => RuntimeLine::Failed,
+    }
+}
+
+/// A diagnostic line from the runtime's standard error, or None. A line that
+/// holds a pairing key is dropped, as on standard output (`route_runtime_event`).
+fn stderr_event(line: &str) -> Option<RuntimeEvent> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.contains(PAIRING_URI_PREFIX) {
+        return None;
+    }
+    let looks_like_error = trimmed.starts_with("Traceback")
+        || trimmed.starts_with("Exception")
+        || trimmed.starts_with("Error:")
+        || trimmed.contains("ModuleNotFoundError")
+        || trimmed.contains("UnicodeEncodeError");
+    Some(RuntimeEvent {
+        event_type: if looks_like_error { "runtime_error" } else { "runtime_log" }.to_string(),
+        status: if looks_like_error { "error" } else { "running" }.to_string(),
+        message: trimmed.to_string(),
+    })
+}
+
 fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
     std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(stdout);
+        let mut buffer = Vec::new();
 
-        for line in reader.lines() {
-            let Ok(line) = line else {
-                clear_pairings(&app);
-                emit_runtime_event(
-                    &app,
-                    RuntimeEvent {
-                        event_type: "runtime_error".to_string(),
-                        status: "error".to_string(),
-                        message: "Runtime output stream closed unexpectedly.".to_string(),
-                    },
-                );
-                break;
+        loop {
+            let line = match read_runtime_line(&mut reader, &mut buffer, false) {
+                RuntimeLine::Line(line) => line,
+                RuntimeLine::Skipped => continue,
+                RuntimeLine::End => break,
+                RuntimeLine::Failed => {
+                    clear_pairings(&app);
+                    emit_runtime_event(
+                        &app,
+                        RuntimeEvent {
+                            event_type: "runtime_error".to_string(),
+                            status: "error".to_string(),
+                            message: "Runtime output stream closed unexpectedly.".to_string(),
+                        },
+                    );
+                    break;
+                }
             };
 
             let trimmed = line.trim();
@@ -378,13 +553,7 @@ fn write_runtime_payload(
     process: &mut RuntimeProcess,
     payload: serde_json::Value,
 ) -> Result<(), String> {
-    writeln!(process.stdin, "{payload}")
-        .map_err(|error| format!("Could not write to Qronos runtime: {error}"))?;
-
-    process
-        .stdin
-        .flush()
-        .map_err(|error| format!("Could not flush Qronos runtime command: {error}"))
+    process.input.send(&payload)
 }
 
 fn write_runtime_command(process: &mut RuntimeProcess, command: &str) -> Result<(), String> {
@@ -426,6 +595,8 @@ fn require_task_id(task_id: &str) -> Result<&str, String> {
 pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir().ok();
     let local_data = app.path().local_data_dir().ok();
+    // Every backend service learns the one product version (tauri.conf.json via package_info).
+    backend::set_app_version(app.package_info().version.to_string());
     let backend = backend::discover(resources.as_deref(), local_data.as_deref())?;
     if let Some(backend) = backend.as_ref() {
         app.asset_protocol_scope()
@@ -550,10 +721,15 @@ pub fn start_runtime(
         pairings.clear();
     }
 
-    let mut command = state.require_backend()?.command(Service::Bridge)?;
+    // The supervisor starts the bridge itself, relays this process's pipes
+    // to it, restarts it within a bounded budget and reports
+    // `supervisor_state` events; see core/supervisor_relay.py.
+    let mut command = state.require_backend()?.command(Service::Supervisor)?;
     command
         .env("QRONOS_MEMORY_RUNTIME", "1")
         .env("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "1")
+        // The one product version (tauri.conf.json), for runtime status hooks.
+        .env("QRONOS_APP_VERSION", app.package_info().version.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -579,42 +755,24 @@ pub fn start_runtime(
         let app_for_stderr = app.clone();
 
         std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
+            let mut reader = BufReader::new(stderr);
+            let mut buffer = Vec::new();
 
-            for line in reader.lines().map_while(Result::ok) {
-                let trimmed = line.trim();
-
-                if trimmed.is_empty() {
-                    continue;
+            loop {
+                match read_runtime_line(&mut reader, &mut buffer, true) {
+                    RuntimeLine::Line(line) => {
+                        if let Some(event) = stderr_event(&line) {
+                            emit_runtime_event(&app_for_stderr, event);
+                        }
+                    }
+                    RuntimeLine::Skipped => continue,
+                    RuntimeLine::End | RuntimeLine::Failed => break,
                 }
-
-                let looks_like_error = trimmed.starts_with("Traceback")
-                    || trimmed.starts_with("Exception")
-                    || trimmed.starts_with("Error:")
-                    || trimmed.contains("ModuleNotFoundError")
-                    || trimmed.contains("UnicodeEncodeError");
-
-                emit_runtime_event(
-                    &app_for_stderr,
-                    RuntimeEvent {
-                        event_type: if looks_like_error {
-                            "runtime_error".to_string()
-                        } else {
-                            "runtime_log".to_string()
-                        },
-                        status: if looks_like_error {
-                            "error".to_string()
-                        } else {
-                            "running".to_string()
-                        },
-                        message: line,
-                    },
-                );
             }
         });
     }
 
-    spawn_runtime_reader(app, stdout);
+    spawn_runtime_reader(app.clone(), stdout);
 
     /*
      * Wake listening is a runtime invariant, not a frontend timing concern.
@@ -626,7 +784,18 @@ pub fn start_runtime(
      * The frontend may still send the same action after runtime_ready as a
      * recovery path; start_wake_listener() is idempotent.
      */
-    let mut runtime_process = RuntimeProcess { child, stdin };
+    let app_for_input = app.clone();
+    let input = RuntimeInput::spawn(stdin, move || {
+        emit_runtime_event(
+            &app_for_input,
+            RuntimeEvent {
+                event_type: "runtime_error".to_string(),
+                status: "error".to_string(),
+                message: COMMAND_UNCONFIRMED.to_string(),
+            },
+        );
+    });
+    let mut runtime_process = RuntimeProcess { child, input };
 
     if let Err(error) = write_runtime_payload(
         &mut runtime_process,
@@ -647,7 +816,7 @@ pub fn start_runtime(
     Ok(RuntimeStatus {
         running: true,
         status: "starting".to_string(),
-        message: "Qronos runtime process started with native wake bootstrap.".to_string(),
+        message: "Qronos runtime supervisor started with native wake bootstrap.".to_string(),
     })
 }
 
@@ -1389,6 +1558,11 @@ pub fn runtime_set_paused(paused: bool, state: State<'_, RuntimeManagerState>) -
     )
 }
 
+/// 100 x 50 ms = 5 s for an orderly stop. The supervisor's own shutdown
+/// grace (3 s) plus its terminate step fits inside it, so the desktop's
+/// kill is only the backstop.
+const STOP_WAIT_STEPS: u32 = 100;
+
 #[tauri::command]
 pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStatus, String> {
     let mut guard = state
@@ -1400,42 +1574,29 @@ pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStat
         pairings.clear();
     }
 
-    let Some(mut process) = guard.take() else {
+    let Some(process) = guard.take() else {
         return Ok(RuntimeStatus {
             running: false,
             status: "stopped".to_string(),
             message: "Qronos runtime is already stopped.".to_string(),
         });
     };
+    // Status and other commands are answered while this waits.
+    drop(guard);
 
-    let _ = write_runtime_command(&mut process, "shutdown");
-
-    for _ in 0..20 {
-        match process.child.try_wait() {
-            Ok(Some(_)) => {
-                return Ok(RuntimeStatus {
-                    running: false,
-                    status: "stopped".to_string(),
-                    message: "Qronos runtime stopped safely.".to_string(),
-                });
-            }
-            Ok(None) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(_) => break,
-        }
+    match stop_owned_process(process, STOP_WAIT_STEPS) {
+        StopOutcome::Exited => Ok(RuntimeStatus {
+            running: false,
+            status: "stopped".to_string(),
+            message: "Qronos runtime stopped safely.".to_string(),
+        }),
+        StopOutcome::Killed => Ok(RuntimeStatus {
+            running: false,
+            status: "stopped".to_string(),
+            message: "Qronos runtime was force-stopped after shutdown timeout.".to_string(),
+        }),
+        StopOutcome::KillFailed(error) => Err(format!("Could not stop Qronos runtime: {error}")),
     }
-
-    process
-        .child
-        .kill()
-        .map_err(|error| format!("Could not stop Qronos runtime: {error}"))?;
-
-    Ok(RuntimeStatus {
-        running: false,
-        status: "stopped".to_string(),
-        message: "Qronos runtime was force-stopped after shutdown timeout.".to_string(),
-    })
 }
 
 pub fn shutdown(app: &AppHandle) {
@@ -1451,34 +1612,280 @@ pub fn shutdown(app: &AppHandle) {
         pairings.clear();
     }
 
-    let Some(mut process) = guard.take() else {
+    let Some(process) = guard.take() else {
         return;
     };
+    drop(guard);
 
-    // Give the Python runtime the same graceful-shutdown opportunity used by
-    // stop_runtime(). This matters because Python owns child resources such as
-    // the persistent whisper-server process. Killing Python immediately after
-    // writing "shutdown" can orphan those children and leave GPU memory and
-    // localhost ports allocated after the desktop has exited.
+    // The same bounded stop as stop_runtime(). Python owns child resources
+    // such as the persistent whisper-server process, so it gets its graceful
+    // chance first; the kill after the deadline ends only the process this
+    // manager owns, and its kill-on-close Job Object then ends the bridge.
+    let _ = stop_owned_process(process, STOP_WAIT_STEPS);
+}
+
+#[derive(Debug, PartialEq)]
+enum StopOutcome {
+    Exited,
+    Killed,
+    KillFailed(String),
+}
+
+/// Stop the one runtime process this manager owns, within `steps` x 50 ms.
+///
+/// "shutdown" is queued, never written here, so a runtime that is not reading
+/// its input cannot hold this; the input is then closed, the exact child gets
+/// the bounded wait, and is killed (and reaped) if it is still running.
+fn stop_owned_process(mut process: RuntimeProcess, steps: u32) -> StopOutcome {
     let _ = write_runtime_command(&mut process, "shutdown");
+    process.input.close();
 
-    for _ in 0..20 {
+    for _ in 0..steps {
         match process.child.try_wait() {
-            Ok(Some(_)) => {
-                return;
-            }
-            Ok(None) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(_) => {
-                break;
+            Ok(Some(_)) => return StopOutcome::Exited,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => break,
+        }
+    }
+
+    match process.child.kill() {
+        Ok(()) => {
+            let _ = process.child.wait();
+            StopOutcome::Killed
+        }
+        Err(error) => StopOutcome::KillFailed(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod runtime_reader_tests {
+    use super::*;
+
+    fn lines(bytes: &[u8], lossy: bool) -> Vec<RuntimeLine> {
+        let mut reader = BufReader::new(bytes);
+        let mut buffer = Vec::new();
+        let mut out = Vec::new();
+        loop {
+            let line = read_runtime_line(&mut reader, &mut buffer, lossy);
+            let end = line == RuntimeLine::End;
+            out.push(line);
+            if end {
+                return out;
             }
         }
     }
 
-    // Shutdown is bounded: if Python does not exit within roughly one second,
-    // force-stop only the runtime process owned by this manager.
-    let _ = process.child.kill();
+    #[test]
+    fn an_invalid_line_is_skipped_and_reading_goes_on() {
+        let read = lines(b"{\"a\":1}\n{\"bad\":\"\xff\xfe\"}\n{\"b\":2}\n", false);
+        assert_eq!(
+            read,
+            vec![
+                RuntimeLine::Line("{\"a\":1}\n".to_string()),
+                RuntimeLine::Skipped,
+                RuntimeLine::Line("{\"b\":2}\n".to_string()),
+                RuntimeLine::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_cut_off_by_the_end_of_the_stream_is_never_a_line() {
+        let read = lines(b"{\"a\":1}\n{\"cut_off\":\"qronos://pa", false);
+        assert_eq!(read[1], RuntimeLine::Skipped);
+        assert_eq!(read[2], RuntimeLine::End);
+    }
+
+    #[test]
+    fn an_oversized_line_is_skipped_whole() {
+        let mut bytes = vec![b'x'; MAX_RUNTIME_LINE_BYTES as usize + 10];
+        bytes.extend_from_slice(b"\n{\"after\":1}\n");
+        let read = lines(&bytes, false);
+        assert_eq!(read[0], RuntimeLine::Skipped);
+        assert_eq!(read[1], RuntimeLine::Line("{\"after\":1}\n".to_string()));
+    }
+
+    #[test]
+    fn stderr_survives_invalid_text_and_never_carries_a_pairing_key() {
+        let read = lines(b"Traceback (most recent call last)\nbad \xff\nqronos://pair?k=SECRET\n", true);
+        let events: Vec<RuntimeEvent> = read
+            .into_iter()
+            .filter_map(|line| match line {
+                RuntimeLine::Line(text) => stderr_event(&text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "runtime_error");
+        assert_eq!(events[1].message, "bad \u{FFFD}");
+        assert!(events.iter().all(|event| !event.message.contains("SECRET")));
+    }
+}
+
+#[cfg(test)]
+mod runtime_input_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn command(size: usize) -> serde_json::Value {
+        serde_json::json!({ "command": "echo", "text": "y".repeat(size) })
+    }
+
+    #[test]
+    fn a_runtime_that_stops_reading_gets_refusals_and_never_holds_the_caller() {
+        // A real anonymous pipe whose reading end is kept open and never read.
+        let (_reader, writer) = std::io::pipe().unwrap();
+        let input = RuntimeInput::spawn(writer, || {});
+        let started = Instant::now();
+        let mut refused = 0;
+        for _ in 0..500 {
+            match input.send(&command(16 * 1024)) {
+                Ok(()) => {}
+                Err(message) => {
+                    assert_eq!(message, COMMAND_NOT_READ);
+                    refused += 1;
+                }
+            }
+        }
+        assert!(refused > 0, "a full pipe must be refused, not queued without end");
+        assert!(started.elapsed() < Duration::from_secs(2), "sending must never wait on the pipe");
+        assert!(input.queued_bytes.load(Ordering::SeqCst) <= MAX_QUEUED_COMMAND_BYTES);
+    }
+
+    #[test]
+    fn the_queue_is_bounded_by_bytes_as_well_as_count() {
+        let (_reader, writer) = std::io::pipe().unwrap();
+        let input = RuntimeInput::spawn(writer, || {});
+        // Each is just under the per-command limit; the byte budget refuses
+        // long before MAX_QUEUED_COMMANDS is reached.
+        let accepted = (0..MAX_QUEUED_COMMANDS)
+            .filter(|_| input.send(&command(MAX_COMMAND_BYTES - 100)).is_ok())
+            .count();
+        assert!(accepted <= MAX_QUEUED_COMMAND_BYTES / (MAX_COMMAND_BYTES - 100) + 1);
+        assert_eq!(input.send(&command(MAX_COMMAND_BYTES)).unwrap_err(), COMMAND_TOO_LARGE);
+    }
+
+    #[test]
+    fn a_write_that_fails_is_unconfirmed_once_and_later_commands_are_refused() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader); // the runtime is gone
+        let reported = Arc::new(AtomicUsize::new(0));
+        let counter = reported.clone();
+        let input = RuntimeInput::spawn(writer, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        input.send(&command(10)).unwrap(); // queued; the write then fails
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reported.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+        assert_eq!(input.send(&command(10)).unwrap_err(), COMMAND_INPUT_CLOSED);
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+    }
+
+    /// Run only as a child of the test below: an owned process that never
+    /// reads its standard input, and exits on its own after 30 s.
+    #[test]
+    #[ignore]
+    fn helper_child_that_never_reads_its_input() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn an_owned_child_that_never_reads_cannot_hold_commands_or_its_stop() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::runtime_input_tests::helper_child_that_never_reads_its_input",
+                "--ignored",
+                "--quiet",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let reported = Arc::new(AtomicUsize::new(0));
+        let counter = reported.clone();
+        let mut input = RuntimeInput::spawn(stdin, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let refused = (0..500).filter(|_| input.send(&command(16 * 1024)).is_err()).count();
+        assert!(refused > 0 && started.elapsed() < Duration::from_secs(2));
+
+        // Stop: queue the shutdown (or have it refused), close, kill after a
+        // bounded wait. Nothing here waits on the child's full pipe.
+        let started = Instant::now();
+        let _ = input.send(&serde_json::json!({ "command": "shutdown" }));
+        input.close();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // The writer, blocked on the full pipe, is released by the exit and
+        // reports the command it was writing as unconfirmed, once.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reported.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stop_and_app_exit_are_bounded_by_an_owned_child_that_never_reads() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::runtime_input_tests::helper_child_that_never_reads_its_input",
+                "--ignored",
+                "--quiet",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let reported = Arc::new(AtomicUsize::new(0));
+        let counter = reported.clone();
+        let input = RuntimeInput::spawn(stdin, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut process = RuntimeProcess { child, input };
+        // Fill its input until commands are refused: it never reads.
+        let refused = (0..500)
+            .filter(|_| write_runtime_payload(&mut process, command(16 * 1024)).is_err())
+            .count();
+        assert!(refused > 0);
+
+        let started = Instant::now();
+        assert_eq!(stop_owned_process(process, 20), StopOutcome::Killed);
+        // 20 x 50 ms of grace, then the kill and reap; never the child's 30 s.
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+
+        // The command the writer was in the middle of is reported unconfirmed, once.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reported.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_closed_input_refuses_without_writing_and_queued_commands_still_go_out() {
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let mut input = RuntimeInput::spawn(writer, || {});
+        input.send(&serde_json::json!({ "command": "shutdown" })).unwrap();
+        input.close();
+        assert_eq!(input.send(&command(1)).unwrap_err(), COMMAND_INPUT_CLOSED);
+        let mut received = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut received).unwrap();
+        assert_eq!(received, "{\"command\":\"shutdown\"}\n");
+    }
 }
 
 #[cfg(test)]
@@ -1667,6 +2074,13 @@ mod pairing_route_tests {
             "link_error",
             "{\"action\":\"qronos.link_revoke\",\"code\":\"unknown_device\"}"
         )));
+    }
+
+    #[test]
+    fn a_runtime_that_stopped_or_is_being_restarted_ends_pending_requests() {
+        assert!(ends_runtime_session(&event("runtime_stopping", "restarting")));
+        assert!(!ends_runtime_session(&event("supervisor_state", "running")));
+        assert!(!ends_runtime_session(&event("runtime_pong", "")));
     }
 
     #[test]

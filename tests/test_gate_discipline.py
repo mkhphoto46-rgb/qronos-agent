@@ -74,6 +74,31 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Creates/closes only the local named Qronos runtime mutex; it does not "
         "launch processes or manipulate user applications."
     ),
+    "core.instance_ownership": (
+        "Creates, wait-acquires and releases only Qronos's own named singleton "
+        "mutexes (CreateMutexW/WaitForSingleObject/ReleaseMutex) on one holder "
+        "thread; it launches nothing and touches no user application."
+    ),
+    "core.startup_admission": (
+        "Calls SHGetKnownFolderPath through ctypes only to read the Local AppData "
+        "known folder of its own token; it changes nothing."
+    ),
+    "core.store_admission": (
+        "Takes and releases byte-range locks (LockFileEx/UnlockFileEx) on "
+        "Qronos's own admission lock file, and asks whether the update fence "
+        "mutex exists (OpenMutexW); it launches nothing."
+    ),
+    "core.update_service": (
+        "Starts only the verified staged Qronos installer (/S /QRONOSUPDATE) "
+        "through fenced_launcher, after the person's typed approval secret and "
+        "only when the launch is available, which it is not by default "
+        "(launch_unavailable); only that child receives a duplicate of the "
+        "update fence handle. spawn_inheriting, a handle-list spawn helper, has "
+        "no product caller (an owned test uses it). ctypes: the update fence and "
+        "runtime-singleton mutexes (CreateMutexW, WaitForSingleObject with no "
+        "wait), a share-read CreateFileW lock on the staged installer and "
+        "GetProcessTimes."
+    ),
     "core.windows_accessibility": (
         "Reads UI Automation focus, geometry, properties and RuntimeIds. "
         "UIA mutations live in the separately reviewed, authorization-gated backend."
@@ -92,6 +117,18 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Starts, watches and stops only the bundled Qronos runtime child it "
         "supervises, with fixed arguments; holds a per-session named mutex. "
         "It performs no user action and owns no audio, UI or dialog."
+    ),
+    "core.supervisor_relay": (
+        "The supervisor's desktop mode: starts only the bundled runtime bridge "
+        "(fixed command, base interpreter from source), relays the desktop's "
+        "pipes to it, binds it to a kill-on-close Job Object and stops only "
+        "that exact child. It performs no user action and owns no audio, UI or dialog."
+    ),
+    "core.spooler_service": (
+        "Stops and starts the one Windows service named Spooler (a constant) "
+        "through the Service Control Manager, with query/stop/start rights "
+        "only. Called only by the broker's registered printer.spooler_restart "
+        "action, after the broker's full verification and its gate re-check."
     ),
     "core.pipe_peer": (
         "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "

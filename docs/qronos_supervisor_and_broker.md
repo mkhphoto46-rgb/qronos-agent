@@ -1,9 +1,11 @@
 # Supervisor, user runtime and Elevated Action Broker (D8)
 
-Status: **component contracts implemented and tested with disposable fixtures; not
-wired into the product.** Nothing here is installed, registered as a service,
-started at sign-in, or exercised through a real UAC prompt yet. Those steps
-belong to the product startup owner and to later live acceptance. See
+Status: **the supervisor is wired into the desktop's runtime start, stop and
+shutdown (see [Product wiring](#product-wiring-supervised-desktop-runtime)),
+and the broker holds one production action, the print-spooler restart,
+reached from the person's own desktop chat turn.** Nothing here is installed, registered as a
+service, started at sign-in, or exercised through a real UAC prompt. Live
+acceptance on a real desktop is deferred. See
 [What is not done](#what-is-not-done).
 
 The architecture asks for a persistent supervisor and a separate user-session
@@ -18,9 +20,12 @@ accepts one exact approved action rather than a shell command.
 | `core/supervisor_ipc.py` | Authenticated, deadline-bounded local channel | both sides |
 | `core/pipe_peer.py` | Read-only pipe peer process ids (`GetNamedPipe{Client,Server}ProcessId`) | both sides |
 | `core/supervisor.py` | `Supervisor` (keeps the runtime alive) and `SupervisedRuntimeClient` (the runtime's half) | signed-in user |
+| `core/supervisor_relay.py` | Desktop mode: relays the desktop's pipes to the bridge, Job Object, lifecycle events | signed-in user |
 | `core/action_broker.py` | The broker: verify one request, perform it, exit | elevated, via UAC |
 | `core/action_broker_client.py` | `BrokerSession`: the runtime's side, from a gate grant to a result | user runtime |
 | `core/uac_launch.py` | Starts the bundled broker with `ShellExecuteExW` `runas` | user runtime |
+| `core/elevated_actions.py` | The spooler-restart request, typed-secret prompt, cancellation and outcomes | user runtime |
+| `core/spooler_service.py` | Stops and starts the one service `Spooler` through the Service Control Manager | elevated, via UAC |
 
 `build_support/runtime_entry.py` exposes them as two more closed services of
 the frozen executable: `supervisor` and `action-broker`.
@@ -108,13 +113,44 @@ All waits in the channel have deadlines.
    HMAC under a fresh session key.
 3. **Launch and connect.** It listens on a fresh pipe and launches the broker
    (`UacBrokerLauncher` in production: the normal UAC prompt, which the user
-   can decline). It accepts only the launched process id, sends one request,
-   reads one result, and waits for the broker to exit.
+   can decline). The broker's command line carries only public identifiers:
+   `action-broker --pipe NAME --runtime-pid PID`. The session key never goes
+   on a command line, in the environment or in a log. The session accepts
+   only the launched process id and releases the key to it on the pipe. It
+   then runs the mutual handshake and sends one request: the typed action,
+   the envelope and the person's typed secret. It reads one result and waits
+   for the broker to exit.
+4. **Cancellation.** Each approved action has one `Cancellation`, which the
+   coordinator's `discard` (Stop, Pause, shutdown) cancels under the same
+   lock as its epoch change. The session honours it:
+   - before launching, and after the UAC prompt returns;
+   - while waiting for the broker to connect, for the handshake and for its
+     hello. `cancel()` interrupts the listener, and the other waits look
+     every 50 ms, so Stop ends the session at once, not after the 120 s
+     connect timeout;
+   - at key release. The key is written only after `release_key()` grants
+     it, and that grant is the ordering point. A Stop that comes first means
+     no key byte is sent, which covers every Stop made while the session
+     still waits for the broker to connect. A Stop that comes after the
+     grant is ordered after the release: the key is being, or has been,
+     written to the launched, PID-checked broker, and the Stop still ends
+     the handshake and stops the request. The write is not done under the
+     lock, so a stalled peer can never hold up Stop;
+   - at the single commit point, `commit()`, just before the request is
+     sent. A Stop before it means nothing is sent (`BrokerCancelled`, shown
+     as cancelled). A Stop after it cancels nothing: the broker performs one
+     action or none, and the real result, or "unknown", is reported. It is
+     never re-sent.
+   A cancelled session closes its listener and releases the broker's process
+   handle once. A broker that finds no key or no request exits on its own
+   deadline.
 
 The broker (`serve_once`) does the following, in order:
 
-1. **Peer.** It refuses unless the launching runtime runs as the same user,
-   then connects back and requires the pipe server to be that runtime's pid.
+1. **Peer.** It refuses unless the named launching process runs as the same
+   user and runs the broker's own installed executable. Then it connects,
+   requires the pipe server to be exactly that process, receives the session
+   key on the pipe, and runs the mutual handshake.
 2. **Envelope.** It checks the envelope shape, then the HMAC.
 3. **Freshness.** Not issued in the future (5 s skew), not expired, and a
    lifetime of at most 180 s.
@@ -126,6 +162,12 @@ The broker (`serve_once`) does the following, in order:
    or shell syntax.
 7. **Category and target.** Both are re-derived from the parameters and must
    match the approval.
+7a. **Typed secret, checked here.** The person's typed approval secret is
+   checked in the broker itself, against the same per-profile store and
+   shared lockout, whatever the permission settings say. The pipe, the key
+   and the envelope are all chosen by whoever launched the broker, so a
+   local program that is not Qronos could forge every one of them. It cannot
+   type the person's secret. A refusal does not use up the approval.
 8. **Permission gate.** It re-asks `security.gate`. A category the policy
    forbids is refused even with an approval.
 9. **Single use.** The nonce is claimed with an atomic exclusive create in
@@ -139,36 +181,268 @@ The registry refuses command-like kinds (`shell`, `cmd`, `powershell`,
 (script execution, code, registry, boot, raw disk, security settings, backup
 destruction, privilege escalation, cyber attack).
 
-**`PRODUCTION_ACTIONS` is empty.** No current Qronos feature needs elevation,
-so the shipped broker refuses every request with `unknown_action`. That
-proves the mechanics fail closed. **It does not mean any privileged
-capability exists or is complete.** Adding an action requires a reviewed
-`ActionSpec`, a permission policy for its category, and live UAC acceptance.
+**`PRODUCTION_ACTIONS` holds exactly one action: `printer.spooler_restart`.**
 
-## Production wiring contract (for the runtime and desktop startup owner)
+- **Need.** The print workflow stops with "The Windows print spooler is not
+  responding". Restarting that one service is the standard recovery, and
+  Windows lets only administrators do it.
+- **Spec.** It has no parameters. The service is the constant `Spooler`,
+  never chosen by a caller. The category is `device_control`, and the
+  target is "Windows Print Spooler service (Spooler)".
+- **Adapter.** `core/spooler_service.py` uses the Service Control Manager
+  with query, stop and start rights only. It never runs a shell, `sc.exe`,
+  `net.exe` or PowerShell.
+- **Behaviour.** It stops the service, waits up to 30 s, starts it, and
+  waits up to 30 s. Each failure says how far it got. Dependent services
+  are never stopped, a paused service is not touched, and the service's
+  configuration is never read or changed.
+- **Everything else** is refused with `unknown_action`.
+- **Not done.** The real restart, UAC prompt and elevated run have not been
+  exercised. That is deferred live acceptance.
 
-These files are owned by Control (`core/runtime_bridge.py`) and the desktop
-startup owner. Nothing below has been edited, and nothing calls these modules
-in production yet.
+Adding any further action needs a reviewed `ActionSpec`, a permission
+policy for its category, and live UAC acceptance.
 
-1. **Startup.** Start `qronos-runtime.exe supervisor --runtime-arguments
-   bridge --supervised` as the signed-in user, from the desktop or a per-user
-   sign-in entry the installer owner decides. Do not use an elevated Windows
-   service.
-2. **Runtime side.** When `bridge` receives `--supervised`, the runtime reads
-   `core.supervisor.read_bootstrap(sys.stdin.buffer)` first and starts
-   `SupervisedRuntimeClient(bootstrap, on_shutdown=…)`. `on_shutdown` should
-   trigger the bridge's existing orderly shutdown. Audio, UI and dialogs stay
-   in the runtime and desktop.
-3. **Elevated action.** For an approved action that needs elevation, the
-   runtime calls
-   `BrokerSession(UacBrokerLauncher(Path(sys.executable))).perform(TypedAction(kind, params), request, grant)`.
-   `grant` comes from `security.gate.issue_grant` after the user's approval.
-   `UacDeclined` and `BrokerUnavailable` must be shown as refusals or as
-   "outcome unknown". A lost answer after the request was sent is reported as
-   outcome unknown and never retried automatically.
-4. **Owner decisions.** The installer owner decides how the supervisor is
-   started at sign-in, if at all, and the broker's code signing.
+## Product wiring (supervised desktop runtime)
+
+Implemented in round 1 of the production wave: the desktop now reaches the
+supervisor.
+
+```text
+desktop (Tauri start_runtime)
+  -> qronos-runtime supervisor --desktop          core/supervisor_relay.py
+       -> qronos-runtime bridge --supervised      core/runtime_bridge.py
+```
+
+1. **Startup.** `start_runtime` (`desktop/src-tauri/src/runtime/mod.rs`)
+   launches the closed `Service::Supervisor` command (`backend.rs`: bundled
+   executable, fixed words `supervisor --desktop`). It runs as the signed-in
+   user and is never elevated. Stop and app exit send `shutdown`, wait at
+   most 5 s, then kill the supervisor. Its kill-on-close Job Object then
+   ends the bridge as well.
+2. **Supervisor.** The supervisor owns the bridge's pipes. The first stdin
+   line is the bootstrap, and then the desktop's lines are relayed. Relayed
+   content is not parsed, logged or echoed in any event, apart from
+   recognising `{"command":"shutdown"}`. Pairing secrets are therefore still
+   routed only by the desktop's existing targeted pairing delivery.
+2a. **Bounds and back-pressure.** The control loop never waits on a pipe.
+   - **Output.** One writer thread writes everything the desktop reads,
+     strictly in arrival order, from one queue with three kinds of entry:
+     - *Lifecycle* (`supervisor_state`, `runtime_stopping`, the final
+       `runtime_error`, the stall warning): never waited for and never
+       dropped for space. An unread `supervisor_state` is replaced by a
+       newer one. Only beyond 256 unread lifecycle entries are the oldest
+       restart notices merged, into a counted notice.
+     - *Notices*: one counted entry per kind, e.g. "N command(s) were not
+       delivered ...". Thousands of refusals therefore cost one entry and
+       can never crowd out a lifecycle event. No notice carries a command's
+       or a line's content.
+     - *Relayed bridge lines*: whole, valid UTF-8, at most 4 MiB, tagged
+       with the bridge's generation, within a 16 MiB budget. When the budget
+       is full, the relaying thread waits, which pushes back on that bridge
+       and not on supervision.
+   - **Generation fence.** When a bridge generation ends (restarting,
+     stopped or degraded), its output gets at most 0.5 s to drain. It is
+     then fenced *before* the events that announce the end. A line of an
+     ended generation, including one already waiting for room, is dropped
+     and counted. So nothing a dead bridge wrote can follow its restart
+     notice or the next bridge's `runtime_ready`.
+   - **Cut-off, invalid and oversized output.** A final line with no
+     newline, a line that is not valid UTF-8, and a line over 4 MiB are
+     each dropped and counted. A newline is never added to a fragment.
+   - **Exit.** The output gets a 2 s drain and is then abandoned. The process
+     ends with `os._exit`, never with a flush that could wait.
+   - **Commands.** A command is at most 1 MiB. At most 256 commands and
+     4 MiB may wait for the bridge. A bridge that stops reading fills that,
+     and further commands are refused with a counted `busy` notice. Only the
+     thread writing to that bridge can block, and only until that exact
+     bridge is stopped.
+   - **Command fate.**
+     - not delivered / busy / too large / incomplete: refused before any
+       byte was written, so nothing ran.
+     - unconfirmed: the write failed after it may have started.
+     - A command written whole may still be lost if the bridge dies; the
+       restart notice says so.
+     - No command is ever replayed.
+   - **Stop while a bridge is still connecting.** Stop or the desktop's
+     end-of-input interrupts the accept and the hello wait at once
+     (`ChannelServer.interrupt`, plus the hello wait polling the stop
+     event). Neither waits for the connect timeout.
+   - **stderr.** It is copied through as it comes. A line holding a pairing
+     URI is dropped and counted, and invalid UTF-8 is replaced.
+   - **Desktop readers** (`mod.rs`): read bounded byte lines. On stdout, an
+     invalid, oversized or cut-off line is skipped, and reading and routing
+     go on. On stderr, text is decoded lossily and the pairing Drop rule
+     applies.
+3. **Health.** The bridge's peer pid is checked first, then the HMAC
+   handshake, then heartbeats (every 5 s, timeout 45 s). A bridge that
+   exits, closes its channel or stops beating is stopped (exact child only)
+   and restarted with backoff. A 4th failure within 10 minutes leads to
+   `degraded`: the desktop receives `runtime_stopping` and `runtime_error`,
+   and the supervisor exits.
+4. **Command-loop health.** Each heartbeat also carries `busy`: the seconds
+   the bridge's command loop has spent inside the current command. At 120 s
+   or more the supervisor emits one `runtime_warning` per stall. It does not
+   kill the bridge for this, because the command may be part-way through a
+   change. Stop still works, because the supervisor handles it without the
+   bridge's command loop.
+5. **Events to the desktop.** `supervisor_state` reports `starting`,
+   `running`, `restarting`, `stopping`, `stopped` or `degraded`.
+   `runtime_stopping` is sent when a bridge ended without being asked; the
+   desktop then clears pending pairing requests and screen prompts.
+   `runtime_error` is sent for commands that were not delivered (while
+   restarting or degraded, or when the queue is full) and on giving up.
+   Commands are never held for a later bridge, and nothing is retried.
+6. **Runtime side.** `bridge --supervised` reads the bootstrap before its
+   command loop and joins the supervisor; if that fails it exits (code 3)
+   and never runs unsupervised. Without the flag it behaves as before.
+7. **Development builds.** From source, the supervisor starts the base
+   interpreter with this environment's import path. A venv `python.exe`
+   launcher's pid is not the process that connects, so the peer check
+   would refuse it.
+
+**Limits.**
+- Beats prove the process and its interpreter are alive.
+- Command-loop progress is reported, not enforced. Stop does not depend on
+  the bridge's command loop. The supervisor handles it and ends the exact
+  bridge after the grace (tested with a loop stuck inside one command).
+- Stop and end-of-input are also prompt while a new bridge is still
+  connecting (tested with a bridge that never joins).
+- Work handed to other threads, such as conversation turns and queued work,
+  is not watched by the supervisor.
+- The bridge is bound to the Job Object a moment after it starts, before it
+  has started any sidecar.
+- The bridge's standard error is copied through as it comes. If the
+  desktop stops reading it, that copying thread waits, and the bridge's own
+  error writes push back.
+- Sign-in start, a persistent supervisor that outlives the desktop, and any
+  Windows service remain installer/owner decisions. None of them exist.
+- The desktop UI has no case yet for `supervisor_state` or `runtime_warning`
+  (Control). `runtime_error` and `runtime_stopping` already reach existing
+  handling.
+
+**Elevated action (`core/elevated_actions.py`).** The person's own desktop
+chat turn reaches it, for example "سرویس چاپ را ری‌استارت کن" or "restart
+the print spooler". A strict deterministic parser is used; negations and
+other text are ignored. Device Link text goes to the tool-free chat path and
+never reaches it. The layers, all required, in order:
+
+1. The permission gate must not refuse `device_control`.
+2. The typed approval secret, always. This is a floor even if settings
+   lowered device control to "allow" or "ask". A UAC dialog is Windows'
+   consent to elevation, not Qronos's approval of the exact action.
+3. A gate grant for this exact request (170 s). `BrokerSession` turns it into
+   a single-use HMAC envelope.
+4. The UAC prompt, which the person can decline.
+5. The broker's own verification and gate re-check.
+
+The prompt uses the existing app-workflow protocol:
+- `app_workflow_approval_required` with phase `printer_spooler_restart` and
+  permission `require_typed_secret`.
+- The decision comes back through `qronos.app_workflow_decision`, routed by
+  token.
+- Prompts expire after 120 s and are revoked by Stop, Pause and shutdown.
+
+Outcomes are reported once and never retried:
+- `succeeded`.
+- `failed`: the adapter's reviewed message.
+- `refused`: declined, UAC declined, cancelled by Stop/Pause/shutdown
+  before the request left, unavailable, forbidden, or not the installed
+  build.
+- `uncertain`: `BrokerOutcomeUnknown`. The request left but the answer was
+  lost, so the person is told to check the service. An unexpected error
+  also ends here, so every path gives exactly one visible result.
+
+Only one elevated action runs at a time. From source, elevation is refused
+before any prompt.
+
+**Desktop contract (Control).** `desktop/src/appWorkflowApproval.ts` accepts
+four phases today, so the frontend drops this prompt until Control adds
+`printer_spooler_restart` with permission `require_typed_secret`. The secret
+should be sent exactly as for `print`. Until then the action is reachable
+in the runtime but not approvable from the UI. It fails closed: the prompt
+simply expires.
+
+## Start-up order, singletons and the update fence
+
+Every process that opens Qronos's persistent stores runs one order before its
+first store opens (`core/startup_admission.py`). The frozen entry point
+(`build_support/runtime_entry.py`) runs it BEFORE importing the service module,
+so no import-time code can open a store first; each service's `main` calls it
+again, a no-op once done.
+
+1. **Singleton, when the service has one (the bridge).** It is OWNED: a holder
+   thread wait-acquires the mutex and keeps it for the process's life
+   (`core/instance_ownership.py`). Creating the mutex, finding that it exists,
+   an initial-owner flag or a caller value never count as ownership. The
+   release runs on that same thread, once, and a native release failure is
+   recorded, never reported as clean.
+2. **The update fence, checked AFTER the acquisition.** While
+   `Local\Qronos.UpdateInProgress.v1` exists, what was acquired is released and
+   start-up is refused. That includes an abandoned mutex (`WAIT_ABANDONED`):
+   its owner may have been stopped by an update. An unknown answer also
+   releases and refuses. Entry points retry for up to 10 s while an update is
+   what stands in the way; sidecars refuse at once.
+   - Why this closes the race with the updater's real order: the updater takes
+     the exclusive store admission, then creates the fence, and only then waits
+     for each runtime singleton. If the fence came first, the runtime sees it
+     and refuses. If the runtime checked first, it already owns its singleton,
+     so the updater's wait times out ("runtime_running") and the updater gives
+     up, fence included.
+3. **The product version:** `QRONOS_APP_VERSION`, set by the desktop for every
+   backend service from its own package information (tauri.conf.json). From
+   source only, it is tauri.conf.json itself. A packaged process without it is
+   refused. Authority boundary: this is the desktop's declaration passed in the
+   environment, not a signed value; a same-user program that starts the backend
+   itself chooses it.
+4. **The barrier:** `UpdateService.recover_before_stores` on exactly the data
+   root the process will be admitted to. It is awaited and bounded (the update
+   store lock waits at most 10 s; the exclusive restore never waits).
+   - It may put data back after an interrupted update, only under the exclusive
+     admission, so a live writer makes it refuse instead.
+   - It is never a status hook or a background task.
+   - Anything but success refuses start-up.
+5. **The writer admission:** a shared `admit_writer` on the data root, kept for
+   the process's life. The updater's exclusive admission is refused while any
+   writer holds it.
+
+A refusal is terminal and opens nothing:
+- the bridge reports `runtime_error` with the typed code and exits with 78;
+- the supervisor treats 78 as final (DEGRADED, no restart loop);
+- CLI services print `{"ok": false, "code": ...}`.
+
+Which processes run what:
+- **The supervisor** opens no store: it owns `Local\QronosSupervisor` and checks
+  the fence only.
+- **Store-opening services** (bridge, settings, library, memory, permissions,
+  update): the whole order.
+- **The update service:** the whole order for every operation except `launch`,
+  which takes the exclusive admission itself (`LaunchHold`) and cannot also
+  hold a shared one. It stays refused by default.
+- **The elevated action broker:** a shared admission on its known-folder
+  profile, without the barrier, because it only ever runs inside a live runtime
+  that already passed it.
+- **Audio and doctor** open no store.
+
+Where it applies: the installed runtime. That is always the frozen executable,
+and no environment value can turn it off there.
+- A source checkout is never updated by the installer and keeps its data in the
+  checkout, so it takes nothing.
+- The exception: a source process whose store-path overrides point INTO an
+  installed data root runs the whole order on that root. Overrides and roots are
+  compared as resolved paths (junctions, symbolic links, `\\?\` and 8.3 names).
+- An override that is an existing FILE with more than one name (a hard link) is
+  refused with `store` before any store is opened or changed. A hard link keeps
+  its own outside name, so its other names could be in installed data, and
+  placing them would mean listing the file's names. The check is one link-count
+  read per override; nothing is opened and no folder is listed. Single-name files
+  and missing files are unaffected. Use a copy, not a link, for a private store.
+
+The update CLI is registered in the desktop backend as `Service::Update`, for
+one-shot reads and approval steps only. One-shot IPC never runs `launch`,
+because it waits for and kills its child. The desktop hand-over launch path,
+which reads one line, never kills the guard and keeps it out of any
+kill-on-close Job, is a later, gated contract.
 
 ## Tests (fixtures only)
 
@@ -194,6 +468,40 @@ in production yet.
   being restarted, a child that never connects, a wrong key or a stalled
   authentication, an impostor grandchild, and a bystander process left
   untouched.
+- `tests/test_supervisor_relay.py`: relay units (framing, bounds, refused
+  and dropped commands, state events, fixed bridge command). It also runs the
+  supervisor as its own process (`tests/fixtures/relay_supervisor_driver.py`)
+  over pipes, as the desktop does, with a disposable bridge stand-in
+  (`tests/fixtures/relay_bridge_child.py`). These cover pass-through and
+  orderly shutdown; the desktop closing its input; a crash loop going
+  degraded; a hung bridge replaced; a command loop stuck in one command
+  reported and not killed; an oversized output line; a bridge ignoring
+  shutdown being terminated after the grace; and killing the supervisor
+  ending its bridge through the Job Object. It also covers real full pipes:
+  - a desktop that stops reading while the bridge floods. Supervision and
+    Stop still finish within bounds, and the supervisor's memory stays
+    bounded;
+  - a bridge that stops reading its input, which gets `BUSY` refusals
+    rather than a backlog, and is ended after the grace;
+  - a command cut off by the end of input, which is never delivered;
+  - a bridge that acts and dies before replying. Its command is never sent
+    to the restarted bridge.
+  Unit tests cover the byte and count budgets, events never waiting, and a
+  part-way write being reported as unconfirmed. One end-to-end test runs
+  `python -m core.supervisor --desktop` with the real bridge on throwaway
+  state, through ping, pong and shutdown.
+- `tests/test_elevated_actions.py`: the request parser; the exact production
+  spec (no parameters, so a caller cannot choose the service); reviewed
+  failure messages only; the SCM adapter with a fake advapi32, covering each
+  stop/start/timeout/dependent/paused path and only `Spooler` opened; the
+  coordinator, covering the typed-secret floor whatever the settings,
+  single use, refusals before any prompt, every outcome reported once and
+  never retried, UAC declined, revocation and pause; bridge routing; and,
+  with real non-elevated broker children, the production spec end to end
+  (only `perform` replaced by a marker write) and a lost answer after acting,
+  which is reported as `BrokerOutcomeUnknown`.
+- Rust (`backend.rs`, `mod.rs`): the closed `supervisor --desktop` command,
+  and `runtime_stopping` ending pending pairing requests.
 - `tests/test_action_broker.py`: every verification step and refusal, the
   registry rules, single use across instances and races, and audit contents.
 - `tests/test_action_broker_session.py`: a real non-elevated broker child
@@ -208,13 +516,67 @@ refuses that indirection.
 
 ## What is not done
 
-- Not wired into `runtime_bridge`, the desktop, or the installer (contract
-  above).
+- The bridge does route the broker. `QronosRuntime` builds the coordinator
+  lazily, sends it the person's own chat turn and the prompt decisions, and
+  calls its `discard` on Stop, Pause and shutdown. The desktop frontend does
+  not yet show the `printer_spooler_restart` prompt (Control contract
+  above), so the action cannot be approved from the UI today; it fails
+  closed. The supervisor is wired into the desktop's start, stop and
+  shutdown. The installer starts nothing at sign-in.
 - No live UAC prompt, elevated run, Windows service, scheduled task or
   sign-in entry has been created or exercised.
-- `PRODUCTION_ACTIONS` is empty, so there is no elevated product capability.
-- The broker's session key is on its command line. Another process of the
-  same user could read it. The pid checks in both directions mean such a
-  process can neither impersonate the runtime nor receive the action, but the
-  key is not secret from the same user.
+- `printer.spooler_restart` has never been run for real: no UAC prompt,
+  elevated broker or Service Control Manager call has been exercised. The
+  desktop does not yet display its prompt (Control contract above).
+- An over-the-shoulder elevation, where a standard user types an
+  administrator's credentials, runs the broker as another user. The broker's
+  same-user check then refuses it. This fails closed, but it means such users
+  cannot use elevated actions.
+- **Trust boundary, stated precisely.** The broker's authority is the
+  approval-secret store in the signed-in user's own profile,
+  `<Local AppData>\Qronos\approval_secret.sqlite3`. That is an ordinary
+  per-user file: a salted scrypt record with no administrator-protected
+  access list and no integrity binding. The supported boundary is therefore
+  another Windows user, or a same-user program that does not tamper with the
+  person's profile.
+  - Within that boundary, nothing but the person's typed secret gets an
+    elevated action. A caller-chosen key, pipe, process id or MAC'd envelope
+    is not authority, and neither is a secret store chosen through the
+    environment. Tests: a hostile local "runtime" with its own pipe, key and
+    envelope, and a launcher pointing the environment at its own store.
+  - Outside it: a same-user program can REPLACE that store file with one
+    holding a secret it chose. It can then satisfy both a genuine runtime it
+    started and the broker with that secret. This is tested, and it is a
+    known limit. Redirecting the user's Local AppData known folder (the
+    per-user "User Shell Folders" setting, which the same user can write)
+    is the same kind of relocation. That one is source-level and was not
+    tested, because the real registry is not changed.
+  - What still stands against such a program: Windows' UAC consent prompt,
+    which the person must accept, and the fixed registry, which holds one
+    action (stop and start the `Spooler` service, no parameters).
+  - A stronger binding would need a verifier record that only an
+    administrator can write. It does not exist.
+  - Nothing here defends against a same-user account that is already
+    compromised in other ways, for example malware that reads what the
+    person types or injects into the Qronos runtime.
+- **Profile binding.** The elevated broker takes its authority from the
+  installed profile, `<Local AppData>\Qronos`. It finds that folder through
+  Windows' known-folder API for its own token
+  (`SHGetKnownFolderPath(FOLDERID_LocalAppData)`), never from environment
+  values a launcher may have chosen, such as `QRONOS_APPROVAL_SECRET_PATH`,
+  `QRONOS_DATA_ROOT` or `QRONOS_PERMISSION_AUDIT_PATH`. This removes the
+  environment as a way to choose the store. It does not stop a same-user
+  program from relocating the known folder or replacing the file in it (see
+  the trust boundary above). Its authority there
+  is the approval-secret store with its lockout and audit, the single-use
+  journal, and its own audit.
+  - Tested: a launcher pointing those variables at its own store with
+    secret B is refused, and only the profile's secret A works.
+  - If the runtime was configured to keep its secret elsewhere, the broker
+    refuses and fails closed.
+  - Not checked: how Windows passes, or does not pass, a caller's
+    environment to an elevated process. The design does not depend on it.
+  - The broker's gate re-check still reads the permission policy through
+    the ordinary configuration. A launcher could only make that check
+    stricter or looser; the typed-secret floor binds either way.
 - Off Windows, sessions are refused by design.

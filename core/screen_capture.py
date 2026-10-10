@@ -63,12 +63,15 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import time
 from typing import Callable
 
 from dataclasses import replace
 
 from core.actions import ActionRequest
+from core.grounding_freshness import state_epoch
 from core.vision_image import PreparedImage, prepare_bytes
 from core.window_binding import (
     WindowBinder,
@@ -184,6 +187,22 @@ class Capture:
     #: for a capture made through capture_bound(), where the window identity and
     #: layout were verified both before and after the pixels were copied.
     frame_rect: WindowRect | None = None
+
+    #: Monotonic time the picture was taken. Grounded coordinates expire a
+    #: short time after it (core.grounding_freshness); replace() keeps it.
+    captured_at: float = field(default_factory=time.monotonic)
+
+    #: The bound window's input state epoch when the pixels were copied.
+    #: Any Qronos click/key/wheel in that window afterwards advances it.
+    #: Left unset, it is the window's current epoch: a frame taken now.
+    state_epoch: int | None = None
+
+    #: SHA-256 of the encoded image a model was shown, for provenance.
+    pixel_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if self.state_epoch is None:
+            object.__setattr__(self, "state_epoch", state_epoch(self.binding_token))
 
     def describe(self) -> str:
         what = "the screen" if self.window is None else "one window"
@@ -389,6 +408,7 @@ class ScreenCapture:
                 f"Verified window binding is stale: {exc}"
             ) from exc
 
+        epoch = state_epoch(binding.identity_token)
         capture = self.capture(
             approved=approved,
             window=binding.hwnd,
@@ -438,11 +458,18 @@ class ScreenCapture:
             expected_rect.top + capture.source_height,
         )
 
+        if state_epoch(binding.identity_token) != epoch:
+            raise CaptureUnavailable(
+                "Qronos changed the window while it was being captured; frame discarded."
+            )
+
         return replace(
             capture,
             binding_token=binding.identity_token,
             layout_token=binding.layout_token,
             frame_rect=frame_rect,
+            state_epoch=epoch,
+            pixel_sha256=hashlib.sha256(capture.image.data).hexdigest(),
         )
 
     def capture_under(

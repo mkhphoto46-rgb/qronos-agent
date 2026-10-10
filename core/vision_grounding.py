@@ -14,6 +14,18 @@ import json
 import math
 from typing import Any
 
+from core.grounding_freshness import (
+    CONTEXT_MAX_CHANGED_NATIVE_PIXELS,
+    GROUNDING_MAX_AGE_SECONDS,
+    Clock,
+    FreshnessExpired,
+    RegionFingerprint,
+    monotonic,
+    region_fingerprint,
+    require_fresh,
+    require_neighbourhood_unchanged,
+    require_region_unchanged,
+)
 from core.screen_capture import Capture
 from core.window_binding import WindowBinder, WindowBinding, WindowBindingStale, WindowRect
 
@@ -158,6 +170,11 @@ class GroundedPoint:
     model_height: int
     source_width: int
     source_height: int
+    #: Provenance of the exact frame: when it was taken, the window's input
+    #: state epoch then, and the digest of the image the model saw.
+    captured_at: float = 0.0
+    state_epoch: int = 0
+    capture_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -211,6 +228,14 @@ class GroundedTarget:
     point: GroundedPoint
     image_box: ImageBox
     screen_box: WindowRect
+    #: The pixels around the target as the model saw them. Before the
+    #: coordinate is used, a fresh frame must show the same pixels there
+    #: (confirm_grounded_target). A target without one is never confirmed.
+    fingerprint: RegionFingerprint | None = None
+    #: The whole window as the model saw it: the target's viewport context.
+    #: Identical pixels at the target are not enough if the rows, document
+    #: or view around it changed.
+    context: RegionFingerprint | None = None
 
     @property
     def hwnd(self) -> int:
@@ -298,6 +323,9 @@ def ground_point(
         model_height=model_height,
         source_width=capture.source_width,
         source_height=capture.source_height,
+        captured_at=float(capture.captured_at),
+        state_epoch=int(capture.state_epoch),
+        capture_sha256=str(capture.pixel_sha256),
     )
 
 
@@ -415,7 +443,177 @@ def ground_structured_response(
         point=point,
         image_box=candidate.image_box,
         screen_box=screen_box,
+        fingerprint=target_fingerprint(capture, screen_box),
+        context=viewport_fingerprint(capture),
     )
+
+
+#: Pixels around a target that must still look the same before it is used.
+FINGERPRINT_MARGIN_PIXELS = 4
+
+
+def target_fingerprint(capture: Capture, screen_box: WindowRect) -> RegionFingerprint:
+    """The pixels of a target box (plus a small margin) in the frame it was found in."""
+    frame = capture.frame_rect
+    margin = FINGERPRINT_MARGIN_PIXELS
+    rect = WindowRect(
+        max(frame.left, screen_box.left - margin),
+        max(frame.top, screen_box.top - margin),
+        min(frame.right, screen_box.right + margin),
+        min(frame.bottom, screen_box.bottom + margin),
+    )
+    try:
+        return region_fingerprint(capture, rect)
+    except FreshnessExpired as exc:
+        raise GroundingUnavailable(f"The target's pixels could not be recorded: {exc}") from exc
+
+
+def viewport_fingerprint(capture: Capture) -> RegionFingerprint:
+    """The whole bound frame at model resolution: the context of any target in it."""
+    try:
+        return region_fingerprint(capture, capture.frame_rect)
+    except FreshnessExpired as exc:
+        raise GroundingUnavailable(f"The window's pixels could not be recorded: {exc}") from exc
+
+
+def confirm_grounded_target(
+    target: GroundedTarget,
+    binding: WindowBinding,
+    binder: WindowBinder,
+    capture_source,
+    *,
+    screen_approved: bool,
+    reason: str,
+    max_age_seconds: float = GROUNDING_MAX_AGE_SECONDS,
+    clock: Clock = monotonic,
+) -> tuple[int, int]:
+    """Return the target's point only after a fresh frame confirms it is still there.
+
+    Provenance alone cannot see a scroll, a dialog or a document change that
+    keeps the window's identity, geometry and focus. So the exact window is
+    captured again, permission-gated, and the pixels around the target must
+    match the pixels the model saw. Any difference refuses the coordinate:
+    the caller grounds again from a new frame instead of guessing.
+    """
+    if target.fingerprint is None or target.context is None:
+        raise GroundingStale("The target carries no pixel evidence; ground it again.")
+    point = revalidate_grounded_target(
+        target,
+        binding,
+        binder,
+        require_foreground=True,
+        max_age_seconds=max_age_seconds,
+        clock=clock,
+    )
+    confirm_frame(
+        target.fingerprint,
+        target.context,
+        target.screen_box,
+        f"The target '{target.label}'",
+        binding,
+        binder,
+        capture_source,
+        screen_approved=screen_approved,
+        reason=reason,
+        max_age_seconds=max_age_seconds,
+        clock=clock,
+    )
+    return point
+
+
+def confirm_grounded_point(
+    point: GroundedPoint,
+    fingerprint: RegionFingerprint,
+    context: RegionFingerprint,
+    binding: WindowBinding,
+    binder: WindowBinder,
+    capture_source,
+    *,
+    screen_approved: bool,
+    reason: str,
+    max_age_seconds: float = GROUNDING_MAX_AGE_SECONDS,
+    clock: Clock = monotonic,
+) -> tuple[int, int]:
+    """confirm_grounded_target for a point-only target, with the pixels around it."""
+    xy = revalidate_grounded_point(
+        point,
+        binding,
+        binder,
+        require_foreground=True,
+        max_age_seconds=max_age_seconds,
+        clock=clock,
+    )
+    confirm_frame(
+        fingerprint,
+        context,
+        fingerprint.screen_rect,
+        f"The target '{point.label}'",
+        binding,
+        binder,
+        capture_source,
+        screen_approved=screen_approved,
+        reason=reason,
+        max_age_seconds=max_age_seconds,
+        clock=clock,
+    )
+    return xy
+
+
+def confirm_frame(
+    fingerprint: RegionFingerprint,
+    context: RegionFingerprint,
+    target_box: WindowRect,
+    what: str,
+    binding: WindowBinding,
+    binder: WindowBinder,
+    capture_source,
+    *,
+    screen_approved: bool,
+    reason: str,
+    max_age_seconds: float = GROUNDING_MAX_AGE_SECONDS,
+    clock: Clock = monotonic,
+):
+    """Take a fresh frame and require it to show the target and its context unchanged.
+
+    Three comparisons, per colour channel (core.grounding_freshness):
+    the target box itself, strictly; its row and column bands across the
+    window, strictly; the rest of the window, within a small native-pixel
+    allowance. Returns the confirming frame.
+    """
+    fresh = capture_source.capture_bound(
+        binding,
+        binder,
+        approved=screen_approved,
+        require_foreground=True,
+        reason=reason,
+    )
+    _validate_bound_capture(fresh)
+    if fresh.binding_token != binding.identity_token or fresh.layout_token != binding.layout_token:
+        raise GroundingStale("The confirming frame belongs to a different window or layout.")
+    around = f"The window around {what[4:] if what.startswith('The ') else what}"
+    try:
+        require_region_unchanged(fingerprint, fresh, what=what)
+        # Same pixels at the target are not enough: the rows, labels or view
+        # around it must not have changed either.
+        require_neighbourhood_unchanged(context, fresh, target_box, what=around)
+        require_region_unchanged(
+            context,
+            fresh,
+            what=around,
+            max_native_pixels=CONTEXT_MAX_CHANGED_NATIVE_PIXELS,
+        )
+        # The confirming frame itself must still be current.
+        require_fresh(
+            captured_at=fresh.captured_at,
+            captured_epoch=fresh.state_epoch,
+            identity_token=binding.identity_token,
+            max_age_seconds=max_age_seconds,
+            clock=clock,
+            what="The confirming frame",
+        )
+    except FreshnessExpired as exc:
+        raise GroundingStale(str(exc)) from exc
+    return fresh
 
 
 def revalidate_grounded_point(
@@ -424,14 +622,30 @@ def revalidate_grounded_point(
     binder: WindowBinder,
     *,
     require_foreground: bool = True,
+    max_age_seconds: float = GROUNDING_MAX_AGE_SECONDS,
+    clock: Clock = monotonic,
 ) -> tuple[int, int]:
-    """Return the screen point only while its original binding/layout is current."""
+    """Return the screen point only while its original binding/layout is current.
+
+    The point also expires a short time after its frame was captured and as
+    soon as Qronos sends any input to that window after the capture.
+    """
     if point.hwnd != binding.hwnd:
         raise GroundingStale("The grounded point belongs to a different window handle.")
     if point.binding_token != binding.identity_token:
         raise GroundingStale("The grounded point belongs to a different process instance.")
     if point.layout_token != binding.layout_token:
         raise GroundingStale("The grounded point belongs to a different window layout.")
+    try:
+        require_fresh(
+            captured_at=point.captured_at,
+            captured_epoch=point.state_epoch,
+            identity_token=binding.identity_token,
+            max_age_seconds=max_age_seconds,
+            clock=clock,
+        )
+    except FreshnessExpired as exc:
+        raise GroundingStale(str(exc)) from exc
 
     try:
         fresh = binder.revalidate(
@@ -457,6 +671,8 @@ def revalidate_grounded_target(
     binder: WindowBinder,
     *,
     require_foreground: bool = True,
+    max_age_seconds: float = GROUNDING_MAX_AGE_SECONDS,
+    clock: Clock = monotonic,
 ) -> tuple[int, int]:
     """Revalidate the target provenance and return only its safe action point."""
     point = revalidate_grounded_point(
@@ -464,6 +680,8 @@ def revalidate_grounded_target(
         binding,
         binder,
         require_foreground=require_foreground,
+        max_age_seconds=max_age_seconds,
+        clock=clock,
     )
 
     if not (

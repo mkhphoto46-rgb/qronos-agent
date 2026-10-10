@@ -1,0 +1,306 @@
+--- upstream/installer.nsi
++++ installer.nsi
+@@ -34,6 +34,11 @@
+ {{#if installer_hooks}}
+ !include "{{installer_hooks}}"
+ {{/if}}
++; Qronos (installer-template/PROVENANCE.md): this template is only valid with the Qronos hooks, which
++; provide the update fence, the install-root checks and the explicit install-success steps below.
++!ifndef QRONOS_TEMPLATE_HOOKS
++  !error "The Qronos installer template must be built with build_support.build_desktop (Qronos hooks missing)."
++!endif
+ 
+ !define WEBVIEW2APPGUID "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+ 
+@@ -310,13 +315,19 @@
+ Function PageLeaveReinstall
+   ${NSD_GetState} $R2 $R1
+ 
+-  ; If migrating from Wix, always uninstall
++  ; Qronos: no previous uninstaller is ever run from this installer (it was never fenced, and one started
++  ; under this installer's fence could not take it). Replacement is in place only, through the current
++  ; installation's own file list (QronosRemoveOwnedPayload). A WiX/MSI registration is refused visibly.
+   ${If} $WixMode = 1
+-    Goto reinst_uninstall
++    MessageBox MB_ICONSTOP "Another (MSI) installation of ${PRODUCTNAME} is registered. Remove it from Windows Settings > Apps first. Nothing was changed." /SD IDOK
++    Quit
+   ${EndIf}
+ 
+   ; In update mode, always proceeds without uninstalling
+   ${If} $UpdateMode = 1
++    Goto reinst_done
++  ${EndIf}
++  ${If} $PassiveMode = 1
+     Goto reinst_done
+   ${EndIf}
+ 
+@@ -345,42 +356,9 @@
+   ${EndIf}
+ 
+   reinst_uninstall:
+-    HideWindow
+-    ClearErrors
+-
+-    ${If} $WixMode = 1
+-      ReadRegStr $R1 HKLM "$R6" "UninstallString"
+-      ExecWait '$R1' $0
+-    ${Else}
+-      ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
+-      ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
+-      ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|} ; append /UPDATE
+-      ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|} ; append /P
+-      StrCpy $R1 "$R1 _?=$4" ; append uninstall directory
+-      ExecWait '$R1' $0
+-    ${EndIf}
+-
+-    BringToFront
+-
+-    ${IfThen} ${Errors} ${|} StrCpy $0 2 ${|} ; ExecWait failed, set fake exit code
+-
+-    ${If} $0 <> 0
+-    ${OrIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+-      ; User cancelled wix uninstaller? return to select un/reinstall page
+-      ${If} $WixMode = 1
+-      ${AndIf} $0 = 1602
+-        Abort
+-      ${EndIf}
+-
+-      ; User cancelled NSIS uninstaller? return to select un/reinstall page
+-      ${If} $0 = 1
+-        Abort
+-      ${EndIf}
+-
+-      ; Other erros? show generic error message and return to select un/reinstall page
+-      MessageBox MB_ICONEXCLAMATION "$(unableToUninstall)"
+-      Abort
+-    ${EndIf}
++    ; Qronos: refused visibly; the person stays on this page and can choose to install in place.
++    MessageBox MB_ICONINFORMATION "${PRODUCTNAME} replaces the installed version in place and keeps your data. To remove the installed version first, cancel and uninstall it from Windows Settings > Apps. Nothing was changed." /SD IDOK
++    Abort
+   reinst_done:
+ FunctionEnd
+ 
+@@ -425,7 +403,8 @@
+ Var DeleteAppDataCheckbox
+ Var DeleteAppDataCheckboxState
+ !define /ifndef WS_EX_LAYOUTRTL         0x00400000
+-!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
++; Qronos: the "Delete app data" checkbox (a recursive folder removal) is not offered; the two callbacks
++; below are kept unreferenced so the upstream text stays recognisable.
+ Function un.ConfirmShow ; Add add a `Delete app data` check box
+   ; $1 inner dialog HWND
+   ; $2 window DPI
+@@ -455,7 +434,6 @@
+   SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
+   SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
+ FunctionEnd
+-!define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
+ Function un.ConfirmLeave
+   SendMessage $DeleteAppDataCheckbox ${BM_GETCHECK} 0 0 $DeleteAppDataCheckboxState
+ FunctionEnd
+@@ -636,33 +614,42 @@
+ SectionEnd
+ 
+ Section Install
++  ; Qronos: the update fence, the exclusive store admission and the install-root checks run FIRST
++  ; (NSIS_HOOK_PREINSTALL), before SetOutPath creates the install folder and before anything is killed,
++  ; copied, removed or registered.
++  !insertmacro NSIS_HOOK_PREINSTALL
++  ; Qronos: from here every material step must succeed (QRONOS_STEP); failed commands only set the error flag.
++  ClearErrors
+   SetOutPath $INSTDIR
+-
+-  !ifmacrodef NSIS_HOOK_PREINSTALL
+-    !insertmacro NSIS_HOOK_PREINSTALL
+-  !endif
++  !insertmacro QRONOS_STEP "the install folder"
+ 
+   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
++  ClearErrors ; Qronos: the running-app check is not an install step
+ 
+   ; Copy main executable
+   File "${MAINBINARYSRCPATH}"
++  !insertmacro QRONOS_STEP "the main program"
+ 
+   ; Copy resources
+   {{#each resources_dirs}}
+     CreateDirectory "$INSTDIR\\{{this}}"
++    !insertmacro QRONOS_STEP "a resource folder"
+   {{/each}}
+   {{#each resources}}
+     File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
++    !insertmacro QRONOS_STEP "a resource file"
+   {{/each}}
+ 
+   ; Copy external binaries
+   {{#each binaries}}
+     File /a "/oname={{this}}" "{{no-escape @key}}"
++    !insertmacro QRONOS_STEP "an external program"
+   {{/each}}
+ 
+   ; Create file associations
+   {{#each file_associations as |association| ~}}
+     {{#each association.ext as |ext| ~}}
++       !error "Qronos: file associations are not reviewed (their macros read the registry and set the error flag)."
+        !insertmacro APP_ASSOCIATE "{{ext}}" "{{or association.name ext}}" "{{association-description association.description ext}}" "$INSTDIR\${MAINBINARYNAME}.exe,0" "Open with ${PRODUCTNAME}" "$INSTDIR\${MAINBINARYNAME}.exe $\"%1$\""
+     {{/each}}
+   {{/each}}
+@@ -670,58 +657,79 @@
+   ; Register deep links
+   {{#each deep_link_protocols as |protocol| ~}}
+     WriteRegStr SHCTX "Software\Classes\\{{protocol}}" "URL Protocol" ""
++    !insertmacro QRONOS_STEP "a link registration"
+     WriteRegStr SHCTX "Software\Classes\\{{protocol}}" "" "URL:${BUNDLEID} protocol"
++    !insertmacro QRONOS_STEP "a link registration"
+     WriteRegStr SHCTX "Software\Classes\\{{protocol}}\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
++    !insertmacro QRONOS_STEP "a link registration"
+     WriteRegStr SHCTX "Software\Classes\\{{protocol}}\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
++    !insertmacro QRONOS_STEP "a link registration"
+   {{/each}}
+ 
+   ; Create uninstaller
+   WriteUninstaller "$INSTDIR\uninstall.exe"
++  !insertmacro QRONOS_STEP "the uninstaller"
+ 
+   ; Save $INSTDIR in registry for future installations
+   WriteRegStr SHCTX "${MANUPRODUCTKEY}" "" $INSTDIR
++  !insertmacro QRONOS_STEP "the install location registration"
+ 
+   !if "${INSTALLMODE}" == "both"
+     ; Save install mode to be selected by default for the next installation such as updating
+     ; or when uninstalling
+     WriteRegStr SHCTX "${UNINSTKEY}" $MultiUser.InstallMode 1
+-  !endif
+-
+-  ; Remove old main binary if it doesn't match new main binary name
++    !insertmacro QRONOS_STEP "the install mode registration"
++  !endif
++
++  ; Qronos: the previous main program is removed only through the owned file list (QronosRemoveOwnedPayload
++  ; in NSIS_HOOK_PREINSTALL), never by a name read from the registry. The name is still read for the
++  ; shortcut migration below (read only).
+   ReadRegStr $OldMainBinaryName SHCTX "${UNINSTKEY}" "MainBinaryName"
+-  ${If} $OldMainBinaryName != ""
+-  ${AndIf} $OldMainBinaryName != "${MAINBINARYNAME}.exe"
+-    Delete "$INSTDIR\$OldMainBinaryName"
+-  ${EndIf}
++  ClearErrors ; Qronos: a missing value sets the error flag; it is not a failure
+ 
+   ; Save current MAINBINARYNAME for future updates
+   WriteRegStr SHCTX "${UNINSTKEY}" "MainBinaryName" "${MAINBINARYNAME}.exe"
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+ 
+   ; Registry information for add/remove programs
+   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayIcon" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\""
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+   WriteRegStr SHCTX "${UNINSTKEY}" "Publisher" "${MANUFACTURER}"
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+   WriteRegStr SHCTX "${UNINSTKEY}" "InstallLocation" "$\"$INSTDIR$\""
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+   WriteRegStr SHCTX "${UNINSTKEY}" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoModify" "1"
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoRepair" "1"
++  !insertmacro QRONOS_STEP "the Apps & features registration"
+ 
+   ${GetSize} "$INSTDIR" "/M=uninstall.exe /S=0K /G=0" $0 $1 $2
++  ClearErrors ; Qronos: GetSize clears or sets the flag itself; the size estimate is not an install step
+   IntOp $0 $0 + ${ESTIMATEDSIZE}
+   IntFmt $0 "0x%08X" $0
+   WriteRegDWORD SHCTX "${UNINSTKEY}" "EstimatedSize" "$0"
++  !insertmacro QRONOS_STEP "the size registration"
+ 
+   !if "${HOMEPAGE}" != ""
+     WriteRegStr SHCTX "${UNINSTKEY}" "URLInfoAbout" "${HOMEPAGE}"
++    !insertmacro QRONOS_STEP "the homepage registration"
+     WriteRegStr SHCTX "${UNINSTKEY}" "URLUpdateInfo" "${HOMEPAGE}"
++    !insertmacro QRONOS_STEP "the homepage registration"
+     WriteRegStr SHCTX "${UNINSTKEY}" "HelpLink" "${HOMEPAGE}"
++    !insertmacro QRONOS_STEP "the homepage registration"
+   !endif
+ 
+   ; Create start menu shortcut
+   !insertmacro MUI_STARTMENU_WRITE_BEGIN Application
+     Call CreateOrUpdateStartMenuShortcut
+   !insertmacro MUI_STARTMENU_WRITE_END
++  !insertmacro QRONOS_STEP "the start menu shortcut"
+ 
+   ; Create desktop shortcut for silent and passive installers
+   ; because finish page will be skipped
+@@ -729,7 +737,10 @@
+   ${OrIf} ${Silent}
+     Call CreateOrUpdateDesktopShortcut
+   ${EndIf}
+-
++  !insertmacro QRONOS_STEP "the desktop shortcut"
++
++  ; Qronos: every material step above succeeded; only now may the receipt be written (POSTINSTALL).
++  !insertmacro QRONOS_INSTALL_COMPLETE
+   !ifmacrodef NSIS_HOOK_POSTINSTALL
+     !insertmacro NSIS_HOOK_POSTINSTALL
+   !endif
+@@ -774,26 +785,11 @@
+ FunctionEnd
+ 
+ Section Uninstall
+-
+-  !ifmacrodef NSIS_HOOK_PREUNINSTALL
+-    !insertmacro NSIS_HOOK_PREUNINSTALL
+-  !endif
+-
+-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+-
+-  ; Delete the app directory and its content from disk
+-  ; Copy main executable
+-  Delete "$INSTDIR\${MAINBINARYNAME}.exe"
+-
+-  ; Delete resources
+-  {{#each resources}}
+-    Delete "$INSTDIR\\{{this.[1]}}"
+-  {{/each}}
+-
+-  ; Delete external binaries
+-  {{#each binaries}}
+-    Delete "$INSTDIR\\{{this}}"
+-  {{/each}}
++  ; Qronos: NSIS_HOOK_PREUNINSTALL holds the fence and the exclusive admission, refuses a folder that is not
++  ; Qronos's own, checks the whole owned file list against the disk, stops the app and removes exactly the
++  ; listed files and folders. The stock raw deletion of the program, resources, binaries and resource
++  ; folders (which would act before any ownership check) is removed; uninstall.exe is deleted by exact name.
++  !insertmacro NSIS_HOOK_PREUNINSTALL
+ 
+   ; Delete app associations
+   {{#each file_associations as |association| ~}}
+@@ -812,12 +808,10 @@
+ 
+ 
+   ; Delete uninstaller
+-  Delete "$INSTDIR\uninstall.exe"
+-
+-  {{#each resources_ancestors}}
+-  RMDir /REBOOTOK "$INSTDIR\\{{this}}"
+-  {{/each}}
+-  RMDir "$INSTDIR"
++  ; Qronos: only when the validated owned file list names it (QronosRemoveOwnedPayload in PREUNINSTALL).
++  ${If} $QronosUninstallerListed == "1"
++    Delete "$INSTDIR\uninstall.exe"
++  ${EndIf}
+ 
+   ; Remove shortcuts if not updating
+   ${If} $UpdateMode <> 1
+@@ -878,9 +872,7 @@
+     DeleteRegKey /ifempty HKCU "${MANUPRODUCTKEY}"
+     DeleteRegKey /ifempty HKCU "${MANUKEY}"
+ 
+-    SetShellVarContext current
+-    RmDir /r "$APPDATA\${BUNDLEID}"
+-    RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
++    ; Qronos: no recursive folder removal (the option's checkbox is not offered; see the confirm page).
+   ${EndIf}
+ 
+   !ifmacrodef NSIS_HOOK_POSTUNINSTALL

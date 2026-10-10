@@ -125,21 +125,27 @@ def test_launcher_accepts_only_an_absolute_executable_and_plain_words(tmp_path):
             BundledRuntimeLauncher(tmp_path / "qronos-runtime.exe", bad)
 
 
-def test_one_supervisor_per_session():
-    existing = {"value": 0}
+def test_one_supervisor_per_session_by_ownership_not_existence():
+    """R1: the supervisor's singleton is the production name, held by a wait-acquisition; existence proves nothing."""
+    from core.instance_ownership import MutexApi
 
-    def create(name):
-        assert name == "Local\\QronosSupervisor"
-        return 42
+    calls = []
+    waits = iter([0, 0x102])  # granted to the first, timed out for the second (a live owner)
 
-    closed = []
-    first = SupervisorInstanceGuard.acquire(create, lambda: existing["value"], closed.append)
-    existing["value"] = 183
+    api = MutexApi(
+        create=lambda name: calls.append(("create", name)) or 42,
+        wait=lambda handle, ms: calls.append(("wait", ms)) or next(waits),
+        release=lambda handle: calls.append(("release", handle)) or True,
+        close=lambda handle: calls.append(("close", handle)) or True,
+        last_error=lambda: 183,  # "already exists" is reported to both and decides nothing
+    )
+    first = SupervisorInstanceGuard.acquire(api=api, fence_exists=lambda: False, retry_seconds=0)
+    assert first.owned and calls[0] == ("create", "Local\\QronosSupervisor")
     with pytest.raises(SupervisorAlreadyRunning):
-        SupervisorInstanceGuard.acquire(create, lambda: existing["value"], closed.append)
-    assert closed == [42]
+        SupervisorInstanceGuard.acquire(api=api, fence_exists=lambda: False, retry_seconds=0)
     first.release()
-    assert closed == [42, 42]
+    first.release()
+    assert [kind for kind, _ in calls] == ["create", "wait", "create", "wait", "close", "release", "close"]
 
 
 # ---------------------------------------------------- real child processes

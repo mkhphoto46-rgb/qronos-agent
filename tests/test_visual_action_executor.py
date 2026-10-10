@@ -16,6 +16,7 @@ from core.window_binding import (
 )
 from security.gate import evaluate, issue_grant
 from security.permissions import ActionCategory
+from tests.fixtures.still_window import png, textured
 
 
 def snapshot():
@@ -62,7 +63,7 @@ def setup_context():
 
     capture = Capture(
         image=PreparedImage(
-            data=b"png",
+            data=png(textured(1280, 720)),
             width=1280,
             height=720,
             format="png",
@@ -210,10 +211,19 @@ class FakeKeyboard:
         return object()
 
 
+class FakeHover:
+    def __init__(self):
+        self.calls = []
+
+    def smooth_hover(self, binding, x, y, **kwargs):
+        self.calls.append((x, y))
+
+
 class FakeInputs:
     def __init__(self):
         self.click = FakeClick()
         self.keyboard = FakeKeyboard()
+        self.hover = FakeHover()
 
 
 def grant_for(binding, *, target=None):

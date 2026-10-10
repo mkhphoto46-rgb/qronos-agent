@@ -23,12 +23,37 @@ SERVICES = {
     "permissions": "core.permissions_cli",
     "audio": "core.audio_output_cli",
     "doctor": "core.runtime_preflight",
-    # Lifecycle only: keeps the user runtime alive; no audio, UI or dialogs.
+    # Lifecycle only (`supervisor --desktop`): starts the bridge, relays the
+    # desktop's pipes to it and keeps it alive; no audio, UI or dialogs.
     "supervisor": "core.supervisor",
     # One exact approved typed action per launch; started through UAC by the
     # runtime when needed. Refuses everything while no action is registered.
     "action-broker": "core.action_broker",
+    # The Installer's offline update service (core/update_cli.py). Its launch
+    # stays refused (launch_unavailable) until the hand-over path is accepted.
+    "update": "core.update_cli",
 }
+
+#: Services that open Qronos's persistent stores. Each one runs the start-up
+#: order of core/startup_admission.py BEFORE its module is imported, so no
+#: import-time code can open a store first: the bridge also owns its singleton.
+#: The supervisor opens no store (it owns its own singleton in run_desktop);
+#: audio (playback) and doctor (read-only diagnostics) open none either; the
+#: action broker takes its own shared admission on its known-folder profile
+#: inside serve_once, right after it has authenticated the live, admitted bridge
+#: that launched it and before any of its stores (core/action_broker.py).
+STORE_SERVICES = {
+    "bridge": {"instance": True},
+    "settings": {},
+    "library": {},
+    "memory": {},
+    "permissions": {},
+    "update": {},
+}
+#: The one update operation that must NOT take a shared admission: launching
+#: takes the EXCLUSIVE admission itself (core.update_service.LaunchHold), and a
+#: process cannot hold both. With the default quiescence it is refused anyway.
+UPDATE_EXCLUSIVE_OPERATIONS = frozenset({"launch"})
 
 
 def _prevent_asio_selection() -> None:
@@ -66,6 +91,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": "Unknown Qronos backend service."}))
         return 2
     service = arguments.pop(0)
+    refused = _admit_before_import(service, arguments)
+    if refused is not None:
+        return refused
     sys.argv = [service, *arguments]
     try:
         return int(importlib.import_module(SERVICES[service]).main())
@@ -74,6 +102,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         # blocks. Frozen dispatch calls main directly, so preserve it here.
         print(json.dumps({"ok": False, "error": str(error), "errorType": type(error).__name__}, ensure_ascii=False))
         return 1
+
+
+def _admit_before_import(service: str, arguments: list) -> int | None:
+    """core/startup_admission.py for a store-opening service; an exit code when start-up is refused."""
+    policy = STORE_SERVICES.get(service)
+    if policy is None:
+        return None
+    if service == "update" and arguments[:1] and arguments[0].strip().lower() in UPDATE_EXCLUSIVE_OPERATIONS:
+        return None
+    from core import startup_admission
+
+    try:
+        startup_admission.enter(service, instance=bool(policy.get("instance")))
+    except startup_admission.StartupRefused as refused:
+        if service == "bridge":
+            # The bridge's own event shape, relayed to the desktop by the supervisor.
+            print(json.dumps({"eventType": "runtime_error", "status": "error",
+                              "message": f"{refused} ({refused.code})"}, ensure_ascii=True), flush=True)
+        else:
+            print(json.dumps(startup_admission.refusal(refused), ensure_ascii=False), flush=True)
+        return startup_admission.STARTUP_REFUSED_EXIT
+    return None
 
 
 if __name__ == "__main__":

@@ -69,6 +69,7 @@ from core.paint_draw_integration import (
     PaintUndoExecution,
     PreparedPaintDrawAction,
     PreparedPaintUndo,
+    paint_draw_failure_response_fa,
 )
 from core.paint_draw_parser import (
     PAINT_UNDO_AMBIGUOUS,
@@ -130,6 +131,7 @@ from core.task_plan import TaskPlan
 from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.compute_estimator import ComputeEstimator
 from core.intent_gate import IntentGate
+from core.runtime_hooks import run_startup_status_hooks
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.undo_journal import Reversal, UndoJournal
@@ -3502,10 +3504,56 @@ class QronosRuntime:
         )
         return self._app_workflows
 
+    def _ensure_elevated_actions(self):
+        """The elevated-action coordinator (core/elevated_actions.py), built on first use."""
+        coordinator = getattr(self, "_elevated_actions", None)
+        if coordinator is None:
+            from core.elevated_actions import ElevatedActionCoordinator
+            from core.library_executor import WorkflowSecretCheck
+
+            # The bridge never opens the secret store itself; like printing,
+            # it borrows the Library's per-profile check and shared lockout.
+            secret_check = WorkflowSecretCheck()
+            coordinator = ElevatedActionCoordinator(
+                notify=self._notify,
+                verify_secret=secret_check.verify,
+                secret_status=secret_check.status,
+                paused=lambda: self.runtime_paused,
+            )
+            self._elevated_actions = coordinator
+        return coordinator
+
+    def _begin_text_elevated_action(self, text: str, request_id: str, started_at: float) -> bool:
+        """
+        Route the person's own request to restart the print spooler.
+
+        Only desktop chat turns come here; Device Link text goes to the
+        tool-free chat path and can never reach an elevated action.
+        """
+        from core.elevated_actions import parse_spooler_restart
+
+        if not parse_spooler_restart(text):
+            return False
+        if self._computer_actions.stopped_since_turn_start():
+            self._finish_text_file_action(
+                request_id=request_id,
+                response="لغو شد؛ هیچ کاری شروع نشد.",
+                started_at=started_at,
+            )
+            return True
+        reply = self._ensure_elevated_actions().try_begin(text, request_id)
+        if reply is None:
+            return False
+        self._finish_text_file_action(request_id=request_id, response=reply, started_at=started_at)
+        return True
+
     def _begin_text_app_workflow(self, text: str, request_id: str, started_at: float) -> bool:
         """Route a Telegram-download or print request to its approval flow."""
         from core.app_workflow_intents import parse_workflow_intent
         from core.browser_research import plan_navigation
+
+        if self._begin_text_elevated_action(text, request_id, started_at):
+            return True
 
         if parse_workflow_intent(text) is None and plan_navigation(text) is None:
             return False
@@ -3530,6 +3578,10 @@ class QronosRuntime:
         secret: str | None = None,
     ) -> None:
         """Answer one workflow prompt by its single-use identity."""
+        elevated = getattr(self, "_elevated_actions", None)
+        if elevated is not None and elevated.owns(action_token):
+            elevated.resolve(action_token, approved=approved, secret=secret)
+            return
         coordinator = getattr(self, "_app_workflows", None)
         if coordinator is None:
             self._notify(
@@ -4312,7 +4364,7 @@ class QronosRuntime:
             else:
                 self._fail_text_file_action(
                     request_id=request_id,
-                    error=execution.result.detail or "Paint drawing failed.",
+                    error=paint_draw_failure_response_fa(execution),
                     started_at=started_at,
                 )
             return True
@@ -4455,6 +4507,8 @@ class QronosRuntime:
             report["voiceComputerFailed"] = True
             report["voiceComputerFailure"] = execution.result.detail
         report["voiceComputerDeferred"] = False
+        if execution.result.outcome is ActionOutcome.FAILED:
+            return paint_draw_failure_response_fa(execution)
         return "نقاشی در Paint کامل یا تأیید نشد؛ هیچ retry خودکاری انجام نشد."
 
     def _begin_text_calculator_semantic_action(
@@ -6820,6 +6874,11 @@ class QronosRuntime:
         if app_workflows is not None:
             # Telegram/print prompts and running steps stop with everything else.
             app_workflows.discard(reason)
+        elevated = getattr(self, "_elevated_actions", None)
+        if elevated is not None:
+            # Open elevation prompts too. A broker already started is not
+            # interrupted: it performs one action or none, and reports.
+            elevated.discard(reason)
         if revoked:
             self._notify(
                 "computer_approval_discarded",
@@ -9152,10 +9211,7 @@ class QronosRuntime:
         elif execution.result.outcome is ActionOutcome.REFUSED:
             response = "مجوز فعلی اجازهٔ این نقاشی را نمی‌دهد."
         else:
-            response = (
-                "نقاشی کامل یا تأیید نشد؛ برای جلوگیری از خطوط دوبل "
-                "Qronos روی همان canvas دوباره تلاش نکرد."
-            )
+            response = paint_draw_failure_response_fa(execution)
             self._notify(
                 "paint_draw_failed",
                 "error",
@@ -10735,7 +10791,112 @@ QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
 }
 
 
+SUPERVISED_FLAG = "--supervised"
+#: After the supervisor asks for shutdown (or is gone), the command loop ends
+#: when its input does. If it has not within this, the process ends anyway: a
+#: supervised bridge never outlives its supervisor's request.
+SUPERVISED_EXIT_BACKSTOP_SECONDS = 30.0
+
+
+class CommandLoopHealth:
+    """
+    Whole seconds the command loop has spent inside the command it is
+    handling now (0 while it waits for the next). Sent with each heartbeat,
+    so the supervisor can report a loop stuck in one command; the heartbeat
+    thread alone would keep beating through that.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._since: float | None = None
+        self._lock = threading.Lock()
+
+    def enter(self) -> None:
+        with self._lock:
+            self._since = self._clock()
+
+    def leave(self) -> None:
+        with self._lock:
+            self._since = None
+
+    def busy_seconds(self) -> int:
+        with self._lock:
+            since = self._since
+        return 0 if since is None else int(self._clock() - since)
+
+
+COMMAND_LOOP = CommandLoopHealth()
+
+
+def _command_lines(stream):
+    """The command loop's input; marks each command busy until the next is asked for."""
+    for raw_line in stream:
+        COMMAND_LOOP.enter()
+        yield raw_line
+        COMMAND_LOOP.leave()
+
+
+def start_supervision(stream) -> Any:
+    """
+    Join the supervisor that started this bridge (``core/supervisor_relay.py``).
+
+    The supervisor's bootstrap is the first line of standard input, read here
+    before the command loop reads anything. The supervisor's process id is
+    checked on the pipe and both sides prove the session key; any failure
+    raises, and a supervised bridge then exits rather than run unsupervised.
+    """
+    from core.supervisor import SupervisedRuntimeClient, read_bootstrap
+
+    bootstrap = read_bootstrap(stream)
+
+    def on_shutdown(reason: str) -> None:
+        # The supervisor also sends "shutdown" on standard input, which the
+        # command loop handles in order. This is only the backstop.
+        backstop = threading.Timer(SUPERVISED_EXIT_BACKSTOP_SECONDS, os._exit, args=(70,))
+        backstop.daemon = True
+        backstop.start()
+
+    client = SupervisedRuntimeClient(
+        bootstrap, on_shutdown=on_shutdown, busy_seconds=COMMAND_LOOP.busy_seconds,
+    )
+    client.start()
+    return client
+
+
 def main() -> int:
+    supervision = None
+
+    # Before ANY store opens (core/startup_admission.py): own the bridge singleton,
+    # refuse while an update runs, resolve an interrupted update, then hold the shared
+    # writer admission for this process's life. The frozen entry point has already done
+    # this before importing this module; then this is a no-op.
+    from core import startup_admission
+
+    try:
+        startup_admission.enter("bridge", instance=True)
+    except startup_admission.StartupRefused as refused:
+        emit("runtime_error", "error", f"{refused} ({refused.code})")
+        return startup_admission.STARTUP_REFUSED_EXIT
+
+    if SUPERVISED_FLAG in sys.argv[1:]:
+        try:
+            supervision = start_supervision(sys.stdin.buffer)
+        except Exception as exc:
+            emit(
+                "runtime_error",
+                "error",
+                f"The Qronos runtime could not join its supervisor ({type(exc).__name__}).",
+            )
+            return 3
+
+    try:
+        return _run()
+    finally:
+        if supervision is not None:
+            supervision.stop("runtime exiting")
+
+
+def _run() -> int:
     runtime = QronosRuntime()
 
     # The real desktop must not depend on a later Settings write or a frontend
@@ -10804,12 +10965,16 @@ def main() -> int:
         "Qronos runtime bridge is ready.",
     )
 
+    # Reviewed status hooks (core/runtime_hooks.py), on their own daemon
+    # thread with a deadline each: they can never hold up the command loop.
+    run_startup_status_hooks(emit)
+
     # Paired phones, when the user turned the link on. Text-only mode too;
     # off by default, and then nothing is built.
     runtime.start_device_link()
 
     try:
-        for raw_line in sys.stdin:
+        for raw_line in _command_lines(sys.stdin):
             line = raw_line.strip()
 
             if not line:

@@ -1,5 +1,12 @@
 {
   "schema": 1,
-  "comment": "Owner-provided Ed25519 public keys trusted to sign Qronos local update manifests (core/local_update.py). Empty on purpose: with no key, Qronos accepts no update package. Adding or revoking a key is an owner decision made in a reviewed change. Never put a private key here or anywhere in the repository.",
-  "keys": []
+  "comment": "Owner-provided Ed25519 public keys trusted to sign Qronos local update manifests (core/local_update.py). The one entry is the public trustedKeyEntry printed by create-key when the real owner key was created on 2026-10-09 from the reviewed b76a904 signer (provenance: docs/local-update-packages.md). Listing a key does not make any install possible: the update launch stays refused until its wiring is reviewed. Adding or revoking a key is an owner decision made in a reviewed change. Never put a private key here or anywhere in the repository.",
+  "keys": [
+    {
+      "keyId": "b0566b68ca6ee2887a8db62b3aff00e8",
+      "publicKey": "JvjHULywOhnnREKqgUZmYXXqYHXpKrq9s6yYnXlq8bY=",
+      "owner": "Qronos Owner",
+      "revoked": false
+    }
+  ]
 }

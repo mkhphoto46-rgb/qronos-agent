@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[cfg(debug_assertions)]
 use std::process::Stdio;
@@ -15,24 +16,51 @@ const EXECUTABLE: &str = "qronos-runtime";
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Service {
     Bridge,
+    /// The supervised runtime: `qronos-runtime supervisor --desktop`, which
+    /// starts the bridge itself and relays its standard input and output.
+    Supervisor,
     Library,
     Memory,
     Audio,
     Settings,
     Permissions,
     Doctor,
+    /// The offline update service (core/update_cli.py, Installer-owned). Registered
+    /// for one-shot reads and approval steps only; its launch is never run through
+    /// one-shot IPC (see service_ipc.rs), and no command mounts it yet.
+    #[allow(dead_code)]
+    Update,
+}
+
+/// The product version every backend service is told (QRONOS_APP_VERSION): the
+/// desktop's own package version, set once from tauri's package information
+/// (tauri.conf.json). There is no second version constant.
+static APP_VERSION: OnceLock<String> = OnceLock::new();
+
+pub(super) fn set_app_version(version: String) {
+    let _ = APP_VERSION.set(version);
 }
 
 impl Service {
     fn name(self) -> &'static str {
         match self {
             Self::Bridge => "bridge",
+            Self::Supervisor => "supervisor",
             Self::Library => "library",
             Self::Memory => "memory",
             Self::Audio => "audio",
             Self::Settings => "settings",
             Self::Permissions => "permissions",
             Self::Doctor => "doctor",
+            Self::Update => "update",
+        }
+    }
+
+    /// Fixed words after the service name; nothing here comes from a caller.
+    fn fixed_arguments(self) -> &'static [&'static str] {
+        match self {
+            Self::Supervisor => &["--desktop"],
+            _ => &[],
         }
     }
 
@@ -40,12 +68,14 @@ impl Service {
     fn module(self) -> &'static str {
         match self {
             Self::Bridge => "core.runtime_bridge",
+            Self::Supervisor => "core.supervisor",
             Self::Library => "core.library_cli",
             Self::Memory => "core.memory_cli",
             Self::Audio => "core.audio_output_cli",
             Self::Settings => "core.settings_cli",
             Self::Permissions => "core.permissions_cli",
             Self::Doctor => "core.runtime_preflight",
+            Self::Update => "core.update_cli",
         }
     }
 }
@@ -80,6 +110,7 @@ impl Backend {
                 let mut command = Command::new(directory.join(EXECUTABLE));
                 command
                     .arg(service.name())
+                    .args(service.fixed_arguments())
                     .current_dir(directory)
                     .env("QRONOS_PACKAGED_RUNTIME", "1")
                     .env("QRONOS_DATA_ROOT", data_root)
@@ -91,11 +122,16 @@ impl Backend {
                 let mut command = Command::new(resolve_python(root)?);
                 command
                     .args(["-u", "-m", service.module()])
+                    .args(service.fixed_arguments())
                     .current_dir(root);
                 command
             }
         };
         command.env("PYTHONUTF8", "1").env("PYTHONUNBUFFERED", "1");
+        if let Some(version) = APP_VERSION.get() {
+            // The start-up barrier of every store-opening service needs the running version.
+            command.env("QRONOS_APP_VERSION", version);
+        }
         Ok(command)
     }
 }
@@ -285,6 +321,51 @@ mod tests {
             fixture.0.join("profile/Temp/Chatterbox")
         );
         assert!(!fixture.0.join("profile").exists());
+    }
+
+    #[test]
+    fn every_service_is_told_the_desktop_package_version_and_update_is_a_closed_service() {
+        let fixture = Fixture::new();
+        let directory = fixture.bundle();
+        let backend = Backend::Packaged {
+            directory: directory.clone(),
+            data_root: fixture.0.join("profile"),
+            asset_root: fixture.0.join("assets"),
+        };
+        set_app_version("9.8.7".to_string());
+        for service in [Service::Settings, Service::Update, Service::Supervisor] {
+            let command = backend.command(service).unwrap();
+            let version = command
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("QRONOS_APP_VERSION"))
+                .and_then(|(_, value)| value.map(|v| v.to_owned()));
+            assert_eq!(version, Some(std::ffi::OsString::from(APP_VERSION.get().unwrap())));
+        }
+        assert_eq!(
+            backend.command(Service::Update).unwrap().get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("update")]
+        );
+    }
+
+    #[test]
+    fn the_supervised_runtime_is_a_closed_bundled_command() {
+        let fixture = Fixture::new();
+        let directory = fixture.bundle();
+        let backend = Backend::Packaged {
+            directory: directory.clone(),
+            data_root: fixture.0.join("profile"),
+            asset_root: fixture.0.join("assets"),
+        };
+        let command = backend.command(Service::Supervisor).unwrap();
+        assert_eq!(command.get_program(), directory.join(EXECUTABLE));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("supervisor"), std::ffi::OsStr::new("--desktop")]
+        );
+        assert_eq!(
+            backend.command(Service::Bridge).unwrap().get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("bridge")]
+        );
     }
 
     #[test]

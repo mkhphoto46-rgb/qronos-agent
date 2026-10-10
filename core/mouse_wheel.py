@@ -113,9 +113,12 @@ class MouseWheelController:
             authorization=authorization,
         )
 
-        self._wheel(
-            steps
-        )
+        try:
+            self._wheel(
+                steps
+            )
+        finally:
+            self._guard.note_state_change(binding)
 
         self._guard.revalidate(
             binding,

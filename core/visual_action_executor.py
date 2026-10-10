@@ -9,7 +9,8 @@ from core.input_safety import BoundInputAuthorization
 from core.mouse_click import MouseClickResult
 from core.screen_capture import ScreenCapture
 from core.visual_targeting import VisualTarget, VisualTargetLocator
-from core.vision_grounding import revalidate_grounded_point
+from core.confirmed_press import press_grounded_point
+from core.vision_grounding import target_fingerprint, viewport_fingerprint
 from core.window_binding import (
     WindowBinder,
     WindowBinding,
@@ -149,6 +150,12 @@ class VisualActionExecutor:
             description,
             frame,
         )
+        # The pixels around the located point, as the model saw them.
+        fingerprint = target_fingerprint(
+            frame,
+            _point_scope(binding.snapshot.client_rect, target.point.screen_x,
+                         target.point.screen_y, radius=radius),
+        )
 
         # Vision inference may take seconds and another window can steal
         # foreground. Never click until the exact bound HWND is foreground
@@ -163,19 +170,12 @@ class VisualActionExecutor:
             require_same_layout=True,
         )
 
-        x, y = revalidate_grounded_point(
-            target.point,
-            binding,
-            self.binder,
-            require_foreground=True,
-        )
-
         client = binding.snapshot.client_rect
 
         scope = _point_scope(
             client,
-            x,
-            y,
+            target.point.screen_x,
+            target.point.screen_y,
             radius=radius,
         )
 
@@ -186,12 +186,28 @@ class VisualActionExecutor:
 
         self._checkpoint()
 
-        clicked = self.inputs.click.click_at(
+        # Provenance is not enough: a fresh frame must show the target (and
+        # its row/column and window) unchanged where Vision found it; the
+        # cursor then moves, one more frame must show nothing opened because
+        # of the motion, and only then is the button pressed, without motion.
+        # A locator that grounded a box with the point (VisionGrounder) lets
+        # the whole control show its own hover highlight after the motion;
+        # confirmed_press checks, clips and caps that box. The point-only
+        # VisualTargetLocator has none, so only the point scope may change.
+        clicked = press_grounded_point(
+            target.point,
+            fingerprint,
+            viewport_fingerprint(frame),
             binding,
-            x,
-            y,
+            self.binder,
+            self.capture,
+            self.inputs,
             authorization=authorization,
             allowed_rect=scope,
+            screen_approved=screen_approved,
+            reason="Confirm the located target is still in place before the click.",
+            cancel_token=self.cancel_token,
+            grounded_box=getattr(target, "screen_box", None),
         )
 
         # Native input is considered successful only if the exact window and

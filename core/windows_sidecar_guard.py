@@ -22,6 +22,10 @@ class SidecarGuardUnavailable(RuntimeError):
     """Windows could not establish safe lifetime ownership for a sidecar."""
 
 
+class SidecarUpdateInProgress(SidecarGuardUnavailable):
+    """The update fence exists: no sidecar starts while an update or its installer runs."""
+
+
 class _IO_COUNTERS(ctypes.Structure):
     _fields_ = [
         ("ReadOperationCount", ctypes.c_uint64),
@@ -143,6 +147,13 @@ class WindowsSidecarGuard:
     The Job Object uses JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Its handle is owned
     only by the parent Qronos process. If that parent exits or crashes, Windows
     closes the handle and terminates every sidecar assigned to the job.
+
+    The mutex is OWNED by a holder thread (``core.instance_ownership``): a
+    wait-acquisition, never "created" or "already existed", released on that
+    same thread exactly once. ``WAIT_ABANDONED`` is ownership after a dead
+    owner, but the dead owner may have been stopped by an update, so after ANY
+    acquisition the update fence is checked: while it exists the mutex is
+    released again and no sidecar starts (``SidecarUpdateInProgress``).
     """
 
     def __init__(self, mutex_name: str) -> None:
@@ -150,16 +161,18 @@ class WindowsSidecarGuard:
             raise ValueError("mutex_name must not be empty")
 
         self.mutex_name = mutex_name
-        self._mutex_handle = None
+        self._owned = None
         self._job_handle = None
         self._closed = False
+        #: True only if this guard's mutex release was confirmed by Windows.
+        self.release_confirmed = False
         self._lock = threading.RLock()
 
     @classmethod
-    def acquire(cls, mutex_name: str) -> "WindowsSidecarGuard":
+    def acquire(cls, mutex_name: str, *, api=None, fence_exists=None) -> "WindowsSidecarGuard":
         guard = cls(mutex_name)
         try:
-            guard._acquire_mutex()
+            guard._acquire_mutex(api=api, fence_exists=fence_exists)
             guard._create_kill_on_close_job()
             return guard
         except Exception:
@@ -171,42 +184,30 @@ class WindowsSidecarGuard:
         with self._lock:
             return self._closed
 
-    def _acquire_mutex(self) -> None:
-        kernel32 = _kernel32()
+    @property
+    def abandoned(self) -> bool:
+        """True when this guard's mutex was acquired from an owner that died holding it."""
+        owned = self._owned
+        return bool(owned is not None and owned.abandoned)
 
-        handle = kernel32.CreateMutexW(
-            None,
-            False,
-            self.mutex_name,
-        )
-        if not handle:
-            _raise_last_error(
-                f"Could not create Qronos sidecar mutex {self.mutex_name!r}"
-            )
+    def _acquire_mutex(self, *, api=None, fence_exists=None) -> None:
+        from core.instance_ownership import AlreadyOwned, OwnershipError, UpdateInProgress, acquire_unless_updating
 
-        wait_result = kernel32.WaitForSingleObject(
-            handle,
-            0,
-        )
-
-        if wait_result in {
-            WAIT_OBJECT_0,
-            WAIT_ABANDONED,
-        }:
-            self._mutex_handle = handle
-            return
-
-        kernel32.CloseHandle(handle)
-
-        if wait_result == WAIT_TIMEOUT:
-            raise SidecarAlreadyRunning(
-                "Another Qronos process already owns this sidecar."
-            )
-
-        raise SidecarGuardUnavailable(
-            "Windows returned an unexpected mutex wait result "
-            f"0x{int(wait_result):08X}."
-        )
+        options = {"retry_seconds": 0.0, "api": api}
+        if fence_exists is not None:
+            options["fence_exists"] = fence_exists
+        try:
+            self._owned = acquire_unless_updating(self.mutex_name, **options)
+        except AlreadyOwned as error:
+            raise SidecarAlreadyRunning("Another Qronos process already owns this sidecar.") from error
+        except UpdateInProgress as error:
+            raise SidecarUpdateInProgress(
+                "An update is being installed; the sidecar does not start until it ends."
+            ) from error
+        except OwnershipError as error:
+            raise SidecarGuardUnavailable(
+                f"Could not own Qronos sidecar mutex {self.mutex_name!r}: {error}"
+            ) from error
 
     def _create_kill_on_close_job(self) -> None:
         kernel32 = _kernel32()
@@ -266,26 +267,20 @@ class WindowsSidecarGuard:
 
             self._closed = True
             job = self._job_handle
-            mutex = self._mutex_handle
+            owned = self._owned
             self._job_handle = None
-            self._mutex_handle = None
-
-        if os.name != "nt":
-            return
-
-        kernel32 = _kernel32()
+            self._owned = None
 
         # Close the job first. If a sidecar survived normal shutdown, this is
         # the final fail-safe that terminates it before singleton ownership is
         # released to another Qronos process.
-        if job:
-            kernel32.CloseHandle(job)
+        if job and os.name == "nt":
+            _kernel32().CloseHandle(job)
 
-        if mutex:
-            try:
-                kernel32.ReleaseMutex(mutex)
-            finally:
-                kernel32.CloseHandle(mutex)
+        if owned is not None:
+            # On its holder thread, once. An unconfirmed native release is recorded,
+            # never reported as clean; Windows releases it when this process exits.
+            self.release_confirmed = owned.release()
 
     def __enter__(self) -> "WindowsSidecarGuard":
         return self

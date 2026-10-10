@@ -24,6 +24,10 @@
 !include "LogicLib.nsh"
 !include "x64.nsh"
 !include "${__FILEDIR__}\qronos-install-root.nsh"
+!include "${__FILEDIR__}\qronos-update-fence.nsh"
+
+; The Qronos template (installer-template/installer.nsi) refuses to compile without these hooks.
+!define QRONOS_TEMPLATE_HOOKS
 
 !define QRONOS_WEBVIEW2_APPID "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 !define QRONOS_WEBVIEW2_FILE "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
@@ -47,12 +51,11 @@
   ${EndIf}
 !macroend
 
-; Stops the installation. SetOutPath $INSTDIR has already created the install
-; folder, so it is removed again, but only if it is still empty (RMDir without
-; /r never deletes files). A probe harness can define QRONOS_PROBE_RESULT to
-; also record the message in a file; the installer never defines it.
-; Refuses before anything was installed into a folder that is not Qronos's own;
-; nothing is removed.
+; Stops the installation. With the Qronos template (installer-template/) these
+; run in NSIS_HOOK_PREINSTALL BEFORE SetOutPath, so no install folder has been
+; created yet and nothing under it is changed or removed. A probe harness can
+; define QRONOS_PROBE_RESULT to also record the message in a file; the installer
+; never defines it.
 !macro QRONOS_REFUSE MESSAGE
   !ifdef QRONOS_PROBE_RESULT
     FileOpen $R7 "${QRONOS_PROBE_RESULT}" w
@@ -68,11 +71,6 @@
     FileWrite $R7 "${MESSAGE}"
     FileClose $R7
   !endif
-  ; $INSTDIR is the process's current directory, which Windows will not remove.
-  ; Only the current directory is moved: a SetOutPath here would make archive
-  ; readers such as 7-Zip place every later File instruction under $TEMP.
-  System::Call 'kernel32::SetCurrentDirectoryW(w "$TEMP")'
-  RMDir "$INSTDIR"
   Abort "${MESSAGE}"
 !macroend
 
@@ -100,8 +98,31 @@
   Push $R7
   Push $R8
   Push $R9
+  ; First: the update fence and the exclusive store admission (update hand-over or manual install),
+  ; before anything is checked, killed, copied or removed (qronos-update-fence.nsh).
+  !insertmacro QRONOS_FENCE_INSTALL
+  ${If} $QronosFenceMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosFenceMessage"
+  ${EndIf}
   ; The install folder must be Qronos's own before anything is installed.
   Call QronosCheckInstallRoot
+  ${If} $QronosMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
+  ${EndIf}
+  ; The previous installation's whole file list is checked against the disk (no link, junction or wrong
+  ; kind on the way to any entry) before anything is stopped, removed or installed.
+  StrCpy $QronosValidateOnly "1"
+  Call QronosRemoveOwnedPayload
+  StrCpy $QronosValidateOnly ""
+  ${If} $QronosMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
+  ${EndIf}
+  ; Replace, never mix: remove exactly the previous installation's listed files,
+  ; once Qronos is not running, before anything new is installed.
+  !ifmacrodef CheckIfAppIsRunning
+    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !endif
+  Call QronosRemoveOwnedPayload
   ${If} $QronosMessage != ""
     !insertmacro QRONOS_REFUSE "$QronosMessage"
   ${EndIf}
@@ -121,26 +142,55 @@
   ${Else}
     DetailPrint "Microsoft Edge WebView2 Runtime $R9 is already installed."
   ${EndIf}
-  ; Replace, never mix: remove exactly the previous installation's listed files,
-  ; once Qronos is not running, before the new files are copied.
-  !ifmacrodef CheckIfAppIsRunning
-    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  !endif
-  Call QronosRemoveOwnedPayload
-  ${If} $QronosMessage != ""
-    !insertmacro QRONOS_REFUSE "$QronosMessage"
-  ${EndIf}
   Pop $R9
   Pop $R8
   Pop $R7
 !macroend
 
-; After Tauri's own uninstall steps: remove whatever the installation's file list
-; still names, and the install folder when it is empty. Unlisted files stay.
-!macro NSIS_HOOK_POSTUNINSTALL
+; The last statement of the Install section, reached only after every install step succeeded: in
+; update mode, the installation receipt for the start-up barrier. A failure leaves no receipt (the
+; barrier then reports the update as unconfirmed); the installed files stay.
+!macro NSIS_HOOK_POSTINSTALL
+  Call QronosWriteReceipt
+  ${If} $QronosFenceMessage != ""
+    DetailPrint "$QronosFenceMessage"
+  ${EndIf}
+!macroend
+
+; First in the Uninstall section, before anything is stopped, removed or unregistered: the fence and the
+; exclusive admission, then the install folder must be Qronos's own (protected roots and ancestors, no link;
+; a folder with content must carry a valid Qronos file list), the whole file list is checked against the
+; disk, the app is stopped, and exactly the listed files and folders are removed. The Qronos template has
+; no other file deletion in its Uninstall section (except uninstall.exe by exact name).
+!macro NSIS_HOOK_PREUNINSTALL
+  Call un.QronosFenceUninstall
+  ${If} $QronosFenceMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosFenceMessage"
+  ${EndIf}
+  Call un.QronosCheckInstallRoot
+  ${If} $QronosMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosMessage Nothing was removed."
+  ${EndIf}
+  ; Without its own file list nothing here is provably Qronos's: refuse before anything is touched.
+  ${IfNot} ${FileExists} "$INSTDIR\${QRONOS_MANIFEST}"
+    !insertmacro QRONOS_REFUSE "This folder has no Qronos file list, so nothing in it is removed. Nothing was removed."
+  ${EndIf}
+  StrCpy $QronosValidateOnly "1"
+  Call un.QronosRemoveOwnedPayload
+  StrCpy $QronosValidateOnly ""
+  ${If} $QronosMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
+  ${EndIf}
+  !ifmacrodef CheckIfAppIsRunning
+    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !endif
   Call un.QronosRemoveOwnedPayload
   ${If} $QronosMessage != ""
-    DetailPrint "$QronosMessage"
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
   ${EndIf}
+!macroend
+
+; Last in the Uninstall section: the install folder, only when it is empty. Unlisted files stay.
+!macro NSIS_HOOK_POSTUNINSTALL
   RMDir "$INSTDIR"
 !macroend

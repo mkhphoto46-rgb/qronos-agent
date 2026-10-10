@@ -21,6 +21,7 @@ from core.model_manager import ModelManager
 from core.paint_adapter import PaintAdapter, PaintCanvasProgress, PaintCanvasRegion
 from core.paint_canvas_grounding import ground_paint_canvas
 from core.paint_state import PaintStateGrounder, PaintStateNormalizer
+from core.paint_templates import approve_template_sketch, match_paint_template
 from core.paint_verification import (
     PaintPostDrawVerification,
     PaintPostDrawVerifier,
@@ -60,6 +61,10 @@ class PaintDrawError(RuntimeError):
 
 class PaintReferenceUnavailable(PaintDrawError):
     """No trusted local reference-image provider is connected."""
+
+
+class PaintModelUnavailable(PaintDrawError):
+    """The local Vision/brain runtime could not be reached."""
 
 
 class PaintReferenceProvider(Protocol):
@@ -196,6 +201,8 @@ class PaintDrawExecution:
     run: PaintDrawRun | None = None
     side_effects: PaintDrawSideEffects = PaintDrawSideEffects()
     undo_entry: UndoEntry | None = None
+    #: Why a failed drawing stopped (see paint_failure_kind); "" otherwise.
+    failure_kind: str = ""
 
     @property
     def undo_available(self) -> bool:
@@ -305,8 +312,13 @@ class PaintDrawExecutor:
         inputs_factory: InputsFactory = InputCapabilities.for_binder,
         sleep_fn: SleepFn = time.sleep,
         undo_step_settle_seconds: float = 0.15,
+        ui_grounder_factory: Callable[[object], object] = PaintStateGrounder,
+        critic_factory: Callable[[object], object] = SketchVisualCritic,
     ) -> None:
         self.computer_executor = computer_executor
+        # The Vision-backed grounder and critic; injected fakes in tests.
+        self._ui_grounder_factory = ui_grounder_factory
+        self._critic_factory = critic_factory
         self.reference_provider = (
             reference_provider
             if reference_provider is not None
@@ -403,6 +415,7 @@ class PaintDrawExecutor:
 
         run: PaintDrawRun | None = None
         state = _PaintRunState()
+        failure_kind = ""
         try:
             run = self._perform(
                 prepared.action,
@@ -429,6 +442,7 @@ class PaintDrawExecutor:
                 ),
             )
         except Exception as exc:
+            failure_kind = paint_failure_kind(exc)
             result = ActionResult(
                 action_id=prepared.gui_request.action_id,
                 outcome=ActionOutcome.FAILED,
@@ -460,6 +474,7 @@ class PaintDrawExecutor:
             run,
             side_effects=side_effects,
             undo_entry=undo_entry,
+            failure_kind=failure_kind if result.outcome is ActionOutcome.FAILED else "",
         )
 
     def decline_screen(self, prepared: PreparedPaintDrawAction) -> None:
@@ -555,19 +570,31 @@ class PaintDrawExecutor:
         """
         state = state if state is not None else _PaintRunState()
         checkpoint(cancel_token)
-        reference = self.reference_provider.reference_for(action.prompt)
+        # A plain house/shape request uses a reviewed deterministic template;
+        # anything else needs a reference image and refuses without one,
+        # before the model runtime or Paint is touched.
+        template = match_paint_template(action.prompt)
+        reference = (
+            None if template is not None else self.reference_provider.reference_for(action.prompt)
+        )
 
         manager = self._model_manager_factory()
         if not manager.ensure_runtime_ready():
-            raise PaintDrawError(
+            raise PaintModelUnavailable(
                 "Local Qronos brain runtime/Ollama could not be reached or "
                 "started automatically."
             )
         checkpoint(cancel_token)
 
-        approved_sketch, _diagnostics = ReferenceSketchPipeline(
-            manager.runtime
-        ).plan(action.prompt, reference)
+        if template is not None:
+            approved_sketch = approve_template_sketch(
+                action.prompt, template, self._critic_factory(manager.runtime)
+            )
+        else:
+            approved_sketch, _diagnostics = ReferenceSketchPipeline(
+                manager.runtime,
+                critic=self._critic_factory(manager.runtime),
+            ).plan(action.prompt, reference)
         # Planning can take a long time; Stop during it must still prevent
         # every Windows side effect.
         checkpoint(cancel_token)
@@ -622,7 +649,7 @@ class PaintDrawExecutor:
         # toolbar coordinate is vision-grounded to this exact HWND/layout.
         capture = self._screen_capture_factory()
         state.capture = capture
-        ui_grounder = PaintStateGrounder(manager.runtime)
+        ui_grounder = self._ui_grounder_factory(manager.runtime)
         try:
             normalizer = PaintStateNormalizer(
                 self.computer_executor.window_binder,
@@ -633,7 +660,7 @@ class PaintDrawExecutor:
                 close_grounder=False,
             )
             state.normalizer = normalizer
-            normalizer.normalize(
+            normalization = normalizer.normalize(
                 binding,
                 authorization=input_authorization,
                 screen_approved=True,
@@ -677,6 +704,7 @@ class PaintDrawExecutor:
         draw = PaintAdapter(
             self.computer_executor.window_binder,
             inputs=inputs,
+            capture=capture,
         ).execute_approved(
             binding,
             approved_sketch,
@@ -686,6 +714,8 @@ class PaintDrawExecutor:
             inset_pixels=12,
             cancel_token=cancel_token,
             progress=state.canvas_progress,
+            screen_approved=True,
+            tool_regions=normalization.control_boxes,
         )
 
         # The drawing is complete. From here on only observation remains, so
@@ -704,7 +734,7 @@ class PaintDrawExecutor:
         state.after = after
 
         verification = PaintPostDrawVerifier(
-            SketchVisualCritic(manager.runtime)
+            self._critic_factory(manager.runtime)
         ).verify(
             binding,
             approved_sketch,
@@ -1148,6 +1178,112 @@ class PaintDrawExecutor:
             steps_sent=steps_sent,
             restored=restored,
         )
+
+
+def paint_failure_kind(exc: BaseException) -> str:
+    """A stable, user-explainable reason a drawing stopped.
+
+    The most specific cause wins: a toolbar or canvas error that was caused
+    by out-of-date evidence is "expired", by a changed screen "window_changed",
+    and so on, whatever wrapper carried it.
+    """
+    from core.grounding_freshness import ContentChanged, EvidenceTooOld, InputSinceCapture
+    from core.paint_adapter import (
+        PaintAdapterError,
+        PaintCanvasChanged,
+        PaintCanvasExpired,
+        PaintPlanNotApproved,
+        PaintVerificationUnavailable,
+    )
+    from core.paint_canvas_grounding import PaintCanvasGroundingError
+    from core.paint_state import PaintStateError
+    from core.paint_templates import TemplateSketchRejected
+    from core.paint_verification import PaintPostDrawError
+    from core.reference_sketch_pipeline import ReferenceSketchRejected
+    from core.screen_capture import CaptureUnavailable
+    from core.vision_grounding import GroundingStale, GroundingUnavailable
+
+    if isinstance(exc, PaintReferenceUnavailable):
+        return "reference_unavailable"
+    if isinstance(exc, PaintModelUnavailable):
+        return "model_unavailable"
+    if isinstance(exc, (TemplateSketchRejected, ReferenceSketchRejected)):
+        return "preview_rejected"
+    if isinstance(exc, PaintPostDrawError):
+        return "not_verified"
+
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__
+    for cause in chain:
+        if isinstance(cause, PaintPlanNotApproved):
+            return "plan_not_approved"
+        if isinstance(cause, PaintVerificationUnavailable):
+            return "verification_unavailable"
+        if isinstance(cause, (PaintCanvasExpired, EvidenceTooOld, InputSinceCapture)):
+            return "expired"
+        if isinstance(cause, (PaintCanvasChanged, ContentChanged, WindowBindingStale, CaptureUnavailable)):
+            return "window_changed"
+
+    if isinstance(exc, (PaintCanvasGroundingError, PaintStateError, GroundingUnavailable)):
+        return "not_grounded"
+    if isinstance(exc, (GroundingStale, PaintAdapterError)):
+        return "window_changed"
+    return "other"
+
+
+_FAILURE_FA = {
+    "reference_unavailable": (
+        "برای این نقاشی تصویر مرجع محلی لازم است و هنوز به Qronos وصل نیست. "
+        "فعلاً بدون مرجع فقط خانه، دایره، مربع، مستطیل، مثلث، ستاره، خط و فلش "
+        "کشیده می‌شوند."
+    ),
+    "model_unavailable": "مدل محلی تشخیص تصویر در دسترس نبود.",
+    "preview_rejected": "پیش‌نمایش نقاشی از بررسی تصویری رد شد.",
+    "not_grounded": "Qronos نتوانست بوم یا ابزارهای Paint را با اطمینان پیدا کند.",
+    "window_changed": (
+        "پنجرهٔ Paint یا محتوای آن تغییر کرد یا فوکوس را از دست داد؛ "
+        "برای ایمنی ادامه داده نشد."
+    ),
+    "not_verified": (
+        "نتیجهٔ واقعی روی بوم با طرح تأییدشده تطبیق نداشت؛ موفقیتی ادعا نمی‌شود."
+    ),
+    "expired": (
+        "شناسایی بوم یا ابزارهای Paint دیگر تازه نبود (زمانش گذشته بود یا Qronos پیش از آن "
+        "در Paint کاری کرده بود)؛ برای ایمنی ادامه داده نشد."
+    ),
+    "verification_unavailable": (
+        "امکان بررسی تصویری مرحله‌به‌مرحلهٔ نقاشی فراهم نبود؛ برای ایمنی ادامه داده نشد."
+    ),
+    "plan_not_approved": (
+        "طرحی که باید کشیده می‌شد دقیقاً همان طرح تأییدشده نبود؛ برای ایمنی ادامه داده نشد."
+    ),
+    "other": "نقاشی در Paint انجام نشد.",
+}
+
+
+def paint_draw_failure_response_fa(execution: "PaintDrawExecution") -> str:
+    """Honest Persian summary of a failed drawing: why it stopped and what changed."""
+    effects = execution.side_effects
+    reason = _FAILURE_FA.get(execution.failure_kind or "other", _FAILURE_FA["other"])
+    if not effects.any:
+        changed = "در Paint هیچ تغییری ایجاد نشد."
+    elif not effects.touched_canvas:
+        changed = (
+            "روی بوم چیزی کشیده نشد؛ ابزار، رنگ یا ضخامت Paint ممکن است تغییر کرده باشد."
+            if effects.toolbar_clicks
+            else "روی بوم چیزی کشیده نشد؛ فقط Paint باز یا فعال شد."
+        )
+    else:
+        changed = (
+            f"{effects.strokes_completed} خط از {effects.strokes_planned} خط کشیده شد "
+            "و دکمهٔ ماوس رها شد؛ Qronos دوباره تلاش نمی‌کند."
+        )
+        if not execution.undo_available:
+            changed += " بازگردانی خودکار این تغییرات در دسترس نیست."
+    return f"{reason} {changed}"
 
 
 def _describe_side_effects(effects: PaintDrawSideEffects) -> str:

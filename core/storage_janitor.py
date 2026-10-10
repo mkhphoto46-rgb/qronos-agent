@@ -496,6 +496,12 @@ class StorageJanitor:
 
 def main() -> None:
     """Show what a cleanup pass would do, without deleting anything."""
+    from core import startup_admission  # before the first store opens (core/startup_admission.py)
+
+    refused = startup_admission.enter_cli("storage-janitor")
+    if refused is not None:
+        raise SystemExit(refused)
+
     import time
 
     from core.storage_budget import DEFAULT_BUDGETS, measure_component

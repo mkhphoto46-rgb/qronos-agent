@@ -55,6 +55,8 @@ class Setup:
         return {"kind": action.kind, "params": dict(action.params)}, approval
 
     def verify(self, action, approval, **kwargs):
+        kwargs.setdefault("secret", "right")
+        kwargs.setdefault("verify_secret", lambda secret: secret == "right")
         return verify_request(action, approval, self.key, self.registry, self.consumed, **kwargs)
 
 
@@ -115,7 +117,8 @@ def test_a_change_that_leaves_the_target_alone_is_still_refused_by_the_digest(se
                        setup.key, registry, setup.consumed)
     assert refusal.value.outcome == "not_approved"
     assert verify_request({"kind": "fixture.sized_marker", "params": {"name": "alpha", "size": 1}}, approval,
-                          setup.key, registry, setup.consumed).params["size"] == 1
+                          setup.key, registry, setup.consumed, secret="right",
+                          verify_secret=lambda secret: secret == "right").params["size"] == 1
 
 
 def test_freshness(setup):
@@ -162,12 +165,12 @@ def test_parameters_must_match_the_spec_exactly(setup, params, outcome):
     assert refusal.value.outcome == outcome
 
 
-def test_an_unknown_kind_is_refused_and_production_holds_no_actions(setup):
+def test_an_unknown_kind_is_refused_and_production_holds_only_the_spooler_restart(setup):
     action, approval = setup.approved()
     with pytest.raises(BrokerRefusal) as refusal:
         verify_request(action, approval, setup.key, PRODUCTION_ACTIONS, setup.consumed)
     assert refusal.value.outcome == "unknown_action"
-    assert PRODUCTION_ACTIONS.kinds() == ()
+    assert PRODUCTION_ACTIONS.kinds() == ("printer.spooler_restart",)
 
 
 def test_the_gate_is_asked_again_inside_the_broker(setup):
@@ -271,12 +274,14 @@ def test_a_malformed_nonce_is_never_claimed(tmp_path):
 def test_handling_performs_and_audits_without_secrets(setup):
     action, approval = setup.approved("gamma")
     records = []
-    result = handle_request({"action": action, "approval": approval}, setup.key, setup.registry, setup.consumed,
-                            audit=records.append)
+    result = handle_request({"action": action, "approval": approval, "secret": "right"}, setup.key,
+                            setup.registry, setup.consumed, audit=records.append,
+                            verify_secret=lambda secret: secret == "right")
     assert result == {"ok": True, "outcome": "performed", "detail": "marker gamma written"}
     assert (setup.work / "markers" / "gamma.done").read_text() == "performed"
     text = json.dumps(records)
     assert approval["mac"] not in text and setup.key.hex() not in text and "gamma" not in text
+    assert "right" not in text  # the typed secret is never audited
     assert records[0]["outcome"] == "performed" and records[0]["actionId"] == approval["actionId"]
 
 
@@ -286,15 +291,74 @@ def test_a_failing_action_reports_failure_without_its_message(setup):
     registry = ActionRegistry([spec])
     request = ActionRequest(category=ActionCategory.CREATE_OR_EDIT_FILE, target="boom", summary="Boom.")
     approval = build_approval(TypedAction("fixture.boom", {}), request, grant_for(request), setup.key)
-    result = handle_request({"action": {"kind": "fixture.boom", "params": {}}, "approval": approval},
-                            setup.key, registry, setup.consumed)
+    result = handle_request({"action": {"kind": "fixture.boom", "params": {}}, "approval": approval,
+                             "secret": "right"}, setup.key, registry, setup.consumed,
+                            verify_secret=lambda secret: secret == "right")
     assert result["ok"] is False and result["outcome"] == "failed" and "private" not in result["detail"]
 
 
-def test_broker_arguments_are_exactly_pipe_key_and_runtime_pid():
-    good = ["--pipe", r"\\.\pipe\qronos-action-broker-" + "0" * 32, "--key", "ab" * 32, "--runtime-pid", "42"]
-    assert parse_arguments(good)[2] == 42
-    for bad in (good[:4], good + ["--extra"], ["--key", "ab" * 32, "--pipe", good[1], "--runtime-pid", "42"],
-                good[:3] + ["xyz"] + good[4:], good[:5] + ["-1"]):
+def test_broker_arguments_are_exactly_the_pipe_and_runtime_pid_and_never_a_key():
+    good = ["--pipe", r"\\.\pipe\qronos-action-broker-" + "0" * 32, "--runtime-pid", "42"]
+    assert parse_arguments(good) == (good[1], 42)
+    for bad in (good[:2], good + ["--extra"], ["--runtime-pid", "42", "--pipe", good[1]],
+                good[:3] + ["-1"], good[:3] + ["0"], good[:2] + ["--key", "ab" * 32] + good[2:]):
         with pytest.raises(ValueError):
             parse_arguments(bad)
+    from core.action_broker_client import broker_arguments
+
+    assert broker_arguments(good[1], 42) == ["action-broker", *good]
+
+
+@pytest.mark.parametrize("secret, check", [
+    (None, lambda secret: True),           # no secret sent
+    ("", lambda secret: True),             # empty
+    ("x" * 2000, lambda secret: True),     # absurdly long
+    ("wrong", lambda secret: secret == "right"),
+    ("right", None),                        # no check available: refuse, never allow
+    ("right", lambda secret: 1 / 0),        # a failing store refuses
+])
+def test_the_broker_requires_the_typed_secret_itself(setup, secret, check):
+    action, approval = setup.approved()
+    with pytest.raises(BrokerRefusal) as refusal:
+        setup.verify(action, approval, secret=secret, verify_secret=check)
+    assert refusal.value.outcome == "secret_rejected"
+    assert setup.consumed.claim(approval["nonce"])  # a refused request never used up the approval
+
+
+def test_only_the_installed_runtime_executable_is_a_legitimate_launcher(monkeypatch):
+    import os
+    import sys
+
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert broker.same_executable(os.getpid()) is False  # from source: never
+    import psutil as real_psutil
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", real_psutil.Process().exe())
+    assert broker.same_executable(os.getpid()) is True  # this very process, same executable
+
+    class Other:
+        def __init__(self, pid):
+            pass
+
+        def exe(self):
+            return "C:/Users/someone/Downloads/not-qronos.exe"
+
+    import psutil
+
+    monkeypatch.setattr(psutil, "Process", Other)
+    assert broker.same_executable(1234) is False
+
+
+def test_the_broker_refuses_a_launcher_that_is_not_the_qronos_runtime_before_any_pipe(monkeypatch):
+    from core.supervisor_ipc import ChannelError
+
+    opened = []
+    monkeypatch.setattr(broker, "connect_for_key", lambda *args, **kwargs: opened.append(args))
+    with pytest.raises(ChannelError, match="not the installed Qronos runtime"):
+        broker.serve_once(r"\.\pipe\qronos-action-broker-" + "0" * 32, 42,
+                          owner_check=lambda pid: True, identity_check=lambda pid: False)
+    with pytest.raises(ChannelError, match="not the same user"):
+        broker.serve_once(r"\.\pipe\qronos-action-broker-" + "0" * 32, 42,
+                          owner_check=lambda pid: False, identity_check=lambda pid: True)
+    assert opened == []

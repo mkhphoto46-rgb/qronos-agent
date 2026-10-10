@@ -346,6 +346,128 @@ def verify_generated_script(script: str, wrapper: Path) -> None:
         raise PrerequisiteError("The generated installer script does not include the verified WebView2 hook.")
 
 
+# ------------------------------------------------- the pinned installer template
+
+#: The Qronos NSIS template (installer-template/PROVENANCE.md): tauri-bundler 2.9.4's installer.nsi plus a
+#: reviewed diff. tauri.conf.json selects it; the build refuses anything else.
+TEMPLATE_DIR = ROOT / "desktop" / "src-tauri" / "installer-template"
+TEMPLATE_SETTING = "installer-template/installer.nsi"
+UPSTREAM_TEMPLATE_SHA256 = "20f4ecc730defb71f1342eaeaec4021df13be3d843abba0effe88ea5835fa079"
+TEMPLATE_LICENCES = {"License_MIT.md": "86fc515b82835f7cb6ad400cc64a9d3380d22d55b593e8c34f51efee9f6a250b",
+                     "License_Apache.md": "a0746c84c2a9663f57491dda8a619cc64152a8447889c0e17aa2f3e592e0097e"}
+#: Steps every generated Qronos installer checks (QRONOS_STEP), at least once each, in this order.
+TEMPLATE_STEPS = ("the install folder", "the main program", "the uninstaller", "the install location registration",
+                  "the Apps & features registration", "the size registration", "the start menu shortcut",
+                  "the desktop shortcut")
+#: Statements whose failure only sets the NSIS error flag: each must be followed IMMEDIATELY by its QRONOS_STEP.
+_MATERIAL = re.compile(r"^(SetOutPath|File|CreateDirectory|WriteUninstaller|WriteRegStr|WriteRegDWORD|"
+                       r"CreateShortcut|Call CreateOrUpdate\w+Shortcut)\b")
+#: Allowed between a material statement and its step (they never touch the error flag).
+_NEUTRAL = ("${EndIf}", "!insertmacro MUI_STARTMENU_WRITE_END", "!endif")
+#: Commands that clear or set the error flag; inside the shortcut functions they could hide a failure.
+_FLAG_CHANGERS = re.compile(r"\b(ClearErrors|IfErrors|SetErrors|ReadRegStr|ReadINIStr|GetSize|\$\{Errors\})")
+#: Values only test probes define; a production script or hook wrapper with one is refused.
+_PROBE_ONLY = re.compile(r"^\s*!define\s+(QRONOS_PROBE_\w+|QRONOS_UPDATE_FENCE_NAME|QPROBE_\w+)\b", re.MULTILINE)
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_template_source(directory: Path = TEMPLATE_DIR) -> None:
+    """The committed template is the pinned upstream file plus exactly the reviewed diff, with its licences."""
+    import difflib
+
+    upstream = directory / "upstream" / "installer.nsi"
+    if not upstream.is_file() or _file_sha256(upstream) != UPSTREAM_TEMPLATE_SHA256:
+        raise PrerequisiteError("installer-template/upstream/installer.nsi is not tauri-bundler 2.9.4's template.")
+    for name, digest in TEMPLATE_LICENCES.items():
+        if not (directory / name).is_file() or _file_sha256(directory / name) != digest:
+            raise PrerequisiteError(f"installer-template/{name} is not the upstream licence text.")
+    ours = (directory / "installer.nsi").read_text(encoding="utf-8").splitlines(keepends=True)
+    diff = "".join(difflib.unified_diff(upstream.read_text(encoding="utf-8").splitlines(keepends=True), ours,
+                                        "upstream/installer.nsi", "installer.nsi", n=3))
+    if diff != (directory / "qronos-template.diff").read_text(encoding="utf-8"):
+        raise PrerequisiteError("installer-template/installer.nsi differs from the reviewed qronos-template.diff.")
+
+
+def _block(script: str, opening: str, closing: str) -> str:
+    start = script.find(f"\n{opening}\n")
+    if start < 0:
+        raise PrerequisiteError(f"The generated installer script has no {opening!r}.")
+    end = script.find(f"\n{closing}", start + 1)
+    return script[start + 1:end]
+
+
+def _statements(block: str) -> list[str]:
+    return [line.strip() for line in block.split("\n")[1:]
+            if line.strip() and not line.strip().startswith((";", "#"))]
+
+
+def verify_generated_order(script: str) -> None:
+    """Tauri's REAL generated installer.nsi has the Qronos order (contracts round 11-12)."""
+    text = script.lstrip("\ufeff").replace("\r\n", "\n")
+    if "!ifndef QRONOS_TEMPLATE_HOOKS" not in text:
+        raise PrerequisiteError("The generated installer script is not from the Qronos template.")
+    install = _statements(_block(text, "Section Install", "SectionEnd"))
+    if not install or install[0] != "!insertmacro NSIS_HOOK_PREINSTALL":
+        raise PrerequisiteError("The generated installer does not run the Qronos fence and checks first.")
+    if install.count("SetOutPath $INSTDIR") != 1:
+        raise PrerequisiteError("The generated installer does not create the install folder exactly once.")
+    pending = None
+    for statement in install:
+        if statement.startswith("!insertmacro QRONOS_STEP "):
+            pending = None
+        elif pending is not None and statement not in _NEUTRAL:
+            raise PrerequisiteError(f"The generated installer does not check {pending!r} immediately.")
+        if _MATERIAL.match(statement):
+            pending = statement
+    if pending is not None:
+        raise PrerequisiteError(f"The generated installer does not check {pending!r}.")
+    steps = re.findall(r'^!insertmacro QRONOS_STEP "(.*)"$', "\n".join(install), re.MULTILINE)
+    positions = [steps.index(step) if step in steps else -1 for step in TEMPLATE_STEPS]
+    if -1 in positions or positions != sorted(positions):
+        raise PrerequisiteError(f"The generated installer does not check every install step: {steps}.")
+    if install.count("!insertmacro QRONOS_INSTALL_COMPLETE") != 1:
+        raise PrerequisiteError("The generated installer has no single install-complete step.")
+    after = install[install.index("!insertmacro QRONOS_INSTALL_COMPLETE") + 1:]
+    if after[:2] != ["!ifmacrodef NSIS_HOOK_POSTINSTALL", "!insertmacro NSIS_HOOK_POSTINSTALL"]:
+        raise PrerequisiteError("The install-complete step is not immediately before the receipt hook.")
+    if any(statement.startswith(("Delete ", "RMDir ", "RmDir ")) for statement in install):
+        raise PrerequisiteError("The generated Install section deletes outside the owned file list.")
+    uninstall = _statements(_block(text, "Section Uninstall", "SectionEnd"))
+    if not uninstall or uninstall[0] != "!insertmacro NSIS_HOOK_PREUNINSTALL":
+        raise PrerequisiteError("The generated uninstaller does not run the Qronos fence and checks first.")
+    deletions = [s for s in uninstall if s.startswith(("Delete ", "RMDir ", "RmDir "))]
+    allowed = re.compile(r'^(Delete "\$INSTDIR\\uninstall\.exe"|Delete "\$(SMPROGRAMS|DESKTOP)\\[^"]*\.lnk"|'
+                         r'RMDir "\$SMPROGRAMS\\\$AppStartMenuFolder")$')
+    unexpected = [s for s in deletions if not allowed.match(s)]
+    if unexpected:
+        raise PrerequisiteError(f"The generated uninstaller deletes outside the owned file list: {unexpected}.")
+    for index, statement in enumerate(uninstall):
+        if statement == 'Delete "$INSTDIR\\uninstall.exe"' and \
+                (index == 0 or uninstall[index - 1] != '${If} $QronosUninstallerListed == "1"'):
+            raise PrerequisiteError("The generated uninstaller deletes uninstall.exe without the owned list naming it.")
+    if re.search(r"^\s*R[Mm]Dir\s+/r\b", text, re.MULTILINE):
+        raise PrerequisiteError("The generated installer removes a folder recursively.")
+    if re.search(r"^\s*!define MUI_PAGE_CUSTOMFUNCTION_(SHOW|LEAVE) un\.Confirm", text, re.MULTILINE):
+        raise PrerequisiteError("The generated uninstaller offers the recursive app-data removal.")
+    for function in ("PageReinstall", "PageLeaveReinstall"):
+        if "ExecWait" in _block(text, f"Function {function}", "FunctionEnd"):
+            raise PrerequisiteError(f"The generated installer can run a previous uninstaller ({function}).")
+    for function in ("CreateOrUpdateStartMenuShortcut", "CreateOrUpdateDesktopShortcut"):
+        if _FLAG_CHANGERS.search("\n".join(_statements(_block(text, f"Function {function}", "FunctionEnd")))):
+            raise PrerequisiteError(f"{function} could hide a failed shortcut from its install step.")
+    if _PROBE_ONLY.search(text):
+        raise PrerequisiteError("The generated installer script defines a test-probe value.")
+
+
+def verify_hook_wrapper(text: str) -> None:
+    """The generated hook wrapper never carries a test-probe value."""
+    if _PROBE_ONLY.search(text):
+        raise PrerequisiteError("The hook wrapper defines a test-probe value.")
+
+
 def find_seven_zip() -> Path:
     candidates = [os.environ.get("QRONOS_7ZIP"), shutil.which("7z"),
                   os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "7-Zip", "7z.exe")]

@@ -4,11 +4,12 @@ from typing import Protocol
 
 from core.paint_adapter import PaintCanvasRegion
 from core.screen_capture import Capture, ScreenCapture
+from core.grounding_freshness import FreshnessExpired, region_fingerprint
 from core.vision_grounding import (
     GroundedTarget,
     GroundingStale,
     GroundingUnavailable,
-    revalidate_grounded_target,
+    confirm_grounded_target,
 )
 from core.window_binding import WindowBinder, WindowBinding, WindowRect
 
@@ -56,11 +57,14 @@ def ground_paint_canvas(
 
     try:
         grounded = grounder.locate(CANVAS_TARGET, frame)
-        revalidate_grounded_target(
+        # A fresh frame must still show the canvas where Vision found it.
+        confirm_grounded_target(
             grounded,
             binding,
             binder,
-            require_foreground=True,
+            capture,
+            screen_approved=screen_approved,
+            reason="Confirm the grounded Paint canvas is still where Vision found it.",
         )
     except (GroundingUnavailable, GroundingStale) as exc:
         raise PaintCanvasGroundingError(
@@ -83,7 +87,17 @@ def ground_paint_canvas(
             "Vision canvas bounds are too small to be accepted as the Paint drawing surface."
         )
 
-    return PaintCanvasRegion.verified(binding, rect)
+    try:
+        fingerprint = region_fingerprint(frame, rect)
+    except FreshnessExpired as exc:
+        raise PaintCanvasGroundingError(f"Paint canvas pixels could not be recorded: {exc}") from exc
+    return PaintCanvasRegion.verified(
+        binding,
+        rect,
+        captured_at=grounded.point.captured_at,
+        state_epoch=grounded.point.state_epoch,
+        fingerprint=fingerprint,
+    )
 
 
 def _rect_inside(outer: WindowRect, inner: WindowRect) -> bool:

@@ -487,6 +487,12 @@ class ArtifactOwnershipRegistry:
 
 def main() -> None:
     """Show a summary of the persisted ownership registry."""
+    from core import startup_admission  # before the first store opens (core/startup_admission.py)
+
+    refused = startup_admission.enter_cli("artifact-ownership")
+    if refused is not None:
+        raise SystemExit(refused)
+
     registry = ArtifactOwnershipRegistry(
         store=JsonFileOwnershipStore()
     )

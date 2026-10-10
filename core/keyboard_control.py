@@ -100,9 +100,12 @@ class KeyboardController:
         )
 
         if delay == 0:
-            self._text(
-                value
-            )
+            try:
+                self._text(
+                    value
+                )
+            finally:
+                self._guard.note_state_change(binding)
 
         else:
             for index, char in enumerate(
@@ -113,9 +116,12 @@ class KeyboardController:
                     authorization=authorization,
                 )
 
-                self._text(
-                    char
-                )
+                try:
+                    self._text(
+                        char
+                    )
+                finally:
+                    self._guard.note_state_change(binding)
 
                 if (
                     index + 1
@@ -149,8 +155,11 @@ class KeyboardController:
         # Validate before touching SendInput, including injected test senders.
         virtual_key_code(name)
         self._guard.revalidate(binding, authorization=authorization)
-        self._key(name, True)
-        self._key(name, False)
+        try:
+            self._key(name, True)
+            self._key(name, False)
+        finally:
+            self._guard.note_state_change(binding)
         self._guard.revalidate(binding, authorization=authorization)
         return self._result(binding, "key", name)
 
@@ -261,6 +270,8 @@ class KeyboardController:
                     )
                 except Exception:
                     pass
+
+            self._guard.note_state_change(binding)
 
         self._guard.revalidate(
             binding,

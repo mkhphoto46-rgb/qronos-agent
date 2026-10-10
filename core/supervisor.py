@@ -43,9 +43,11 @@ from enum import Enum
 from pathlib import Path
 from typing import BinaryIO, Callable, Optional, Protocol, Sequence
 
+from core.startup_admission import STARTUP_REFUSED_EXIT
 from core.supervisor_ipc import (
     PROTOCOL_VERSION,
     Channel,
+    ChannelCancelled,
     ChannelError,
     ChannelServer,
     ChannelTimeout,
@@ -57,7 +59,9 @@ from core.supervisor_ipc import (
 #: What the supervisor may receive from the runtime, and send to it.
 FROM_RUNTIME = MessageSchema({
     "hello": {"pid": "int", "protocol": "int"},
-    "heartbeat": {"seq": "int"},
+    # busy: whole seconds the runtime's command loop has spent inside the
+    # command it is handling now; 0 while it waits for the next one.
+    "heartbeat": {"seq": "int", "busy": "int"},
     "goodbye": {"reason": "str"},
 })
 TO_RUNTIME = MessageSchema({
@@ -93,6 +97,9 @@ class SupervisorPolicy:
     stable_after_seconds: float = 120.0
     shutdown_grace_seconds: float = 10.0
     terminate_grace_seconds: float = 5.0
+    #: A command loop busy this long with one command is reported, never
+    #: killed for it: the command may be in the middle of changing something.
+    command_loop_warn_seconds: float = 120.0
 
     def __post_init__(self) -> None:
         if not 0 < self.heartbeat_interval_seconds < self.heartbeat_timeout_seconds:
@@ -102,7 +109,8 @@ class SupervisorPolicy:
         if self.max_restarts < 0 or self.restart_window_seconds <= 0:
             raise ValueError("Restart limits must be non-negative with a positive window.")
         for value in (self.connect_timeout_seconds, self.shutdown_grace_seconds,
-                      self.terminate_grace_seconds, self.stable_after_seconds):
+                      self.terminate_grace_seconds, self.stable_after_seconds,
+                      self.command_loop_warn_seconds):
             if value <= 0:
                 raise ValueError("Timeouts must be positive.")
 
@@ -207,8 +215,10 @@ class Supervisor:
         notify: Optional[StateListener] = None,
         clock: Callable[[], float] = time.monotonic,
         peer_pid=None,
+        warn: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._launcher = launcher
+        self._warn = warn
         self._policy = policy
         self._notify = notify
         self._clock = clock
@@ -217,6 +227,7 @@ class Supervisor:
         self._stop = threading.Event()
         self._state = SupervisorState.STOPPED
         self._lock = threading.Lock()
+        self._connecting: Optional[ChannelServer] = None
         self.starts = 0
 
     @property
@@ -224,8 +235,17 @@ class Supervisor:
         return self._state
 
     def stop(self) -> None:
-        """Ask the run loop to shut the child down and return."""
+        """
+        Ask the run loop to shut the child down and return.
+
+        Prompt even while a new runtime is still connecting: the server it is
+        being accepted on is interrupted, and the hello wait polls this.
+        """
         self._stop.set()
+        with self._lock:
+            server = self._connecting
+        if server is not None:
+            server.interrupt()
 
     def run(self) -> SupervisorState:
         """Run until stopped or degraded. Returns the final state."""
@@ -244,6 +264,13 @@ class Supervisor:
 
             if self._stop.is_set():
                 break
+
+            if child.poll() == STARTUP_REFUSED_EXIT:
+                # The runtime refused to start before opening any store (an update in progress,
+                # unresolved update recovery, an unknown version...). It said why on its own
+                # output; restarting would only repeat the refusal, so this is terminal.
+                self._set(SupervisorState.DEGRADED, "the runtime refused to start; it reported why")
+                return self._state
 
             delay = self._budget.after_failure(self._clock(), self._clock() - started_at)
 
@@ -286,27 +313,77 @@ class Supervisor:
         except Exception:
             return server, _NoChild(), None, "the runtime could not be launched"
 
+        with self._lock:
+            self._connecting = server
+        if self._stop.is_set():
+            server.interrupt()  # stop() came between launching and here
+
+        # A child that exits before it connects (for example a start-up refusal) ends the
+        # wait at once instead of after the whole connect timeout.
+        connected = threading.Event()
+        exited: list[int] = []
+
+        def watch_child() -> None:
+            while not connected.wait(0.1):
+                code = child.poll()
+                if code is not None:
+                    exited.append(code)
+                    server.interrupt()
+                    return
+
+        threading.Thread(target=watch_child, name="qronos-supervisor-child-watch", daemon=True).start()
+
+        channel = None
         try:
             channel = server.accept(
                 self._policy.connect_timeout_seconds,
                 expected_pid=child.pid,
                 peer_pid=self._peer_pid,
             )
-            hello = channel.receive(self._policy.connect_timeout_seconds)
+            hello = self._receive_hello(channel)
+
+            if hello is None:
+                channel.close()
+                return server, child, None, "supervisor stopping"
 
             if hello["kind"] != "hello" or hello["pid"] != child.pid or hello["protocol"] != PROTOCOL_VERSION:
                 channel.close()
                 return server, child, None, "the runtime introduced itself wrongly"
 
             channel.send("welcome", protocol=PROTOCOL_VERSION, supervisor_pid=os.getpid())
+        except ChannelCancelled:
+            if exited and not self._stop.is_set():
+                return server, child, None, f"the runtime exited before connecting (code {exited[0]})"
+            return server, child, None, "supervisor stopping"
         except ChannelError as error:
+            if channel is not None:
+                channel.close()
             return server, child, None, f"the runtime did not connect ({type(error).__name__})"
+        finally:
+            connected.set()
+            with self._lock:
+                self._connecting = None
 
         return server, child, channel, None
+
+    def _receive_hello(self, channel: Channel) -> Optional[dict]:
+        """The runtime's hello within the connect timeout; None if Stop came first."""
+        deadline = self._clock() + self._policy.connect_timeout_seconds
+        while True:
+            if self._stop.is_set():
+                return None
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                raise ChannelTimeout("The runtime did not say hello in time.")
+            try:
+                return channel.receive(min(0.25, remaining))
+            except ChannelTimeout:
+                continue
 
     def _watch(self, child: ChildProcess, channel: Channel) -> str:
         last_beat = self._clock()
         interval = self._policy.heartbeat_interval_seconds
+        stall_reported = False
 
         while True:
             if self._stop.is_set():
@@ -327,6 +404,12 @@ class Supervisor:
             if message is not None:
                 if message["kind"] == "heartbeat":
                     last_beat = now
+                    busy = message["busy"]
+                    if busy >= self._policy.command_loop_warn_seconds and not stall_reported:
+                        stall_reported = True
+                        self._report(busy)
+                    elif busy == 0:
+                        stall_reported = False
                 elif message["kind"] == "goodbye":
                     return "the runtime said goodbye"
                 else:
@@ -335,9 +418,21 @@ class Supervisor:
             if now - last_beat > self._policy.heartbeat_timeout_seconds:
                 return "the runtime stopped responding"
 
+    def _report(self, busy: int) -> None:
+        if self._warn is not None:
+            try:
+                self._warn(f"The runtime's command loop has been busy with one command for {busy} s.")
+            except Exception:
+                pass
+
     def _shutdown(self, child: ChildProcess, channel: Optional[Channel], reason: str) -> None:
         """Ask, wait, terminate, kill — only ever the exact child launched."""
         if child.poll() is None and channel is not None:
+            # A child whose input this supervisor relays is also asked there,
+            # where its command loop reads; the request never waits on a pipe.
+            request_stop = getattr(child, "request_stop", None)
+            if callable(request_stop):
+                request_stop()
             try:
                 channel.send("shutdown", reason=reason[:200])
             except ChannelError:
@@ -391,51 +486,49 @@ class SupervisorAlreadyRunning(RuntimeError):
 
 class SupervisorInstanceGuard:
     """
-    One supervisor per signed-in Windows session.
+    One supervisor per signed-in Windows session, by OWNING ``Local\\QronosSupervisor``.
 
     A named mutex in the ``Local\\`` namespace is per session by definition,
     so a second sign-in on the same machine gets its own supervisor while a
-    second supervisor in the same session is refused. Off Windows it is a
-    no-op; Qronos's supervisor is a Windows component.
+    second supervisor in the same session is refused. Ownership is a
+    wait-acquisition by a holder thread kept for the supervisor's life
+    (``core.instance_ownership``); creating the mutex, or finding that it
+    exists, proves nothing. After acquiring, the update fence is checked: while
+    an update or its installer is alive the supervisor releases the mutex and
+    refuses (``UpdateInProgress``), after retrying for a bounded time. The
+    updater's quiescence takes this same name, so a live supervisor makes it
+    refuse. Off Windows it is a no-op; the supervisor is a Windows component.
     """
 
     NAME = "Local\\QronosSupervisor"
 
-    def __init__(self, handle: int, close: Callable[[int], None]) -> None:
-        self._handle = handle
-        self._close = close
+    def __init__(self, owned) -> None:
+        self._owned = owned
 
     @classmethod
-    def acquire(cls, create_mutex=None, last_error=None, close_handle=None) -> "SupervisorInstanceGuard":
-        if sys.platform != "win32" and create_mutex is None:
-            return cls(0, lambda handle: None)
+    def acquire(cls, *, api=None, fence_exists=None, retry_seconds: Optional[float] = None,
+                name: Optional[str] = None) -> "SupervisorInstanceGuard":
+        if sys.platform != "win32" and api is None:
+            return cls(None)
 
-        if create_mutex is None:
-            from ctypes import wintypes
+        from core.instance_ownership import ENTRY_RETRY_SECONDS, AlreadyOwned, acquire_unless_updating
 
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
-            kernel32.CreateMutexW.restype = wintypes.HANDLE
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            create_mutex = lambda name: kernel32.CreateMutexW(None, False, name)  # noqa: E731
-            last_error = ctypes.get_last_error
-            close_handle = kernel32.CloseHandle
+        options = {"retry_seconds": ENTRY_RETRY_SECONDS if retry_seconds is None else retry_seconds, "api": api}
+        if fence_exists is not None:
+            options["fence_exists"] = fence_exists
+        try:
+            return cls(acquire_unless_updating(name or cls.NAME, **options))
+        except AlreadyOwned as error:
+            raise SupervisorAlreadyRunning("A Qronos supervisor is already running in this session.") from error
 
-        handle = create_mutex(cls.NAME)
+    @property
+    def owned(self) -> bool:
+        return self._owned is not None and self._owned.owned
 
-        if not handle:
-            raise OSError("Windows could not create the supervisor mutex.")
-
-        if last_error() == 183:  # ERROR_ALREADY_EXISTS
-            close_handle(handle)
-            raise SupervisorAlreadyRunning("A Qronos supervisor is already running in this session.")
-
-        return cls(int(handle), close_handle)
-
-    def release(self) -> None:
-        if self._handle:
-            self._close(self._handle)
-            self._handle = 0
+    def release(self) -> bool:
+        """Release the singleton on its holder thread, once; True only if Windows confirmed it."""
+        owned, self._owned = self._owned, None
+        return owned.release() if owned is not None else True
 
 
 # ------------------------------------------------------- the runtime's half
@@ -486,8 +579,10 @@ class SupervisedRuntimeClient:
         on_shutdown: Callable[[str], None],
         heartbeat_interval_seconds: float = 5.0,
         peer_pid=None,
+        busy_seconds: Callable[[], float] = lambda: 0,
     ) -> None:
         self._bootstrap = bootstrap
+        self._busy_seconds = busy_seconds
         self._on_shutdown = on_shutdown
         self._interval = heartbeat_interval_seconds
         self._peer_pid = peer_pid
@@ -534,7 +629,11 @@ class SupervisedRuntimeClient:
         while not self._stopping.wait(self._interval):
             seq += 1
             try:
-                self._channel.send("heartbeat", seq=seq)  # type: ignore[union-attr]
+                busy = max(0, min(int(self._busy_seconds()), 10**9))
+            except Exception:
+                busy = 0
+            try:
+                self._channel.send("heartbeat", seq=seq, busy=busy)  # type: ignore[union-attr]
             except ChannelError:
                 return
 
@@ -563,24 +662,24 @@ class SupervisedRuntimeClient:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """
-    ``qronos-runtime supervisor --runtime-arguments <words...>``: supervise the
-    bundled runtime started with those fixed arguments, until stopped.
+    ``qronos-runtime supervisor --desktop``: supervise the desktop's runtime
+    bridge, relaying the desktop's standard input and output to it, until
+    the desktop stops it (see ``core/supervisor_relay.py``).
 
-    The runtime arguments are fixed by the production wiring (see
-    docs/qronos_supervisor_and_broker.md); nothing else is accepted.
+    That is the only mode: the bridge's command and arguments are fixed by
+    this module, and nothing else is accepted.
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
 
-    if not arguments or arguments[0] != "--runtime-arguments" or len(arguments) < 2:
-        print(json.dumps({"ok": False, "error": "Usage: supervisor --runtime-arguments <words>"}))
+    if arguments != ["--desktop"]:
+        print(json.dumps({"ok": False, "error": "Usage: supervisor --desktop"}))
         return 2
 
-    guard = SupervisorInstanceGuard.acquire()
-    try:
-        supervisor = Supervisor(BundledRuntimeLauncher(Path(sys.executable), arguments[1:]))
-        state = supervisor.run()
-    finally:
-        guard.release()
+    from core.supervisor_relay import exit_process, run_desktop
 
-    print(json.dumps({"ok": state is SupervisorState.STOPPED, "state": state.value}))
-    return 0 if state is SupervisorState.STOPPED else 1
+    exit_process(run_desktop())
+    return 1  # not reached
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

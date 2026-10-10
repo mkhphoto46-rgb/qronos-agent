@@ -10,12 +10,15 @@ This is the process that would run elevated. It is launched by the user
 runtime through the normal UAC prompt (``core/uac_launch.py``), only when an
 approved action needs it, and it exits after that one action. It:
 
-    1. connects back to the runtime's fresh named pipe and authenticates with
-       the per-session key (mutual HMAC handshake, ``core/supervisor_ipc.py``),
-       then checks that the pipe is served by the exact runtime process that
-       launched it, as the same Windows user;
-    2. receives one request: a typed action ``{kind, params}`` and an approval
-       envelope the runtime built from a live ``security.gate.ActionGrant``;
+    1. checks that the process named on its command line is the Qronos
+       runtime — the same Windows user AND the same installed executable as
+       this broker — then connects to that process's named pipe, checks the
+       pipe is served by exactly that process, receives the per-session key
+       on the pipe (it is never on a command line) and runs the mutual HMAC
+       handshake (``core/supervisor_ipc.py``);
+    2. receives one request: a typed action ``{kind, params}``, an approval
+       envelope the runtime built from a live ``security.gate.ActionGrant``,
+       and the person's typed approval secret;
     3. verifies, in this order, refusing on the first failure:
          - the envelope's shape and its HMAC under the session key;
          - freshness: issued no later than now (with a small clock skew),
@@ -27,6 +30,12 @@ approved action needs it, and it exits after that one action. It:
            validation, and nothing in them names a script, code or shell;
          - the category and target the approval names are the ones the
            registry derives from the parameters;
+         - the person's typed approval secret, checked here against the
+           same per-profile store and shared lockout as everywhere else.
+           This is what makes the approval Qronos's: the pipe, the key and
+           the envelope are all chosen by whoever launched the broker, so a
+           local process that is not Qronos could forge every one of them;
+           it cannot type the person's secret;
          - the permission gate, re-asked here: a category the policy forbids
            (script execution, registry, boot, security settings, …) is
            refused even with an approval;
@@ -35,11 +44,30 @@ approved action needs it, and it exits after that one action. It:
            is refused;
     4. performs the action, reports the result, and exits.
 
+Trust boundary, stated precisely. The authority is the approval-secret store
+in the signed-in user's own profile (``<Local AppData>\\Qronos``, found through
+the known-folder API, never the environment). It is an ordinary per-user file
+with no administrator-protected binding, so the supported boundary is another
+Windows user, or a same-user program that does not tamper with that profile:
+a caller-chosen key, pipe, process id, envelope or environment-selected store
+gets nothing without the person's typed secret. A same-user program that
+replaces the store file with one holding its own secret (tested), or relocates
+the Local AppData known folder (source-level), satisfies the check with that
+secret. What then remains is Windows' UAC consent prompt and the fixed
+one-action registry below. Nothing here defends against a same-user account
+already compromised in other ways (malware that reads what the person types or
+injects into the Qronos runtime).
+
 There is no shell, interpreter or command-line action, and the registry
-refuses to hold one. **The production registry is empty**: no current Qronos
-feature needs elevation, so every request is refused until a reviewed action
-is added to ``PRODUCTION_ACTIONS``. The mechanics above are real and tested end
-to end with a fixture action in a disposable, non-elevated child process.
+refuses to hold one. **The production registry holds exactly one action**,
+``printer.spooler_restart``: stop and start the one Windows service named
+``Spooler`` (``core/spooler_service.py``), with no parameters at all — the
+service is a constant, never chosen by the caller. It is the recovery the
+print workflow needs when the spooler stops responding, and Windows allows
+only administrators to do it. Every other kind is refused (``unknown_action``).
+The mechanics above are real and tested end to end with a fixture action in a
+disposable, non-elevated child process; the real spooler restart is never run
+by tests and belongs to deferred live acceptance.
 """
 
 from __future__ import annotations
@@ -64,7 +92,7 @@ from core.supervisor_ipc import (
     ChannelError,
     MessageSchema,
     canonical_json,
-    connect,
+    connect_for_key,
     hmac_sha256,
 )
 
@@ -72,7 +100,8 @@ MAX_APPROVAL_SECONDS = 180.0
 CLOCK_SKEW_SECONDS = 5.0
 REQUEST_TIMEOUT_SECONDS = 30.0
 
-FROM_RUNTIME = MessageSchema({"request": {"action": "object", "approval": "object"}})
+FROM_RUNTIME = MessageSchema({"request": {"action": "object", "approval": "object", "secret": "str"}})
+MAX_SECRET_CHARS = 1024
 TO_RUNTIME = MessageSchema({
     "hello": {"pid": "int", "protocol": "int"},
     "result": {"ok": "bool", "outcome": "str", "detail": "str"},
@@ -138,6 +167,9 @@ class ActionSpec:
     perform: Callable[[Mapping[str, Any]], str]
     summary: str
     validate: Callable[[Mapping[str, Any]], None] = field(default=lambda params: None)
+    #: Exception types whose messages are fixed, reviewed text safe to show;
+    #: any other failure is reported by its type name only.
+    failures: tuple[type, ...] = ()
 
 
 class ActionRegistry:
@@ -165,8 +197,28 @@ class ActionRegistry:
         return tuple(sorted(self._table))
 
 
-#: What this build can perform elevated. Empty on purpose; see the module doc.
-PRODUCTION_ACTIONS = ActionRegistry(())
+def _restart_spooler(params: Mapping[str, Any]) -> str:
+    from core.spooler_service import SpoolerRecovery
+
+    return SpoolerRecovery().restart()
+
+
+def _spooler_spec() -> ActionSpec:
+    from core.spooler_service import SERVICE_DISPLAY, SpoolerRecoveryFailed
+
+    return ActionSpec(
+        kind="printer.spooler_restart",
+        category=ActionCategory.DEVICE_CONTROL,
+        fields={},
+        target=lambda params: SERVICE_DISPLAY,
+        perform=_restart_spooler,
+        summary="Restart the Windows Print Spooler service: stop it, then start it. Nothing else.",
+        failures=(SpoolerRecoveryFailed,),
+    )
+
+
+#: What this build can perform elevated; see the module doc.
+PRODUCTION_ACTIONS = ActionRegistry((_spooler_spec(),))
 
 
 def action_digest(kind: str, params: Mapping[str, Any]) -> str:
@@ -229,10 +281,57 @@ class ConsumedApprovals:
                 pass
 
 
-def default_consumed_directory() -> Path:
-    from core.config import CONFIG
+def _known_local_appdata() -> Path:
+    """
+    This user's Local AppData folder, from Windows' known-folder API for this
+    process's own token (``SHGetKnownFolderPath``) — never from an
+    environment variable, which whoever launched the broker may have chosen.
+    """
+    if sys.platform != "win32":
+        raise OSError("The installed Qronos profile is a Windows known folder.")
+    import ctypes
+    import uuid
+    from ctypes import wintypes
 
-    return CONFIG.paths.data / "ActionBroker" / "consumed"
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                    ("Data4", ctypes.c_ubyte * 8)]
+
+    raw = uuid.UUID("F1B32785-6FBA-4FCF-9D55-7B8E7F157091").bytes_le  # FOLDERID_LocalAppData
+    folder = GUID.from_buffer_copy(raw)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    ole32 = ctypes.WinDLL("ole32")
+    shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE,
+                                             ctypes.POINTER(ctypes.c_wchar_p)]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    path = ctypes.c_wchar_p()
+    if shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(path)) != 0 or not path.value:
+        raise OSError("Windows did not report this user's Local AppData folder.")
+    try:
+        return Path(path.value)
+    finally:
+        ole32.CoTaskMemFree(path)
+
+
+def installed_profile() -> Path:
+    """
+    The installed Qronos profile the broker's authority lives in.
+
+    The desktop runs the runtime with its data in this same folder
+    (``<Local AppData>\\Qronos``). The broker takes the approval-secret
+    store, its lockout and audit, the single-use journal and its own audit
+    from here, never from environment values such as
+    QRONOS_APPROVAL_SECRET_PATH or QRONOS_DATA_ROOT: otherwise a launcher
+    could point the broker at a store whose secret it chose itself. If the
+    runtime was configured to keep its secret elsewhere, the broker refuses —
+    it fails closed.
+    """
+    return _known_local_appdata() / "Qronos"
+
+
+def default_consumed_directory() -> Path:
+    return installed_profile() / "ActionBroker" / "consumed"
 
 
 # ------------------------------------------------------------------ verifying
@@ -246,6 +345,7 @@ class VerifiedAction:
 
 
 GateCheck = Callable[[ActionRequest], "gate.Verdict"]
+SecretCheck = Callable[[str], bool]
 
 
 def verify_request(
@@ -256,6 +356,8 @@ def verify_request(
     consumed: ConsumedApprovals,
     clock: Callable[[], float] = time.time,
     gate_check: GateCheck = gate.evaluate,
+    secret: Optional[str] = None,
+    verify_secret: Optional[SecretCheck] = None,
 ) -> VerifiedAction:
     """Every check from the module doc, in order. Raises BrokerRefusal."""
     if not isinstance(approval, dict) or set(approval) != set(_APPROVAL_FIELDS):
@@ -311,6 +413,17 @@ def verify_request(
     if approval["category"] != spec.category.value or approval["target"] != target:
         raise BrokerRefusal("not_approved", "The approval names a different category or target.")
 
+    # The typed secret, always, whatever the permission settings say: the
+    # only part of a request that whoever launched this broker cannot forge.
+    secret_ok = False
+    if verify_secret is not None and isinstance(secret, str) and 0 < len(secret) <= MAX_SECRET_CHARS:
+        try:
+            secret_ok = bool(verify_secret(secret))
+        except Exception:
+            secret_ok = False
+    if not secret_ok:
+        raise BrokerRefusal("secret_rejected", "The typed approval secret was not accepted.")
+
     try:
         request = ActionRequest(
             category=spec.category,
@@ -333,10 +446,12 @@ def verify_request(
 
 def handle_request(message: dict, key: bytes, registry: ActionRegistry, consumed: ConsumedApprovals,
                    clock: Callable[[], float] = time.time, gate_check: GateCheck = gate.evaluate,
-                   audit: Optional[Callable[[dict], None]] = None) -> dict:
+                   audit: Optional[Callable[[dict], None]] = None,
+                   verify_secret: Optional[SecretCheck] = None) -> dict:
     """Verify and perform one request; the result fields to send back."""
     try:
-        verified = verify_request(message["action"], message["approval"], key, registry, consumed, clock, gate_check)
+        verified = verify_request(message["action"], message["approval"], key, registry, consumed, clock, gate_check,
+                                  secret=message.get("secret"), verify_secret=verify_secret)
     except BrokerRefusal as refusal:
         _audit(audit, message, False, refusal.outcome)
         return {"ok": False, "outcome": refusal.outcome, "detail": refusal.detail}
@@ -345,6 +460,8 @@ def handle_request(message: dict, key: bytes, registry: ActionRegistry, consumed
         detail = verified.spec.perform(verified.params)
     except Exception as error:
         _audit(audit, message, False, "failed")
+        if verified.spec.failures and isinstance(error, verified.spec.failures):
+            return {"ok": False, "outcome": "failed", "detail": str(error)[:500]}
         return {"ok": False, "outcome": "failed", "detail": f"The action failed: {type(error).__name__}."}
 
     _audit(audit, message, True, "performed")
@@ -390,57 +507,111 @@ def same_user(pid: int) -> bool:
         return False
 
 
+def same_executable(pid: int) -> bool:
+    """
+    Whether ``pid`` runs this broker's own installed executable.
+
+    Only the installed (frozen) Qronos is ever a legitimate launcher: from
+    source this is always False. It is one check among several — a process
+    running the Qronos executable still has to present the typed secret.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        import psutil
+
+        theirs = os.path.normcase(os.path.realpath(psutil.Process(pid).exe()))
+        mine = os.path.normcase(os.path.realpath(sys.executable))
+        return theirs == mine
+    except Exception:
+        return False
+
+
+def store_secret_check() -> SecretCheck:
+    """The installed profile's approval-secret store, with its persisted lockout and audit."""
+    from core.library_executor import WorkflowSecretCheck
+
+    return WorkflowSecretCheck.in_profile(installed_profile()).verify
+
+
 def serve_once(
     address: str,
-    key: bytes,
     runtime_pid: int,
     registry: ActionRegistry = PRODUCTION_ACTIONS,
     consumed: Optional[ConsumedApprovals] = None,
     audit: Optional[Callable[[dict], None]] = None,
     peer_pid=None,
     owner_check: Callable[[int], bool] = same_user,
+    identity_check: Callable[[int], bool] = same_executable,
+    verify_secret: Optional[SecretCheck] = None,
+    admit: Optional[Callable[[], object]] = None,
 ) -> dict:
-    """Connect back to the runtime, handle exactly one request, return its result."""
+    """Connect back to the runtime, handle exactly one request, return its result.
+
+    ``admit`` (the product passes core.startup_admission's writer admission) runs
+    right AFTER the runtime is authenticated — same user, the installed image,
+    the pipe served by exactly that process, and the session key received from
+    it, which only a live, already admitted bridge's broker session releases —
+    and BEFORE any store opens: no secret store, journal or audit line is
+    touched first. If it refuses, the pipe is closed before the hello and the
+    runtime reports the broker unavailable, with nothing sent.
+    """
     if not owner_check(runtime_pid):
         raise ChannelError("The launching runtime is not the same user.")
+    if not identity_check(runtime_pid):
+        raise ChannelError("The launching process is not the installed Qronos runtime.")
 
-    channel: Channel = connect(address, key, receive=FROM_RUNTIME, send=TO_RUNTIME,
-                               expected_server_pid=runtime_pid, peer_pid=peer_pid)
+    channel, key = connect_for_key(address, receive=FROM_RUNTIME, send=TO_RUNTIME,
+                                   expected_server_pid=runtime_pid, peer_pid=peer_pid)
     try:
+        if admit is not None:
+            admit()  # authenticated parent first; no store has been opened yet
         channel.send("hello", pid=os.getpid(), protocol=PROTOCOL_VERSION)
         message = channel.receive(REQUEST_TIMEOUT_SECONDS)
         result = handle_request(message, key, registry, consumed or ConsumedApprovals(default_consumed_directory()),
-                                audit=audit)
+                                audit=audit,
+                                verify_secret=verify_secret if verify_secret is not None else store_secret_check())
         channel.send("result", **result)
         return result
     finally:
         channel.close()
 
 
-def parse_arguments(arguments: Sequence[str]) -> tuple[str, bytes, int]:
-    """``--pipe ADDRESS --key HEX64 --runtime-pid PID``, exactly."""
-    if len(arguments) != 6 or arguments[0::2] != ["--pipe", "--key", "--runtime-pid"]:
-        raise ValueError("Usage: action-broker --pipe ADDRESS --key HEX --runtime-pid PID")
-    address, key_hex, pid_text = arguments[1], arguments[3], arguments[5]
-    if not _HEX64.fullmatch(key_hex) or not pid_text.isdigit():
+def parse_arguments(arguments: Sequence[str]) -> tuple[str, int]:
+    """``--pipe ADDRESS --runtime-pid PID``, exactly. No key: it comes over the pipe."""
+    if len(arguments) != 4 or arguments[0::2] != ["--pipe", "--runtime-pid"]:
+        raise ValueError("Usage: action-broker --pipe ADDRESS --runtime-pid PID")
+    address, pid_text = arguments[1], arguments[3]
+    if not pid_text.isdigit() or not 0 < int(pid_text) < 2**32:
         raise ValueError("Invalid broker arguments.")
-    return address, bytes.fromhex(key_hex), int(pid_text)
+    return address, int(pid_text)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
-        address, key, runtime_pid = parse_arguments(arguments)
+        address, runtime_pid = parse_arguments(arguments)
     except ValueError as error:
         print(json.dumps({"ok": False, "error": str(error)}))
         return 2
 
-    from core.config import CONFIG
+    # Its stores (approval secret, journal, audit) are the INSTALLED profile's in every mode,
+    # so its shared writer admission there is always taken (installed=True states that fact;
+    # it waives nothing). It runs only after the parent is authenticated (serve_once).
+    from core import startup_admission
+
+    profile = installed_profile()
+
+    def admit() -> object:
+        return startup_admission.enter("action-broker", barrier=False, installed=True, data_root=profile)
 
     try:
-        result = serve_once(address, key, runtime_pid,
-                            audit=jsonl_audit(CONFIG.paths.data / "ActionBroker" / "audit.jsonl"))
-    except ChannelError as error:
+        result = serve_once(address, runtime_pid, audit=jsonl_audit(profile / "ActionBroker" / "audit.jsonl"),
+                            admit=admit)
+    except startup_admission.StartupRefused as refused:
+        print(json.dumps(startup_admission.refusal(refused)))
+        return startup_admission.STARTUP_REFUSED_EXIT
+    except (ChannelError, OSError) as error:
         print(json.dumps({"ok": False, "error": type(error).__name__}))
         return 1
 

@@ -213,7 +213,7 @@ the Qronos source. None of this has been run on a real machine.
 | Program files (per-user install, Tauri's default) | `%LOCALAPPDATA%\qronos-desktop` | Only the files the installer itself placed there, then the empty folders |
 | Settings, history, memory, permissions, approval secret, runtime assets | `%LOCALAPPDATA%\Qronos` (from `core/config.py` and the desktop's `local_data_dir()`) | No |
 | Library and other user documents | the folders the user chose, by default under `Documents` | No |
-| WebView2 caches | `%LOCALAPPDATA%\com.qronos.agent` | Only when the user ticks "Delete the application data". The UI keeps no state there (no `localStorage`, `sessionStorage` or IndexedDB). |
+| WebView2 caches | `%LOCALAPPDATA%\com.qronos.agent` | No. The pinned template does not offer Tauri's "Delete the application data" choice. The UI keeps no state there (no `localStorage`, `sessionStorage` or IndexedDB). |
 | WebView2 Runtime | Windows (shared by many apps) | No |
 
 - **Uninstalling keeps Qronos user data.** Removing it is a manual step, which
@@ -225,7 +225,9 @@ the Qronos source. None of this has been run on a real machine.
   - a `productName` that is, or that Windows resolves to, "Qronos" (for
     example `Qronos.` or `QRONOS~1`), which would make the per-user install
     folder `%LOCALAPPDATA%\Qronos`;
-  - such an identifier, which "Delete the application data" would remove.
+  - such an identifier, which stock Tauri's "Delete the application data"
+    would remove. The pinned template does not offer that choice; the guard
+    stays.
 
 **What the installer enforces**
 
@@ -312,9 +314,10 @@ Documents. It never runs the Qronos installer or reads real user folders.
 
 **Limits**
 - An installation from before this manifest existed, such as the 7584 review
-  build, has no manifest. Its folder is refused as "not a Qronos installation"
-  unless Tauri's "uninstall first" choice has emptied it. Uninstall such a
-  build first.
+  build has no manifest. Its folder is refused as "not a Qronos installation".
+  The installer refuses the "uninstall first" choice and never runs an old
+  uninstaller, so remove such a build first with its own uninstaller (Windows
+  Settings > Apps).
 - The desktop's startup check still confirms only the runtime executable, its
   folder and protocol version, not every file in the runtime manifest.
   Stopping at startup when there are stray runtime files belongs to the
@@ -322,6 +325,153 @@ Documents. It never runs the Qronos installer or reads real user folders.
 - `CheckIfAppIsRunning` from Tauri's template is used before the removal. It is
   absent in the probe harness, so the "Qronos is running" path is covered only
   by a file held open during a probe run, not by a real running app.
+
+## The update fence, hand-over and receipt
+
+The installer's half of the update hand-over in `local-update-packages.md` is
+made of three parts:
+- `installer-hooks/qronos-update-fence.nsh`;
+- the pinned installer template `desktop/src-tauri/installer-template/`
+  (`PROVENANCE.md` there lists every change to Tauri 2.9.4's own template);
+- the hook order in `webview2-offline.nsh`.
+
+The contracts are `work/opus-production-installer-contract-round10.txt` and
+`work/opus-production-installer-contract-round11.txt`, with the round-12
+corrections. `build_desktop` refuses Tauri's stock template, verifies the pinned
+source, and checks the order in the real generated `installer.nsi`.
+
+**Order of an installation.** Before NSIS runs the Install section, only
+`.onInit`, the template's no-op checks and the stock WebView2 section (which
+only reads the registry in "skip" mode) run. In the GUI, the pages also run;
+the reinstall page never starts a previous uninstaller (see below). The
+Install section then runs, in this order:
+1. The update fence and the EXCLUSIVE store admission (update hand-over or
+   manual install).
+2. The install-root check (protected folders and ancestors, links, foreign
+   content).
+3. The previous installation's whole file list, checked against the disk.
+4. Stopping the running app.
+5. Removing exactly the listed files and folders.
+6. The WebView2 child.
+7. Only then `SetOutPath`, the copy, the uninstaller, the registration and the
+   shortcuts.
+
+On a refusal in steps 1-3, no folder or file under the install folder, the start
+menu or the desktop is created, changed or removed, nothing is stopped and the
+installer writes no registry value. Two things can still exist:
+- NSIS's own temporary plug-in folder in `%TEMP%`;
+- the admission lock file `<data root>\.qronos-store-admission.lock`, opened
+  (`OPEN_ALWAYS`) only when the data folder exists.
+
+**What is held.** Two things:
+- the update fence: the named mutex `Local\Qronos.UpdateInProgress.v1`;
+- the exclusive store admission: a byte-range lock on the admission file, the
+  same lock `core/store_admission.py` uses.
+
+Both handles are non-inheritable and never closed by the script. They last
+exactly as long as the installer or uninstaller process, whether it ends
+normally, aborts, crashes or is killed. Nothing it starts can keep them.
+
+**Manual install or uninstall.** The fence and the admission must both be free
+at once. Otherwise the installer stops with "Another Qronos update or
+installation is running" or "Qronos is still running with its data open". An
+absent data folder skips only the admission.
+
+**Update mode** (`<installer> /S /QRONOSUPDATE`, started only by the updater):
+- `/QRONOSUPDATE` without `/S` is refused. The uninstaller refuses
+  `/QRONOSUPDATE`. Update mode never falls back to a manual install.
+- The private record on standard input is bounded: 1023 bytes, 30 s.
+- The guard must be the installer's real parent:
+  - If it can be opened, its creation time must match, and it must exit within
+    60 s before anything is installed.
+  - If it cannot be opened, only proof that it no longer exists (error 87)
+    counts as "gone" (a guard that crashed). Then the fence identity is the
+    proof. Access denied or any other failure refuses before the
+    acknowledgement (independent review Media15, F15-1).
+- The handed fence handle must be another handle to the fence object.
+- The receipts folder must be this installer's own
+  `<data root>\Updates\receipts`. The data root is derived by the installer.
+- The version must be the installer's own.
+
+**Explicit success and the receipt.** In a silent install, NSIS 3.11 lets a
+failed `File`, `CreateDirectory`, `WriteUninstaller`, registry write or
+`CreateShortcut` continue with only the error flag set, and `${GetSize}` clears
+that flag. So:
+- every one of those statements, including each iteration of the resource,
+  program and deep-link loops and each registry write, is followed
+  IMMEDIATELY by `QRONOS_STEP`, which stops the installation;
+- `ClearErrors` appears only right after a checked step.
+
+The build refuses a generated script that breaks this. In update mode the
+receipt (`<pid>-<ticks>.receipt`, `CREATE_NEW`) is written only after
+`QRONOS_INSTALL_COMPLETE`, holding the nonce, the approved package and manifest
+SHA-256, the installer's own version and `result=installed`. A stopped
+installation leaves a partial install and no receipt. The start-up barrier
+then reports the update honestly (unconfirmed or not applied).
+
+**Deletion.** The install-root check and the owned file list come before
+EVERY deletion, every app stop and every registration or shortcut change.
+- The installer deletes nothing else. The stock deletion of an "old main
+  program" named in the registry is removed.
+- The uninstaller removes only the listed files and folders, plus
+  `uninstall.exe` by its exact name. The stock deletion of the program,
+  resources, binaries and resource folders is removed.
+- The "Delete the application data" checkbox (a recursive folder removal) is
+  not offered.
+- The reinstall page never runs a previous uninstaller, a WiX/MSI uninstaller
+  or any child. "Uninstall first" and an MSI registration are refused visibly;
+  passive mode continues in place.
+
+**Writes outside the Install section, for the record.** Modern UI saves the
+chosen language in the registry at the end of a successful installation
+(skipped after an abort). In the GUI, the finish page can create the desktop
+shortcut and start the app. Both happen in the same installer process, after
+the section, while the fence is still held.
+
+**Tests** (inert, silent, current-user probes in temporary folders; never a
+real installer, registry, shortcut or user folder):
+- `tests/test_update_fence_nsis.py` (the fence file in small probes);
+- `tests/test_installer_template.py`, which compiles the WHOLE pinned template
+  with Tauri's own compiler. Its rendering is proven equal to Tauri's real
+  output. The registry and shell folders are swapped for files in the test
+  folder, and every swap is counted. It covers:
+  - refusals before any change;
+  - the reinstall page;
+  - a real failure at the FIRST command of every step group while later
+    commands would succeed;
+  - a real `UpdateService` hand-over;
+  - a guard that cannot be opened;
+  - protected roots, links, junctions and missing or malformed file lists with
+    foreign files (nothing changed);
+  - uninstalls that remove only listed files.
+
+**Limits**
+- NSIS releases the fence's ownership when its install thread ends. The fence
+  object and the admission lock last until the process exits. The app started
+  from the manual finish page can meet a live fence for a moment; Runtime's
+  start-up must retry briefly (contract round 10, section 5, R2).
+- None of this has run as a real Tauri-built installer on a real machine; see
+  below. The default updater launch stays refused.
+
+**Open installer gates** (independent review Media18; nothing here is
+activated):
+- **O-A, availability: a defect to repair before activation.** Step 5 removes
+  the previous installation's listed files before the WebView2 child and
+  before every later checked step. If the WebView2 child or any later step
+  fails, neither the old nor the new program is left usable. The installer
+  stops with an honest message, and user data is untouched. Qronos does not
+  restore the previous program; reinstalling is the only recovery today. The
+  update launch and any release stay gated until a reviewed repair keeps a
+  usable program through such a failure.
+- **O-B, defence in depth.** `verify_generated_order` does not inspect the
+  sections that run before the Install section. That they do nothing rests on
+  the configuration checks: `check_tauri_config` (WebView2 "skip", no minimum
+  WebView2 version) and the empty-define check.
+- **O-C, shortcuts.** The updater starts the installer with
+  `/S /QRONOSUPDATE` but not `/UPDATE`, so Tauri's update mode stays off. A
+  silent Qronos update therefore creates or refreshes the Start-menu and
+  desktop shortcuts, including one the person deleted. Whether to pass
+  `/UPDATE` (or `/NS`) is an open product decision.
 
 ## Updates and rollback
 
@@ -361,11 +511,18 @@ acceptance testing is allowed:
 4. An ARM64 machine without WebView2. The refusal message should appear.
 5. A Windows SmartScreen warning is expected while the Qronos installer is
    unsigned.
-6. Upgrading over an older Qronos, with both "uninstall first" choices.
+6. Upgrading over an older Qronos in place. Choosing "uninstall first" on the
+   reinstall page should be refused visibly, with nothing changed.
    `%LOCALAPPDATA%\Qronos` and the Library should be unchanged afterwards.
-7. Uninstalling with and without "Delete the application data".
+7. Uninstalling. No "Delete the application data" choice should be shown.
    `%LOCALAPPDATA%\Qronos` and the Library should remain; WebView2 should
    remain installed.
+8. The update fence inside a real Tauri-built installer:
+   - a manual install, a reinstall and an uninstall, each while Qronos runs
+     and while it is closed;
+   - an update hand-over (`/S /QRONOSUPDATE`) and its receipt.
+   The default updater launch stays refused until this and the Runtime/Control
+   wiring are accepted.
 
 ## Owner decisions still open
 
