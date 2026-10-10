@@ -218,9 +218,14 @@ def build_bridge_media_host(
     """The bridge's one media host, bound to the bridge's own governor, ledger, approvals and audit."""
     from qronos_media.service import default_data_dir, tools_from_environment
 
+    from qronos_media.semantic import MediaEmbedder
+
     data_dir = default_data_dir()
+    # ONE embedder for the host: its residency proof (owned /api/ps, captured process exit) frees the bge-m3 slot.
+    shared_embedder = MediaEmbedder(embedding_owner)
     authority = issue_hosted_authority(governor=governor, ledger=ledger, disk_root=data_dir,
-                                       foreground_busy=foreground_busy, paused=paused, activity=activity)
+                                       foreground_busy=foreground_busy, paused=paused, activity=activity,
+                                       residency=shared_embedder.residency)
 
     def permissions() -> Any:
         from qronos_media.permissions import GatePermissions
@@ -229,9 +234,7 @@ def build_bridge_media_host(
 
     def embedder() -> Any:
         # The runtime's EXISTING bge-m3 memory sidecar (core/memory_runtime.py); media never starts a server.
-        from qronos_media.semantic import MediaEmbedder
-
-        return MediaEmbedder(embedding_owner)
+        return shared_embedder
 
     return MediaHost(authority, data_dir=default_data_dir, tools=tools_from_environment, permissions=permissions,
                      embedder=embedder)

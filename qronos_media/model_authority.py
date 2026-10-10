@@ -89,6 +89,10 @@ class ModelLease:
         self._live: list[ChildRecord] = []
         self.children: list[ChildRecord] = []
         self.closed = False
+        # After release: "termination_unproven" (file-served), "resident" or "request_unresolved" (sidecar).
+        self.state = "held"
+        # A sidecar request failed or timed out: the server may still be working on it.
+        self.unresolved = False
 
     # ---- SpawnObserver (called by run_bounded)
 
@@ -144,6 +148,11 @@ class ModelLease:
         with self._lock:
             self.closed = True
 
+    def mark_unresolved(self) -> None:
+        """A request to the memory sidecar failed or timed out; its server-side work is not proven stopped."""
+        with self._lock:
+            self.unresolved = True
+
     def outstanding(self, *, teardown: bool) -> bool:
         """True while a spawn is in its handoff or any started child's exit is not proven."""
         with self._lock:
@@ -198,7 +207,16 @@ def _teardown(record: ChildRecord) -> None:
 
 
 class HostedModelAuthority:
-    """CPU/disk stages through the bridge governor (LIGHT) plus declared model stages (HEAVY, managed)."""
+    """CPU/disk stages through the bridge governor (LIGHT) plus declared model stages (managed reservations).
+
+    One slot per declared model: the same model is never loaded twice by media, while different declared models
+    are left to the governor and ledger. A file-served model (whisper.cpp) is freed when its contained children
+    are proven gone. A model served by the runtime's memory sidecar (bge-m3) stays loaded there after a request
+    (keep_alive), so finishing a request does not free its memory: the slot becomes ``resident`` (or
+    ``request_unresolved`` after a failed or timed-out request, whose server work may still be running) and keeps
+    its ledger and governor reservations until ``residency`` proves the model unloaded or the captured sidecar
+    process gone. A later media request reuses that one reservation (no second accounting); media never unloads it.
+    """
 
     def __init__(
         self,
@@ -211,13 +229,12 @@ class HostedModelAuthority:
         paused: Callable[[], bool],
         activity: ActivityReader | None = None,
         reserve_bytes: int = DEFAULT_DISK_RESERVE_BYTES,
+        residency: Callable[[], str] | None = None,
     ) -> None:
         if token is not _ISSUED:
             raise TypeError("a HostedModelAuthority is issued by the Qronos runtime only")
-        from core.resource_governor import Weight
         from core.resource_ownership import ResourceBudget, ResourceOwner, WorkloadPriority
 
-        self._weight = Weight.HEAVY
         self._budget, self._owner, self._priority = ResourceBudget, ResourceOwner.QRONOS, WorkloadPriority.BACKGROUND
         self.governor = governor
         self.ledger = ledger
@@ -226,12 +243,20 @@ class HostedModelAuthority:
         self.reserve_bytes = reserve_bytes
         self._foreground_busy = foreground_busy
         self._paused = paused
+        # "loaded" | "unloaded" | "exited" | "unknown" for the memory sidecar's model (never "unloaded" by guess).
+        self._residency = residency or (lambda: "unknown")
         self._light = GovernorAuthority(governor, disk_root, activity=self.activity, reserve_bytes=reserve_bytes)
         self._lock = threading.RLock()
-        self._slot: ModelLease | None = None
+        self._slots: dict[str, ModelLease] = {}
         self._preempted: str | None = None
         self._closed = False
         self.events: deque[dict[str, object]] = deque(maxlen=MAX_EVENTS)
+
+    @property
+    def _slot(self) -> ModelLease | None:
+        """The held slot when exactly one model is held (diagnostics and tests)."""
+        with self._lock:
+            return next(iter(self._slots.values()), None)
 
     # ---- yielding
 
@@ -281,11 +306,20 @@ class HostedModelAuthority:
             raise ResourceRefused("undeclared_model", needs.stage)
         spec = needs.model
         with self._lock:
-            if not self.reconcile():
-                busy = self._slot
-                raise ResourceRefused("termination_unproven" if busy is not None and busy.closed else "model_busy",
-                                      busy.task_id if busy is not None else "")
+            self._reconcile_slot(spec.name)
+            held = self._slots.get(spec.name)
+            if held is not None:
+                if held.closed and held.state == "resident":
+                    # The model is still loaded in the sidecar under media's one reservation: reuse it.
+                    lease = ModelLease(self, held.task_id, spec, held.granted_at, held.ledger_id)
+                    self._slots[spec.name] = lease
+                    self._event("reuse_resident", held.task_id, model=spec.name)
+                    return lease
+                if held.closed:
+                    raise ResourceRefused(held.state, held.task_id)  # termination_unproven / request_unresolved
+                raise ResourceRefused("model_busy", held.task_id)
             mode, pressure = _common_checks(needs, self.activity, self.disk_root, self.reserve_bytes)
+            from core.resource_governor import Weight
             from core.resource_ownership import DuplicateWorkloadReservation
 
             try:
@@ -294,8 +328,6 @@ class HostedModelAuthority:
                                             budget=self._budget(vram_mb=spec.vram_mb, ram_mb=spec.ram_mb))
             except DuplicateWorkloadReservation:
                 raise ResourceRefused("model_double_load", spec.name) from None
-            from core.resource_governor import Weight
-
             weight = Weight.LIGHT if spec.weight == "light" else Weight.HEAVY
             try:
                 grant = self.governor.request(task_id, weight, activity_mode=mode, resource_pressure=pressure,
@@ -307,8 +339,9 @@ class HostedModelAuthority:
                 self.ledger.release(owned.reservation_id)
                 raise ResourceRefused(grant.refusal.value if grant.refusal else "refused", grant.detail)
             lease = ModelLease(self, task_id, spec, grant.reservation.granted_at, owned.reservation_id)
-            self._slot = lease
-        self._event("reserve", task_id, model=spec.name, vramMb=spec.vram_mb, ledger=owned.reservation_id)
+            self._slots[spec.name] = lease
+        self._event("reserve", task_id, model=spec.name, vramMb=spec.vram_mb, ramMb=spec.ram_mb,
+                    ledger=owned.reservation_id)
         return lease
 
     def renew(self, lease: Lease | ModelLease) -> Lease | ModelLease:
@@ -318,7 +351,8 @@ class HostedModelAuthority:
         if not isinstance(lease, ModelLease):
             return self._light.renew(lease)
         with self._lock:
-            if lease is not self._slot or lease.closed or self.governor.renew(lease.task_id) is None:
+            if self._slots.get(lease.spec.name) is not lease or lease.closed \
+                    or self.governor.renew(lease.task_id) is None:
                 raise ResourceRefused("lease_lost", lease.task_id)
         return lease
 
@@ -329,49 +363,65 @@ class HostedModelAuthority:
         with self._lock:
             lease.close()
             self._event("release_requested", lease.task_id)
+            if lease.spec.served_by == "memory_sidecar":
+                # The HTTP request has returned (drained), but the sidecar keeps the model loaded, and a failed
+                # request may still be running there: nothing is freed until residency is proven gone.
+                lease.state = "request_unresolved" if lease.unresolved else "resident"
+                self._event(lease.state, lease.task_id, model=lease.spec.name)
+                return
             self._try_free(lease, teardown=True)
 
     # ---- proof and freeing
 
     def reconcile(self) -> bool:
-        """Free a released slot whose children are now proven gone. True when no model slot is held."""
+        """Free released slots whose proof is now available. True when no model slot is held."""
         with self._lock:
-            slot = self._slot
-            if slot is None:
-                return True
-            if not slot.closed:
-                return False
-            return self._try_free(slot, teardown=True)
+            for name in list(self._slots):
+                self._reconcile_slot(name)
+            return not self._slots
+
+    def _reconcile_slot(self, name: str) -> None:
+        slot = self._slots.get(name)
+        if slot is None or not slot.closed:
+            return
+        if slot.spec.served_by == "memory_sidecar":
+            try:
+                proof = self._residency()
+            except Exception:  # noqa: BLE001 - an unreadable state is not proof
+                proof = "unknown"
+            if proof in {"unloaded", "exited"}:
+                self._free(slot, proof=proof)
+            return
+        self._try_free(slot, teardown=True)
 
     def _after_child(self, lease: ModelLease) -> None:
         if lease.closed:
             with self._lock:
-                if self._slot is lease:
+                if self._slots.get(lease.spec.name) is lease:
                     self._try_free(lease, teardown=False)
 
     def _try_free(self, lease: ModelLease, *, teardown: bool) -> bool:
         if lease.outstanding(teardown=teardown):
+            lease.state = "termination_unproven"
             self._event("termination_unproven", lease.task_id,
                         children=[c.describe() for c in lease.children if not c.proven])
             return False
-        if self._slot is lease:
+        self._free(lease, proof="children_exited")
+        return True
+
+    def _free(self, lease: ModelLease, *, proof: str) -> None:
+        if self._slots.get(lease.spec.name) is lease:
             self.ledger.release(lease.ledger_id)
             self.governor.release(lease.task_id)
-            self._slot = None
-            self._event("released", lease.task_id, ledger=lease.ledger_id)
-        return True
+            del self._slots[lease.spec.name]
+            self._event("released", lease.task_id, ledger=lease.ledger_id, proof=proof)
 
     def status(self) -> dict[str, object]:
         with self._lock:
-            slot = self._slot
-            return {
-                "modelSlot": None if slot is None else {
-                    "task": slot.task_id, "model": slot.spec.name, "released": slot.closed,
-                    "state": "termination_unproven" if slot.closed else "held",
-                    "children": [c.describe() for c in slot.children],
-                },
-                "yieldReason": self.yield_reason(),
-            }
+            slots = [{"task": slot.task_id, "model": slot.spec.name, "released": slot.closed,
+                      "state": slot.state if slot.closed else "held",
+                      "children": [c.describe() for c in slot.children]} for slot in self._slots.values()]
+        return {"modelSlot": slots[0] if len(slots) == 1 else (slots or None), "yieldReason": self.yield_reason()}
 
     def _event(self, kind: str, task: str, **detail: object) -> None:
         self.events.append({"event": kind, "task": task, "at": time.monotonic(), **detail})

@@ -792,6 +792,10 @@ def run_semantic(ctx: StageContext) -> Commit:
             vectors = ctx.embedder.embed([text for _, text in batch])
         except semantic.EmbeddingInvalid as exc:
             raise StageFailed(f"bge-m3 answer rejected: {exc}") from None
+        except ResourceRefused as exc:
+            if exc.reason == "embedding_request_failed":
+                lease.mark_unresolved()  # the server may still be working on it: not proven drained
+            raise
         done += len(batch)
         rows = [(key, semantic._fixed_profile()["model"], semantic.model_version(), semantic.DIMENSION, vector,
                  time.time()) for (key, _), vector in zip(batch, vectors)]

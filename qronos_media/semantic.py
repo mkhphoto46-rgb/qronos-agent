@@ -80,6 +80,7 @@ class MediaEmbedder:
         self._transport = transport or request_json  # tests: a fake HTTP transport only
         self._profile = _fixed_profile()
         self._verified = False
+        self._last_owner: object = None  # the owned sidecar process last used (exit proof for residency)
 
     def _owner(self) -> object:
         try:
@@ -88,7 +89,43 @@ class MediaEmbedder:
             owner = None
         if owner is None or owner is False:
             raise ResourceRefused("model_unavailable", "the bge-m3 memory sidecar is not running under Qronos ownership")
+        self._last_owner = owner
         return owner
+
+    def residency(self) -> str:
+        """Whether the sidecar still holds bge-m3: "loaded", "unloaded", "exited" or "unknown" (never a guess).
+
+        "exited": the captured owned process (a psutil identity: pid plus creation time) is gone. "unloaded":
+        the owned sidecar's own /api/ps no longer lists bge-m3. Anything else, including no current owner, is
+        "unknown", which keeps the reservation counted.
+        """
+        last = self._last_owner
+        is_running = getattr(last, "is_running", None)
+        if callable(is_running):
+            try:
+                if not is_running():
+                    return "exited"
+            except Exception:  # noqa: BLE001
+                return "unknown"
+        try:
+            owner = self._owner_check()
+        except Exception:  # noqa: BLE001
+            owner = None
+        if owner is None or owner is False:
+            return "unknown"
+        try:
+            listed = self._transport("GET", self._profile["base"] + "/api/ps", timeout=TAGS_TIMEOUT_SECONDS,
+                                     json=None, owner=owner, max_bytes=MAX_TAGS_BYTES)
+        except Exception:  # noqa: BLE001
+            return "unknown"
+        models = listed.get("models") if isinstance(listed, dict) else None
+        if not isinstance(models, list):
+            return "unknown"
+        for item in models:
+            if isinstance(item, dict) and {str(item.get("name", "")).casefold(),
+                                           str(item.get("model", "")).casefold()} & ACCEPTED_MODEL_NAMES:
+                return "loaded"
+        return "unloaded"
 
     def _call(self, method: str, path: str, *, timeout: float, max_bytes: int, payload: dict | None = None) -> Any:
         try:

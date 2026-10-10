@@ -385,6 +385,8 @@ class MediaService:
         try:
             vector = self.embedder.embed([query.strip()], timeout=semantic.QUERY_TIMEOUT_SECONDS)[0]
         except (ResourceRefused, semantic.EmbeddingInvalid) as exc:
+            if getattr(exc, "reason", "") == "embedding_request_failed" and hasattr(lease, "mark_unresolved"):
+                lease.mark_unresolved()
             block["reason"] = getattr(exc, "reason", "embedding_invalid")
             return {"query": query, "exact": exact, "semantic": block}
         finally:

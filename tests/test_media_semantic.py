@@ -54,10 +54,14 @@ class FakeSidecar:
         self.answer = answer
         self.fail_on = fail_on
         self.on_embed = on_embed
+        self.loaded = True  # what the sidecar's /api/ps lists (bge-m3 resident under keep_alive)
 
     def __call__(self, method, url, *, timeout, json=None, owner=None, max_bytes=None):
         self.calls.append({"method": method, "url": url, "json": json, "owner": owner, "maxBytes": max_bytes,
                            "timeout": timeout})
+        if url.endswith("/api/ps"):
+            return {"models": ([{"name": "bge-m3:latest", "model": "bge-m3:latest"}] if self.loaded else [])
+                    + [{"name": "someone-elses-model:latest"}]}
         if url.endswith("/api/tags"):
             return {"models": [{"name": "bge-m3:latest", "model": "bge-m3:latest",
                                 "details": {"quantization_level": self.quantization, "family": "bert"}}]}
@@ -77,20 +81,30 @@ class State:
     paused = False
 
 
-def authority(tmp_path: Path, state: State | None = None):
+EMBEDDERS: dict[int, semantic.MediaEmbedder] = {}
+
+
+def authority(tmp_path: Path, state: State | None = None, *, sidecar: FakeSidecar | None = None, owner=OWNER):
+    """The runtime-issued authority with the host's ONE embedder as its residency proof (as build_bridge_media_host)."""
     from qronos_media.model_authority import issue_hosted_authority
 
     state = state or State()
-    return issue_hosted_authority(governor=ResourceGovernor(read_system=lambda: QUIET, read_gpu=lambda: None),
+    embedder = semantic.MediaEmbedder(lambda: owner, transport=sidecar) if sidecar is not None else None
+    auth = issue_hosted_authority(governor=ResourceGovernor(read_system=lambda: QUIET, read_gpu=lambda: None),
                                   ledger=ResourceLedger(), disk_root=tmp_path, foreground_busy=lambda: state.foreground,
-                                  paused=lambda: state.paused, activity=quiet_activity, reserve_bytes=0), state
+                                  paused=lambda: state.paused, activity=quiet_activity, reserve_bytes=0,
+                                  residency=embedder.residency if embedder is not None else None)
+    EMBEDDERS[id(auth)] = embedder
+    return auth, state
 
 
 def prepared(tmp_path: Path, auth, sidecar: FakeSidecar | None, cues=CUES_EN, *, permissions=None):
     library = tmp_path / "library"
     library.mkdir()
     (library / "film.mkv").write_bytes(b"synthetic container stand-in")
-    embedder = semantic.MediaEmbedder(lambda: OWNER, transport=sidecar) if sidecar is not None else None
+    embedder = EMBEDDERS.get(id(auth))
+    if embedder is None and sidecar is not None:  # e.g. the standalone authority
+        embedder = semantic.MediaEmbedder(lambda: OWNER, transport=sidecar)
     service = MediaService(tmp_path / "media-data", tools=None, authority=auth,
                            permissions=permissions or FakePermissions(), embedder=embedder)
     service.add_root(str(library), kind="folder", max_depth=2)
@@ -182,9 +196,9 @@ def test_a_non_f16_model_a_missing_owner_or_a_failed_request_is_refused_typed():
 # ------------------------------------------------------------------ the stage
 
 
-def test_the_hosted_stage_indexes_windows_with_lineage_and_frees_the_slot(tmp_path):
-    auth, _ = authority(tmp_path)
+def test_the_hosted_stage_indexes_windows_with_lineage_and_frees_the_slot_only_on_unload_proof(tmp_path):
     sidecar = FakeSidecar()
+    auth, _ = authority(tmp_path, sidecar=sidecar)
     service, asset_id = prepared(tmp_path, auth, sidecar)
     report = service.index(max_seconds=60, max_stages=5)
     assert f"{asset_id}/semantic" in report["completed"], report
@@ -193,7 +207,14 @@ def test_the_hosted_stage_indexes_windows_with_lineage_and_frees_the_slot(tmp_pa
     assert rows[0]["text"].startswith("Where did you leave the key?") and rows[0]["start_ms"] == 500
     reserved = [e for e in auth.events if e["event"] == "reserve"]
     assert reserved and reserved[0]["model"] == BGE_M3.name
-    assert auth.governor.active() == () and auth.ledger.active() == ()
+    # The request returned, but the sidecar keeps bge-m3 loaded (keep_alive): the declared memory stays counted.
+    [owned] = auth.ledger.active()
+    assert owned.budget.ram_mb == 2048 and len(auth.governor.active()) == 1
+    assert auth.status()["modelSlot"]["state"] == "resident"
+    assert auth.reconcile() is False and len(auth.ledger.active()) == 1  # still listed by the sidecar's /api/ps
+    sidecar.loaded = False  # the sidecar unloaded it itself (media never asks)
+    assert auth.reconcile() is True and auth.governor.active() == () and auth.ledger.active() == ()
+    assert not any(c["json"] and c["json"].get("keep_alive") in ("0", "0s", 0) for c in sidecar.calls)
 
 
 def test_the_standalone_authority_never_embeds_and_other_work_carries_on(tmp_path):
@@ -214,13 +235,14 @@ def test_foreground_preemption_between_batches_leaves_no_index_and_resume_embeds
             state.foreground = True  # the person speaks while the first batch is answered
 
     sidecar = FakeSidecar(on_embed=speak)
+    auth, state = authority(tmp_path, state, sidecar=sidecar)
     service, asset_id = prepared(tmp_path, auth, sidecar)
     report = service.index(max_seconds=60, max_stages=5)
     assert report["stopped"] == "deferred" and "foreground" in report["detail"], report
     assert windows(service, asset_id) == []  # nothing searchable from a stopped run
     first = list(sidecar.embedded)
     assert stage(service, asset_id)["state"] == "QUEUED"
-    assert auth.governor.active() == () and auth.ledger.active() == ()
+    assert len(auth.ledger.active()) == 1  # resident, still counted
     state.foreground = False
     report = service.index(max_seconds=60, max_stages=5)
     assert f"{asset_id}/semantic" in report["completed"], report
@@ -228,26 +250,35 @@ def test_foreground_preemption_between_batches_leaves_no_index_and_resume_embeds
     assert len(first) == 2 and later and not set(first) & set(later), "a cached window was embedded twice"
     assert len(windows(service, asset_id)) == len({w.window_key for w in semantic.build_windows(
         service.store.db, asset_id)})
+    assert len(auth.ledger.active()) == 1 and any(e["event"] == "reuse_resident" for e in auth.events)
 
 
 def test_a_failed_or_invalid_request_leaves_no_completed_partial_index(tmp_path, monkeypatch):
     monkeypatch.setattr(semantic, "EMBED_BATCH", 2)  # 5 windows -> 3 batches; the second one fails
-    auth, _ = authority(tmp_path)
-    service, asset_id = prepared(tmp_path, auth, FakeSidecar(fail_on=2))
+    failing = FakeSidecar(fail_on=2)  # e.g. a client timeout: the server's work is not proven stopped
+    auth, _ = authority(tmp_path, sidecar=failing)
+    service, asset_id = prepared(tmp_path, auth, failing)
     report = service.index(max_seconds=60, max_stages=5)
     assert report["stopped"] == "deferred" and "embedding_request_failed" in report["detail"], report
+    assert auth.status()["modelSlot"]["state"] == "request_unresolved" and len(auth.ledger.active()) == 1
+    with pytest.raises(ResourceRefused) as refused:
+        auth.reserve("media:semantic:again", stages_module.STAGES["semantic"].needs)
+    assert refused.value.reason == "request_unresolved"
+    assert auth.reconcile() is False  # the model is still loaded: no drain is proven
+    failing.loaded = False
+    assert auth.reconcile() is True and auth.ledger.active() == ()
     assert windows(service, asset_id) == [] and stage(service, asset_id)["state"] == "QUEUED"
     assert service.store.db.execute("SELECT count(*) FROM semantic_cache").fetchone()[0] == 2  # batch 1 cached only
-    auth2, _ = authority(tmp_path / "b")
     (tmp_path / "b").mkdir(exist_ok=True)
-    service2, asset2 = prepared(tmp_path / "b", auth2, FakeSidecar(answer=_bad("nan")))
+    bad = FakeSidecar(answer=_bad("nan"))
+    auth2, _ = authority(tmp_path / "b", sidecar=bad)
+    service2, asset2 = prepared(tmp_path / "b", auth2, bad)
     service2.index(max_seconds=60, max_stages=5)
     assert windows(service2, asset2) == [] and stage(service2, asset2)["state"] == "FAILED"
-    assert auth2.governor.active() == () and auth2.ledger.active() == ()
+    assert auth2.status()["modelSlot"]["state"] == "resident"  # the request completed; the model stays loaded
 
 
 def test_a_revoked_root_stops_the_work_before_anything_is_searchable(tmp_path):
-    auth, _ = authority(tmp_path)
     permissions = FakePermissions()
     library = tmp_path / "library"
 
@@ -255,14 +286,16 @@ def test_a_revoked_root_stops_the_work_before_anything_is_searchable(tmp_path):
         if n == 1:
             permissions.refuse_roots[str(library)] = "revoked"
 
-    service, asset_id = prepared(tmp_path, auth, FakeSidecar(on_embed=revoke), permissions=permissions)
+    sidecar = FakeSidecar(on_embed=revoke)
+    auth, _ = authority(tmp_path, sidecar=sidecar)
+    service, asset_id = prepared(tmp_path, auth, sidecar, permissions=permissions)
     report = service.index(max_seconds=60, max_stages=5)
     assert report["stopped"] in {"permission", "deferred"} and windows(service, asset_id) == [], report
 
 
 def test_only_changed_windows_are_re_embedded_and_asr_changes_requeue_the_stage(tmp_path):
-    auth, _ = authority(tmp_path)
     sidecar = FakeSidecar()
+    auth, _ = authority(tmp_path, sidecar=sidecar)
     service, asset_id = prepared(tmp_path, auth, sidecar)
     service.index(max_seconds=60, max_stages=5)
     before = len(sidecar.embedded)
@@ -281,8 +314,9 @@ def test_only_changed_windows_are_re_embedded_and_asr_changes_requeue_the_stage(
 
 
 def test_deleting_a_track_or_an_asset_removes_its_vectors_from_the_index(tmp_path):
-    auth, _ = authority(tmp_path)
-    service, asset_id = prepared(tmp_path, auth, FakeSidecar())
+    sidecar = FakeSidecar()
+    auth, _ = authority(tmp_path, sidecar=sidecar)
+    service, asset_id = prepared(tmp_path, auth, sidecar)
     service.index(max_seconds=60, max_stages=5)
     assert windows(service, asset_id)
     with service.store.transaction() as tx:
@@ -294,8 +328,9 @@ def test_deleting_a_track_or_an_asset_removes_its_vectors_from_the_index(tmp_pat
 
 
 def test_semantic_search_returns_evidence_after_the_lexical_answer_and_crosses_languages(tmp_path):
-    auth, _ = authority(tmp_path)
-    service, asset_id = prepared(tmp_path, auth, FakeSidecar())
+    sidecar = FakeSidecar()
+    auth, _ = authority(tmp_path, sidecar=sidecar)
+    service, asset_id = prepared(tmp_path, auth, sidecar)
     service.index(max_seconds=60, max_stages=5)
     answer = service.search_semantic("کلید را کجا گذاشتی؟", limit=3)
     assert list(answer) == ["query", "exact", "semantic"]  # lexical first, semantic as its own block
@@ -306,18 +341,19 @@ def test_semantic_search_returns_evidence_after_the_lexical_answer_and_crosses_l
     assert top["dialogue"].startswith("Where did you leave the key?")  # the ORIGINAL transcript text
     assert top["crossScript"] is True and top["track"]["language"] == "eng" and top["confidence"] == "uncalibrated"
     assert top["similarity"] > block["results"][1]["similarity"]
-    assert auth.governor.active() == () and auth.ledger.active() == ()
+    assert len(auth.ledger.active()) == 1  # indexing and the query share the one resident reservation
 
 
 def test_the_query_is_bounded_and_refusals_keep_the_lexical_answer(tmp_path):
-    auth, _ = authority(tmp_path)
-    service, asset_id = prepared(tmp_path, auth, FakeSidecar())
+    sidecar = FakeSidecar()
+    auth, _ = authority(tmp_path, sidecar=sidecar)
+    service, asset_id = prepared(tmp_path, auth, sidecar)
     service.index(max_seconds=60, max_stages=5)
     from qronos_media.service import MediaRequestError
 
     with pytest.raises(MediaRequestError):
         service.search_semantic("x" * 1201)
-    lease = auth.reserve("media:semantic:other", stages_module.STAGES["semantic"].needs)  # the model slot is busy
+    lease = auth.reserve("media:semantic:other", stages_module.STAGES["semantic"].needs)  # an active request holds it
     try:
         answer = service.search_semantic("key")
         assert answer["semantic"]["status"] == "unavailable" and answer["semantic"]["reason"] == "model_busy"
@@ -327,3 +363,31 @@ def test_the_query_is_bounded_and_refusals_keep_the_lexical_answer(tmp_path):
     with service.store.transaction() as tx:  # an asset whose copies all left scope is not offered
         tx.execute("UPDATE files SET error = 'out_of_scope'")
     assert service.search_semantic("key")["semantic"]["results"] == []
+
+
+class FakeProcess:
+    """Stands for the captured owned sidecar process (a psutil identity)."""
+
+    def __init__(self) -> None:
+        self.running = True
+
+    def is_running(self) -> bool:
+        return self.running
+
+
+def test_shared_user_memory_use_never_double_accounts_and_only_exit_proof_frees_it(tmp_path):
+    process = FakeProcess()
+    sidecar = FakeSidecar()
+    auth, _ = authority(tmp_path, sidecar=sidecar, owner=process)
+    service, asset_id = prepared(tmp_path, auth, sidecar)
+    service.index(max_seconds=60, max_stages=5)
+    assert len(auth.ledger.active()) == 1
+    # The user's own memory retrieval keeps using the same resident model (the sidecar still lists it, beside
+    # an unrelated model): media's one reservation stays, and media unloads nothing.
+    service.search_semantic("key")
+    assert len(auth.ledger.active()) == 1 and auth.reconcile() is False
+    assert all(not (c["json"] or {}).get("keep_alive") in ("0", "0s") for c in sidecar.calls)
+    process.running = False  # the owned sidecar process is gone: its memory is gone with it
+    assert auth.reconcile() is True and auth.ledger.active() == () and auth.governor.active() == ()
+    released = [e for e in auth.events if e["event"] == "released"]
+    assert released and released[-1]["proof"] == "exited"
