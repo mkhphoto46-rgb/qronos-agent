@@ -56,6 +56,16 @@ export type UpdateOutcome = {
   dataRestored: boolean;
 };
 
+/** A repair the start-up barrier resolved as unconfirmed (no valid installation receipt). A restart
+ *  cannot change it; the person discards it, or retries: discard, then check the package again
+ *  (a new request, approval and launch). The old launch is never replayed. */
+export type UpdateUnconfirmed = {
+  version: string;
+  kind: UpdateKind;
+  receipt: "absent" | "invalid";
+  actions: Array<"discard" | "retry">;
+};
+
 export type UpdateStatus = {
   runningVersion: string;
   trust: { configured: boolean; activeKeys: number; error: string | null };
@@ -67,6 +77,7 @@ export type UpdateStatus = {
   launching: boolean;
   recoveryPending: boolean;
   outcome: UpdateOutcome | null;
+  unconfirmed: UpdateUnconfirmed | null;
 };
 
 export type UpdateCandidate = { installer: string; manifest: string };
@@ -111,6 +122,7 @@ export const REFUSAL_TEXT: Record<string, string> = {
   not_staged: "به‌روزرسانی تأییدشده آماده نیست.",
   runtime_running: "Qronos هنوز در حال اجراست؛ ابتدا باید متوقف شود.",
   launch_failed: "ویندوز نتوانست نصب‌کننده را اجرا کند.",
+  launch_outcome_unknown: "معلوم نیست نصب‌کننده اجرا شده باشد؛ نتیجه هنگام شروع دوبارهٔ Qronos مشخص می‌شود.",
   launch_unavailable: "اجرای نصب‌کننده هنوز فعال نشده است؛ بستهٔ تأییدشده آماده باقی می‌ماند.",
   update_in_progress: "یک به‌روزرسانی هم‌اکنون در حال اجراست؛ پس از پایان آن دوباره تلاش کنید.",
   writers_active: "بخش دیگری از Qronos هنوز داده‌ها را باز نگه داشته است؛ ابتدا باید بسته شود.",
@@ -133,6 +145,9 @@ export function refusalText(code: string): string {
 export const LAUNCH_NOT_STARTED: ReadonlySet<string> = new Set([
   "launch_unavailable", "runtime_running", "update_in_progress", "writers_active", "recovery_pending",
   "not_approved", "approval_expired", "permission_denied", "not_staged",
+  // The backend raises launch_failed ONLY when Windows created no installer process (NotStarted);
+  // every ambiguous failure is launch_outcome_unknown, which is not in this set.
+  "launch_failed",
 ]);
 
 /** Of those, the ones raised before the single-use launch token was spent: keep the token. */
@@ -151,7 +166,17 @@ export class UpdateOutcomeUnknown extends Error {
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const KEY_ID = /^[0-9a-f]{32}$/;
 const KINDS: ReadonlySet<string> = new Set(["upgrade", "repair", "rollback"]);
+// Semantic Versioning 2.0 (as core.local_update.parse_version), at most 128 characters.
+const VERSION = /^\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const STORE_ID = /^[a-z][a-z0-9_]{0,47}$/;
+const SNAPSHOT_ID = /^\d{10}-[0-9a-f]{12}$/;
+const PACKAGE_NAME = /^qronos-desktop_[0-9A-Za-z.+-]{1,128}_x64-setup\.exe$/;
+const OWNER = /^[^\u0000-\u001f\u007f]{1,128}$/;
+// Tab, LF and CR are allowed in release notes; no other control character.
+const NOTES = /^[^\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]{0,2000}$/;
+const MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024;
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -160,14 +185,44 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function parseOffer(value: unknown): UpdateOffer {
+function isVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 128 && VERSION.test(value);
+}
+
+function matches(value: unknown, pattern: RegExp): value is string {
+  return typeof value === "string" && pattern.test(value);
+}
+
+function storeList(value: unknown, what: string): string[] {
+  if (!Array.isArray(value) || value.length > 64 || !value.every((item) => matches(item, STORE_ID))) bad(what);
+  return [...(value as string[])];
+}
+
+/** Every field the approval card renders or the backend binds, checked exactly and bounded; a fresh object
+ *  with only those fields is returned, so nothing unvalidated reaches the panel. */
+export function parseOffer(value: unknown): UpdateOffer {
   const offer = record(value);
-  if (typeof offer.version !== "string" || typeof offer.kind !== "string" || !KINDS.has(offer.kind)
-      || typeof offer.packageSha256 !== "string" || !SHA256.test(offer.packageSha256)
-      || typeof offer.owner !== "string" || typeof offer.keyId !== "string") {
-    throw new UpdateRefused("bad_response", "The update backend returned an invalid offer.");
+  if (!isVersion(offer.version) || !isVersion(offer.fromVersion)
+      || typeof offer.kind !== "string" || !KINDS.has(offer.kind)
+      || !matches(offer.keyId, KEY_ID) || !matches(offer.owner, OWNER)
+      || !matches(offer.packageSha256, SHA256)
+      || typeof offer.packageBytes !== "number" || !Number.isSafeInteger(offer.packageBytes)
+      || offer.packageBytes < 0 || offer.packageBytes > MAX_PACKAGE_BYTES
+      || !matches(offer.packageName, PACKAGE_NAME)
+      || !matches(offer.notes, NOTES)
+      || !matches(offer.installer, ABSOLUTE) || (offer.installer as string).length > 4096
+      || offer.manifest !== `${offer.installer}.qronos-update.json`
+      || !(offer.restoreSnapshot === null || matches(offer.restoreSnapshot, SNAPSHOT_ID))) {
+    bad("offer");
   }
-  return offer as unknown as UpdateOffer;
+  return {
+    version: offer.version as string, fromVersion: offer.fromVersion as string, kind: offer.kind as UpdateKind,
+    keyId: offer.keyId as string, owner: offer.owner as string, packageSha256: offer.packageSha256 as string,
+    packageBytes: offer.packageBytes as number, packageName: offer.packageName as string,
+    notes: offer.notes as string, installer: offer.installer as string, manifest: offer.manifest as string,
+    changedStores: storeList(offer.changedStores, "offer"), snapshotStores: storeList(offer.snapshotStores, "offer"),
+    restoreSnapshot: offer.restoreSnapshot as string | null,
+  };
 }
 
 function token(value: unknown): string {
@@ -183,6 +238,7 @@ function bad(what: string): never {
 
 const PHASES: ReadonlySet<string> = new Set(["idle", "staged", "handed_off"]);
 const RESULTS: ReadonlySet<string> = new Set(["applied", "not_applied", "unconfirmed"]);
+const UNCONFIRMED_RECEIPTS: ReadonlySet<string> = new Set(["absent", "invalid"]);
 
 function bool(value: unknown, what: string): boolean {
   return typeof value === "boolean" ? value : bad(what);
@@ -192,36 +248,51 @@ function parseOutcome(value: unknown): UpdateOutcome | null {
   if (value === null || value === undefined) return null;
   const outcome = record(value);
   if (typeof outcome.result !== "string" || !RESULTS.has(outcome.result) || typeof outcome.kind !== "string"
-      || !KINDS.has(outcome.kind) || typeof outcome.version !== "string"
-      || !Array.isArray(outcome.dataMismatch) || !outcome.dataMismatch.every((v) => typeof v === "string")) {
+      || !KINDS.has(outcome.kind) || !isVersion(outcome.version)) {
     bad("outcome");
   }
   return {
-    result: outcome.result as UpdateOutcomeResult, kind: outcome.kind as UpdateKind, version: outcome.version,
-    dataMismatch: (outcome.dataMismatch as string[]).slice(0, 64), dataRestored: bool(outcome.dataRestored, "outcome"),
+    result: outcome.result as UpdateOutcomeResult, kind: outcome.kind as UpdateKind, version: outcome.version as string,
+    dataMismatch: storeList(outcome.dataMismatch, "outcome"), dataRestored: bool(outcome.dataRestored, "outcome"),
   };
+}
+
+function parseUnconfirmed(value: unknown): UpdateUnconfirmed | null {
+  if (value === null || value === undefined) return null;
+  const item = record(value);
+  const actions = item.actions;
+  if (!isVersion(item.version) || item.kind !== "repair"
+      || typeof item.receipt !== "string" || !UNCONFIRMED_RECEIPTS.has(item.receipt)
+      || !Array.isArray(actions) || actions.length !== 2 || actions[0] !== "discard" || actions[1] !== "retry") {
+    bad("unconfirmed update");
+  }
+  return { version: item.version as string, kind: "repair", receipt: item.receipt as "absent" | "invalid",
+           actions: ["discard", "retry"] };
 }
 
 /** Only the fields the panel shows, each checked. */
 export function parseStatus(value: unknown): UpdateStatus {
   const status = record(value);
   const trust = record(status.trust);
-  if (typeof status.runningVersion !== "string" || typeof status.phase !== "string" || !PHASES.has(status.phase)
-      || typeof trust.configured !== "boolean" || typeof trust.activeKeys !== "number") {
+  if (!isVersion(status.runningVersion) || typeof status.phase !== "string" || !PHASES.has(status.phase)
+      || typeof trust.configured !== "boolean" || typeof trust.activeKeys !== "number"
+      || !Number.isSafeInteger(trust.activeKeys) || trust.activeKeys < 0 || trust.activeKeys > 1024
+      || !(trust.error === null || trust.error === undefined || matches(trust.error, STORE_ID))) {
     bad("status");
   }
   let staged: UpdateStatus["staged"] = null;
   if (status.staged !== null && status.staged !== undefined) {
     const item = record(status.staged);
-    if (typeof item.version !== "string" || typeof item.kind !== "string" || !KINDS.has(item.kind)
-        || typeof item.packageSha256 !== "string" || !SHA256.test(item.packageSha256)) {
+    if (!isVersion(item.version) || typeof item.kind !== "string" || !KINDS.has(item.kind)
+        || !matches(item.packageSha256, SHA256)) {
       bad("staged update");
     }
-    staged = { version: item.version, kind: item.kind as UpdateKind, packageSha256: item.packageSha256 };
+    staged = { version: item.version as string, kind: item.kind as UpdateKind,
+               packageSha256: item.packageSha256 as string };
   }
   return {
-    runningVersion: status.runningVersion,
-    trust: { configured: trust.configured, activeKeys: trust.activeKeys,
+    runningVersion: status.runningVersion as string,
+    trust: { configured: trust.configured as boolean, activeKeys: trust.activeKeys as number,
              error: typeof trust.error === "string" ? trust.error : null },
     launchAvailable: bool(status.launchAvailable, "status"),
     phase: status.phase as UpdatePhase,
@@ -231,6 +302,7 @@ export function parseStatus(value: unknown): UpdateStatus {
     launching: bool(status.launching, "status"),
     recoveryPending: bool(status.recoveryPending, "status"),
     outcome: parseOutcome(status.outcome),
+    unconfirmed: parseUnconfirmed(status.unconfirmed),
   };
 }
 
@@ -289,6 +361,11 @@ export function createUpdateClient(invoke: UpdateInvoke) {
       await call("launch", { launchToken });
     },
     async discard(): Promise<void> {
+      await call("discard");
+    },
+    /** Retry an unconfirmed repair: discard it; the caller then checks the package again, which is a new
+     *  request, approval and launch (a new nonce). Nothing of the old launch is replayed. */
+    async retry(): Promise<void> {
       await call("discard");
     },
   };

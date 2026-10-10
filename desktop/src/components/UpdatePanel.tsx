@@ -130,6 +130,16 @@ function UpdatePanel(props: UpdatePanelProps) {
     await client.discard();
   });
 
+  // An unconfirmed repair: discard it, then check the package again (a new request, approval and launch).
+  const retry = () => run(async () => {
+    reset();
+    await client.retry();
+    const chosen = await props.pickPackage();
+    if (chosen) {
+      await check(chosen);
+    }
+  });
+
   const trust = status?.trust;
 
   return (
@@ -141,7 +151,7 @@ function UpdatePanel(props: UpdatePanelProps) {
           هیچ کلید امضای مالک تنظیم نشده است؛ تا وقتی تنظیم نشود هیچ بسته‌ای پذیرفته نمی‌شود.
         </p>
       )}
-      {status?.outcome && (
+      {status?.outcome && !status.unconfirmed && (
         <p role="status">
           {status.outcome.result === "applied"
             ? `به‌روزرسانی ${status.outcome.version} نصب شد.`
@@ -156,6 +166,18 @@ function UpdatePanel(props: UpdatePanelProps) {
       )}
       {status?.recoveryPending && !status.updateInProgress && (
         <p role="alert">یک به‌روزرسانی نیمه‌کاره هنگام شروع دوبارهٔ Qronos بازیابی می‌شود.</p>
+      )}
+      {status?.unconfirmed && !status.updateInProgress && (
+        <div role="group" aria-label="تعمیر تأییدنشده">
+          <p role="status">
+            {status.unconfirmed.receipt === "invalid"
+              ? `رسید نصب تعمیر ${status.unconfirmed.version} معتبر نبود؛ انجام شدن آن تأیید نمی‌شود.`
+              : `برای تعمیر ${status.unconfirmed.version} هیچ رسید نصبی نرسید؛ انجام شدن آن تأیید نمی‌شود.`}
+            {" "}شروع دوبارهٔ Qronos این وضعیت را تغییر نمی‌دهد. می‌توانید آن را کنار بگذارید یا دوباره تلاش کنید
+            (فایل نصب‌کننده دوباره بررسی و تأیید می‌شود).
+          </p>
+          <button type="button" onClick={retry} disabled={busy}>تلاش دوباره…</button>
+        </div>
       )}
       {outcomeUnknown && (
         <p role="alert">

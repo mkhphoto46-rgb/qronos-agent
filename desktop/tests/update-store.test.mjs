@@ -211,3 +211,83 @@ test("the panel keeps the token after a not-yet-spent refusal and shows the new 
     assert.match(panel, new RegExp(state));
   }
 });
+
+// ---- round 10: N6 complete bounded validation, N5 resolved unconfirmed repair
+
+test("every rendered or bound offer field is validated and bounded; only checked fields are returned", () => {
+  const parsed = update.parseOffer({ ...OFFER, changedStores: ["settings"], snapshotStores: ["settings"],
+                                     restoreSnapshot: "1800000000-abcdef012345", notes: "line one\r\nline two",
+                                     extraField: "never rendered" });
+  assert.equal(parsed.extraField, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.changedStores)), ["settings"]);
+  const broken = [
+    { fromVersion: { major: 0 } }, { fromVersion: "0.1" }, { version: "1".repeat(129) }, { version: "v0.2.0" },
+    { changedStores: "settings" }, { changedStores: Array(65).fill("settings") }, { changedStores: ["Settings!"] },
+    { changedStores: ["x".repeat(49)] }, { snapshotStores: [7] }, { restoreSnapshot: "latest" },
+    { restoreSnapshot: 5 }, { notes: 42 }, { notes: "n".repeat(2001) }, { notes: "bell\u0007" },
+    { owner: "" }, { owner: "o".repeat(129) }, { owner: "line\nbreak" }, { keyId: "c".repeat(31) },
+    { keyId: "C".repeat(32) }, { packageSha256: "AB".repeat(32) }, { packageBytes: -1 }, { packageBytes: 1.5 },
+    { packageBytes: 3 * 1024 ** 3 }, { packageName: "evil.exe" }, { installer: "relative.exe" },
+    { manifest: "C:\elsewhere.json" }, { kind: "downgrade" },
+  ];
+  for (const change of broken) {
+    assert.throws(() => update.parseOffer({ ...OFFER, ...change }), (error) => error.code === "bad_response",
+      JSON.stringify(change).slice(0, 80));
+  }
+});
+
+test("nested status shapes are validated, including the resolved unconfirmed repair", () => {
+  const resolved = { ...STATUS, recoveryPending: false,
+    unconfirmed: { version: "0.1.0", kind: "repair", receipt: "absent", actions: ["discard", "retry"] } };
+  const status = update.parseStatus(resolved);
+  assert.deepEqual(JSON.parse(JSON.stringify(status.unconfirmed)),
+    { version: "0.1.0", kind: "repair", receipt: "absent", actions: ["discard", "retry"] });
+  assert.equal(status.recoveryPending, false);
+  assert.equal(update.parseStatus({ ...STATUS, unconfirmed: null }).unconfirmed, null);
+  for (const broken of [
+    { unconfirmed: { ...resolved.unconfirmed, kind: "upgrade" } },
+    { unconfirmed: { ...resolved.unconfirmed, receipt: "verified" } },
+    { unconfirmed: { ...resolved.unconfirmed, actions: ["replay"] } },
+    { unconfirmed: "yes" },
+    { runningVersion: "latest" }, { trust: { configured: true, activeKeys: -1, error: null } },
+    { trust: { configured: true, activeKeys: 1.5, error: null } },
+    { trust: { configured: true, activeKeys: 1, error: "<b>html</b>" } },
+    { outcome: { ...STATUS.outcome, dataMismatch: ["Settings With Spaces"] } },
+    { outcome: { ...STATUS.outcome, version: { v: 1 } } },
+    { staged: { version: "0.1", kind: "repair", packageSha256: SHA } },
+  ]) {
+    assert.throws(() => update.parseStatus({ ...resolved, ...broken }), (error) => error.code === "bad_response",
+      JSON.stringify(broken).slice(0, 80));
+  }
+});
+
+test("retry is a discard followed by a new check; the old launch is never replayed", async () => {
+  const { calls, invoke } = backend({ discard: { ok: true }, request: { ok: true, offer: OFFER, approvalToken: TOKEN } });
+  const client = update.createUpdateClient(invoke);
+  await client.retry();
+  await client.request(OFFER.installer, OFFER.manifest);
+  assert.deepEqual(calls.map((call) => call.operation), ["discard", "request"]);
+  assert.equal(calls.some((call) => call.operation === "launch"), false);
+});
+
+test("launch_failed is a proved non-start; launch_outcome_unknown is not", async () => {
+  assert.equal(update.LAUNCH_NOT_STARTED.has("launch_failed"), true);
+  assert.equal(update.LAUNCH_NOT_STARTED.has("launch_outcome_unknown"), false);
+  const order = [];
+  const client = update.createUpdateClient(async () => ({ ok: false, code: "launch_outcome_unknown" }));
+  await assert.rejects(update.launchUpdate(client, TOKEN, {
+    stopRuntime: async () => true,
+    restartRuntime: async () => { order.push("restart"); },
+    exitApp: async () => { order.push("exit"); },
+  }), (error) => error.code === "outcome_unknown");
+  assert.deepEqual(order, []);
+});
+
+test("the panel offers discard and retry for an unconfirmed repair and never promises recovery for it", () => {
+  const panel = source("../src/components/UpdatePanel.tsx");
+  assert.match(panel, /status\?\.unconfirmed/);
+  assert.match(panel, /client\.retry\(\)/);
+  assert.match(panel, /شروع دوبارهٔ Qronos این وضعیت را تغییر نمی‌دهد/);
+  assert.match(panel, /status\?\.outcome && !status\.unconfirmed/);
+  assert.doesNotMatch(panel, /nonce|launchToken\}/);
+});
