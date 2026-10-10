@@ -472,7 +472,9 @@ change requeues it), `MediaService.search_semantic`.
   {"num_gpu": 0}}`) to that fixed endpoint, through `core.local_ipc` with the
   owned process as `owner`. No URL, port or model comes from a caller; media
   never starts a server and never unloads a model. Without an owned sidecar
-  (the memory runtime is off by default) semantic is `unavailable`.
+  (the memory runtime is off by default) semantic is `unavailable`: the stage
+  and the query check the embedder's current owner BEFORE reserving, so nothing
+  is reserved (round 29, Main23 F1).
 - **Checks before storage:** the sidecar must list bge-m3 with quantization
   F16; every answer must name bge-m3, hold one vector per text, exactly 1024
   finite numeric values, non-zero length; the response body is byte-bounded
@@ -485,12 +487,20 @@ change requeues it), `MediaService.search_semantic`.
   (shared memory-runtime use is never double-counted; media never unloads the
   model). It is freed when the owned sidecar's `/api/ps` no longer lists
   bge-m3, or on a trusted contained lifecycle proof of the whole sidecar tree.
-  A failed or timed-out request leaves `request_unresolved`: further media
-  requests are refused, and an empty `/api/ps` does NOT free it (a queued
+  A lease under which no inference request was dispatched (the owner was lost
+  after the grant, `/api/tags` failed or refused, or every window was cached)
+  and which took over no resident slot is freed at release (proof
+  `no_request_dispatched`); an `/api/tags` failure is `model_unavailable`,
+  never unresolved. A failed or timed-out POST leaves `request_unresolved`:
+  while ANY media model request is unresolved, no media model is admitted
+  (Whisper included; Root round-29 decision), and an empty `/api/ps` does NOT
+  free it (a queued
   request may not be listed); only the contained lifecycle proof does. The
   runtime supplies no such lifecycle proof today and the server process merely
   exiting is not accepted (a runner may outlive it), so after a sidecar exit
-  the reservation stays counted until the bridge restarts. Yielding is checked
+  the reservation stays counted until the bridge restarts. A proved `resident`
+  bge-m3 is not uncertain work: it coexists with another declared model
+  through the governor and ledger, both accounted. Yielding is checked
   between batches (8 texts); one in-flight batch is bounded by its timeout
   (30 s).
 - **Index:** windows of consecutive cues of one track (at most 600 characters
