@@ -67,7 +67,15 @@ def test_duplicates_become_one_asset_and_every_stage_completes(tmp_path: Path, b
     service, library, report = _indexed(tmp_path, base_video)
     asset = _only_asset(service)
     assert report["hashed"] == 2 and report["failed"] == [] and report["stopped"] == "idle"
-    assert sorted(report["completed"]) == sorted(f"{asset}/{s}" for s in ("metadata", "subtitles", "scenes", "keyframes"))
+    # Current graph (rounds 24/26): ASR completes as a skip because subtitles exist; semantic needs the runtime's
+    # bge-m3 embedder, which this service does not have, so it stays queued as unavailable (never reserved).
+    assert sorted(report["completed"]) == sorted(f"{asset}/{s}" for s in ("metadata", "subtitles", "asr", "scenes",
+                                                                          "keyframes"))
+    notes = {row[0]: (row[1], row[2]) for row in service.store.db.execute(
+        "SELECT stage, state, note FROM stages WHERE asset_id = ?", (asset,))}
+    assert notes["asr"] == ("COMPLETED", "skipped:subtitles_present")
+    assert notes["semantic"] == ("QUEUED", "unavailable:model_unavailable")
+    assert report["refused"] == [f"{asset}/semantic:model_unavailable"]
     files = service.get_asset(asset)["files"]
     assert {Path(f["path"]).name for f in files} == {"Film One.mkv", "Film One (copy).mkv"}
     tracks = {t["track_id"].split(":")[1][0]: t for t in service.get_asset(asset)["subtitleTracks"]}
@@ -159,11 +167,12 @@ def test_new_sidecar_requeues_only_subtitles_and_replaces_its_text(tmp_path: Pat
     sidecar = library / "Film One.fa.vtt"
     sidecar.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nکاملاً متن تازه\n", encoding="utf-8")
     summary = service.scan()[0]
-    assert summary["requeued_stages"] == 1
-    assert _states(service, asset) == {"metadata": "COMPLETED", "subtitles": "QUEUED",
-                                       "scenes": "COMPLETED", "keyframes": "COMPLETED"}
+    # subtitles and its dependents only (asr, semantic); shot detection and keyframes are not touched
+    assert summary["requeued_stages"] == 3
+    assert _states(service, asset) == {"metadata": "COMPLETED", "subtitles": "QUEUED", "asr": "QUEUED",
+                                       "semantic": "QUEUED", "scenes": "COMPLETED", "keyframes": "COMPLETED"}
     report = service.index(max_seconds=120)
-    assert report["completed"] == [f"{asset}/subtitles"]
+    assert report["completed"] == [f"{asset}/subtitles", f"{asset}/asr"]  # asr: a skip (subtitles present)
     assert service.search_dialogue("نخواستم", mode="exact")["results"] == []
     assert service.search_dialogue("متن تازه", mode="exact")["results"][0]["startMs"] == 1_000
     service.close()
@@ -219,7 +228,11 @@ def test_file_changed_after_hashing_never_feeds_the_old_asset(tmp_path: Path, ba
     row = service.store.db.execute("SELECT status, asset_id FROM files").fetchone()
     assert tuple(row) == ("pending_identity", None)
     report = service.index(max_seconds=120)
-    assert report["hashed"] == 1 and len(report["completed"]) == 4
+    assert report["hashed"] == 1
+    new_asset = next(row[0] for row in service.store.db.execute("SELECT asset_id FROM assets WHERE asset_id != ?",
+                                                                   (asset,)))
+    assert sorted(report["completed"]) == sorted(f"{new_asset}/{s}" for s in ("metadata", "subtitles", "asr",
+                                                                              "scenes", "keyframes"))
     assert _states(service, asset)["metadata"] == "QUEUED"  # the old hash got nothing
     service.close()
 
@@ -459,7 +472,8 @@ def test_status_lists_pending_capabilities_honestly(tmp_path: Path, base_video: 
     status = service.status()
     pending = {item["capability"]: item["status"] for item in status["pending"]}
     assert pending["visual_embeddings"] == "decision_pending"
-    assert pending["actions_motion"] == "not_supported" and pending["asr"] == "pending"
+    assert pending["actions_motion"] == "not_supported" and pending["asr"] == "implemented_unverified"
+    assert pending["semantic_dialogue"] == "implemented_unverified" and pending["topics"] == "deferred"
     assert status["stages"]["keyframes"] == {"COMPLETED": 1} and status["toolsAvailable"]
     service.close()
 
