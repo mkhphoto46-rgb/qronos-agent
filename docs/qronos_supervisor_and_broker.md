@@ -217,9 +217,13 @@ desktop (Tauri start_runtime)
 1. **Startup.** `start_runtime` (`desktop/src-tauri/src/runtime/mod.rs`)
    launches the closed `Service::Supervisor` command (`backend.rs`: bundled
    executable, fixed words `supervisor --desktop`). It runs as the signed-in
-   user and is never elevated. Stop and app exit send `shutdown`, wait at
+   user and is never elevated. It is created suspended, made a member of a
+   desktop-owned Job Object (no limits: it never kills) and then resumed, so
+   every descendant is in that Job. Stop and app exit send `shutdown`, wait at
    most 5 s, then kill the supervisor. Its kill-on-close Job Object then
-   ends the bridge as well.
+   ends the bridge as well. A stop counts as done only when the supervisor
+   exited AND the desktop's Job has no live process (at most 10 s more);
+   otherwise the Job is kept as busy ownership and a new start is refused.
 2. **Supervisor.** The supervisor owns the bridge's pipes. The first stdin
    line is the bootstrap, and then the desktop's lines are relayed. Relayed
    content is not parsed, logged or echoed in any event, apart from
@@ -450,7 +454,9 @@ The update CLI is registered in the desktop backend as `Service::Update`, for
 one-shot reads and approval steps only. One-shot IPC never runs `launch`,
 because it waits for and kills its child. The desktop hand-over launch path,
 which reads one line, never kills the guard and keeps it out of any
-kill-on-close Job, is a later, gated contract.
+kill-on-close Job, is `runtime/lifecycle.rs` (see local-update-packages.md,
+"Wiring by other owners"); the launch itself stays refused at its enablement
+point until independent acceptance.
 
 ## Tests (fixtures only)
 
