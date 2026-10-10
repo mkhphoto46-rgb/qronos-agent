@@ -166,28 +166,57 @@ single place a future path-scoped rule would apply.
 
 - **Sidecars:** each one is admitted separately. Its copy is admitted again
   with a fresh gate answer, the sidecar itself is admitted, and pause, Stop,
-  the deadline and permission are checked uncached first. This happens twice
-  per sidecar: before the hash and again before the read or decode, because
-  those are two separate opens.
+  the deadline and permission are checked uncached first. This happens
+  before the hash, again before the read, and for ASS/SSA once more right
+  before ffmpeg is started, because each is a separate open or handoff.
 - **Size limit:** a sidecar larger than 16 MiB (SRT, VTT, ASS or SSA) is
   refused from its size alone, before any hash, read or ffmpeg spawn.
 - **Hashing:** the sidecar's identity hash streams through `full_sha256` with
   the stage's cancellation. Pause, Stop, the deadline, revocation and lease
   loss stop it between chunks and requeue the stage.
-- **Hash byte bound (round 9):** the hash read itself is bounded by
-  `full_sha256(..., limit=16 MiB)`. No read ever asks for a byte past
-  16 MiB + 1. A sidecar that grew after its size check, at the hash or during
+- **Hash byte bound (round 9; raw reads round 13):** the hash read itself is
+  bounded by `full_sha256(..., limit=16 MiB)`. No hash read request asks for a
+  byte past 16 MiB + 1, and the bytes consumed are at most 16 MiB + 1. Since
+  round 13 the bounded hash and the bounded read use the unbuffered file
+  beneath `open()`, so for a real file the operating system is not asked past
+  16 MiB + 1 either (before, one 8 KiB read-ahead buffer could go beyond it;
+  those bytes were never hashed). This is measured at the raw file-object
+  level; nothing is claimed about caching below it. A sidecar that grew after
+  its size check, at the hash or during
   it, is refused there as a failed track ("too large: grew past ... while
   hashed"), with no parse read and no ffmpeg run. The stage still completes.
   The size check after the hash is only a second check. Video asset identity
   passes no limit and is still a full hash.
-- **Reading:** SRT and VTT are then read in 256 KiB chunks, at most 16 MiB,
-  with the same cancellation. The bytes read must hash to the same digest, so
-  the stored sidecar hash is of exactly the bytes parsed. A file that changes
-  between the hash and the read, or while it is read (size, mtime or file id),
-  is recorded as a failed track.
-- **ASS/SSA:** decoded by ffmpeg only after the same size check and hash, with
-  bounded output.
+- **Reading:** every sidecar (SRT, VTT, ASS and SSA) is then read in 256 KiB
+  chunks, at most 16 MiB, with the same cancellation. The bytes read must hash
+  to the same digest, so the stored sidecar hash is of exactly the bytes used;
+  a substitution is refused by content even when size, mtime and file id are
+  unchanged. A file that changes between the hash and the read, or while it is
+  read, or whose size, mtime or file id differ at the end, is recorded as a
+  failed track.
+- **ASS/SSA (round 13):** ffmpeg never opens the user's sidecar. It decodes a
+  private copy of exactly the verified bytes, created new under
+  `<cache>/subtitle-input/sub-<random>.ass|ssa`; the name never contains the
+  user's file name. On Windows that copy is held open with read-only sharing
+  until ffmpeg has finished, so no other process can write, truncate, rename
+  or delete it meanwhile; Windows also refuses to rename or delete the folders
+  above it while it is held, so the path ffmpeg opens by name cannot be
+  rebound to another file (tested on this machine). The handle's final path
+  must be the intended one, and the path is checked for links again before
+  use. The copy is re-read and re-hashed through that handle before ffmpeg
+  starts and after it ends. Only once the copy is ready is the original
+  admitted again with a fresh gate answer, immediately before ffmpeg starts,
+  so a refusal that lands while the copy is prepared stops it. Afterwards the
+  copy is deleted through a handle whose file identity must match, so a
+  different file that took its name is never deleted (that is reported as a
+  failure, not hidden). Copies left by a crash are removed at the start of the
+  next subtitles stage; one still held open by a live owner is skipped and
+  counted, never forced. Same-user limit: another program of the same user
+  can read the copy, but cannot change it or rebind its path while ffmpeg may
+  read it. The decoder keeps
+  its usual limits (file-only protocol, the `ass` demuxer, the Job object,
+  bounded output). Until round 13 ffmpeg reopened the sidecar by name after the
+  hash, so a file that grew in between could reach it; that is repaired.
 - **Decoder spawns:** every embedded subtitle extraction, every scene chunk
   and every keyframe opens its copy again through a fresh admission.
 - **Refusals:** a refusal at any of these handoffs requeues the stage with
