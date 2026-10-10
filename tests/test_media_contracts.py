@@ -297,20 +297,42 @@ def test_media_modules_have_no_network_path(module: Path) -> None:
     assert network_findings(module.read_text(encoding="utf-8")) == {}
 
 
+#: Modules that may use the process API at all: the tool runner and its job containment.
+PROCESS_MODULES = {"containment.py", "tools.py"}
+#: Native (ctypes) use that is NOT process creation, each with what it is for.
+NATIVE_METADATA_MODULES = {
+    "containment.py": "Job objects: limits, adoption of the suspended child, teardown, accounting, exit proof.",
+    "decoder_copy.py": "File handles that pin and identify the verified private decoder copy (reviewed boundary).",
+}
+#: Native process creation is never reached through ctypes anywhere in the package.
+NATIVE_SPAWN_NAMES = {"CreateProcessW", "CreateProcessA", "CreateProcessAsUserW", "ShellExecuteW", "ShellExecuteExW",
+                      "WinExec"}
+
+
 def test_only_the_tool_runner_starts_processes_and_never_through_a_shell() -> None:
-    spawners = []
+    process_users, native_users, popen_sites = set(), set(), set()
     for module in MEDIA_MODULES:
-        tree = ast.parse(module.read_text(encoding="utf-8"))
+        source = module.read_text(encoding="utf-8")
+        tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = [alias.name for alias in node.names] + [getattr(node, "module", None) or ""]
-                if any(name.split(".")[0] in {"subprocess", "ctypes", "multiprocessing"} for name in names):
-                    spawners.append(module.name)
+                if any(name.split(".")[0] in {"subprocess", "multiprocessing"} for name in names):
+                    process_users.add(module.name)
+                if any(name.split(".")[0] == "ctypes" for name in names):
+                    native_users.add(module.name)
             if isinstance(node, ast.keyword) and node.arg == "shell":
                 assert isinstance(node.value, ast.Constant) and node.value.value is False
             if isinstance(node, ast.Attribute) and node.attr in {"system", "startfile", "popen"}:
                 assert not (isinstance(node.value, ast.Name) and node.value.id == "os"), module.name
-    assert sorted(set(spawners)) == ["containment.py", "tools.py"]
+            if isinstance(node, ast.Attribute) and node.attr == "Popen":
+                popen_sites.add(module.name)
+            if isinstance(node, (ast.Attribute, ast.Name)) and getattr(node, "attr", getattr(node, "id", "")) \
+                    in NATIVE_SPAWN_NAMES:
+                raise AssertionError(f"{module.name} reaches native process creation")
+    assert process_users == PROCESS_MODULES
+    assert popen_sites <= {"tools.py", "containment.py"} and "tools.py" in popen_sites
+    assert native_users == set(NATIVE_METADATA_MODULES)
 
 
 # -------------------------------------------------------------------- cli
