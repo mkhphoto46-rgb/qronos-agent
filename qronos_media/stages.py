@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import time
 from typing import Callable
 
 from qronos_media.decoder_copy import sweep_stale_inputs, verified_decoder_input
@@ -27,13 +28,16 @@ from qronos_media.identity import FileState, HashCancelled, HashLimitExceeded, c
 from qronos_media.paths import UnsafeMediaPath, owned_child, readable_media_file
 from qronos_media.scope import OutOfScope, admit_sidecar
 from qronos_media.probe import ProbeResult, probe
-from qronos_media.resources import StageNeeds
+from qronos_media import asr
+from qronos_media.resources import WHISPER_LARGE_V3_TURBO_Q5_0, ResourceRefused, StageNeeds
 from qronos_media.subtitles import (
     IMAGE_SUBTITLE_CODECS, MAX_SUBTITLE_BYTES, TEXT_SUBTITLE_CODECS, Cue, SubtitleError, decode_subtitle_bytes,
     find_sidecars, parse_srt, parse_subtitle_text,
 )
 from qronos_media.text import normalise_for_search
-from qronos_media.tools import ASS_DEMUXERS, ChildCancelled, MediaTools, MediaToolUnavailable, run_bounded
+from qronos_media.tools import (
+    ASS_DEMUXERS, ChildCancelled, ChildTerminationUnproven, MediaTools, MediaToolUnavailable, run_bounded,
+)
 
 
 class StageFailed(RuntimeError):
@@ -54,6 +58,9 @@ STAGES: dict[str, StageSpec] = {
     for spec in (
         StageSpec("metadata", 1, (), 0, StageNeeds("metadata")),
         StageSpec("subtitles", 1, ("metadata",), 1, StageNeeds("subtitles", disk_bytes=64 * 1024**2)),
+        # Model-bearing: only the runtime-issued HostedModelAuthority grants it (never the standalone CLI).
+        StageSpec("asr", asr.ASR_VERSION, ("subtitles",), 1,
+                  StageNeeds("asr", disk_bytes=256 * 1024**2, model=WHISPER_LARGE_V3_TURBO_Q5_0)),
         StageSpec("scenes", 1, ("metadata",), 3, StageNeeds("scenes")),
         StageSpec("keyframes", 1, ("scenes",), 3, StageNeeds("keyframes", disk_bytes=256 * 1024**2)),
     )
@@ -62,9 +69,13 @@ STAGES: dict[str, StageSpec] = {
 # Handoff capabilities that do not exist yet. Status reports them so nobody
 # mistakes an empty result for "nothing there".
 PENDING_CAPABILITIES: tuple[dict[str, object], ...] = (
-    {"capability": "asr", "level": 1, "status": "pending",
-     "reason": "Speech recognition for files without subtitles needs a chunked, timestamped whisper.cpp media path "
-               "and a cross-process model lease with the Qronos governor."},
+    {"capability": "asr", "level": 1, "status": "implemented_unverified",
+     "reason": "whisper.cpp large-v3-turbo q5_0 transcribes files without subtitles, only inside the Qronos runtime "
+               "(shared governor and ledger) and only when the pinned whisper assets are provisioned; the standalone "
+               "tool never runs it. Output is unverified, uncalibrated machine text; no accuracy is claimed and no "
+               "real-model run has been accepted."},
+    {"capability": "subtitle_asr_fusion", "level": 1, "status": "pending",
+     "reason": "Agreement/uncertainty labels between subtitles and ASR (handoff s9) are not implemented."},
     {"capability": "semantic_dialogue", "level": 2, "status": "pending",
      "reason": "BGE-M3 text embeddings need a batch/lease contract with the existing CPU sidecar."},
     {"capability": "visual_embeddings", "level": 3, "status": "decision_pending",
@@ -127,6 +138,8 @@ class StageContext:
     #: Re-admission of a copy right before a decoder opens it (scope and a
     #: fresh gate answer for its root). Production always sets it; None refuses.
     admit: Callable[[Path], Path] = None  # type: ignore[assignment]
+    #: The lease this stage runs under (a model stage needs the runtime-issued ModelLease).
+    lease: Callable[[], object] = lambda: None
 
     def checkpoint_boundary(self) -> None:
         if self.interrupted():
@@ -615,9 +628,127 @@ def run_keyframes(ctx: StageContext) -> Commit:
     return lambda db: None
 
 
+# ----------------------------------------------------------------------- asr
+
+def run_asr(ctx: StageContext) -> Commit:
+    """Chunked whisper.cpp transcription of one chosen audio stream (see :mod:`qronos_media.asr`)."""
+    from core.config import CONFIG
+    from qronos_media.model_authority import ModelLease
+
+    lease = ctx.lease()
+    if not isinstance(lease, ModelLease) or lease.spec is not WHISPER_LARGE_V3_TURBO_Q5_0:
+        raise ResourceRefused("model_lease_required", "asr")
+    if asr.skip_reason(ctx.db, ctx.asset_id) is not None:
+        # Decided again under the lease: subtitle evidence is never overwritten.
+        return _asr_cleared(ctx.asset_id)
+    assets = asr.locate_whisper(CONFIG.paths.runtime_assets)  # AsrUnavailable: nothing starts
+    tools = ctx.require_tools()
+    choice = asr.choose_audio(ctx.db, ctx.asset_id)
+    asset_sha = ctx.asset()["sha256"]
+    key = asr.plan_key(asset_sha, choice, assets)
+    stored = {row["chunk_index"]: row for row in ctx.db.execute(
+        "SELECT chunk_index, segments_json, child_json FROM asr_chunks WHERE asset_id = ? AND plan_key = ? "
+        "ORDER BY chunk_index", (ctx.asset_id, key))}
+    chunks: list[tuple[int, list]] = []
+    index, eof = 0, False
+    while index in stored:  # resume: reuse every finished chunk, transcribe none twice
+        row = stored[index]
+        chunks.append((index, [tuple(s) for s in json.loads(row["segments_json"])]))
+        eof = bool(json.loads(row["child_json"]).get("eof"))
+        index += 1
+        if eof:
+            break
+    video = ctx.primary_file()
+    while not eof:
+        if index >= asr.MAX_CHUNKS:
+            raise StageFailed("audio did not end within the chunk limit")
+        ctx.checkpoint_boundary()
+        ctx.renew()
+        wav, out_base, out_json = asr.owned_paths(ctx.cache_dir, ctx.asset_id, index)
+        try:
+            video = ctx.reopen(video)  # each chunk is a new decoder open: admitted again now
+            start_ms = choice.offset_ms + index * asr.CHUNK_MS
+            extracted = run_bounded(
+                asr.launcher(tools.audio_chunk_argv(video, stream_index=choice.stream_index,
+                                                    start_seconds=start_ms / 1000.0,
+                                                    length_seconds=asr.CHUNK_MS / 1000.0, output=wav)),
+                timeout_seconds=max(120.0, asr.CHUNK_MS / 1000.0), stdout_limit=64 * 1024,
+                stderr_limit=256 * 1024, cancelled=ctx.cancelled, env=tools.child_env(),
+            )
+            if extracted.returncode != 0 or not wav.is_file():
+                raise StageFailed(f"audio extraction failed for chunk {index}")
+            length = asr.wav_duration_ms(wav)
+            segments: list = []
+            child_info: dict = {"eof": length < asr.CHUNK_MS - asr.CHUNK_EOF_SLACK_MS, "lengthMs": length}
+            if length > 0:
+                try:
+                    result = run_bounded(
+                        asr.launcher(asr.whisper_argv(assets, wav, out_base, asr.whisper_language(choice.language))),
+                        timeout_seconds=max(300.0, length / 1000.0 * 10.0), stdout_limit=1024 * 1024,
+                        stderr_limit=1024 * 1024, cancelled=ctx.cancelled, env=asr.whisper_env(assets),
+                        limits=asr.ASR_CHILD_LIMITS, observer=lease,
+                    )
+                except ChildTerminationUnproven:
+                    raise ResourceRefused("termination_unproven", f"asr chunk {index}") from None
+                if result.returncode != 0 or not out_json.is_file():
+                    raise StageFailed(f"speech recognition failed for chunk {index} (exit {result.returncode})")
+                segments = asr.parse_whisper_json(out_json.read_bytes(), length)
+                child_info.update({"pid": result.pid, "peakMemoryBytes": result.peak_memory_bytes})
+            eof = bool(child_info["eof"])
+            chunk_row = (ctx.asset_id, key, index, start_ms, length, json.dumps(segments), json.dumps(child_info),
+                         time.time())
+
+            def write(db: sqlite3.Connection, chunk_row: tuple = chunk_row) -> None:
+                db.execute(
+                    "INSERT OR REPLACE INTO asr_chunks(asset_id, plan_key, chunk_index, audio_offset_ms, length_ms, "
+                    "segments_json, child_json, created_at) VALUES (?,?,?,?,?,?,?,?)", chunk_row)
+
+            ctx.checkpoint = {"plan": key, "next_chunk": index + 1, "eof": eof}
+            ctx.save_checkpoint(ctx.checkpoint, write)  # chunk result and checkpoint: one transaction
+            chunks.append((index, segments))
+            index += 1
+        finally:
+            for leftover in (wav, out_json):
+                leftover.unlink(missing_ok=True)
+    rows = asr.build_rows(ctx.asset_id, choice, chunks)
+    record = asr.provenance(asset_sha, choice, assets, key, len(chunks))
+    tid = asr.track_id(ctx.asset_id, choice)
+
+    def commit(db: sqlite3.Connection) -> None:
+        _delete_asr(db, ctx.asset_id)
+        db.execute(
+            "INSERT INTO subtitle_tracks(track_id, asset_id, source, stream_index, language, title, codec, forced, "
+            "encoding, status, detail, cue_count, provenance_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (tid, ctx.asset_id, "asr", choice.stream_index, choice.language, "ASR (unverified)", "whisper.cpp", 0,
+             "utf-8", "indexed", record["label"], len(rows), json.dumps(record, sort_keys=True)),
+        )
+        db.executemany(
+            "INSERT INTO dialogue(asset_id, track_id, kind, seq, start_ms, end_ms, text, norm_text) "
+            "VALUES (?,?,?,?,?,?,?,?)", rows)
+
+    return commit
+
+
+def _delete_asr(db: sqlite3.Connection, asset_id: str) -> None:
+    """Only this asset's ASR track and rows; subtitle evidence is never touched."""
+    db.execute("DELETE FROM dialogue WHERE track_id IN "
+               "(SELECT track_id FROM subtitle_tracks WHERE asset_id = ? AND source = 'asr')", (asset_id,))
+    db.execute("DELETE FROM subtitle_tracks WHERE asset_id = ? AND source = 'asr'", (asset_id,))
+
+
+def _asr_cleared(asset_id: str) -> Commit:
+    return lambda db: _delete_asr(db, asset_id)
+
+
+#: Stages that decide, before any resource is reserved, that an asset needs nothing now (the skip note).
+SKIPS: dict[str, Callable[[sqlite3.Connection, str], object]] = {"asr": asr.skip_reason}
+#: What a skipped stage removes (rows from an earlier run that no longer apply), in the same transaction.
+SKIP_CLEANUP: dict[str, Callable[[sqlite3.Connection, str], None]] = {"asr": _delete_asr}
+
 RUNNERS: dict[str, Callable[[StageContext], Commit]] = {
     "metadata": run_metadata,
     "subtitles": run_subtitles,
+    "asr": run_asr,
     "scenes": run_scenes,
     "keyframes": run_keyframes,
 }

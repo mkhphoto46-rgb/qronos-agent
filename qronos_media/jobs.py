@@ -40,7 +40,9 @@ from qronos_media.identity import FileState, HashCancelled, asset_id_for, full_s
 from qronos_media.permissions import Approval, MediaPermissionRefused, MediaPermissions
 from qronos_media.resources import MediaResourceAuthority, ResourceRefused, StageNeeds
 from qronos_media.scope import OUT_OF_SCOPE, OutOfScope, admit, load_scopes
-from qronos_media.stages import RUNNERS, STAGES, StageContext, StageFailed, downstream, subtitles_input_fingerprint
+from qronos_media.stages import (
+    RUNNERS, SKIP_CLEANUP, SKIPS, STAGES, StageContext, StageFailed, downstream, subtitles_input_fingerprint,
+)
 from qronos_media.store import MediaStore
 from qronos_media.tools import ChildCancelled, MediaToolError, MediaTools
 
@@ -327,6 +329,10 @@ class Watch:
             self.reason = "cancelled"
         elif clock >= self.deadline:
             self.reason = "time_budget"
+        elif (yielded := _yield_reason(runner.authority)) is not None:
+            # The hosted authority's cheap check: the assistant's foreground turn,
+            # Pause, Stop/shutdown/revocation or gaming/creator load.
+            self.reason = f"deferred:{yielded}"
         elif self.roots and not self.roots <= runner.allowed_roots(max_age=REVOCATION_CHECK_SECONDS):
             self.reason = "permission"
         elif clock - self._renewed >= LEASE_RENEW_SECONDS:
@@ -345,6 +351,32 @@ class Watch:
             return False
         self._last = clock
         return self.now()
+
+
+#: Refusals that will not change by waiting (no authority may grant this stage here, or its assets are not
+#: provisioned as pinned): the stage stays QUEUED with the reason and the run carries on with other work.
+UNAVAILABLE_REASONS = frozenset({
+    "requires_qronos_governor", "requires_trusted_model_authority", "gpu_lease_contract_pending",
+    "undeclared_model", "model_lease_required", "model_unavailable",
+})
+
+
+def backfill_stages(db: sqlite3.Connection, now: float | None = None) -> int:
+    """Queue stages added since an asset was hashed (for example ``asr``). Inside a write transaction."""
+    now = time.time() if now is None else now
+    added = 0
+    for name, spec in STAGES.items():
+        added += db.execute(
+            "INSERT INTO stages(asset_id, stage, version, state, queued_at) SELECT a.asset_id, ?, ?, 'QUEUED', ? "
+            "FROM assets a WHERE NOT EXISTS (SELECT 1 FROM stages s WHERE s.asset_id = a.asset_id AND s.stage = ?)",
+            (name, spec.version, now, name),
+        ).rowcount
+    return added
+
+
+def _yield_reason(authority: object) -> str | None:
+    check = getattr(authority, "yield_reason", None)
+    return check() if callable(check) else None
 
 
 class StageRunner:
@@ -518,7 +550,7 @@ class StageRunner:
 
     # ---- stage work
 
-    def _next_stage(self, skip: set[str]) -> sqlite3.Row | None:
+    def _next_stage(self, skip: set[str], skip_pairs: frozenset | set = frozenset()) -> sqlite3.Row | None:
         clause, params = self._roots_sql()
         rows = self.db.execute(
             "SELECT s.asset_id, s.stage, s.checkpoint FROM stages s JOIN assets a ON a.asset_id = s.asset_id "
@@ -531,7 +563,7 @@ class StageRunner:
         states_by_asset: dict[str, dict[str, str]] = {}
         for row in rows:
             spec = STAGES.get(row["stage"])
-            if spec is None or row["asset_id"] in skip:
+            if spec is None or row["asset_id"] in skip or (row["asset_id"], row["stage"]) in skip_pairs:
                 continue
             states = states_by_asset.setdefault(row["asset_id"], {
                 r["stage"]: r["state"] for r in self.db.execute(
@@ -551,7 +583,10 @@ class StageRunner:
             return report
         if not self._hash_pending(deadline, report):
             return report
+        with self.store.transaction() as db:
+            backfill_stages(db, self.clock())
         skip: set[str] = set()
+        skip_pairs: set[tuple[str, str]] = set()
         while len(report.completed) + len(report.failed) < max_stages:
             if self.monotonic() >= deadline:
                 report.stopped = "time_budget"
@@ -559,11 +594,14 @@ class StageRunner:
             if self.paused():
                 report.stopped = "paused"
                 return report
-            row = self._next_stage(skip)
+            row = self._next_stage(skip, skip_pairs)
             if row is None:
                 report.stopped = "idle"
                 return report
             outcome = self._run_one(row["asset_id"], row["stage"], row["checkpoint"], report, deadline)
+            if outcome == "unavailable":
+                skip_pairs.add((row["asset_id"], row["stage"]))
+                continue
             if outcome in {"deferred", "stop"}:
                 return report
             if outcome in {"identity_changed", "no_verified_file", "cancelled", "refused"}:
@@ -593,9 +631,30 @@ class StageRunner:
             report.identity_changed.append(key)
             return "no_verified_file"
         task = f"media:{stage}:{asset_id}"
+        skip_check = SKIPS.get(stage)
+        skipped = skip_check(self.db, asset_id) if skip_check is not None else None
+        if skipped:
+            # Nothing to do for this asset (for ASR: subtitles exist, or no audio). Completed without any
+            # resource reservation; the stage's own cleanup removes rows that no longer apply.
+            with self.store.transaction() as db:
+                db.execute(
+                    "UPDATE stages SET state = 'COMPLETED', finished_at = ?, checkpoint = NULL, note = ?, error = NULL "
+                    "WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
+                    (self.clock(), f"skipped:{skipped}", asset_id, stage))
+                cleanup = SKIP_CLEANUP.get(stage)
+                if cleanup is not None:
+                    cleanup(db, asset_id)
+            report.completed.append(key)
+            return "completed"
         try:
             lease = self.authority.reserve(task, spec.needs)
         except ResourceRefused as exc:
+            if exc.reason in UNAVAILABLE_REASONS:
+                with self.store.transaction() as db:
+                    db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
+                               (f"unavailable:{exc.reason}", asset_id, stage))
+                report.refused.append(f"{key}:{exc.reason}")
+                return "unavailable"
             report.stopped, report.detail = "deferred", str(exc)
             return "deferred"
         holder = [lease]
@@ -610,8 +669,16 @@ class StageRunner:
                     (self.clock(), asset_id, stage),
                 )
 
-            def save(data: dict) -> None:
+            def save(data: dict, write: Callable[[sqlite3.Connection], None] | None = None) -> None:
+                # ``write`` (chunk results) commits in the SAME transaction as the checkpoint.
                 with self.store.transaction() as db:
+                    if write is not None:
+                        running = db.execute(
+                            "SELECT 1 FROM stages WHERE asset_id = ? AND stage = ? AND state = 'RUNNING'",
+                            (asset_id, stage)).fetchone()
+                        if running is None:  # cancelled elsewhere: no chunk result outlives its job
+                            raise _Superseded()
+                        write(db)
                     db.execute("UPDATE stages SET checkpoint = ? WHERE asset_id = ? AND stage = ? AND state = 'RUNNING'",
                                (json.dumps(data), asset_id, stage))
 
@@ -626,6 +693,7 @@ class StageRunner:
                 interrupted=watch.now,
                 excluded=self._excluded,
                 admit=self._admit_now,
+                lease=lambda: holder[0],
             )
             try:
                 commit = RUNNERS[stage](ctx)
@@ -642,6 +710,10 @@ class StageRunner:
                 report.detail = f"refused:{exc.reason}"
                 return "stop"
             except ResourceRefused as exc:
+                if exc.reason in UNAVAILABLE_REASONS:
+                    self._set(asset_id, stage, "QUEUED", note=f"unavailable:{exc.reason}")
+                    report.refused.append(f"{key}:{exc.reason}")
+                    return "unavailable"
                 self._set(asset_id, stage, "QUEUED", note=f"deferred:{exc.reason}")
                 report.stopped, report.detail = "deferred", str(exc)
                 return "deferred"

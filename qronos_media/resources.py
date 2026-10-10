@@ -15,9 +15,14 @@ Both yield to gaming and creator activity: indexing a film is hours of disk
 and decode, which is not "light" from the user's point of view whatever the
 instantaneous readings say. Both keep a disk free-space reserve.
 
-No stage in this package needs the GPU. Later model stages (speech
-recognition, Vision captions, embeddings) need a cross-process lease to the
-backend governor first; until that contract exists they are pending.
+A stage that runs a model (speech recognition today; embeddings and Vision
+captions later) is *model-bearing*, whatever device it uses: a CPU whisper
+run still takes gigabytes and competes with the assistant's own voice turn.
+Neither authority above grants one. Only the runtime-owned
+:class:`qronos_media.model_authority.HostedModelAuthority`, which the product
+bridge issues from its own governor and ledger, does. A model stage names one
+of the declared :data:`DECLARED_MODELS` objects; a caller cannot ask for a
+model or a memory size of its own.
 """
 from __future__ import annotations
 
@@ -40,10 +45,55 @@ _YIELD_MODES = frozenset({
 
 
 @dataclass(frozen=True)
+class ModelAsset:
+    """A provisioned file, checked read-only by size and SHA-256 before any use (never executed here)."""
+
+    parts: tuple[str, ...]          # below CONFIG.paths.runtime_assets
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True, eq=False)
+class ModelSpec:
+    """One declared model. Compared by identity: only the objects in DECLARED_MODELS exist."""
+
+    name: str
+    vram_mb: int                    # declared conservative estimate, reserved in the ledger
+    ram_mb: int
+    executable: ModelAsset
+    weights: ModelAsset
+
+
+#: whisper.cpp large-v3-turbo q5_0 through whisper-cli, the same assets as Qronos
+#: voice (core/whisper_cpp_runtime.py paths). The 2 GiB figure is a declared,
+#: conservative profile, not a measured footprint.
+WHISPER_LARGE_V3_TURBO_Q5_0 = ModelSpec(
+    name="whisper.cpp/ggml-large-v3-turbo-q5_0",
+    vram_mb=2048,
+    ram_mb=2048,
+    executable=ModelAsset(("whisper", "bin", "Release", "whisper-cli.exe"), 489_984,
+                          "8df0133301fcab305a3ff56b3cda5915560679c760fb3182df920a9097116bcd"),
+    weights=ModelAsset(("whisper", "models", "ggml-large-v3-turbo-q5_0.bin"), 574_041_195,
+                       "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"),
+)
+
+DECLARED_MODELS: tuple[ModelSpec, ...] = (WHISPER_LARGE_V3_TURBO_Q5_0,)
+
+
+def is_declared(model: object) -> bool:
+    return any(model is declared for declared in DECLARED_MODELS)
+
+
+@dataclass(frozen=True)
 class StageNeeds:
     stage: str
     gpu: bool = False
     disk_bytes: int = 0
+    model: ModelSpec | None = None
+
+    @property
+    def model_bearing(self) -> bool:
+        return self.model is not None or self.gpu
 
 
 @dataclass(frozen=True)
@@ -111,7 +161,8 @@ class StandaloneCpuAuthority:
         self.clock = clock
 
     def reserve(self, task_id: str, needs: StageNeeds) -> Lease:
-        if needs.gpu:
+        if needs.model_bearing:
+            # CPU-only is not model-free: a model run needs the runtime's shared admission.
             raise ResourceRefused("requires_qronos_governor", needs.stage)
         _common_checks(needs, self.activity, self.disk_root, self.reserve_bytes)
         return Lease(task_id, self.clock(), None)
@@ -145,9 +196,11 @@ class GovernorAuthority:
 
     def reserve(self, task_id: str, needs: StageNeeds) -> Lease:
         if needs.gpu:
-            # A model stage must declare its model and VRAM to the governor's
-            # model slot logic; that contract is not defined yet.
+            # An undeclared GPU lease has no contract at all.
             raise ResourceRefused("gpu_lease_contract_pending", needs.stage)
+        if needs.model_bearing:
+            # Declared model stages go through the runtime-issued HostedModelAuthority only.
+            raise ResourceRefused("requires_trusted_model_authority", needs.stage)
         mode, pressure = _common_checks(needs, self.activity, self.disk_root, self.reserve_bytes)
         grant = self.governor.request(task_id, self._light, activity_mode=mode, resource_pressure=pressure)
         if not grant.granted or grant.reservation is None:
