@@ -134,7 +134,18 @@ if os.name == "nt":
             if handle is None or handle == _INVALID_HANDLE:
                 raise _fail("create")
             self._handle = handle
-            self.identity = _identity_of(handle)
+            try:
+                self.identity = _identity_of(handle)
+            except OSError as exc:
+                # Without its identity the new file cannot be deleted by identity, and deleting it by name could
+                # remove a file that took its name. So the handle is closed (never leaked) and the empty file
+                # is left to the bounded, identity-bound sweep (sweep_stale_inputs).
+                self.close()
+                raise DecoderInputError("decoder input: the new copy could not be identified; its handle was "
+                                        "closed and the empty file is left for the bounded sweep") from exc
+            except BaseException:
+                self.close()
+                raise
 
         def write_all(self, data: bytes) -> None:
             view = memoryview(data)
