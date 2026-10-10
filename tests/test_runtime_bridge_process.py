@@ -37,8 +37,9 @@ def private_profile_has_local_appdata(isolate_qronos_storage_profile, tmp_path: 
     tests/conftest.py points USERPROFILE at a private folder of this test that does not exist yet. A
     source-mode child bridge with store overrides resolves Windows' known <Local AppData> for its own token
     (core/startup_admission._known_local_appdata, SHGetKnownFolderPath), which expands that redirected
-    profile and fails while <profile>\\AppData\\Local is missing; start-up then refuses "store", as it
-    must. Create exactly that private folder. Production admission, the known-folder binding and every
+    profile and fails while that profile has no Local application-data folder; start-up then refuses
+    "store", as it must. Create exactly that private folder (below, under the redirected profile).
+    Production admission, the known-folder binding and every
     assertion here are unchanged.
     """
     profile = Path(os.environ["USERPROFILE"])
