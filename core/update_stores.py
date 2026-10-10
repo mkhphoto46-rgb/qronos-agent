@@ -90,6 +90,12 @@ STORES: tuple[StoreSpec, ...] = (
               "e6ff36875df600dcdf2ce936a7ba54cacfccb34616c2b404acc99332a933442e"),
     StoreSpec("web_friction", 1, "unversioned:core.web_friction", None, "Web friction memory (SQLite)",
               "be006f4135bd470f1da242fe441258599bf21f00530d4fa774573983ec670249"),
+    # The media index is rebuildable from the user's files but is never copied raw: a package that changes its
+    # format is refused (unsupported_migration), which is a release compatibility gate, not rollback support.
+    # Schema 2 code still reads (and migrates forward, once) a schema-1 file.
+    StoreSpec("media_index", 2, "qronos_media.store:SCHEMA_VERSION", None, "Media index (SQLite)",
+              "da32f1d1b120ed86585f184fe0b6903c2196e4a9ee526bb071adc82ddc9974ef", reads_from=1,
+              relocation_env=("QRONOS_MEDIA_DATA_DIR",)),
 )
 
 STORE_BY_ID = {spec.store_id: spec for spec in STORES}

@@ -13,6 +13,13 @@ is ever edited in place.
 
 Search opens the file read-only, so querying never needs the indexing stack
 and never takes the writer lock (handoff s35).
+
+Schema 2 adds speech-recognition dialogue. A track's ``source`` may be
+``asr``; its ``provenance_json`` records the model, the asset SHA-256, the
+audio stream, the language and that the text is unverified and uncalibrated.
+``asr_chunks`` holds each finished chunk's segments with the stage checkpoint,
+so a resumed run never transcribes a chunk twice. A schema-1 file is migrated
+forward once, in one transaction; a newer file is refused untouched.
 """
 from __future__ import annotations
 
@@ -21,7 +28,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -95,7 +102,7 @@ CREATE TABLE IF NOT EXISTS streams (
 CREATE TABLE IF NOT EXISTS subtitle_tracks (
     track_id TEXT PRIMARY KEY,
     asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
-    source TEXT NOT NULL CHECK (source IN ('embedded', 'sidecar')),
+    source TEXT NOT NULL CHECK (source IN ('embedded', 'sidecar', 'asr')),
     stream_index INTEGER,
     sidecar_path TEXT,
     sidecar_sha256 TEXT,
@@ -106,9 +113,22 @@ CREATE TABLE IF NOT EXISTS subtitle_tracks (
     encoding TEXT,
     status TEXT NOT NULL CHECK (status IN ('indexed', 'unsupported_image', 'failed')),
     detail TEXT,
-    cue_count INTEGER NOT NULL DEFAULT 0
+    cue_count INTEGER NOT NULL DEFAULT 0,
+    provenance_json TEXT
 );
 CREATE INDEX IF NOT EXISTS tracks_by_asset ON subtitle_tracks(asset_id);
+
+CREATE TABLE IF NOT EXISTS asr_chunks (
+    asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+    plan_key TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    audio_offset_ms INTEGER NOT NULL,
+    length_ms INTEGER NOT NULL,
+    segments_json TEXT NOT NULL,
+    child_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (asset_id, plan_key, chunk_index)
+);
 
 CREATE TABLE IF NOT EXISTS dialogue (
     unit_id INTEGER PRIMARY KEY,
@@ -184,6 +204,54 @@ CREATE INDEX IF NOT EXISTS stages_by_state ON stages(state);
 """
 
 
+_MIGRATE_1_TO_2 = (
+    """CREATE TABLE subtitle_tracks_v2 (
+    track_id TEXT PRIMARY KEY,
+    asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK (source IN ('embedded', 'sidecar', 'asr')),
+    stream_index INTEGER,
+    sidecar_path TEXT,
+    sidecar_sha256 TEXT,
+    language TEXT,
+    title TEXT,
+    codec TEXT,
+    forced INTEGER NOT NULL DEFAULT 0,
+    encoding TEXT,
+    status TEXT NOT NULL CHECK (status IN ('indexed', 'unsupported_image', 'failed')),
+    detail TEXT,
+    cue_count INTEGER NOT NULL DEFAULT 0,
+    provenance_json TEXT
+)""",
+    "INSERT INTO subtitle_tracks_v2 (track_id, asset_id, source, stream_index, sidecar_path, sidecar_sha256, "
+    "language, title, codec, forced, encoding, status, detail, cue_count) SELECT track_id, asset_id, source, "
+    "stream_index, sidecar_path, sidecar_sha256, language, title, codec, forced, encoding, status, detail, "
+    "cue_count FROM subtitle_tracks",
+    "DROP TABLE subtitle_tracks",
+    "ALTER TABLE subtitle_tracks_v2 RENAME TO subtitle_tracks",
+    "CREATE INDEX IF NOT EXISTS tracks_by_asset ON subtitle_tracks(asset_id)",
+)
+
+
+def _migrate_1_to_2(db: sqlite3.Connection) -> None:
+    """Rebuild subtitle_tracks so a track may come from ASR. One transaction; foreign keys checked after."""
+    db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in _MIGRATE_1_TO_2:
+                db.execute(statement)
+            if db.execute("PRAGMA foreign_key_check").fetchall():
+                raise sqlite3.IntegrityError("foreign keys broken by the schema-2 migration")
+            db.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '2') "
+                       "ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+    finally:
+        db.execute("PRAGMA foreign_keys = ON")
+
+
 class StoreTooNew(RuntimeError):
     """The database was written by a newer media index."""
 
@@ -216,6 +284,7 @@ class MediaStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        version = None
         if path.exists():
             # Read the version through a read-only connection first, so a
             # database from a newer build is refused without being touched
@@ -231,6 +300,8 @@ class MediaStore:
         self.db = _connect(path, read_only=False)
         self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA synchronous = NORMAL")
+        if version == 1:
+            _migrate_1_to_2(self.db)
         # executescript commits implicitly, so it runs outside an explicit
         # transaction; every statement in the schema is idempotent.
         self.db.executescript(_SCHEMA)
