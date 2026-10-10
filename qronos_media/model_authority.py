@@ -229,6 +229,10 @@ class HostedModelAuthority:
     process gone. A later media request reuses that one reservation (no second accounting); media never unloads it.
     A sidecar lease under which no inference request was dispatched (``ModelLease.mark_dispatched``) and which
     took over no resident slot is freed at release: the sidecar was never asked to load the model for media.
+
+    While any media model request is ``request_unresolved``, no media model of any kind is admitted until the
+    trusted whole-tree proof resolves it; a proved ``resident`` model coexists with other declared models through
+    the governor and ledger, both accounted.
     """
 
     def __init__(
@@ -324,6 +328,14 @@ class HostedModelAuthority:
         spec = needs.model
         with self._lock:
             self._reconcile_slot(spec.name)
+            # Uncertain in-flight work: while ANY media model request is unresolved (its server work may still be
+            # running), no media model is admitted, another model included. Only the trusted whole-tree proof
+            # (checked by _reconcile_slot) resolves it; a resident model is not uncertain and does not refuse.
+            for name in [n for n, s in self._slots.items() if s.closed and s.state == "request_unresolved"]:
+                self._reconcile_slot(name)
+            unresolved = next((s for s in self._slots.values() if s.closed and s.state == "request_unresolved"), None)
+            if unresolved is not None:
+                raise ResourceRefused("request_unresolved", unresolved.task_id)
             held = self._slots.get(spec.name)
             if held is not None:
                 if held.closed and held.state == "resident":
