@@ -230,6 +230,7 @@ class HostedModelAuthority:
         activity: ActivityReader | None = None,
         reserve_bytes: int = DEFAULT_DISK_RESERVE_BYTES,
         residency: Callable[[], str] | None = None,
+        sidecar_lifecycle: Callable[[], str] | None = None,
     ) -> None:
         if token is not _ISSUED:
             raise TypeError("a HostedModelAuthority is issued by the Qronos runtime only")
@@ -245,6 +246,9 @@ class HostedModelAuthority:
         self._paused = paused
         # "loaded" | "unloaded" | "exited" | "unknown" for the memory sidecar's model (never "unloaded" by guess).
         self._residency = residency or (lambda: "unknown")
+        # "tree_exited" only from a trusted contained lifecycle proof of the WHOLE sidecar process tree (its Job
+        # holds no process); anything else is "unknown". The runtime supplies none today, so it stays unknown.
+        self._sidecar_lifecycle = sidecar_lifecycle or (lambda: "unknown")
         self._light = GovernorAuthority(governor, disk_root, activity=self.activity, reserve_bytes=reserve_bytes)
         self._lock = threading.RLock()
         self._slots: dict[str, ModelLease] = {}
@@ -386,11 +390,20 @@ class HostedModelAuthority:
             return
         if slot.spec.served_by == "memory_sidecar":
             try:
-                proof = self._residency()
+                lifecycle = self._sidecar_lifecycle()
             except Exception:  # noqa: BLE001 - an unreadable state is not proof
+                lifecycle = "unknown"
+            if lifecycle == "tree_exited":
+                self._free(slot, proof="sidecar_tree_exited")
+                return
+            if slot.state != "resident":
+                return  # request_unresolved: a negative model list or a closed client connection proves no drain
+            try:
+                proof = self._residency()
+            except Exception:  # noqa: BLE001
                 proof = "unknown"
-            if proof in {"unloaded", "exited"}:
-                self._free(slot, proof=proof)
+            if proof == "unloaded":
+                self._free(slot, proof="model_unloaded")
             return
         self._try_free(slot, teardown=True)
 

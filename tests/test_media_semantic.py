@@ -84,17 +84,23 @@ class State:
 EMBEDDERS: dict[int, semantic.MediaEmbedder] = {}
 
 
+LIFECYCLE: dict[int, list] = {}
+
+
 def authority(tmp_path: Path, state: State | None = None, *, sidecar: FakeSidecar | None = None, owner=OWNER):
     """The runtime-issued authority with the host's ONE embedder as its residency proof (as build_bridge_media_host)."""
     from qronos_media.model_authority import issue_hosted_authority
 
     state = state or State()
+    lifecycle = ["unknown"]  # a test may set "tree_exited" (a trusted contained lifecycle proof)
     embedder = semantic.MediaEmbedder(lambda: owner, transport=sidecar) if sidecar is not None else None
     auth = issue_hosted_authority(governor=ResourceGovernor(read_system=lambda: QUIET, read_gpu=lambda: None),
                                   ledger=ResourceLedger(), disk_root=tmp_path, foreground_busy=lambda: state.foreground,
                                   paused=lambda: state.paused, activity=quiet_activity, reserve_bytes=0,
-                                  residency=embedder.residency if embedder is not None else None)
+                                  residency=embedder.residency if embedder is not None else None,
+                                  sidecar_lifecycle=lambda: lifecycle[0])
     EMBEDDERS[id(auth)] = embedder
+    LIFECYCLE[id(auth)] = lifecycle
     return auth, state
 
 
@@ -265,7 +271,11 @@ def test_a_failed_or_invalid_request_leaves_no_completed_partial_index(tmp_path,
         auth.reserve("media:semantic:again", stages_module.STAGES["semantic"].needs)
     assert refused.value.reason == "request_unresolved"
     assert auth.reconcile() is False  # the model is still loaded: no drain is proven
-    failing.loaded = False
+    failing.loaded = False  # /api/ps is empty: a queued request may simply not be listed yet
+    assert auth.reconcile() is False and len(auth.ledger.active()) == 1
+    with pytest.raises(ResourceRefused):
+        auth.reserve("media:semantic:again", stages_module.STAGES["semantic"].needs)
+    LIFECYCLE[id(auth)][0] = "tree_exited"  # only a contained lifecycle proof of the whole sidecar tree frees it
     assert auth.reconcile() is True and auth.ledger.active() == ()
     assert windows(service, asset_id) == [] and stage(service, asset_id)["state"] == "QUEUED"
     assert service.store.db.execute("SELECT count(*) FROM semantic_cache").fetchone()[0] == 2  # batch 1 cached only
@@ -387,7 +397,9 @@ def test_shared_user_memory_use_never_double_accounts_and_only_exit_proof_frees_
     service.search_semantic("key")
     assert len(auth.ledger.active()) == 1 and auth.reconcile() is False
     assert all(not (c["json"] or {}).get("keep_alive") in ("0", "0s") for c in sidecar.calls)
-    process.running = False  # the owned sidecar process is gone: its memory is gone with it
+    process.running = False  # the server process alone exiting proves nothing: a runner may outlive it
+    assert auth.reconcile() is False and len(auth.ledger.active()) == 1
+    LIFECYCLE[id(auth)][0] = "tree_exited"
     assert auth.reconcile() is True and auth.ledger.active() == () and auth.governor.active() == ()
     released = [e for e in auth.events if e["event"] == "released"]
-    assert released and released[-1]["proof"] == "exited"
+    assert released and released[-1]["proof"] == "sidecar_tree_exited"

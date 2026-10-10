@@ -479,9 +479,20 @@ change requeues it), `MediaService.search_semantic`.
   (new optional `max_bytes` in `core.local_ipc`, default unchanged).
 - **Ownership:** a declared model (`BGE_M3`: CPU, 2048 MiB declared RAM, LIGHT
   managed governor reservation) through the same `HostedModelAuthority` as ASR.
-  There is no child process: the lease ends after the synchronous request
-  returned or failed. Yielding is checked between batches (8 texts); one
-  in-flight batch is bounded by its timeout (30 s).
+  A returned request does not free that memory: the sidecar keeps bge-m3
+  loaded (keep_alive), so the slot stays `resident` with its ledger and
+  governor reservations, and later media requests reuse that one reservation
+  (shared memory-runtime use is never double-counted; media never unloads the
+  model). It is freed when the owned sidecar's `/api/ps` no longer lists
+  bge-m3, or on a trusted contained lifecycle proof of the whole sidecar tree.
+  A failed or timed-out request leaves `request_unresolved`: further media
+  requests are refused, and an empty `/api/ps` does NOT free it (a queued
+  request may not be listed); only the contained lifecycle proof does. The
+  runtime supplies no such lifecycle proof today and the server process merely
+  exiting is not accepted (a runner may outlive it), so after a sidecar exit
+  the reservation stays counted until the bridge restarts. Yielding is checked
+  between batches (8 texts); one in-flight batch is bounded by its timeout
+  (30 s).
 - **Index:** windows of consecutive cues of one track (at most 600 characters
   and 30 s, one cue of overlap) keep the original text, track, seq range and
   times. Vectors go to `semantic_cache` (keyed by model, version, dimension and

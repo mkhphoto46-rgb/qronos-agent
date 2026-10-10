@@ -80,7 +80,7 @@ class MediaEmbedder:
         self._transport = transport or request_json  # tests: a fake HTTP transport only
         self._profile = _fixed_profile()
         self._verified = False
-        self._last_owner: object = None  # the owned sidecar process last used (exit proof for residency)
+        self._last_owner: object = None  # the owned sidecar process last used (diagnostics only; not a proof)
 
     def _owner(self) -> object:
         try:
@@ -93,20 +93,13 @@ class MediaEmbedder:
         return owner
 
     def residency(self) -> str:
-        """Whether the sidecar still holds bge-m3: "loaded", "unloaded", "exited" or "unknown" (never a guess).
+        """Whether the sidecar still lists bge-m3: "loaded", "unloaded" or "unknown" (never a guess).
 
-        "exited": the captured owned process (a psutil identity: pid plus creation time) is gone. "unloaded":
-        the owned sidecar's own /api/ps no longer lists bge-m3. Anything else, including no current owner, is
-        "unknown", which keeps the reservation counted.
+        "unloaded": the owned sidecar's own /api/ps no longer lists bge-m3 (its runner was let go). That frees a
+        RESIDENT slot only; it never proves that a failed or timed-out request has drained (a queued request may
+        not be listed yet). The server process merely exiting is not reported as proof either: its model runner
+        may outlive it. No current owner is "unknown", which keeps the reservation counted.
         """
-        last = self._last_owner
-        is_running = getattr(last, "is_running", None)
-        if callable(is_running):
-            try:
-                if not is_running():
-                    return "exited"
-            except Exception:  # noqa: BLE001
-                return "unknown"
         try:
             owner = self._owner_check()
         except Exception:  # noqa: BLE001
