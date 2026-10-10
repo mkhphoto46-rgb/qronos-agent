@@ -60,8 +60,11 @@ class ModelSpec:
     name: str
     vram_mb: int                    # declared conservative estimate, reserved in the ledger
     ram_mb: int
-    executable: ModelAsset
-    weights: ModelAsset
+    executable: ModelAsset | None = None   # file-provisioned models (whisper.cpp)
+    weights: ModelAsset | None = None
+    weight: str = "heavy"           # governor weight: "heavy" (GPU-capable, one owner) or "light" (CPU)
+    served_by: str = "file"         # "file" (a contained child) or "memory_sidecar" (the existing CPU sidecar)
+    dimension: int = 0              # embedding models: the exact vector length
 
 
 #: whisper.cpp large-v3-turbo q5_0 through whisper-cli, the same assets as Qronos
@@ -77,7 +80,19 @@ WHISPER_LARGE_V3_TURBO_Q5_0 = ModelSpec(
                        "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"),
 )
 
-DECLARED_MODELS: tuple[ModelSpec, ...] = (WHISPER_LARGE_V3_TURBO_Q5_0,)
+#: bge-m3 (F16, 1024 dimensions) served by Qronos's existing CPU-only memory sidecar (core/memory_runtime.py,
+#: 127.0.0.1:11435, num_gpu 0). Media never starts that server; it only uses the runtime's owned one. CPU work
+#: still needs the shared admission: a LIGHT managed reservation plus a declared RAM budget in the ledger.
+BGE_M3 = ModelSpec(
+    name="ollama/bge-m3:latest F16",
+    vram_mb=0,
+    ram_mb=2048,
+    weight="light",
+    served_by="memory_sidecar",
+    dimension=1024,
+)
+
+DECLARED_MODELS: tuple[ModelSpec, ...] = (WHISPER_LARGE_V3_TURBO_Q5_0, BGE_M3)
 
 
 def is_declared(model: object) -> bool:

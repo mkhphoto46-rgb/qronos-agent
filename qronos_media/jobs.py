@@ -383,7 +383,7 @@ class StageRunner:
     def __init__(self, store: MediaStore, *, tools: MediaTools | None, authority: MediaResourceAuthority,
                  permissions: MediaPermissions, cache_dir: Path, cache_quota_bytes: int,
                  excluded: tuple[Path, ...] = (), clock: Callable[[], float] = time.time,
-                 monotonic: Callable[[], float] = time.monotonic) -> None:
+                 monotonic: Callable[[], float] = time.monotonic, embedder: object = None) -> None:
         self.store = store
         self.db = store.db
         self.tools = tools
@@ -399,6 +399,7 @@ class StageRunner:
         self._excluded: tuple[Path, ...] = tuple(excluded) or (cache_dir.parent,)
         self.monotonic = monotonic
         self._watch: Watch | None = None
+        self.embedder = embedder  # the runtime's bge-m3 embedder (semantic stage) or None
 
     def _admit_now(self, path: Path) -> Path:
         """Admit a copy immediately before a decoder opens it: scope, and a fresh gate answer.
@@ -646,6 +647,13 @@ class StageRunner:
                     cleanup(db, asset_id)
             report.completed.append(key)
             return "completed"
+        if getattr(spec.needs.model, "served_by", "") == "memory_sidecar" and self.embedder is None:
+            # No runtime embedder in this process: nothing could run, so no model slot is reserved for it.
+            with self.store.transaction() as db:
+                db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
+                           ("unavailable:model_unavailable", asset_id, stage))
+            report.refused.append(f"{key}:model_unavailable")
+            return "unavailable"
         try:
             lease = self.authority.reserve(task, spec.needs)
         except ResourceRefused as exc:
@@ -694,6 +702,7 @@ class StageRunner:
                 excluded=self._excluded,
                 admit=self._admit_now,
                 lease=lambda: holder[0],
+                embedder=self.embedder,
             )
             try:
                 commit = RUNNERS[stage](ctx)

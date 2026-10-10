@@ -294,8 +294,11 @@ class HostedModelAuthority:
                                             budget=self._budget(vram_mb=spec.vram_mb, ram_mb=spec.ram_mb))
             except DuplicateWorkloadReservation:
                 raise ResourceRefused("model_double_load", spec.name) from None
+            from core.resource_governor import Weight
+
+            weight = Weight.LIGHT if spec.weight == "light" else Weight.HEAVY
             try:
-                grant = self.governor.request(task_id, self._weight, activity_mode=mode, resource_pressure=pressure,
+                grant = self.governor.request(task_id, weight, activity_mode=mode, resource_pressure=pressure,
                                               managed=True)
             except BaseException:
                 self.ledger.release(owned.reservation_id)
