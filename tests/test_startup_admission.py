@@ -106,7 +106,8 @@ def test_the_order_is_ownership_version_barrier_admission_then_stores_once():
     calls: list = []
     service_start(calls, instance=True, version="0.2.0", **scripted(calls))
     assert calls == ["instance", "recover:0.2.0", "admit", "store-opened"]
-    startup_admission.enter("fixture", instance=True, installed=True, windows=True)  # idempotent
+    # idempotent for the SAME root (round 14: re-entry names the root it was admitted on; another root is refused)
+    startup_admission.enter("fixture", instance=True, installed=True, windows=True, data_root=Path("unused"))
     assert calls == ["instance", "recover:0.2.0", "admit", "store-opened"]
 
 

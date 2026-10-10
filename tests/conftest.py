@@ -253,6 +253,19 @@ def isolate_qronos_storage_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 @pytest.fixture(autouse=True)
+def isolate_known_local_appdata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    The start-up order resolves the known-folder ``<Local AppData>\\Qronos`` whenever a store
+    override is set (core/startup_admission.installed_store_target), and every test sets
+    overrides above. Point that known folder at a private folder of this test, so no test ever
+    queries or resolves the real user's Local AppData (child processes do their own seam).
+    """
+    from core import startup_admission
+
+    monkeypatch.setattr(startup_admission, "_known_local_appdata", lambda: tmp_path / "known-local-appdata")
+
+
+@pytest.fixture(autouse=True)
 def isolate_qronos_permission_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

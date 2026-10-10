@@ -74,6 +74,8 @@ MESSAGES = {
     "update_in_progress": "An update is being installed; Qronos starts when it ends.",
     "recovery_failed": "An interrupted update could not be resolved; Qronos does not open its data.",
     "version_unknown": "The running Qronos version is unknown; Qronos does not open its data.",
+    "recovery_pending": "An interrupted update has not been resolved yet; Qronos does not open its data. It is "
+                        "resolved at a start when no other part of Qronos is running.",
     "writers_active": "Another part of Qronos holds its data while an update needs it; nothing was opened.",
     "already_running": "Another Qronos runtime is already running in this Windows session.",
     "ownership_unavailable": "Windows could not establish the runtime's ownership; nothing was opened.",
@@ -112,24 +114,125 @@ STORE_PATH_OVERRIDES = (
 )
 
 
+def _known_local_appdata() -> Path:
+    """
+    This user's Local AppData folder from Windows' known-folder API for this
+    process's own token (``SHGetKnownFolderPath``), the folder the desktop
+    keeps the installed data in (``<Local AppData>\\Qronos``). Tests replace
+    this function with a private folder; nothing else does.
+    """
+    if os.name != "nt":
+        raise OSError("Local AppData is a Windows known folder.")
+    import ctypes
+    import uuid
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                    ("Data4", ctypes.c_ubyte * 8)]
+
+    folder = GUID.from_buffer_copy(uuid.UUID("F1B32785-6FBA-4FCF-9D55-7B8E7F157091").bytes_le)  # FOLDERID_LocalAppData
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    ole32 = ctypes.WinDLL("ole32")
+    shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE,
+                                             ctypes.POINTER(ctypes.c_wchar_p)]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    path = ctypes.c_wchar_p()
+    if shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(path)) != 0 or not path.value:
+        raise OSError("Windows did not report this user's Local AppData folder.")
+    try:
+        return Path(path.value)
+    finally:
+        ole32.CoTaskMemFree(path)
+
+
+def _plain_spelling(text: str) -> str:
+    """Drop Windows' extended-length / device prefixes: \\\\?\\C:\\x and \\\\.\\C:\\x are C:\\x."""
+    for prefix in ("\\\\?\\UNC\\", "\\\\.\\UNC\\"):
+        if text[:len(prefix)].upper() == prefix:
+            return "\\\\" + text[len(prefix):]
+    for prefix in ("\\\\?\\", "\\\\.\\"):
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
+def _resolved(value: Any) -> tuple[str, Path]:
+    """
+    (comparison key, resolved path) of a folder or file that may not exist yet.
+
+    The nearest EXISTING ancestor is resolved by Windows itself (its final
+    path: junctions, symbolic links, 8.3 short names and drive substitutions),
+    then the missing tail is appended. Nothing is created or opened for
+    reading. A path that cannot be resolved (for example access denied on
+    the way) is refused rather than compared by its spelling.
+    """
+    try:
+        text = _plain_spelling(os.path.expanduser(os.fspath(value)))
+        if not text or "\0" in text:
+            raise ValueError("empty or invalid path")
+        current, tail = os.path.abspath(text), []
+        while True:
+            try:
+                os.lstat(current)
+                break
+            except FileNotFoundError:
+                parent = os.path.dirname(current)
+                if parent == current:
+                    raise
+                tail.append(os.path.basename(current))
+                current = parent
+        base = _plain_spelling(os.path.realpath(current, strict=True))
+        resolved = os.path.join(base, *reversed(tail)) if tail else base
+    except (OSError, ValueError) as error:
+        raise StartupRefused("store", "Qronos cannot tell which data folder a store path leads to; "
+                                      "nothing was opened.") from error
+    return os.path.normcase(os.path.normpath(resolved)), Path(os.path.normpath(resolved))
+
+
 def installed_store_target(environ: Optional[Mapping[str, str]] = None) -> Optional[Path]:
-    """The installed data root a NON-installed process would write into through a store override, if any."""
+    """
+    The installed data root a NON-installed process would write into through a store override, if any.
+
+    Overrides and roots are compared as RESOLVED paths, so a junction, a
+    symbolic link, a \\\\?\\ spelling or an 8.3 alias of the installed data
+    still counts as the installed data. The roots are the known-folder
+    ``<Local AppData>\\Qronos`` (what the desktop uses), LOCALAPPDATA\\Qronos
+    and an absolute QRONOS_DATA_ROOT. Overrides leading into two different
+    installed roots, or a path that cannot be resolved, refuse start-up
+    (StartupRefused) instead of choosing one.
+    """
     environment = os.environ if environ is None else environ
+    targets = [environment.get(name, "").strip() for name in STORE_PATH_OVERRIDES]
+    targets = [value for value in targets if value]
+    if not targets:
+        return None  # nothing is redirected: no query, no resolution
+    try:
+        candidates = [_known_local_appdata() / "Qronos"]
+    except OSError as error:
+        message = ("Windows did not report this user's Local AppData folder, so Qronos cannot tell whether a store "
+                   "path leads into installed data; nothing was opened.")
+        raise StartupRefused("store", message) from error
     local = environment.get("LOCALAPPDATA", "").strip()
-    roots = [(Path(local) if local else Path.home() / ".local" / "share") / "Qronos"]
+    candidates.append((Path(local) if local else Path.home() / ".local" / "share") / "Qronos")
     configured = environment.get("QRONOS_DATA_ROOT", "").strip()
     if configured and Path(configured).is_absolute():
-        roots.append(Path(configured))
-    for name in STORE_PATH_OVERRIDES:
-        value = environment.get(name, "").strip()
-        if not value:
-            continue
-        target = Path(os.path.abspath(os.path.expanduser(value)))
-        for root in roots:
-            root = Path(os.path.abspath(root))
-            if target == root or root in target.parents:
-                return root
-    return None
+        candidates.append(Path(configured))
+    roots: dict[str, Path] = {}
+    for candidate in candidates:
+        key, path = _resolved(candidate)
+        roots.setdefault(key, path)
+    matched: dict[str, Path] = {}
+    for value in targets:
+        key, _ = _resolved(value)
+        for root_key, root_path in roots.items():
+            if key == root_key or key.startswith(root_key.rstrip(os.sep) + os.sep):
+                matched[root_key] = root_path
+    if len(matched) > 1:
+        raise StartupRefused("store", "Store paths lead into more than one installed Qronos data folder; "
+                                      "nothing was opened.")
+    return next(iter(matched.values()), None)
 
 
 def _installed() -> bool:
@@ -162,6 +265,37 @@ def recover_on(data_root: Path, version: str) -> dict:
     return {"ok": True, "result": str(result.get("result", ""))[:32]}
 
 
+def pending_on(data_root: Path, version: str) -> dict:
+    """
+    Re-check, UNDER the shared admission just taken, that no update became pending on this root after the
+    barrier ran (Runtime17 O1): {"ok": True} or {"ok": False, "code": ...}; never raises, never restores.
+
+    After a successful barrier there is no launching claim, and a handoff remains only as a repair the barrier
+    resolved as unconfirmed (its outcome names that handoff's version and kind). So any claim, or any other
+    handoff, appeared in between: an update ran (and ended) before this admission. Refused as
+    ``recovery_pending``: the next start runs the barrier again. The update fence itself was already checked by
+    ``admit_writer`` under the same shared lock, so it is not asked again here.
+    """
+    from core.local_update import UpdateError
+    from core.update_service import UpdateService
+
+    try:
+        status = UpdateService(Path(data_root), version, liveness=lambda: False).status()
+    except UpdateError as error:
+        return {"ok": False, "code": error.code}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"ok": False, "code": "recovery_failed"}
+    if status.get("launching"):
+        return {"ok": False, "code": "recovery_pending"}
+    handoff, outcome = status.get("handoff"), status.get("outcome")
+    if handoff is not None:
+        resolved = (isinstance(outcome, dict) and isinstance(handoff, dict) and outcome.get("result") == "unconfirmed"
+                    and outcome.get("version") == handoff.get("version") and outcome.get("kind") == handoff.get("kind"))
+        if not resolved:
+            return {"ok": False, "code": "recovery_pending"}
+    return {"ok": True}
+
+
 def _default_admit(data_root: Path) -> Any:
     from core import store_admission
 
@@ -188,6 +322,7 @@ def enter(
     windows: Optional[bool] = None,
     installed: Optional[bool] = None,
     barrier: bool = True,
+    confirm: Optional[Callable[[str], dict]] = None,
 ) -> Any:
     """Run steps 1-4 once for this process; return the held writer admission (or raise StartupRefused).
 
@@ -200,35 +335,44 @@ def enter(
     can be between steps then. Nothing earlier in the broker opens a store.
     """
     with _lock:
+        # What THIS call asks for (applicability and the RESOLVED data root), decided before anything held is
+        # handed back: an earlier admission authorises only the same root and mode (Runtime17 F2).
+        applicable, key, root = _binding(environ, data_root, windows, installed)
         if "admission" in _held:
+            if _held.get("binding") != (applicable, key):
+                raise StartupRefused("store", "This process was already admitted for another Qronos data folder or "
+                                              "start-up mode; it must not continue.")
             if instance and "instance" not in _held and not _held.get("notApplicable"):
                 raise StartupRefused("ownership_unavailable", "This process was admitted without its instance "
                                                               "ownership; it must not continue.")
             return _held["admission"]
-        on_windows = os.name == "nt" if windows is None else windows
-        is_installed = _installed() if installed is None else installed
-        if on_windows and not is_installed and data_root is None:
-            target = installed_store_target(environ)
-            if target is not None:  # a source process opening INSTALLED stores: no bypass
-                is_installed, data_root = True, target
-        if not on_windows or not is_installed:
+        if not applicable:
             _held["admission"] = None
             _held["notApplicable"] = True
             _held["service"] = service
+            _held["binding"] = (False, None)
             return None
 
         guard = None
+        admission = None
         try:
             if instance:
                 guard = _acquire(acquire_instance, retry_seconds)
-            root = Path(data_root) if data_root is not None else _default_data_root()
             if barrier:
                 running = version or product_version(environ)
                 outcome = _recover(recover or (lambda v: recover_on(root, v)), running)
                 if outcome.get("ok") is not True:
                     raise StartupRefused(str(outcome.get("code") or "recovery_failed"))
             admission = _admit(admit, root)
+            if barrier:
+                # Under the shared admission no update can start any more; one may have run between the barrier
+                # and this admission (Runtime17 O1). Re-read this root's lifecycle and refuse a new pending one.
+                confirmed = _recover(confirm or (lambda v: pending_on(root, v)), running)
+                if confirmed.get("ok") is not True:
+                    raise StartupRefused(str(confirmed.get("code") or "recovery_pending"))
         except BaseException:
+            if admission is not None:
+                _release(admission)
             if guard is not None:
                 _close(guard)
             raise
@@ -236,7 +380,31 @@ def enter(
             _held["instance"] = guard
         _held["admission"] = admission
         _held["service"] = service
+        _held["binding"] = (True, key)
         return admission
+
+
+def _binding(environ: Optional[Mapping[str, str]], data_root: Optional[Path], windows: Optional[bool],
+             installed: Optional[bool]) -> tuple[bool, Optional[str], Optional[Path]]:
+    """(applicable, resolved-root key, root to admit) for one ``enter`` call; StartupRefused when undecidable."""
+    on_windows = os.name == "nt" if windows is None else windows
+    is_installed = _installed() if installed is None else installed
+    if on_windows and not is_installed and data_root is None:
+        target = installed_store_target(environ)
+        if target is not None:  # a source process opening INSTALLED stores: no bypass
+            is_installed, data_root = True, target
+    if not on_windows or not is_installed:
+        return False, None, None
+    root = Path(data_root) if data_root is not None else _default_data_root()
+    key, _ = _resolved(root)
+    return True, key, root
+
+
+def _release(admission: Any) -> None:
+    try:
+        admission.release()
+    except Exception:  # noqa: BLE001 - the process is refusing anyway; Windows releases the lock at exit
+        pass
 
 
 def _acquire(acquire_instance: Callable[[float], Any], retry_seconds: float) -> Any:
