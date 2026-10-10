@@ -92,6 +92,15 @@ class MediaEmbedder:
         self._last_owner = owner
         return owner
 
+    def unavailable_reason(self) -> str | None:
+        """Asked BEFORE a model slot is reserved (no IPC): "model_unavailable" while no owned sidecar process
+        exists, so nothing is reserved for a model that cannot be asked; None when a request may be tried."""
+        try:
+            self._owner()
+        except ResourceRefused as refused:
+            return refused.reason
+        return None
+
     def residency(self) -> str:
         """Whether the sidecar still lists bge-m3: "loaded", "unloaded" or "unknown" (never a guess).
 
@@ -120,20 +129,28 @@ class MediaEmbedder:
                 return "loaded"
         return "unloaded"
 
-    def _call(self, method: str, path: str, *, timeout: float, max_bytes: int, payload: dict | None = None) -> Any:
+    def _call(self, method: str, path: str, *, timeout: float, max_bytes: int, payload: dict | None = None,
+              failure: str = "embedding_request_failed", on_dispatch: Callable[[], None] | None = None) -> Any:
+        owner = self._owner()  # no owner: refused before anything is sent
+        if on_dispatch is not None:
+            on_dispatch()  # from here on the request may reach the server
         try:
             return self._transport(method, self._profile["base"] + path, timeout=timeout, json=payload,
-                                   owner=self._owner(), max_bytes=max_bytes)
+                                   owner=owner, max_bytes=max_bytes)
         except ResourceRefused:
             raise
         except Exception as exc:  # noqa: BLE001 - IPC failures are typed, retried later
-            raise ResourceRefused("embedding_request_failed", type(exc).__name__) from None
+            raise ResourceRefused(failure, type(exc).__name__) from None
 
     def verify(self) -> None:
-        """The sidecar must serve bge-m3 in F16 (checked once per embedder)."""
+        """The sidecar must serve bge-m3 in F16 (checked once per embedder).
+
+        /api/tags starts no inference, so its failure is a capability refusal ("model_unavailable"), never an
+        unresolved request."""
         if self._verified:
             return
-        tags = self._call("GET", "/api/tags", timeout=TAGS_TIMEOUT_SECONDS, max_bytes=MAX_TAGS_BYTES)
+        tags = self._call("GET", "/api/tags", timeout=TAGS_TIMEOUT_SECONDS, max_bytes=MAX_TAGS_BYTES,
+                          failure="model_unavailable")
         models = tags.get("models") if isinstance(tags, dict) else None
         for item in models if isinstance(models, list) else []:
             if not isinstance(item, dict):
@@ -145,8 +162,12 @@ class MediaEmbedder:
                 return
         raise ResourceRefused("model_unavailable", "the sidecar does not serve bge-m3 in F16")
 
-    def embed(self, texts: Sequence[str], *, timeout: float = EMBED_TIMEOUT_SECONDS) -> list[bytes]:
-        """Normalised float32 vectors (little-endian bytes) for at most EMBED_BATCH bounded texts."""
+    def embed(self, texts: Sequence[str], *, timeout: float = EMBED_TIMEOUT_SECONDS,
+              on_dispatch: Callable[[], None] | None = None) -> list[bytes]:
+        """Normalised float32 vectors (little-endian bytes) for at most EMBED_BATCH bounded texts.
+
+        ``on_dispatch`` is called once the owner is resolved and the model verified, immediately before the POST
+        that may make the sidecar load bge-m3 (the lease's evidence that a request was possibly dispatched)."""
         cleaned = [str(text).strip() for text in texts]
         if not cleaned or len(cleaned) > EMBED_BATCH or any(not t or len(t) > MAX_TEXT_CHARS for t in cleaned):
             raise ValueError("embedding input must be 1..8 non-empty texts of at most 1200 characters")
@@ -154,7 +175,8 @@ class MediaEmbedder:
         payload = {"model": self._profile["model"], "input": cleaned, "truncate": False,
                    "keep_alive": self._profile["keep_alive"], "options": {"num_gpu": 0}}
         answer = self._call("POST", "/api/embed", timeout=timeout,
-                            max_bytes=BYTES_PER_VECTOR_JSON * len(cleaned) + 4096, payload=payload)
+                            max_bytes=BYTES_PER_VECTOR_JSON * len(cleaned) + 4096, payload=payload,
+                            on_dispatch=on_dispatch)
         if not isinstance(answer, dict):
             raise EmbeddingInvalid("the embedding answer is not an object")
         echoed = answer.get("model")

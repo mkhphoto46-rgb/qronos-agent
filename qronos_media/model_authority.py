@@ -93,6 +93,10 @@ class ModelLease:
         self.state = "held"
         # A sidecar request failed or timed out: the server may still be working on it.
         self.unresolved = False
+        # Sidecar evidence that the model may be loaded: an inference request was possibly dispatched under this
+        # lease, or the lease took over a slot already resident. Neither: the sidecar was never asked to load it.
+        self.dispatched = False
+        self.inherited_resident = False
 
     # ---- SpawnObserver (called by run_bounded)
 
@@ -152,6 +156,13 @@ class ModelLease:
         """A request to the memory sidecar failed or timed out; its server-side work is not proven stopped."""
         with self._lock:
             self.unresolved = True
+
+    def mark_dispatched(self) -> None:
+        """An inference request is about to be sent to the memory sidecar (it may load the model from here on)."""
+        with self._lock:
+            if self.closed:
+                raise ResourceRefused("lease_released", self.task_id)
+            self.dispatched = True
 
     def outstanding(self, *, teardown: bool) -> bool:
         """True while a spawn is in its handoff or any started child's exit is not proven."""
@@ -216,6 +227,8 @@ class HostedModelAuthority:
     ``request_unresolved`` after a failed or timed-out request, whose server work may still be running) and keeps
     its ledger and governor reservations until ``residency`` proves the model unloaded or the captured sidecar
     process gone. A later media request reuses that one reservation (no second accounting); media never unloads it.
+    A sidecar lease under which no inference request was dispatched (``ModelLease.mark_dispatched``) and which
+    took over no resident slot is freed at release: the sidecar was never asked to load the model for media.
     """
 
     def __init__(
@@ -316,6 +329,7 @@ class HostedModelAuthority:
                 if held.closed and held.state == "resident":
                     # The model is still loaded in the sidecar under media's one reservation: reuse it.
                     lease = ModelLease(self, held.task_id, spec, held.granted_at, held.ledger_id)
+                    lease.inherited_resident = True
                     self._slots[spec.name] = lease
                     self._event("reuse_resident", held.task_id, model=spec.name)
                     return lease
@@ -370,7 +384,16 @@ class HostedModelAuthority:
             if lease.spec.served_by == "memory_sidecar":
                 # The HTTP request has returned (drained), but the sidecar keeps the model loaded, and a failed
                 # request may still be running there: nothing is freed until residency is proven gone.
-                lease.state = "request_unresolved" if lease.unresolved else "resident"
+                if lease.unresolved:
+                    lease.state = "request_unresolved"
+                elif lease.dispatched or lease.inherited_resident:
+                    lease.state = "resident"
+                else:
+                    # No inference request was ever sent under this lease and it took over no resident slot
+                    # (owner missing or lost, model check refused, everything cached): media never asked the
+                    # sidecar to load the model, so there is nothing of media's to keep counted.
+                    self._free(lease, proof="no_request_dispatched")
+                    return
                 self._event(lease.state, lease.task_id, model=lease.spec.name)
                 return
             self._try_free(lease, teardown=True)

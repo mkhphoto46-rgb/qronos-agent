@@ -647,13 +647,16 @@ class StageRunner:
                     cleanup(db, asset_id)
             report.completed.append(key)
             return "completed"
-        if getattr(spec.needs.model, "served_by", "") == "memory_sidecar" and self.embedder is None:
-            # No runtime embedder in this process: nothing could run, so no model slot is reserved for it.
-            with self.store.transaction() as db:
-                db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
-                           ("unavailable:model_unavailable", asset_id, stage))
-            report.refused.append(f"{key}:model_unavailable")
-            return "unavailable"
+        if getattr(spec.needs.model, "served_by", "") == "memory_sidecar":
+            # No runtime embedder in this process, or no owned sidecar process behind it right now: nothing could
+            # run, so no model slot is reserved for it (a reservation would claim a model that was never loaded).
+            missing = "model_unavailable" if self.embedder is None else self.embedder.unavailable_reason()
+            if missing is not None:
+                with self.store.transaction() as db:
+                    db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
+                               (f"unavailable:{missing}", asset_id, stage))
+                report.refused.append(f"{key}:{missing}")
+                return "unavailable"
         try:
             lease = self.authority.reserve(task, spec.needs)
         except ResourceRefused as exc:

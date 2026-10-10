@@ -789,7 +789,7 @@ def run_semantic(ctx: StageContext) -> Commit:
         ctx.checkpoint_boundary()  # Stop, Pause, deadline, permission, the person's foreground turn
         ctx.renew()
         try:
-            vectors = ctx.embedder.embed([text for _, text in batch])
+            vectors = ctx.embedder.embed([text for _, text in batch], on_dispatch=lease.mark_dispatched)
         except semantic.EmbeddingInvalid as exc:
             raise StageFailed(f"bge-m3 answer rejected: {exc}") from None
         except ResourceRefused as exc:

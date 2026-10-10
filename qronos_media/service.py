@@ -376,6 +376,10 @@ class MediaService:
         if self.embedder is None:
             block["reason"] = "no bge-m3 sidecar capability in this process"
             return {"query": query, "exact": exact, "semantic": block}
+        missing = self.embedder.unavailable_reason()  # no owned sidecar now: refused before any reservation
+        if missing is not None:
+            block["reason"] = missing
+            return {"query": query, "exact": exact, "semantic": block}
         try:
             lease = self.authority.reserve(f"media:semantic_query:{time.monotonic_ns()}",
                                            StageNeeds("semantic_query", model=BGE_M3))
@@ -383,7 +387,8 @@ class MediaService:
             block["reason"] = exc.reason
             return {"query": query, "exact": exact, "semantic": block}
         try:
-            vector = self.embedder.embed([query.strip()], timeout=semantic.QUERY_TIMEOUT_SECONDS)[0]
+            vector = self.embedder.embed([query.strip()], timeout=semantic.QUERY_TIMEOUT_SECONDS,
+                                         on_dispatch=getattr(lease, "mark_dispatched", None))[0]
         except (ResourceRefused, semantic.EmbeddingInvalid) as exc:
             if getattr(exc, "reason", "") == "embedding_request_failed" and hasattr(lease, "mark_unresolved"):
                 lease.mark_unresolved()
