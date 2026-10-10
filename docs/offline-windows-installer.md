@@ -323,6 +323,117 @@ Documents. It never runs the Qronos installer or reads real user folders.
   absent in the probe harness, so the "Qronos is running" path is covered only
   by a file held open during a probe run, not by a real running app.
 
+## The update fence, hand-over and receipt
+
+`installer-hooks/qronos-update-fence.nsh` is the installer's half of the
+update hand-over in `local-update-packages.md`. The contract is
+`work/opus-production-installer-contract-round10.txt`, section 3 and
+addendum A.
+
+**Status: a probe-proven primitive, not yet part of the installer.**
+`webview2-offline.nsh` does not include it yet. Tauri 2.9.4's stock template
+does two things before `NSIS_HOOK_PREINSTALL`:
+- `SetOutPath $INSTDIR`, which creates the program folder;
+- in a manual reinstall, its reinstall page can `ExecWait` the previous
+  version's uninstaller, which was never fenced.
+
+So "nothing happens before the fence" can only hold with a pinned custom
+template that:
+- calls the fence (and the install-root check) before `SetOutPath`;
+- securely refuses or avoids the delegated old uninstaller;
+- proves, with full-template error seams, that no failed install step reaches
+  the receipt.
+
+That is the next owned step. Until then, everything below is what the file
+does when called first, proven with compiled probes.
+
+**First thing in every install and uninstall (once wired).** The installer then
+holds two things:
+- the update fence: the named mutex `Local\Qronos.UpdateInProgress.v1`;
+- the EXCLUSIVE store admission: a byte-range lock on
+  `<data root>\.qronos-store-admission.lock`, the same lock
+  `core/store_admission.py` uses.
+
+Both handles are non-inheritable and never closed by the script. They last
+exactly as long as the installer process, whether it ends normally, aborts,
+crashes or is killed. Nothing the installer starts (the WebView2 installer, the
+app from the finish page) can keep them.
+
+**Manual install or uninstall.** The fence and the admission must both be free
+at once. Otherwise the installer stops with "Another Qronos update or
+installation is running" or "Qronos is still running with its data open", and
+nothing has been changed or killed. An absent data folder skips only the
+admission: a writer that creates it afterwards is refused by the fence.
+
+**Update mode** (`<installer> /S /QRONOSUPDATE`, started only by the updater):
+- `/QRONOSUPDATE` without `/S` is refused, and the uninstaller refuses
+  `/QRONOSUPDATE`.
+- Update mode never falls back to a manual install.
+- The private record on standard input is read with a bound: at most 1023
+  bytes, within 30 s. It must have exactly the round-7 lines.
+- The guard must be the installer's real parent, with the same creation time
+  while it lives.
+- The handed fence handle must be another handle to the fence object
+  (`CompareObjectHandles`).
+- The receipts folder must be this installer's own
+  `<data root>\Updates\receipts`. The installer derives the data root itself
+  (`%QRONOS_DATA_ROOT%`, else `%LOCALAPPDATA%\Qronos`), never from the record,
+  and refuses links and junctions.
+- The version must be the installer's own.
+- Then the installer:
+  1. acknowledges with the nonce;
+  2. waits at most 60 s for the guard to let the fence go;
+  3. takes the exclusive admission (30 s);
+  4. waits at most 60 s for the guard process to exit, so none of the guard's
+     files are in use when files are replaced.
+- Anything else refuses with no write and no acknowledgement.
+
+**Receipt.** `QronosWriteReceipt` is meant for the end of the Install
+section. That every earlier extraction, `WriteUninstaller`, registration and
+payload step stops the section on failure is NOT yet proven in the real
+template; the custom-template error seams must prove it first. In update mode
+it writes `<pid>-<ticks>.receipt` with `CREATE_NEW` into the receipts folder,
+holding:
+- the nonce;
+- the approved package and manifest SHA-256;
+- the installer's own version;
+- `result=installed`.
+
+A write failure deletes the partial file through its handle. Only the start-up
+barrier judges a receipt.
+
+**Probe-only values.** `QRONOS_UPDATE_FENCE_NAME`, `QRONOS_PROBE_DATA_ROOT` and
+`QRONOS_PROBE_RESULT` exist for test probes only. `build_desktop` never
+defines them, and a test asserts that.
+
+`tests/test_update_fence_nsis.py` compiles the real fence file into
+throwaway silent probes and runs them, covering:
+- manual install and uninstall, each with a held fence and with an active
+  writer;
+- a late writer refused until exit;
+- fifteen forged records and a missing record channel, each with zero writes;
+- a real `UpdateService.launch` hand-over whose receipt the barrier verifies;
+- a guard that crashes;
+- a grandchild that does not keep the fence.
+
+The probes use unique private fence names and temporary data folders, and
+define `VERSION` after the include, as Tauri's template does.
+
+**Limits**
+- Tauri includes the hooks before it defines `VERSION`. The version is
+  therefore captured by the `QRONOS_FENCE_INSTALL` macro inside the section,
+  never in a Function body.
+- NSIS releases the fence's ownership when its install thread ends. The fence
+  object and the admission lock last until the process exits. The app started
+  from the manual finish page can therefore meet a live fence for a moment,
+  and Runtime's start-up must retry briefly (contract section 5, R2).
+- Previous Qronos uninstallers were never fenced. The fence cannot be assumed
+  for an old uninstaller that a reinstall delegates to. A new uninstaller
+  started by a fenced installer also could not take the fence its parent
+  holds. The custom template must avoid or visibly refuse that path.
+- None of this is in a Tauri-built installer yet. See the status above and
+  below.
+
 ## Updates and rollback
 
 Qronos does not use Tauri's network updater. Updates are new installers that a
@@ -366,6 +477,12 @@ acceptance testing is allowed:
 7. Uninstalling with and without "Delete the application data".
    `%LOCALAPPDATA%\Qronos` and the Library should remain; WebView2 should
    remain installed.
+8. The update fence inside a real Tauri-built installer:
+   - a manual install, a reinstall and an uninstall, each while Qronos runs
+     and while it is closed;
+   - an update hand-over (`/S /QRONOSUPDATE`) and its receipt.
+   The default updater launch stays refused until this and the Runtime/Control
+   wiring are accepted.
 
 ## Owner decisions still open
 

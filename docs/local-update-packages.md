@@ -257,8 +257,16 @@ source checkout. A packaged backend without it refuses (`version_unknown`).
    - It claims the launch, snapshots what an upgrade changes, re-verifies the
      staged installer and manifest, holds the installer open, re-hashes it, and
      starts only that file.
-   - Hand-over (`work/opus-production-installer-contract-round7.txt`):
+   - Hand-over (`work/opus-production-installer-contract-round7.txt`; installer
+     side in `work/opus-production-installer-contract-round10.txt` section 3):
+     - The installer is started as `<installer> /S /QRONOSUPDATE`. Silent mode
+       means no wizard page can delay the acknowledgement, and the installer
+       refuses update mode without it.
      - The installer gets two private pipes and no other inheritable handle.
+     - The record must fit the installer's 1023-byte bound even with the
+       longest handle value. That is checked before Windows is asked to start
+       anything, so a record that is too long is a verified non-start
+       (`launch_failed`).
      - The update fence is duplicated into it as a NON-inheritable handle, so
        nothing it starts (the WebView2 installer, the app from the finish page)
        can keep the fence alive.
@@ -306,6 +314,13 @@ source checkout. A packaged backend without it refuses (`version_unknown`).
        Otherwise the repair is **unconfirmed** and stays staged until the
        person discards it. A version comparison or a caller value is never
        evidence.
+     - Once resolved as unconfirmed, the status is no longer
+       `recoveryPending`, because a restart cannot change it. Instead it
+       offers `unconfirmed.actions: ["discard", "retry"]`. Retry is a discard
+       followed by a new check, request, approval and nonce; the old launch is
+       never replayed. A receipt that arrives after the resolution confirms
+       nothing. A handoff the barrier has not yet resolved stays
+       `recoveryPending`.
      - Every receipt is removed once judged. The outcome records
        `receipt: verified | absent | invalid | not_requested`; an upgrade
        still applies on its version change.
@@ -336,8 +351,13 @@ Limits:
   caller-supplied claims. They do not protect against other software running
   as the same Windows account, which could read the installer's memory: the
   same limit as DPAPI.
-- The installer's own half of the hand-over (the NSIS fence and the receipt)
-  is in `desktop/src-tauri/installer-hooks`; see that section's status.
+- The installer's own half of the hand-over (the NSIS fence, manual-install
+  and uninstall fence, and the receipt) is
+  `desktop/src-tauri/installer-hooks/qronos-update-fence.nsh`, described in
+  `offline-windows-installer.md`. It is proven with compiled probes only. The
+  installer does not include it yet: wiring it so that it runs before Tauri's
+  `SetOutPath` and the reinstall page's old uninstaller needs the pinned
+  custom template, which is the next owned step.
 - `store.handoff` re-hashes the staged installer while holding the store lock
   (bounded by the 2 GiB package limit).
 - Snapshots cover only single-file stores, at most 64 MiB each and 256 MiB in
@@ -544,8 +564,16 @@ own trusted machine.
 
 ## Wiring that other owners do (requested, not done here)
 
-The closed contract is `work/opus-production-installer-contract-round5.txt`. In
-short:
+The closed contract is `work/opus-production-installer-contract-round5.txt`.
+`work/opus-production-installer-contract-round10.txt` section 5 makes it
+precise for the installer counterpart (R1-R4, N9, C1-C4). The additions are:
+- R2: a bounded retry (proposed: 10 s) before refusing a live fence, because
+  of the finish-page start;
+- N9: the update CLI's own admission;
+- C1: a launch path that never kills, times out or Job-owns the CLI or the
+  installer.
+
+In short:
 
 - **Runtime:**
   - the bridge and supervisor OWN their instance mutexes;
