@@ -429,7 +429,14 @@ and no environment value can turn it off there.
 - A source checkout is never updated by the installer and keeps its data in the
   checkout, so it takes nothing.
 - The exception: a source process whose store-path overrides point INTO an
-  installed data root runs the whole order on that root.
+  installed data root runs the whole order on that root. Overrides and roots are
+  compared as resolved paths (junctions, symbolic links, `\\?\` and 8.3 names).
+- An override that is an existing FILE with more than one name (a hard link) is
+  refused with `store` before any store is opened or changed. A hard link keeps
+  its own outside name, so its other names could be in installed data, and
+  placing them would mean listing the file's names. The check is one link-count
+  read per override; nothing is opened and no folder is listed. Single-name files
+  and missing files are unaffected. Use a copy, not a link, for a private store.
 
 The update CLI is registered in the desktop backend as `Service::Update`, for
 one-shot reads and approval steps only. One-shot IPC never runs `launch`,

@@ -46,7 +46,9 @@ Windows there is no update facility, so there ``enter`` admits without these
 steps (and takes no bridge singleton, as before). One exception closes the
 remaining path: a source process whose store-path overrides
 (``STORE_PATH_OVERRIDES``) point INTO an installed data root is opening
-installed stores, so it runs the full order on that root. ``installed``,
+installed stores, so it runs the full order on that root; an override that is
+an existing file with more than one name (a hard link) is refused, because its
+other names cannot be placed without listing them. ``installed``,
 ``windows`` and the other keyword seams are function parameters for tests only;
 no product entry point passes them from a request, argument or environment.
 """
@@ -191,6 +193,34 @@ def _resolved(value: Any) -> tuple[str, Path]:
     return os.path.normcase(os.path.normpath(resolved)), Path(os.path.normpath(resolved))
 
 
+def _require_one_name(resolved: Path) -> None:
+    """
+    Refuse a store override that is a file with more than one name (an NTFS hard link; Media20 H20-1).
+
+    A hard link keeps its own full name, so resolving the path cannot show that
+    the same file also lives in installed data, and an appending or in-place
+    store would then write installed data without its admission. A store file
+    a source process keeps has one name; telling where another name lives would
+    mean listing the file's names across volumes and mount points, so a file
+    with several names is refused as undecidable, wherever its names are.
+    Bounded: one metadata read of the override itself (Windows' own link
+    count), nothing opened, no folder listed. A missing leaf (nothing to link
+    yet) and a folder are not affected; metadata that cannot be read refuses.
+    """
+    import stat
+
+    try:
+        info = os.stat(resolved)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as error:
+        raise StartupRefused("store", "Qronos cannot read whether a store file has other names; nothing was "
+                                      "opened.") from error
+    if not stat.S_ISDIR(info.st_mode) and info.st_nlink != 1:
+        raise StartupRefused("store", "A store path is a file with more than one name (a hard link), so Qronos "
+                                      "cannot tell whether it is installed data; nothing was opened.")
+
+
 def installed_store_target(environ: Optional[Mapping[str, str]] = None) -> Optional[Path]:
     """
     The installed data root a NON-installed process would write into through a store override, if any.
@@ -200,7 +230,8 @@ def installed_store_target(environ: Optional[Mapping[str, str]] = None) -> Optio
     still counts as the installed data. The roots are the known-folder
     ``<Local AppData>\\Qronos`` (what the desktop uses), LOCALAPPDATA\\Qronos
     and an absolute QRONOS_DATA_ROOT. Overrides leading into two different
-    installed roots, or a path that cannot be resolved, refuse start-up
+    installed roots, a path that cannot be resolved, or an existing store file
+    with more than one name (a hard link, ``_require_one_name``) refuse start-up
     (StartupRefused) instead of choosing one.
     """
     environment = os.environ if environ is None else environ
@@ -225,7 +256,8 @@ def installed_store_target(environ: Optional[Mapping[str, str]] = None) -> Optio
         roots.setdefault(key, path)
     matched: dict[str, Path] = {}
     for value in targets:
-        key, _ = _resolved(value)
+        key, path = _resolved(value)
+        _require_one_name(path)
         for root_key, root_path in roots.items():
             if key == root_key or key.startswith(root_key.rstrip(os.sep) + os.sep):
                 matched[root_key] = root_path
