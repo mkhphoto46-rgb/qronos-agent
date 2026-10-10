@@ -453,15 +453,16 @@ real installer, registry, shortcut or user folder):
 - None of this has run as a real Tauri-built installer on a real machine; see
   below. The default updater launch stays refused.
 
-**Open decisions for the next owned installer repair** (independent review
-Media18; nothing here is activated):
-- **O-A, availability.** Step 5 removes the previous installation's listed
-  files before the WebView2 child and before every later checked step. If the
-  WebView2 child or any later step fails, neither the old nor the new program
-  is left installed. The installer stops with an honest message, and user data
-  is untouched. Qronos does not restore the previous program. Reinstalling is
-  the recovery today. Whether to keep the old program until the new one is
-  complete is an open product decision.
+**Open installer gates** (independent review Media18; nothing here is
+activated):
+- **O-A, availability: a defect to repair before activation.** Step 5 removes
+  the previous installation's listed files before the WebView2 child and
+  before every later checked step. If the WebView2 child or any later step
+  fails, neither the old nor the new program is left usable. The installer
+  stops with an honest message, and user data is untouched. Qronos does not
+  restore the previous program; reinstalling is the only recovery today. The
+  update launch and any release stay gated until a reviewed repair keeps a
+  usable program through such a failure.
 - **O-B, defence in depth.** `verify_generated_order` does not inspect the
   sections that run before the Install section. That they do nothing rests on
   the configuration checks: `check_tauri_config` (WebView2 "skip", no minimum
