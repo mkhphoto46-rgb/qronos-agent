@@ -6,11 +6,12 @@ in the handoff (*Qronos Media Intelligence — Agent Build Handoff*, SHA-256
 remembered line of dialogue can be found again with the exact file, track and
 time range it came from.
 
-This wave covers handoff Stage A (foundation), the subtitle part of Stage B
-(dialogue) and the start of Stage D (shot boundaries and keyframes). Speech
-recognition, semantic search, visual search and multimodal search are **not**
-implemented; the index reports them as pending rather than returning empty
-results that look like answers.
+This wave covers handoff Stage A (foundation), Stage B dialogue (subtitles
+first, with whisper.cpp speech recognition as the fallback for files without
+subtitles, inside the Qronos runtime only) and the start of Stage D (shot
+boundaries and keyframes). Semantic search, visual search and multimodal
+search are **not** implemented; the index reports them as pending rather than
+returning empty results that look like answers.
 
 ## What works
 
@@ -20,7 +21,8 @@ results that look like answers.
 | 0 | `ffprobe` metadata: duration, container, streams, languages, dispositions | done |
 | 1 | Subtitles first: sidecar SRT/VTT (UTF-8, UTF-16, legacy Windows-1256/1252), sidecar ASS/SSA and embedded text streams via ffmpeg; track and language provenance | done |
 | 1 | Image subtitles (PGS, VobSub, DVB) | reported `unsupported_image` (needs OCR) |
-| 1 | Speech recognition when no subtitle exists | **pending** |
+| 1 | Speech recognition when no subtitle exists (whisper.cpp large-v3-turbo q5_0, chunked, timestamped) | **implemented, unverified**: runs only in the runtime's media host with the pinned assets provisioned; never in the standalone tool; no real-model run accepted, no accuracy claim |
+| 1 | Subtitle/ASR agreement labels (handoff s9) | **pending** |
 | 1 | Exact phrase search (FTS5, Persian/Arabic normalisation, split-line pairs) and fuzzy search (rare trigrams + similarity) | done |
 | 2 | Semantic / cross-language dialogue search | **pending** |
 | 3 | Shot boundaries (`scdet`, chunked and checkpointed) and adaptive keyframes under a cache quota | done |
@@ -365,8 +367,80 @@ a disk reserve, and refuse any GPU stage. Leases are renewed while hashing and
 decoding. Pause, cancel, permission loss, an expired run budget and a refused
 renewal stop the running child, keep the checkpoint and say why.
 
-No model is loaded. Inference stages need a cross-process model lease with
-the backend governor first (see *Integration hooks*).
+A stage that runs a model is *model-bearing* whatever device it uses (CPU
+whisper is still gigabytes). Neither authority above grants one; only the
+runtime-issued `HostedModelAuthority` does (next section).
+
+## In-process host and model ownership
+
+`core/runtime_bridge.py` builds one `MediaHost` (`qronos_media/host.py`) the
+first time media work is asked for (`media_index` / `media_status` commands).
+Nothing about media runs, probes or opens at startup or on import.
+
+- **One authority.** The host's `HostedModelAuthority` is issued by the bridge
+  from the queue scheduler's own `ResourceGovernor` and the shared
+  `GLOBAL_RESOURCE_LEDGER`. It is an object reference; no request field, CLI
+  flag, Boolean, database row or requested model/size creates or widens it. A
+  model stage names one of `DECLARED_MODELS` (today only whisper, declared at a
+  conservative 2 GiB) and gets that model's declared budget.
+- **Counted twice, freed once, on proof.** A model slot is a ledger reservation
+  (QRONOS, BACKGROUND, 2048 MiB) plus a *managed* HEAVY governor reservation
+  that the lease clock never expires. Both stay counted until every child the
+  lease started has provably exited: a spawn is counted before the process
+  exists, the owned process and Job handles are attached right after creation,
+  and the lease asks those handles (process exited AND the Job holds no
+  process). A release during a spawn handoff or with an unproven child frees
+  nothing; the slot stays `termination_unproven`, further model loads are
+  refused, the unproven Job is kept open, and `reconcile()` retries teardown and
+  proof. No TTL, acknowledgement or caller "exited" flag is proof.
+- **Yielding.** Every hosted stage yields (checked about twice a second while a
+  child runs) to the person's own voice/text/screen turn, Pause, Stop,
+  shutdown, gaming/creator modes and critical pressure. The running child is
+  torn down, its exit proven, the stage requeued with its checkpoint.
+- **Permissions.** The host's `GatePermissions` uses the bridge's
+  `ApprovalLedger` and action audit. Typed-secret approvals are not wired into
+  the host yet (no UI); such roots are refused.
+- **Store admission.** Before the store opens, its ACTUAL resolved folder goes
+  through `core.startup_admission.enter_for_store("media",
+  "QRONOS_MEDIA_DATA_DIR", folder)`: the existing order (update barrier,
+  installed-data binding, one-name rule) on that exact path; for an installed
+  binding the folder must lie inside the admitted data root. The standalone CLI
+  does the same and exits 78 on refusal. `QRONOS_MEDIA_DATA_DIR` is a store
+  path override like the others; the default stays `<data>/Media`.
+
+## Speech recognition (fallback)
+
+`qronos_media/asr.py`, stage `asr` (depends on `subtitles`).
+
+- Runs only when the asset has no indexed subtitle cue; subtitle evidence is
+  never deleted or overwritten. No audio stream means nothing to do.
+- One audio stream by an explicit, recorded rule (the default-flagged stream,
+  else the lowest index), addressed by absolute index.
+- Timeline: asset time is presentation time minus the container start
+  (`assets.start_offset_ms`). Chunks (5 minutes) are planned on the chosen
+  stream's own timeline: chunk *k* starts at `(audioStart - assetOrigin) + k*L`,
+  so a segment at `s` ms is at `k*L + s + (audioStart - assetOrigin)`.
+- ffmpeg writes 16 kHz mono PCM WAV into the owned cache; `whisper-cli` runs with
+  the fixed argv `-m <model> -f <wav> -l <lang|auto> -t 4 -fa -oj -of <base>`
+  inside the existing suspended-before-Job containment (2 GiB, one process).
+- Each finished chunk's segments are stored with the checkpoint in one
+  transaction (`asr_chunks`); a resumed run never transcribes a chunk twice.
+  The final commit (with COMPLETED) replaces only the asset's `source='asr'`
+  track and its dialogue rows, so both FTS indexes update atomically.
+- Provenance (`subtitle_tracks.provenance_json`): model and SHA-256s, asset
+  SHA-256, stream, language, selection rule, offsets, `verified: false`,
+  `calibrated: false`, "unverified machine transcription; no accuracy claim".
+- Assets are the voice assets under `CONFIG.paths.runtime_assets/whisper`,
+  checked read-only by size and SHA-256 before any child starts
+  (`whisper-cli.exe` 489,984 B `8df01333…`, `ggml-large-v3-turbo-q5_0.bin`
+  574,041,195 B `39422170…`). Missing or different means `model_unavailable`
+  and nothing runs. They are not in the installed profile or package today:
+  shipping them with provenance and licence notices is a release gate.
+
+Limits, stated plainly: no real whisper, model, GPU or audio run has been done
+or accepted; the 2 GiB profile is declared, not measured; no lease period ever
+frees a model slot, and if the bridge process itself dies its Jobs close and
+their children end with it (kill-on-close); the CLI never transcribes.
 
 ## ffmpeg provenance
 
@@ -382,23 +456,22 @@ compiles in network protocols (kept unused by the whitelist).
 `python -m qronos_media tools` prints the located build's version and licence
 flags.
 
-## Integration hooks (Root-owned files, not edited here)
+## Integration state
 
-1. `tests/test_offline_network_policy.py`: add `"qronos_media"` to
-   `PRODUCT_PACKAGES`. Until then, `tests/test_media_contracts.py` runs the same
-   `network_findings` scanner over every media module.
-2. Backend service registration (`core/runtime_bridge.py`,
-   `build_support/runtime_entry.py`): a `media` service whose methods are
-   `MediaService`'s, built with `GovernorAuthority(<the bridge's governor>)` and
-   `GatePermissions(audit=<action audit>, ledger=<the bridge's ApprovalLedger>,
-   secrets=<ApprovalSecretStore>)`, with `approve_root` / `approve_export` behind a
-   bounded private IPC field for the secret.
-3. Desktop (Persian UI, later): approval prompts for `approval_required`
-   results, result cards, and open-at-timestamp through the approved
-   application executor.
-4. Before any inference stage: a cross-process model-lease contract with the
-   governor that declares the model and its VRAM, so the media process never
-   double-loads a model.
+Done in this chunk (leased): `qronos_media` is in `PRODUCT_PACKAGES` (offline
+policy and release hygiene), collected by `build_runtime`, a project root for
+notices; the bridge hosts the media worker (above); `core/update_stores.py`
+registers `media_index` (schema 2, reads schema 1, never snapshotted, so an
+update that changes its format is refused: a release compatibility gate, not
+rollback support).
+
+Still open:
+
+1. Desktop (Persian UI): media commands, approval prompts for
+   `approval_required` results (and the typed secret), result cards,
+   open-at-timestamp through the approved application executor.
+2. Shipping whisper assets and an LGPL, protocol-free ffmpeg with notices.
+3. Semantic (bge-m3) and Vision stages: later, under the same authority.
 
 ## Tests
 

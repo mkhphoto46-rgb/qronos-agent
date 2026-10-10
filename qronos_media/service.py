@@ -104,8 +104,13 @@ class MediaService:
         permissions: MediaPermissions,
         cache_quota_bytes: int = DEFAULT_CACHE_QUOTA_BYTES,
         monotonic: Callable[[], float] = time.monotonic,
+        admit_store: Callable[[Path], object] | None = None,
     ) -> None:
         self.layout = MediaLayout(local_path(data_dir))
+        if admit_store is not None:
+            # The product entry points (qronos_media.cli, qronos_media.host) admit the ACTUAL folder through
+            # core.startup_admission.enter_for_store before anything is created or opened; a refusal raises here.
+            admit_store(self.layout.root)
         if has_link_component(self.layout.root):
             raise UnsafeMediaPath("the media data folder must not be behind a link or junction")
         self.layout.root.mkdir(parents=True, exist_ok=True)
@@ -660,9 +665,17 @@ class MediaService:
         return plan
 
 
-def default_data_dir() -> Path:
+#: Moves the media index folder (one of core.startup_admission.STORE_PATH_OVERRIDES, so start-up admission
+#: sees it); the product default is the Qronos data folder.
+MEDIA_DATA_DIR_ENV = "QRONOS_MEDIA_DATA_DIR"
+
+
+def default_data_dir(environ: dict | None = None) -> Path:
     from core.config import CONFIG
 
+    configured = (os.environ if environ is None else environ).get(MEDIA_DATA_DIR_ENV, "").strip()
+    if configured:
+        return local_path(configured)
     return CONFIG.paths.data / "Media"
 
 

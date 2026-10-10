@@ -1452,6 +1452,10 @@ class QronosRuntime:
         self._approvals = ApprovalLedger()
         # Makes "check nothing is pending, then issue" atomic.
         self._approval_lock = threading.Lock()
+        # The in-process media host (qronos_media.host), built on first use only:
+        # nothing about media runs, probes or opens at startup.
+        self._media_host: Any = None
+        self._media_host_lock = threading.Lock()
         # Telegram download / print workflows; prompts share the ledger above.
         self._app_workflows: AppWorkflowCoordinator | None = None
         # One explicit UI approval grants a short, process-local lease for
@@ -1575,6 +1579,48 @@ class QronosRuntime:
             scheduler.start()
 
             return scheduler
+
+    # ------------------------------------------------------ media host
+
+    def _media_foreground_busy(self) -> bool:
+        """The person's own turn (voice, text, screen) is in progress: media yields to it."""
+        with self._lock:
+            return bool(self._busy or self._foreground.active)
+
+    def ensure_media_host(self) -> Any:
+        """
+        The one in-process media host, built the first time media work is asked for.
+
+        It is bound to THIS runtime's objects only: the queue scheduler's
+        ResourceGovernor, the shared ResourceLedger, the ApprovalLedger and the
+        action audit, plus the live foreground and Pause state. Its model
+        authority is issued here, never from anything in a request.
+        """
+        with self._media_host_lock:
+            if self._media_host is not None:
+                return self._media_host
+            from core.resource_ownership import GLOBAL_RESOURCE_LEDGER
+            from qronos_media.host import build_bridge_media_host
+
+            scheduler = self.ensure_scheduler()
+            audit = self.action_audit.record_verdict if self.action_audit is not None else None
+            self._media_host = build_bridge_media_host(
+                governor=scheduler.governor,
+                ledger=GLOBAL_RESOURCE_LEDGER,
+                foreground_busy=self._media_foreground_busy,
+                paused=lambda: self.runtime_paused,
+                approvals=self._approvals,
+                audit=audit,
+            )
+            return self._media_host
+
+    def _preempt_media(self, reason: str) -> None:
+        host = self._media_host
+        if host is not None:
+            try:
+                host.preempt(reason)
+            except Exception:
+                pass
 
     # ------------------------------------------------------ durable queue
 
@@ -6899,6 +6945,7 @@ class QronosRuntime:
         lifecycle = self._foreground_lifecycle()
         with lifecycle.transition():
             cancelled = lifecycle.cancel_current(CANCEL_REASON_USER_STOP)
+            self._preempt_media(CANCEL_REASON_USER_STOP)
             result = self._request_stop_response()
             result["foregroundInferenceCancelled"] = cancelled
             return result
@@ -9617,6 +9664,14 @@ class QronosRuntime:
         if getattr(self, "_link_runtime", None) is not None:
             self.stop_device_link()
         self._computer_actions.close()
+        media_host = self._media_host
+        if media_host is not None:
+            # Before the approvals close: the media stage stops, its model child is
+            # torn down and its exit proven (or it stays counted) within a bound.
+            try:
+                media_host.close()
+            except Exception:
+                pass
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
@@ -10779,6 +10834,34 @@ def handle_queue_debug_load(
     )
 
 
+def handle_media_index(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    """Ask the media host for one bounded index pass (only numbers are read from the request)."""
+    host = runtime.ensure_media_host()
+    answer = host.submit_index(
+        max_seconds=float(payload.get("maxSeconds", 120.0)),
+        max_stages=int(payload.get("maxStages", 50)),
+    )
+    runtime._notify("media_index", "ready" if answer.get("accepted") else "warning", _compact(answer))
+
+
+def handle_media_status(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    host = runtime._media_host
+    status = host.status() if host is not None else {"workerStarted": False}
+    runtime._notify("media_status", "ready", _compact(status))
+
+
+MEDIA_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
+    "media_index": handle_media_index,
+    "media_status": handle_media_status,
+}
+
+
 QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
     "queue_debug_load": handle_queue_debug_load,
     "queue_list": handle_queue_list,
@@ -11017,7 +11100,7 @@ def _run() -> int:
                     )
                     continue
 
-                handler = QUEUE_COMMANDS.get(command)
+                handler = QUEUE_COMMANDS.get(command) or MEDIA_COMMANDS.get(command)
 
                 if handler is not None:
                     handler(runtime, payload)

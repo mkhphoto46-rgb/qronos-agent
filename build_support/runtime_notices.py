@@ -63,7 +63,7 @@ _PYINSTALLER_PREFIXES = ("pyimod", "pyiboot", "pyi_rth_", "_pyi_rth_utils")
 PYINSTALLER_DISTRIBUTION = "pyinstaller"
 
 # Qronos's own code and configuration inside the bundle.
-PROJECT_ROOTS = frozenset({"core", "security", "build_support", "runtime_entry", "config"})
+PROJECT_ROOTS = frozenset({"core", "security", "qronos_media", "build_support", "runtime_entry", "config"})
 
 # Microsoft C/C++ runtime files, also when a wheel renamed them with a hash
 # suffix. Their redistribution terms come from Microsoft's distributable-code

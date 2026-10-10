@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from core.action_audit import ActionAuditLog
-from qronos_media.paths import UnsafeMediaPath
+from qronos_media.paths import UnsafeMediaPath, local_path
 from qronos_media.permissions import GatePermissions, MediaPermissionRefused
 from qronos_media.scope import OutOfScope
 from qronos_media.resources import StandaloneCpuAuthority
@@ -155,7 +155,17 @@ def main(argv: Sequence[str] | None = None, *, service: MediaService | None = No
     owned = service is None
     try:
         if service is None:
+            from core.startup_admission import STARTUP_REFUSED_EXIT, StartupRefused, refusal
+            from qronos_media.host import media_store_admission
+
             data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
+            try:
+                # Start-up admission on the ACTUAL index folder before anything opens (update barrier,
+                # installed-data binding, one-name rule).
+                media_store_admission(local_path(data_dir))
+            except StartupRefused as refused:
+                _emit(refusal(refused))
+                return STARTUP_REFUSED_EXIT
             service = MediaService(
                 data_dir, tools=tools_from_environment(),
                 authority=StandaloneCpuAuthority(data_dir),

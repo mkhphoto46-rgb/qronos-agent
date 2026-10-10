@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "release-exclude.txt"
 
-PRODUCT_PACKAGES = ("core", "security")
+PRODUCT_PACKAGES = ("core", "security", "qronos_media")
 DEBUG_MARKER = "QRONOS_DEBUG_TOOL"
 DEBUG_DIRECTORY = "tools/debug/"
 

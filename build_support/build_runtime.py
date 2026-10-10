@@ -167,7 +167,8 @@ def build(destination: Path, *, allow_audited_interpreter: bool = False) -> Path
         "--name", "qronos-runtime", "--distpath", str(destination),
         "--workpath", str(work / "analysis"), "--specpath", str(work / "spec"),
         "--paths", str(ROOT), "--collect-submodules", "core",
-        "--collect-submodules", "security", "--hidden-import", "openwakeword.model",
+        "--collect-submodules", "security", "--collect-submodules", "qronos_media",
+        "--hidden-import", "openwakeword.model",
         "--hidden-import", "sounddevice",
         "--add-data", f"{ROOT / 'config' / 'brains.json'}:config",
     ]
