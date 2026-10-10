@@ -373,10 +373,13 @@ def test_foreground_preempts_the_running_chunk_then_exit_proof_then_release_then
     runners["control"].write_text(json.dumps({"sleep_on": 1, "sleep": 60, "markers": str(markers)}),
                                   encoding="utf-8")
 
+    spoke: list[float] = []
+
     def turn_starts() -> None:
         deadline = time.monotonic() + 60
         while not list(markers.glob("whisper-1-*.started")) and time.monotonic() < deadline:
             time.sleep(0.02)
+        spoke.append(time.monotonic())
         state.foreground = True  # the person speaks: media must yield
 
     helper = threading.Thread(target=turn_starts)
@@ -395,6 +398,8 @@ def test_foreground_preempts_the_running_chunk_then_exit_proof_then_release_then
     assert asr_rows(service, asset_id) == []  # no partial result committed
     sleeping_pid = int(next(markers.glob("whisper-1-*.started")).read_text())
     assert any(e["pid"] == sleeping_pid and e["proven"] for e in ended)  # the preempted child's exit was proven
+    stopped_at = next(e["at"] for e in ended if e["pid"] == sleeping_pid)
+    assert stopped_at - spoke[0] < 5.0, "media did not yield promptly to the foreground turn"
 
     state.foreground = False
     runners["control"].write_text(json.dumps({"markers": str(markers)}), encoding="utf-8")
