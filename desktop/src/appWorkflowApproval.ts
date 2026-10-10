@@ -267,7 +267,10 @@ export function workflowDetailRows(prompt: WorkflowPrompt): Array<{ label: strin
     if (value === undefined || value === "" || (Array.isArray(value) && value.length === 0)) continue;
     const shown = Array.isArray(value) ? value.join("، ") : String(value);
     const known = DETAIL_VALUE_TEXT[prompt.phase]?.[key];
-    rows.push({ label, value: known && Object.hasOwn(known, shown) ? known[shown] : shown });
+    rows.push({
+      label,
+      value: known && Object.prototype.hasOwnProperty.call(known, shown) ? known[shown] : shown,
+    });
   }
   return rows;
 }
