@@ -576,3 +576,72 @@ def test_f1_a_real_source_cli_reaching_installed_data_through_a_junction_is_admi
     store_opens = [e for e in result["events"] if e["path"] == "settings.json"]
     assert store_opens and all(e["admitted"] for e in store_opens), result["events"]
     assert store_admission.ADMISSION_FILE in os.listdir(root)
+
+
+UPDATE_OPS = ["status", "discover", "verify", "request", "approve", "discard", "startup_check", "launchx",
+              "--launch", "launch now", ""]
+
+
+@pytest.mark.parametrize("operation", UPDATE_OPS)
+def test_n9_every_non_launch_update_operation_from_source_is_admitted_before_any_store(tmp_path, operation):
+    fence = private("fence")
+    root = tmp_path / "known" / "Qronos"
+    (root / "Updates").mkdir(parents=True)
+    audit = root / "action_audit.jsonl"
+    result = run_child(tmp_path, "source", "core.update_cli", [operation], watch=root, fence=fence,
+                       env={"QRONOS_PERMISSION_AUDIT_PATH": str(audit)}, stdin=b"{}")
+    assert len(result["lines"]) == 1, result["stdout"]  # exactly one JSON answer
+    json.loads(result["lines"][0])
+    assert result["admittedAtEnd"] and result["binding"][0] is True, result
+    assert all(e["admitted"] for e in result["events"]
+               if not e["path"].lower().startswith("updates") and e["path"] != store_admission.ADMISSION_FILE)
+    assert "core.update_cli" not in result["imported"]  # ran as __main__; no second import of the module
+
+
+@pytest.mark.parametrize("spelling", ["launch", " Launch ", "LAUNCH"])
+def test_n9_launch_from_source_never_holds_the_shared_admission(tmp_path, spelling):
+    fence = private("fence")
+    root = tmp_path / "known" / "Qronos"
+    (root / "Updates").mkdir(parents=True)
+    result = run_child(tmp_path, "source", "core.update_cli", [spelling], watch=root, fence=fence,
+                       env={"QRONOS_PERMISSION_AUDIT_PATH": str(root / "action_audit.jsonl")},
+                       stdin=b'{"launchToken": "x"}')
+    assert not result["admittedAtEnd"] and len(result["lines"]) == 1, result
+    assert json.loads(result["lines"][0]).get("code") in {"launch_unavailable", "not_approved"}, result["stdout"]
+
+
+@pytest.mark.parametrize("why", ["restore_in_progress", "version_unknown"])
+def test_n9_a_refused_source_update_cli_prints_one_typed_answer_and_opens_no_store(tmp_path, why):
+    fence = private("fence")
+    root = tmp_path / "known" / "Qronos"
+    (root / "Updates").mkdir(parents=True)
+    audit = root / "action_audit.jsonl"
+    env = {"QRONOS_PERMISSION_AUDIT_PATH": str(audit)}
+    holder = None
+    if why == "restore_in_progress":
+        holder = Holder(tmp_path, "exclusive", root, fence)
+    else:
+        env["QRONOS_APP_VERSION"] = "not-a-version"
+    try:
+        result = run_child(tmp_path, "source", "core.update_cli", ["status"], watch=root, fence=fence, env=env,
+                           stdin=b"{}")
+    finally:
+        if holder is not None:
+            holder.end()
+    assert result["code"] == STARTUP_REFUSED_EXIT and len(result["lines"]) == 1, result
+    answer = json.loads(result["lines"][0])
+    assert answer["ok"] is False and answer["errorType"] == "StartupRefused"
+    # a shared admission blocked by an exclusive holder (a restore) is reported as update_in_progress
+    assert answer["code"] == ("update_in_progress" if why == "restore_in_progress" else "version_unknown"), answer
+    assert not audit.exists() and not result["admittedAtEnd"]
+    assert [e for e in result["events"] if not e["path"].lower().startswith("updates")
+            and e["path"] != store_admission.ADMISSION_FILE] == []
+
+
+def test_n9_the_frozen_dispatch_then_the_cli_main_on_the_same_root_is_idempotent(tmp_path):
+    root, fence = tmp_path / "local" / "Qronos", private("fence")
+    (root / "Updates").mkdir(parents=True)
+    result = run_child(tmp_path, "frozen", "update", ["status"], watch=root, fence=fence, env=frozen_env(root),
+                       stdin=b"{}")
+    assert result["code"] == 0 and len(result["lines"]) == 1 and json.loads(result["lines"][0])["ok"] is True, result
+    assert result["admittedAtEnd"]

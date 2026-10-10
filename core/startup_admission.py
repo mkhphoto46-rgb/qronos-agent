@@ -323,6 +323,7 @@ def enter(
     installed: Optional[bool] = None,
     barrier: bool = True,
     confirm: Optional[Callable[[str], dict]] = None,
+    running_version: Optional[Callable[[], str]] = None,
 ) -> Any:
     """Run steps 1-4 once for this process; return the held writer admission (or raise StartupRefused).
 
@@ -359,7 +360,7 @@ def enter(
             if instance:
                 guard = _acquire(acquire_instance, retry_seconds)
             if barrier:
-                running = version or product_version(environ)
+                running = version or _version_of(running_version, environ)
                 outcome = _recover(recover or (lambda v: recover_on(root, v)), running)
                 if outcome.get("ok") is not True:
                     raise StartupRefused(str(outcome.get("code") or "recovery_failed"))
@@ -398,6 +399,18 @@ def _binding(environ: Optional[Mapping[str, str]], data_root: Optional[Path], wi
     root = Path(data_root) if data_root is not None else _default_data_root()
     key, _ = _resolved(root)
     return True, key, root
+
+
+def _version_of(running_version: Optional[Callable[[], str]], environ: Optional[Mapping[str, str]]) -> str:
+    """The product version; a caller that already has the authority function (core.update_cli) passes it."""
+    if running_version is None:
+        return product_version(environ)
+    from core.local_update import UpdateError
+
+    try:
+        return running_version()
+    except (UpdateError, OSError, ValueError) as error:
+        raise StartupRefused("version_unknown") from error
 
 
 def _release(admission: Any) -> None:

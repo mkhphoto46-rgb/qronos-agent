@@ -140,8 +140,30 @@ def _emit(result: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+#: The one operation that must NOT take the shared writer admission: launching takes the EXCLUSIVE
+#: admission itself (core.update_service.LaunchHold). The same normalisation (strip, lower) as
+#: build_support/runtime_entry.UPDATE_EXCLUSIVE_OPERATIONS, and only that exact word.
+EXCLUSIVE_OPERATION = "launch"
+
+
+def _admit_before_stores() -> int | None:
+    """
+    The start-up order of core/startup_admission.py for every operation but ``launch``, before the request is
+    read and before any store opens (Installer N9): the same as the frozen dispatch does before importing this
+    module, so ``python -m core.update_cli`` from source cannot open installed stores without it. Idempotent
+    after the frozen dispatch. Returns the exit code after printing the one refusal JSON, or None to continue.
+    """
+    from core import startup_admission
+
+    return startup_admission.enter_cli("update", running_version=running_version)
+
+
 def main() -> int:
     operation = sys.argv[1].strip().lower() if len(sys.argv) > 1 else "status"
+    if operation != EXCLUSIVE_OPERATION:
+        refused = _admit_before_stores()
+        if refused is not None:
+            return refused
     try:
         raw = sys.stdin.read(_PAYLOAD_LIMIT + 1)
         if len(raw) > _PAYLOAD_LIMIT:
