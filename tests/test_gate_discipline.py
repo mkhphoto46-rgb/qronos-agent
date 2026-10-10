@@ -74,6 +74,27 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "Creates/closes only the local named Qronos runtime mutex; it does not "
         "launch processes or manipulate user applications."
     ),
+    "core.instance_ownership": (
+        "Creates, wait-acquires and releases only Qronos's own named singleton "
+        "mutexes (CreateMutexW/WaitForSingleObject/ReleaseMutex) on one holder "
+        "thread; it launches nothing and touches no user application."
+    ),
+    "core.startup_admission": (
+        "Calls SHGetKnownFolderPath through ctypes only to read the Local AppData "
+        "known folder of its own token; it changes nothing."
+    ),
+    "core.store_admission": (
+        "Takes and releases byte-range locks (LockFileEx/UnlockFileEx) on "
+        "Qronos's own admission lock file, and asks whether the update fence "
+        "mutex exists (OpenMutexW); it launches nothing."
+    ),
+    "core.update_service": (
+        "Starts only the verified staged Qronos installer (/S /QRONOSUPDATE), "
+        "after the person's typed approval secret and only when the launch is "
+        "available, which it is not by default (launch_unavailable). Uses ctypes "
+        "for the update fence and runtime-singleton mutex waits, a share-read "
+        "lock on the staged installer and process start times."
+    ),
     "core.windows_accessibility": (
         "Reads UI Automation focus, geometry, properties and RuntimeIds. "
         "UIA mutations live in the separately reviewed, authorization-gated backend."
