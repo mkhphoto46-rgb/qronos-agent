@@ -294,6 +294,7 @@ def verified_decoder_input(cache_dir: Path, data: bytes, digest: str, suffix: st
     target = owned_child(directory, f"sub-{secrets.token_hex(16)}{suffix}")
     locked = _LockedFile(target)
     identity = locked.identity
+    in_flight: BaseException | None = None
     try:
         locked.write_all(data)
         if locked.size() != len(data) or locked.digest(len(data)) != digest:
@@ -304,14 +305,26 @@ def verified_decoder_input(cache_dir: Path, data: bytes, digest: str, suffix: st
         yield target
         if locked.digest(len(data)) != digest:
             raise DecoderInputError("decoder input: the copy changed while it was decoded")
+    except BaseException as exc:
+        in_flight = exc  # a typed stop (permission, cancellation, resource) or another failure
+        raise
     finally:
         locked.close()
+        failure: DecoderInputError | None = None
         try:
             _delete_exact(target, identity)
+        except DecoderInputError as exc:
+            failure = exc
         except OSError as exc:
-            if isinstance(exc, DecoderInputError):
-                raise
-            raise DecoderInputError(f"decoder input: the copy could not be removed ({type(exc).__name__})") from None
+            failure = DecoderInputError(f"decoder input: the copy could not be removed ({type(exc).__name__})")
+        if failure is not None:
+            if in_flight is None:
+                raise failure  # a normal decode whose cleanup failed still fails
+            # Never replace what is already propagating: a cleanup failure must not turn a typed stop into an
+            # OSError (which a stage records as a failed track). It is reported on that exception instead, and
+            # the copy (still held by another opener, or no longer ours) is left for the bounded sweep.
+            in_flight.add_note(f"decoder input: the copy could not be removed ({failure}); "
+                               "it is left for the bounded sweep")
 
 
 def sweep_stale_inputs(cache_dir: Path) -> dict[str, int]:
