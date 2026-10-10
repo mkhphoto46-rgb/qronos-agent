@@ -31,7 +31,7 @@ from pathlib import Path
 import subprocess
 import threading
 import time
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from qronos_media.containment import DECODER_LIMITS, ChildLimits, Containment
 from qronos_media.paths import decoder_input, local_path
@@ -90,6 +90,23 @@ def _reader(stream, sink: bytearray, limit: int, overflow: threading.Event) -> N
         return
 
 
+class ChildTerminationUnproven(MediaToolError):
+    """The child was told to stop but its exit (and its whole job's) could not be proven.
+
+    The job handle is NOT closed: closing would end the only way to prove the
+    exit later. The spawn observer that owns the child keeps it.
+    """
+
+
+class SpawnObserver(Protocol):
+    """Who owns a child for its whole life (the model lease). Proof comes from the handles it is given."""
+
+    def begin_spawn(self) -> None: ...
+    def spawn_failed(self) -> None: ...
+    def attach(self, child: subprocess.Popen, containment: Containment | None) -> None: ...
+    def finish(self, child: subprocess.Popen, containment: Containment | None) -> bool: ...
+
+
 def run_bounded(
     argv: Sequence[str],
     *,
@@ -100,6 +117,8 @@ def run_bounded(
     env: Mapping[str, str] | None = None,
     poll_seconds: float = 0.05,
     limits: ChildLimits | None = DECODER_LIMITS,
+    observer: SpawnObserver | None = None,
+    containment_factory: Callable[[ChildLimits], Containment] | None = None,
 ) -> ChildResult:
     """Run ``argv`` with a deadline, a cancel check, output caps and OS limits.
 
@@ -108,14 +127,26 @@ def run_bounded(
     child's whole job and raise; the exception carries ``pid``. ``limits`` is
     the memory and process-count containment (see :mod:`qronos_media.containment`);
     if it cannot be applied the child is killed before it runs.
+
+    ``observer`` (a model lease) is told before the process is created
+    (``begin_spawn``; it may refuse), gets the owned process and job handles
+    right after creation (``attach``) and, after teardown, decides from those
+    handles whether the exit is proven (``finish``). When it is not, the job
+    stays open in the observer's hands and :class:`ChildTerminationUnproven`
+    is raised. ``containment_factory`` is a test seam for the job type only.
     """
     if not argv or not all(isinstance(part, str) for part in argv):
         raise ValueError("argv must be a non-empty list of strings")
     if not (0 < timeout_seconds <= 24 * 3600) or not math.isfinite(timeout_seconds):
         raise ValueError("timeout_seconds out of range")
+    if observer is not None:
+        observer.begin_spawn()
     try:
-        containment = Containment(limits) if limits is not None else None
+        factory = containment_factory or Containment  # looked up per call (module seam)
+        containment = factory(limits) if limits is not None else None
     except OSError as exc:
+        if observer is not None:
+            observer.spawn_failed()
         raise MediaToolUnavailable(f"child containment unavailable: {exc}") from None
     kwargs: dict = {}
     if os.name == "nt":
@@ -136,7 +167,11 @@ def run_bounded(
     except OSError as exc:
         if containment is not None:
             containment.close()
+        if observer is not None:
+            observer.spawn_failed()
         raise MediaToolUnavailable(f"could not start {Path(argv[0]).name}: {type(exc).__name__}") from None
+    if observer is not None:
+        observer.attach(child, containment)
 
     def stop_everything() -> None:
         if containment is not None:
@@ -144,38 +179,38 @@ def run_bounded(
         if child.poll() is None:
             child.kill()
 
+    kept_open = False
+    reason: type[MediaToolError] | None = None
+    adopt_error: OSError | None = None
+    out, err = bytearray(), bytearray()
+    overflow = threading.Event()
+    peak = 0
     try:
         if containment is not None:
             try:
                 containment.adopt(child)
             except OSError as exc:
-                stop_everything()
-                child.wait(timeout=10)
-                for stream in (child.stdout, child.stderr):
-                    stream.close()
-                raise MediaToolUnavailable(f"child containment failed: {exc}") from None
-
-        out, err = bytearray(), bytearray()
-        overflow = threading.Event()
-        readers = [
-            threading.Thread(target=_reader, args=(child.stdout, out, stdout_limit, overflow), daemon=True),
-            threading.Thread(target=_reader, args=(child.stderr, err, stderr_limit, overflow), daemon=True),
-        ]
-        for thread in readers:
-            thread.start()
-
-        deadline = time.monotonic() + timeout_seconds
-        reason: type[MediaToolError] | None = None
-        while child.poll() is None:
-            if overflow.is_set():
-                reason = ChildOutputExceeded
-            elif cancelled is not None and cancelled():
-                reason = ChildCancelled
-            elif time.monotonic() >= deadline:
-                reason = ChildTimedOut
-            if reason is not None:
-                break
-            time.sleep(poll_seconds)
+                adopt_error = exc
+        if adopt_error is None:
+            readers = [
+                threading.Thread(target=_reader, args=(child.stdout, out, stdout_limit, overflow), daemon=True),
+                threading.Thread(target=_reader, args=(child.stderr, err, stderr_limit, overflow), daemon=True),
+            ]
+            for thread in readers:
+                thread.start()
+            deadline = time.monotonic() + timeout_seconds
+            while child.poll() is None:
+                if overflow.is_set():
+                    reason = ChildOutputExceeded
+                elif cancelled is not None and cancelled():
+                    reason = ChildCancelled
+                elif time.monotonic() >= deadline:
+                    reason = ChildTimedOut
+                if reason is not None:
+                    break
+                time.sleep(poll_seconds)
+        else:
+            readers = []
         # Always end the whole job: a descendant that outlived the child
         # would otherwise keep the pipes open and the readers blocked.
         stop_everything()
@@ -187,13 +222,26 @@ def run_bounded(
             thread.join(timeout=5)
         peak = containment.peak_memory() if containment is not None else 0
     finally:
-        if containment is not None:
+        if observer is not None:
+            # The observer reads proof from the handles it holds; an unproven
+            # job stays open with it (closing would make proof impossible).
+            kept_open = not observer.finish(child, containment)
+        if containment is not None and not kept_open:
             containment.close()
-    for stream in (child.stdout, child.stderr):
-        try:
-            stream.close()
-        except OSError:
-            pass
+    if not kept_open:
+        # With a descendant still alive (unproven), closing a pipe would wait for the blocked
+        # reader thread, that is, for the descendant: the pipes stay with the observer instead.
+        for stream in (child.stdout, child.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+    if kept_open:
+        error = ChildTerminationUnproven(f"{Path(argv[0]).name}: exit not proven; still counted")
+        error.pid = child.pid
+        raise error
+    if adopt_error is not None:
+        raise MediaToolUnavailable(f"child containment failed: {adopt_error}") from None
     if reason is None and overflow.is_set():
         reason = ChildOutputExceeded
     if reason is not None:
@@ -322,6 +370,23 @@ class MediaTools:
             "-map", "0:v:0", "-an", "-sn", "-dn",
             "-filter_threads", thread_count,
             "-vf", graph, "-f", "null", "-",
+        ]
+
+    def audio_chunk_argv(self, path: Path, *, stream_index: int, start_seconds: float, length_seconds: float,
+                         output: Path) -> list[str]:
+        """ONE explicitly chosen audio stream (absolute index) -> 16 kHz mono 16-bit PCM WAV in an owned file."""
+        target = local_path(output)
+        if target.suffix.lower() != ".wav":
+            raise ValueError("audio chunks are written as .wav")
+        index = int(_number(stream_index, 0, 4096, "stream_index"))
+        return [
+            str(self.ffmpeg), "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-y",
+            "-threads", "1",
+            "-ss", _seconds(start_seconds), "-t", _seconds(max(0.001, length_seconds)),
+            *self._input(path, VIDEO_DEMUXERS),
+            "-map", f"0:{index}", "-vn", "-sn", "-dn",
+            "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav",
+            "file:" + str(target),
         ]
 
     def keyframe_argv(self, path: Path, *, time_seconds: float, output: Path, width: int = 320) -> list[str]:

@@ -112,6 +112,7 @@ if os.name == "nt":
     _kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
     _kernel32.ResumeThread.restype = wintypes.DWORD
     _kernel32.ResumeThread.argtypes = (wintypes.HANDLE,)
+    _kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
 
     _EXTENDED_LIMITS = 9
     _BASIC_ACCOUNTING = 1
@@ -200,6 +201,27 @@ if os.name == "nt":
             if self._job:
                 _kernel32.TerminateJobObject(self._job, 1)
 
+        @staticmethod
+        def creation_time(child: subprocess.Popen) -> int:
+            """The child's creation FILETIME from its own handle (0 if unreadable): with the pid, its identity."""
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not _kernel32.GetProcessTimes(int(child._handle), *(ctypes.byref(t) for t in times)):  # noqa: SLF001
+                return 0
+            return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+
+        def exit_proven(self, child: subprocess.Popen) -> bool:
+            """True only when the child's own handle reports exit AND the job holds no process at all.
+
+            Read while the job handle is still open: after close the job cannot be asked.
+            """
+            if child.poll() is None or not self._job:
+                return False
+            info = _Accounting()
+            if not _kernel32.QueryInformationJobObject(
+                    self._job, _BASIC_ACCOUNTING, ctypes.byref(info), ctypes.sizeof(info), None):
+                return False
+            return int(info.ActiveProcesses) == 0
+
         def close(self) -> None:
             if self._job:
                 _kernel32.CloseHandle(self._job)  # KILL_ON_JOB_CLOSE ends any survivor
@@ -234,6 +256,21 @@ else:  # pragma: no cover - exercised on non-Windows CI only
 
         def peak_memory(self) -> int:
             return 0
+
+        @staticmethod
+        def creation_time(child: subprocess.Popen) -> int:
+            return 0
+
+        def exit_proven(self, child: subprocess.Popen) -> bool:
+            if child.poll() is None or self._pid is None:
+                return False
+            try:
+                os.killpg(self._pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            return False
 
         def terminate(self) -> None:
             if self._pid is not None:
