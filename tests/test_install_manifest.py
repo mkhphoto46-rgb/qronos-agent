@@ -100,11 +100,14 @@ def test_the_committed_hooks_compile_into_an_uninstaller_too(tmp_path):
         pytest.skip("Tauri's NSIS compiler is not installed on this machine.")
     payload = tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
     payload.write_bytes(b"never run")
+    owned = tmp_path / install_manifest.FILE_NAME  # the update transaction embeds the build's own list
+    owned.write_bytes(install_manifest.render(["qronos-desktop.exe", install_manifest.FILE_NAME]))
     script = tmp_path / "compile.nsi"
     script.write_text("\n".join((
         "Unicode true", 'Name "compile-only"', f'OutFile "{tmp_path / "compile-only.exe"}"',
         "RequestExecutionLevel user", f'!define QRONOS_WEBVIEW2_INSTALLER "{payload}"',
-        '!define QRONOS_WEBVIEW2_VERSION "1.2.3.4"', f'!include "{prerequisites.HOOK_PATH}"',
+        '!define QRONOS_WEBVIEW2_VERSION "1.2.3.4"', f'!define QRONOS_OWNED_MANIFEST "{owned}"',
+        f'!include "{prerequisites.HOOK_PATH}"',
         "Section Install", '  SetOutPath "$INSTDIR"', "  !insertmacro NSIS_HOOK_PREINSTALL",
         '  WriteUninstaller "$INSTDIR\\uninstall.exe"', "SectionEnd",
         "Section Uninstall", "  !insertmacro NSIS_HOOK_POSTUNINSTALL", "SectionEnd", "")), encoding="utf-8-sig")

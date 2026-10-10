@@ -48,6 +48,7 @@ _REGISTRY = [
     ("WriteRegStr", re.compile(r'\bWriteRegStr (SHCTX|HKCU|HKLM) "'), r'WriteINIStr "${QPROBE_REG}" "\1\\'),
     ("WriteRegDWORD", re.compile(r'\bWriteRegDWORD (SHCTX|HKCU|HKLM) "'), r'WriteINIStr "${QPROBE_REG}" "\1\\'),
     ("ReadRegStr", re.compile(r'\bReadRegStr (\$\w+) (SHCTX|HKCU|HKLM) "'), r'ReadINIStr \1 "${QPROBE_REG}" "\2\\'),
+    ("ReadRegDWORD", re.compile(r'\bReadRegDWORD (\$\w+) (SHCTX|HKCU|HKLM) "'), r'ReadINIStr \1 "${QPROBE_REG}" "\2\\'),
     ("DeleteRegKey", re.compile(r'\bDeleteRegKey (?:/ifempty )?(SHCTX|HKCU|HKLM) "'),
      r'DeleteINISec "${QPROBE_REG}" "\1\\'),
     ("DeleteRegValue", re.compile(r'\bDeleteRegValue (SHCTX|HKCU|HKLM) "'), r'DeleteINIStr "${QPROBE_REG}" "\1\\'),
@@ -83,9 +84,15 @@ def _inert_registry(text: str, counts: dict[str, int] | None, log: dict[str, int
 
 # The committed Qronos template renders exactly these (fixture context: no deep links or file associations);
 # tests/test_installer_template.py pins them. Probes record the actual counts in transforms.json.
-SCRIPT_REGISTRY = {"WriteRegStr": 12, "WriteRegDWORD": 3, "ReadRegStr": 15, "DeleteRegKey": 7,
+SCRIPT_REGISTRY = {"WriteRegStr": 12, "WriteRegDWORD": 3, "ReadRegStr": 15, "ReadRegDWORD": 0, "DeleteRegKey": 7,
                    "DeleteRegValue": 2, "EnumRegKey": 1}
-HOOK_REGISTRY = {"webview2-offline.nsh": {"ReadRegStr": 3}}
+HOOK_REGISTRY = {"webview2-offline.nsh": {"ReadRegStr": 3},
+                 # the update transaction's metadata snapshot and restore (macros: each command once in the text)
+                 "qronos-update-transaction.nsh": {"ReadRegStr": 1, "ReadRegDWORD": 1, "WriteRegStr": 1,
+                                                   "WriteRegDWORD": 1, "DeleteRegValue": 2}}
+# Folder variables the hooks name (the update transaction's shortcut paths), replaced in the copied hooks too, so a
+# probe never reads or writes the real Start menu or desktop.
+HOOK_FOLDERS = {"webview2-offline.nsh": {"$SMPROGRAMS": 1, "$DESKTOP": 1}}
 
 STUB_UTILS = r"""; Fixture stub of Tauri's utils.nsh (nothing is killed, pinned or retargeted).
 !macro SetContext
@@ -173,9 +180,13 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
                      template: Path | None = None, instdir: Path | None = None, go: bool = False, go2: bool = False,
                      python: str | None = None, reinstall: dict[str, str] | None = None,
                      compile_log: list | None = None, deep_link: bool = False,
-                     registry_fault: str | None = None) -> FullProbe:
+                     registry_fault: str | None = None, extra_defines: dict[str, str] | None = None,
+                     owned_manifest_files: list[str] | None = None) -> FullProbe:
     """registry_fault: the ONE registry write whose rendered line contains this text goes to a read-only fake
-    registry file (a real WriteINIStr failure); every other write succeeds. deep_link: render one protocol."""
+    registry file (a real WriteINIStr failure); every other write succeeds. deep_link: render one protocol.
+    extra_defines: private probe values for the hook wrapper (QRONOS_PROBE_* / QPROBE_* seams only).
+    owned_manifest_files: the update transaction's own list (QRONOS_OWNED_MANIFEST) differs from the payload's
+    manifest (an incoming-manifest mismatch); by default both are the same file, as build_desktop makes them."""
     if MAKENSIS is None or not MAKENSIS.is_file() or PLUGINS is None or not PLUGINS.is_dir():
         raise FileNotFoundError("Tauri's NSIS compiler (with its plug-ins) is not installed on this machine.")
     work.mkdir(parents=True, exist_ok=False)
@@ -189,10 +200,20 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
     (payload / install_manifest.FILE_NAME).write_bytes(install_manifest.render(payload_manifest_files()))
     webview2 = payload / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
     webview2.write_bytes(b"never run: the runtime is reported present")
+    if owned_manifest_files:
+        (work / "owned-list-mismatch.txt").write_bytes(install_manifest.render(owned_manifest_files))
 
     for hook in HOOKS.glob("*.nsh"):
         text = hook.read_text(encoding="utf-8")
+        # installMode currentUser: SHCTX is HKCU, in the hooks as in the rendered script (one fake root).
+        text = _sub(text, re.compile(r"\bSHCTX\b"), "HKCU", None, f"{hook.name}:SHCTX=HKCU", transforms)
         text = _inert_registry(text, HOOK_REGISTRY.get(hook.name, {}), transforms, hook.name)
+        for variable, folder in (("$SMPROGRAMS", "QPROBE_SMPROGRAMS"), ("$DESKTOP", "QPROBE_DESKTOP")):
+            # Every occurrence is replaced (recorded in transforms.json); the committed hooks' counts are pinned
+            # by HOOK_FOLDERS in the tests, so an older tree under test still builds (pre-repair controls).
+            pattern = re.compile(re.escape(variable) + r"(?![A-Za-z])")
+            text = _sub(text, pattern, "${" + folder + "}", len(pattern.findall(text)), f"{hook.name}:{variable}",
+                        transforms)
         (work / "hooks" / hook.name).write_text(text, encoding="utf-8-sig")
     (work / "utils.nsh").write_text(STUB_UTILS, encoding="utf-8-sig")
     (work / "FileAssociation.nsh").write_text(STUB_ASSOCIATIONS, encoding="utf-8-sig")
@@ -260,6 +281,8 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
                        encoding="utf-8")
     defines = {
         "QRONOS_WEBVIEW2_INSTALLER": str(webview2), "QRONOS_WEBVIEW2_VERSION": "1.2.3.4",
+        "QRONOS_OWNED_MANIFEST": str(payload / install_manifest.FILE_NAME),
+        **({"QRONOS_OWNED_MANIFEST": str(work / "owned-list-mismatch.txt")} if owned_manifest_files else {}),
         "QRONOS_UPDATE_FENCE_NAME": fence, "QRONOS_PROBE_DATA_ROOT": str(data_root),
         "QRONOS_PROBE_RESULT": str(work / "result.txt"),
         "QRONOS_PROBE_PROFILE": str(profile["profile"]), "QRONOS_PROBE_LOCALAPPDATA": str(profile["local"]),
@@ -276,6 +299,9 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
     if python:
         defines["QPROBE_GRANDCHILD"] = "1"
         defines["QPROBE_PYTHON"] = python
+    for name, value in (extra_defines or {}).items():
+        assert name.startswith(("QRONOS_PROBE_", "QPROBE_")), name
+        defines[name] = value
     if reinstall:
         defines["QPROBE_REINSTALL"] = "1"
         defines.update({f"QPROBE_REINSTALL_{key.upper()}": value for key, value in reinstall.items()})
@@ -284,6 +310,7 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
     wrapper.write_text("\n".join([f'!define {name} "{value}"' for name, value in defines.items()] + [
         f'!include "{work / "hooks" / "webview2-offline.nsh"}"',
         "Var QProbeChild",
+        "Var QProbeAppChecks",
         "!macro QPROBE_LOG TEXT",
         '  FileOpen $R5 "${QPROBE_LOG}" a',
         "  FileSeek $R5 0 END",
@@ -301,6 +328,10 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
         "!macroend",
         "!macro QPROBE_APP_CHECK",
         '  !insertmacro QPROBE_LOG "app-check"',
+        "  IntOp $QProbeAppChecks $QProbeAppChecks + 1",
+        "  !ifdef QPROBE_ABORT_SECOND_APP_CHECK",
+        '    ${IfThen} $QProbeAppChecks = 2 ${|} Abort "probe: the person declined to close the app" ${|}',
+        "  !endif",
         "  !ifdef QPROBE_GRANDCHILD",
         '    ${If} $QProbeChild != "1"',
         '      StrCpy $QProbeChild "1"',

@@ -691,15 +691,17 @@ def test_the_fence_runs_first_in_preinstall_and_preuninstall_and_the_receipt_las
     hook = (HOOKS / "webview2-offline.nsh").read_text(encoding="utf-8")
     assert '!include "${__FILEDIR__}\\qronos-update-fence.nsh"' in hook
     preinstall = _macro(hook, "NSIS_HOOK_PREINSTALL")
-    # Round 12 (Root's order; adapted from round 10, where the WebView2 child came before the app check and the
-    # removal): fence, install root, whole-list validation, app check, owned removal, then the WebView2 child.
+    # Round 19 (O-A, the update transaction; round 12's order had the owned removal BEFORE the WebView2 child):
+    # fence, install root, recovery of an interrupted update, whole-list validation, the WebView2 child (before
+    # anything of the previous installation changes), app check, then the transaction begins (set aside + claims).
     validate = preinstall.index('StrCpy $QronosValidateOnly "1"')
     order = [preinstall.index("!insertmacro QRONOS_FENCE_INSTALL"), preinstall.index("Call QronosCheckInstallRoot"),
-             validate, preinstall.index("Call QronosRemoveOwnedPayload", validate),
-             preinstall.index("CheckIfAppIsRunning"),
-             preinstall.index("Call QronosRemoveOwnedPayload", preinstall.index("CheckIfAppIsRunning")),
-             preinstall.index("QRONOS_WEBVIEW2_VERSION_TO_R9"), preinstall.index("QRONOS_WEBVIEW2_RUN_INSTALLER")]
+             preinstall.index("Call QronosTxnRecover"), validate,
+             preinstall.index("Call QronosRemoveOwnedPayload", validate),
+             preinstall.index("QRONOS_WEBVIEW2_VERSION_TO_R9"), preinstall.index("QRONOS_WEBVIEW2_RUN_INSTALLER"),
+             preinstall.index("CheckIfAppIsRunning"), preinstall.index("Call QronosTxnBegin")]
     assert order == sorted(order) and len(set(order)) == len(order)
+    assert preinstall.count("Call QronosRemoveOwnedPayload") == 1  # validation only; the set-aside is in Begin
     first = [line.strip() for line in preinstall.splitlines()[1:] if line.strip() and not line.strip().startswith(";")]
     assert first[:5] == ["Push $R7", "Push $R8", "Push $R9", "!insertmacro QRONOS_FENCE_INSTALL",
                          '${If} $QronosFenceMessage != ""']
@@ -722,12 +724,19 @@ def test_the_production_hook_compiles_in_tauris_include_order_and_is_never_run(t
     payload = tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
     payload.write_bytes(b"never run")
     pin = prerequisites.load_pin()
-    (tmp_path / "hooks.nsh").write_text(prerequisites.hook_wrapper(payload, pin), encoding="utf-8")
+    manifest = tmp_path / "qronos-install-manifest.txt"
+    manifest.write_bytes(b"stand-in list")
+    (tmp_path / "hooks.nsh").write_text(prerequisites.hook_wrapper(payload, pin, owned_manifest=manifest),
+                                        encoding="utf-8")
     script = tmp_path / "tauri-order.nsi"
     script.write_text("\n".join((
         "Unicode true", 'Name "compile-only"', f'OutFile "{tmp_path / "compile-only.exe"}"',
         "RequestExecutionLevel user", f'!include "{tmp_path / "hooks.nsh"}"',
         '!define VERSION "0.1.0"',  # after the hooks, as in Tauri 2.9.4's installer.nsi
+        # also after the hooks and before Section Install, as in the template (lines 46, 71-73)
+        '!define PRODUCTNAME "compile-only"',
+        '!define UNINSTKEY "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${PRODUCTNAME}"',
+        '!define MANUPRODUCTKEY "Software\\QronosProbe\\${PRODUCTNAME}"',
         "Section Install", '  SetOutPath "$INSTDIR"', "  !insertmacro NSIS_HOOK_PREINSTALL",
         '  WriteUninstaller "$INSTDIR\\uninstall.exe"',"  !insertmacro NSIS_HOOK_POSTINSTALL", "SectionEnd",
         "Section Uninstall", "  !insertmacro NSIS_HOOK_PREUNINSTALL", "  !insertmacro NSIS_HOOK_POSTUNINSTALL",
@@ -759,7 +768,7 @@ def test_the_build_wrapper_never_sets_a_probe_only_define(tmp_path):
     from build_support import desktop_prerequisites as prerequisites
 
     wrapper = prerequisites.hook_wrapper(tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
-                                         prerequisites.load_pin())
+                                         prerequisites.load_pin(), owned_manifest=tmp_path / "m.txt")
     for name in ("QRONOS_UPDATE_FENCE_NAME", "QRONOS_PROBE_"):
         assert name not in wrapper
         for source in (ROOT / "build_support").rglob("*.py"):

@@ -352,11 +352,18 @@ def _lock(path: Path):
 FAILURES = {
     # name: (probe options, expected failed step). Every case injects a REAL failure at the FIRST command of its
     # loop or group while every LATER command of that group would succeed; the installation must still stop.
-    "main_program_locked": ({}, "the main program"),
-    "first_resource_folder_blocked": ({}, "a resource folder"),
-    "first_resource_file_locked": ({}, "a resource file"),
+    # Round 19 (update transaction): a new payload path is CLAIMED before the template writes it, so an unlisted
+    # file or folder already in the way refuses earlier (step None, REFUSALS) instead of being overwritten. The
+    # file-write failures are therefore injected after the claim: this probe process opens the claimed file
+    # without sharing (QRONOS_PROBE_LOCK_AFTER_CLAIM), so the template's real File/WriteUninstaller fails.
+    "main_program_locked": ({"extra_defines": {"QRONOS_PROBE_LOCK_AFTER_CLAIM": "qronos-probe.exe"}},
+                            "the main program"),
+    "first_resource_folder_blocked": ({}, None),
+    "first_resource_file_locked": ({"extra_defines": {"QRONOS_PROBE_LOCK_AFTER_CLAIM": "res\\one.txt"}},
+                                   "a resource file"),
     "first_link_registration_write": ({"deep_link": True, "registry_fault": '"URL Protocol"'}, "a link registration"),
-    "uninstaller_is_a_folder": ({}, "the uninstaller"),
+    "uninstaller_locked": ({"extra_defines": {"QRONOS_PROBE_LOCK_AFTER_CLAIM": "uninstall.exe"}}, "the uninstaller"),
+    "uninstaller_path_is_an_unlisted_folder": ({}, None),
     "install_location_write": ({"registry_fault": '${MANUPRODUCTKEY}" "" $INSTDIR'},
                                "the install location registration"),
     "first_apps_and_features_write": ({"registry_fault": '"MainBinaryName" "${MAINBINARYNAME}.exe"'},
@@ -367,6 +374,9 @@ FAILURES = {
     "desktop_shortcut_is_a_folder": ({}, "the desktop shortcut"),
     "owned_payload_locked": ({}, None),
 }
+# step None: the typed refusal before anything new is written (and with nothing of the previous payload lost).
+REFUSALS = {"owned_payload_locked": "could not be removed", "first_resource_folder_blocked": "but it is a file",
+            "uninstaller_path_is_an_unlisted_folder": "but it is a folder"}
 
 
 @native
@@ -380,16 +390,12 @@ def test_f3_a_failure_at_any_material_step_leaves_no_receipt(tmp_path, failure):
     probe = env.probe("fail", **options)
     held = None
     manifest_only = [install_manifest.FILE_NAME]
-    if failure == "main_program_locked":
-        _prior_install(probe.instdir, manifest_only)
-        held = _lock(probe.instdir / "qronos-probe.exe")
+    if failure in ("main_program_locked", "first_resource_file_locked", "uninstaller_locked"):
+        _prior_install(probe.instdir, manifest_only)  # the lock is taken by the probe right after its claim
     elif failure == "first_resource_folder_blocked":
         _prior_install(probe.instdir, manifest_only)
         (probe.instdir / "res").write_text("an unlisted FILE where the first resource folder goes", encoding="utf-8")
-    elif failure == "first_resource_file_locked":
-        _prior_install(probe.instdir, manifest_only)
-        held = _lock(probe.instdir / "res" / "one.txt")  # res2\two.txt (later) would be written fine
-    elif failure == "uninstaller_is_a_folder":
+    elif failure == "uninstaller_path_is_an_unlisted_folder":
         _prior_install(probe.instdir, manifest_only)
         (probe.instdir / "uninstall.exe" / "inside").mkdir(parents=True)
     elif failure == "whole_registry_read_only":
@@ -416,7 +422,7 @@ def test_f3_a_failure_at_any_material_step_leaves_no_receipt(tmp_path, failure):
     if step is not None:
         assert probe.read_result() == f"step failed: {step}"
     else:
-        assert "could not be removed" in probe.read_result(), probe.read_result()
+        assert REFUSALS[failure] in probe.read_result(), probe.read_result()
 
 
 # ------------------------------------------------------------------------------- F4 the real hand-over
@@ -899,7 +905,7 @@ def test_the_production_hook_wrapper_carries_no_probe_value(tmp_path):
     from build_support import desktop_prerequisites as prerequisites
 
     wrapper = prerequisites.hook_wrapper(tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
-                                         prerequisites.load_pin())
+                                         prerequisites.load_pin(), owned_manifest=tmp_path / "m.txt")
     prerequisites.verify_hook_wrapper(wrapper)
     with pytest.raises(prerequisites.PrerequisiteError):
         prerequisites.verify_hook_wrapper(wrapper + '!define QRONOS_UPDATE_FENCE_NAME "Local-x"\n')

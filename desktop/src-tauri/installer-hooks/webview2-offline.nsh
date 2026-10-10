@@ -25,6 +25,7 @@
 !include "x64.nsh"
 !include "${__FILEDIR__}\qronos-install-root.nsh"
 !include "${__FILEDIR__}\qronos-update-fence.nsh"
+!include "${__FILEDIR__}\qronos-update-transaction.nsh"
 
 ; The Qronos template (installer-template/installer.nsi) refuses to compile without these hooks.
 !define QRONOS_TEMPLATE_HOOKS
@@ -109,6 +110,26 @@
   ${If} $QronosMessage != ""
     !insertmacro QRONOS_REFUSE "$QronosMessage"
   ${EndIf}
+  ; The update transaction (qronos-update-transaction.nsh) needs this installer's own file list, and it
+  ; restores exactly the metadata and shortcuts this template writes.
+  !ifndef QRONOS_OWNED_MANIFEST
+    !error "Qronos installers must be built with build_support.build_desktop: the install manifest (QRONOS_OWNED_MANIFEST) was not provided."
+  !endif
+  !ifdef STARTMENUFOLDER
+    !if "${STARTMENUFOLDER}" != ""
+      !error "Qronos: a Start-menu folder is not covered by the update transaction's shortcut restore."
+    !endif
+  !endif
+  StrCpy $QronosUninstKey "${UNINSTKEY}"
+  StrCpy $QronosManuKey "${MANUPRODUCTKEY}"
+  StrCpy $QronosLnkStart "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+  StrCpy $QronosLnkDesktop "$DESKTOP\${PRODUCTNAME}.lnk"
+  ; What an earlier, interrupted update left is untrusted: an empty folder is removed, anything else refuses
+  ; with nothing moved or deleted (qronos-update-transaction.nsh, QronosTxnRecover).
+  Call QronosTxnRecover
+  ${If} $QronosMessage != ""
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
+  ${EndIf}
   ; The previous installation's whole file list is checked against the disk (no link, junction or wrong
   ; kind on the way to any entry) before anything is stopped, removed or installed.
   StrCpy $QronosValidateOnly "1"
@@ -117,15 +138,8 @@
   ${If} $QronosMessage != ""
     !insertmacro QRONOS_REFUSE "$QronosMessage"
   ${EndIf}
-  ; Replace, never mix: remove exactly the previous installation's listed files,
-  ; once Qronos is not running, before anything new is installed.
-  !ifmacrodef CheckIfAppIsRunning
-    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  !endif
-  Call QronosRemoveOwnedPayload
-  ${If} $QronosMessage != ""
-    !insertmacro QRONOS_REFUSE "$QronosMessage"
-  ${EndIf}
+  ; The prerequisite comes BEFORE anything of the previous installation changes: if it cannot be
+  ; completed, the previous version stays exactly as it was.
   !insertmacro QRONOS_WEBVIEW2_VERSION_TO_R9
   ${If} $R9 == ""
     ${IfNot} ${IsNativeAMD64}
@@ -141,6 +155,21 @@
     DetailPrint "Microsoft Edge WebView2 Runtime $R9 is installed."
   ${Else}
     DetailPrint "Microsoft Edge WebView2 Runtime $R9 is already installed."
+  ${EndIf}
+  ; Replace, never mix, never lose: once Qronos is not running, the previous installation's listed files
+  ; are SET ASIDE (kept byte for byte, identity journaled) and every path of the new payload is claimed.
+  ; Any later failure puts the previous version back (QRONOS_STEP, QRONOS_INSTALL_COMPLETE, .onInstFailed).
+  !ifmacrodef CheckIfAppIsRunning
+    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !endif
+  Call QronosTxnBegin
+  ${If} $QronosMessage != ""
+    Push $QronosMessage
+    ${If} $QronosTxn == "1"
+      Call QronosTxnRollbackInRun
+    ${EndIf}
+    Pop $QronosMessage
+    !insertmacro QRONOS_REFUSE "$QronosMessage"
   ${EndIf}
   Pop $R9
   Pop $R8
@@ -170,6 +199,11 @@
   Call un.QronosCheckInstallRoot
   ${If} $QronosMessage != ""
     !insertmacro QRONOS_REFUSE "$QronosMessage Nothing was removed."
+  ${EndIf}
+  ; An interrupted update keeps the previous version's files in its transaction folder: only the
+  ; installer may finish or undo it (qronos-update-transaction.nsh).
+  ${If} ${FileExists} "$INSTDIR\${QRONOS_TXN_FOLDER}\*.*"
+    !insertmacro QRONOS_REFUSE "An earlier Qronos update was interrupted. Run the Qronos installer to restore or finish it first. Nothing was removed."
   ${EndIf}
   ; Without its own file list nothing here is provably Qronos's: refuse before anything is touched.
   ${IfNot} ${FileExists} "$INSTDIR\${QRONOS_MANIFEST}"
