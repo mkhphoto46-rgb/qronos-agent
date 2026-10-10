@@ -231,3 +231,61 @@ def test_s2_stage_a_pause_with_a_reader_blocking_cleanup_stays_a_typed_cancellat
     assert _subtitle_rows(service) == rows_before  # nothing committed by this run
     other.close()
     service.close()
+
+
+# ----------------------------------------------------------------------------------------------------- S3
+
+
+@windows
+def test_s3_the_sweep_never_deletes_a_file_swapped_in_after_its_check(tmp_path) -> None:
+    cache = tmp_path / "cache"
+    folder = cache / decoder_copy.INPUT_DIR
+    folder.mkdir(parents=True)
+    stale = folder / f"sub-{'f' * 32}.ass"
+    stale.write_bytes(b"stale copy")
+    moved = tmp_path / "moved-original"
+    real_owned = decoder_copy.owned_child
+
+    def swap_after_the_check(base, *parts):  # seam: lands between the sweep's lstat and its delete
+        path = real_owned(base, *parts)
+        if parts and parts[-1] == stale.name and path.exists() and not moved.exists():
+            os.replace(path, moved)
+            path.write_bytes(b"swapped in by another same-user program")
+        return path
+
+    with pytest.MonkeyPatch.context() as seam:
+        seam.setattr(decoder_copy, "owned_child", swap_after_the_check)
+        counts = decoder_copy.sweep_stale_inputs(cache)
+    assert stale.read_bytes() == b"swapped in by another same-user program", "the replacement was deleted"
+    assert counts == {"removed": 0, "busy": 1}, counts
+    assert moved.read_bytes() == b"stale copy"
+
+
+@windows
+def test_s3_the_identity_bound_sweep_keeps_its_bound_names_and_refusals(tmp_path) -> None:
+    import _winapi
+
+    cache = tmp_path / "cache"
+    folder = cache / decoder_copy.INPUT_DIR
+    folder.mkdir(parents=True)
+    for number in range(300):
+        (folder / f"sub-{number:032x}.ssa").write_bytes(b"stale")
+    kept = [f"sub-{'A' * 32}.ass", f"sub-{'a' * 31}.ass", f"sub-{'a' * 32}.ass.bak", "keep.txt"]
+    for name in kept:
+        (folder / name).write_bytes(b"keep")
+    (folder / f"sub-{'b' * 32}.ass").mkdir()
+    target = tmp_path / "junction-target"
+    target.mkdir()
+    (target / "inside.txt").write_bytes(b"keep")
+    _winapi.CreateJunction(str(target), str(folder / f"sub-{'c' * 32}.ass"))
+    try:
+        rounds = [decoder_copy.sweep_stale_inputs(cache)]
+        assert rounds[0]["removed"] <= decoder_copy.MAX_SWEEP_ENTRIES
+        while rounds[-1]["removed"]:
+            rounds.append(decoder_copy.sweep_stale_inputs(cache))
+        left = sorted(p.name for p in folder.iterdir())
+        assert left == sorted(kept + [f"sub-{'b' * 32}.ass", f"sub-{'c' * 32}.ass"]), left
+        assert (target / "inside.txt").read_bytes() == b"keep"
+        assert sum(r["removed"] for r in rounds) == 300 and all(r["busy"] == 0 for r in rounds), rounds
+    finally:
+        os.rmdir(folder / f"sub-{'c' * 32}.ass")  # the junction link only

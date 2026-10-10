@@ -119,11 +119,21 @@ if os.name == "nt":
     def _fail(what: str) -> DecoderInputError:
         return DecoderInputError(ctypes.get_last_error(), f"decoder input: {what} failed")
 
-    def _identity_of(handle) -> tuple[int, int]:
+    _NOT_A_PLAIN_FILE = 0x00000010 | 0x00000400  # FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT
+
+    def _info_of(handle) -> _ByHandleInfo:
         info = _ByHandleInfo()
         if not _kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
             raise _fail("identity")
+        return info
+
+    def _identity_of(handle) -> tuple[int, int]:
+        info = _info_of(handle)
         return int(info.dwVolumeSerialNumber), (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow)
+
+    def _stat_identity(info: os.stat_result) -> tuple[int, int]:
+        """The (volume serial, file index) pair of an lstat result, comparable with ``_identity_of``."""
+        return info.st_dev & 0xFFFFFFFF, info.st_ino
 
     class _LockedFile:
         """A new file, written once, then held with read-only sharing until closed."""
@@ -206,6 +216,8 @@ if os.name == "nt":
         try:
             if _identity_of(handle) != identity:
                 raise DecoderInputError("decoder input: another file has taken the copy's name; it was not deleted")
+            if _info_of(handle).dwFileAttributes & _NOT_A_PLAIN_FILE:
+                raise DecoderInputError("decoder input: not a plain file; it was not deleted")
             disposition = _DispositionInfo(True)
             if not _kernel32.SetFileInformationByHandle(handle, _FILE_DISPOSITION_INFO, ctypes.byref(disposition),
                                                         ctypes.sizeof(disposition)):
@@ -255,6 +267,9 @@ else:
             if self._fd is not None:
                 os.close(self._fd)
                 self._fd = None
+
+    def _stat_identity(info: os.stat_result) -> tuple[int, int]:  # pragma: no cover
+        return info.st_dev, info.st_ino
 
     def _delete_exact(path: Path, identity: tuple[int, int]) -> bool:  # pragma: no cover
         try:
@@ -331,8 +346,12 @@ def sweep_stale_inputs(cache_dir: Path) -> dict[str, int]:
     """
     Remove copies a crash left behind: only exact ``sub-<hex>.ass|ssa`` plain
     files in ``<cache>/subtitle-input``, at most ``MAX_SWEEP_ENTRIES`` entries
-    looked at. A copy still held open by a live owner cannot be deleted
-    (Windows refuses it) and is counted as busy, never forced.
+    looked at. Each deletion is bound to the file identity seen by its check
+    (``_delete_exact``: the delete goes through a handle whose identity must be
+    that one), so a file that takes the name after the check is never deleted.
+    A copy still held open by a live owner cannot be opened for deletion
+    (Windows refuses it), and a file whose identity changed is left alone; both
+    are counted as busy, never forced.
     """
     counts = {"removed": 0, "busy": 0}
     directory = owned_child(Path(cache_dir), INPUT_DIR)
@@ -348,8 +367,8 @@ def sweep_stale_inputs(cache_dir: Path) -> dict[str, int]:
                 info = os.lstat(entry.path)
                 if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                     continue
-                owned_child(directory, entry.name).unlink()
-                counts["removed"] += 1
+                if _delete_exact(owned_child(directory, entry.name), _stat_identity(info)):
+                    counts["removed"] += 1
             except OSError:
                 counts["busy"] += 1
     return counts
