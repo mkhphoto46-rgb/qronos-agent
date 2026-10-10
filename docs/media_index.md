@@ -400,11 +400,13 @@ Nothing about media runs, probes or opens at startup or on import.
 - **Permissions.** The host's `GatePermissions` uses the bridge's
   `ApprovalLedger` and action audit. Typed-secret approvals are not wired into
   the host yet (no UI); such roots are refused.
-- **Store admission.** Before the store opens, its ACTUAL resolved folder goes
-  through `core.startup_admission.enter_for_store("media",
-  "QRONOS_MEDIA_DATA_DIR", folder)`: the existing order (update barrier,
-  installed-data binding, one-name rule) on that exact path; for an installed
-  binding the folder must lie inside the admitted data root. The standalone CLI
+- **Store admission.** Before the store opens, the ACTUAL database file
+  (`media-index.sqlite3`, plus SQLite's `-wal`/`-shm`/`-journal` files when
+  they exist) goes through `core.startup_admission.enter_for_store("media",
+  "QRONOS_MEDIA_DATA_DIR", path)`: the existing order (update barrier,
+  installed-data binding, one-name rule) on that exact path, so a database that
+  is a hard link into installed data is refused even inside an ordinary folder;
+  for an installed binding the path must lie inside the admitted data root. The standalone CLI
   does the same and exits 78 on refusal. `QRONOS_MEDIA_DATA_DIR` is a store
   path override like the others; the default stays `<data>/Media`.
 

@@ -534,6 +534,86 @@ def test_the_host_admits_the_actual_store_folder_before_anything_opens(tmp_path)
         host.close()
 
 
+STORE_FILE = "media-index.sqlite3"  # MediaLayout.database's name
+_SQLITE_OPENS: list = []
+_COUNTING: list = []
+
+
+def _count_sqlite(event, args) -> None:
+    if _COUNTING and event == "sqlite3.connect":
+        _SQLITE_OPENS.append(args[0] if args else None)
+
+
+sys.addaudithook(_count_sqlite)
+
+
+def _host_report(host) -> dict:
+    deadline = time.monotonic() + 30
+    while host.status()["lastReport"] is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return host.status()["lastReport"]
+
+
+@pytest.mark.parametrize("linked", ["database", "wal_side_file"])
+def test_a_hard_linked_index_database_in_an_ordinary_folder_is_refused_before_any_sqlite_open(tmp_path, linked):
+    """Root round-24 source check: the folder alone passes the one-name rule; the ACTUAL database file must not."""
+    from core import startup_admission
+    from qronos_media.host import MediaHost, media_store_admission
+
+    installed = startup_admission._known_local_appdata() / "Qronos" / "Media"
+    installed.mkdir(parents=True)
+    installed_db = installed / STORE_FILE
+    db = sqlite3.connect(installed_db)
+    db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    db.commit()
+    db.close()
+    (installed / (STORE_FILE + "-wal")).write_bytes(b"installed wal bytes")
+    before = {path.name: path.read_bytes() for path in installed.iterdir()}
+    outside = tmp_path / "ordinary-folder"
+    outside.mkdir()
+    if linked == "database":
+        os.link(installed_db, outside / STORE_FILE)
+    else:
+        (outside / STORE_FILE).write_bytes(b"")
+        os.link(installed / (STORE_FILE + "-wal"), outside / (STORE_FILE + "-wal"))
+    authority, _ = make_authority(tmp_path)
+    host = MediaHost(authority, data_dir=lambda: outside, tools=lambda: None, permissions=lambda: FakePermissions(),
+                     admit_store=media_store_admission)
+    startup_admission._reset_for_tests()
+    _SQLITE_OPENS.clear()
+    _COUNTING.append(1)
+    try:
+        assert host.submit_index(max_seconds=5, max_stages=1)["accepted"]
+        report = _host_report(host)
+    finally:
+        _COUNTING.clear()
+        host.close()
+        startup_admission._reset_for_tests()
+    assert report["stopped"] == "store_admission" and report["code"] == "store", report
+    assert _SQLITE_OPENS == []  # nothing opened, not even read-only
+    assert {path.name: path.read_bytes() for path in installed.iterdir()} == before
+    assert os.stat(installed_db).st_nlink == (2 if linked == "database" else 1)
+
+
+def test_an_ordinary_fresh_index_folder_is_admitted_and_opened(tmp_path):
+    from core import startup_admission
+    from qronos_media.host import MediaHost, media_store_admission
+
+    folder = tmp_path / "fresh-media"
+    authority, state = make_authority(tmp_path)
+    host = MediaHost(authority, data_dir=lambda: folder, tools=lambda: None, permissions=lambda: FakePermissions(),
+                     admit_store=media_store_admission)
+    startup_admission._reset_for_tests()
+    try:
+        assert host.submit_index(max_seconds=5, max_stages=1)["accepted"]
+        report = _host_report(host)
+        assert report["stopped"] == "idle", report
+        assert host.status()["storeOpen"] and (folder / STORE_FILE).is_file()
+    finally:
+        host.close()
+        startup_admission._reset_for_tests()
+
+
 def test_store_admission_binds_the_resolved_folder(tmp_path):
     from core import startup_admission
     from core.startup_admission import StartupRefused

@@ -44,11 +44,29 @@ class MediaHostClosed(RuntimeError):
     pass
 
 
+#: The index database inside the media folder and the side files SQLite opens next to it.
+STORE_FILE = "media-index.sqlite3"
+STORE_SIDE_FILES = ("-wal", "-shm", "-journal")
+
+
 def media_store_admission(root: Path) -> Any:
-    """The media store's own start-up admission, on its ACTUAL resolved folder, before anything opens."""
+    """The media store's own start-up admission on the ACTUAL database file, before anything opens.
+
+    The database path itself goes through ``enter_for_store`` (its folder's targeting is the same: the
+    file lies in it), so a database that is a file with more than one name (a hard link into installed
+    data) is refused even when its folder is an ordinary outside folder (H20-1). SQLite's side files that
+    already exist beside it are checked the same way, since SQLite opens them by name too. A store that
+    does not exist yet is a missing leaf and is admitted like any fresh store.
+    """
     from core import startup_admission
 
-    return startup_admission.enter_for_store("media", "QRONOS_MEDIA_DATA_DIR", root)
+    database = Path(root) / STORE_FILE
+    admission = startup_admission.enter_for_store("media", "QRONOS_MEDIA_DATA_DIR", database)
+    for suffix in STORE_SIDE_FILES:
+        side = Path(str(database) + suffix)
+        if side.exists():
+            startup_admission.enter_for_store("media", "QRONOS_MEDIA_DATA_DIR", side)
+    return admission
 
 
 class MediaHost:
