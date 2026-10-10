@@ -1236,6 +1236,55 @@ def test_a_receipt_from_an_earlier_same_version_handoff_cannot_confirm_this_one(
     assert result["result"] == "unconfirmed" and result["receipt"] == "invalid"
 
 
+# ------------------------------------------- N5: an honest, resolved unconfirmed repair (round-10 contract 1)
+
+
+def test_a_handoff_the_barrier_has_not_resolved_is_recovery_pending(world):
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    status = world.service("0.1.0").status()
+    assert status["recoveryPending"] is True and status["unconfirmed"] is None  # a restart CAN resolve it
+
+
+def test_a_resolved_unconfirmed_repair_is_not_recovery_pending_and_offers_discard_or_retry(world):
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    assert world.service("0.1.0").recover_before_stores()["result"] == "unconfirmed"
+    events_after_first = len(json.loads(world.lifecycle_text())["events"])
+    for _ in range(3):  # restarting resolves nothing new, adds no event, promises nothing
+        result = world.service("0.1.0").recover_before_stores()
+        assert result["result"] == "unconfirmed" and result["receipt"] == "absent"
+    assert len(json.loads(world.lifecycle_text())["events"]) == events_after_first
+    status = world.service("0.1.0").status()
+    assert status["recoveryPending"] is False
+    assert status["unconfirmed"] == {"version": "0.1.0", "kind": "repair", "receipt": "absent",
+                                     "actions": ["discard", "retry"]}
+
+
+def test_a_receipt_arriving_after_the_resolution_never_confirms(world):
+    launched(world.service("0.1.0"), *world.release("0.1.0"))
+    world.service("0.1.0").recover_before_stores()
+    late = world.launcher.receipt()  # even a correctly bound receipt: its installer had already ended
+    result = world.service("0.1.0").recover_before_stores()
+    assert result["result"] == "unconfirmed" and not late.exists()
+    assert world.service("0.1.0").status()["history"] == []
+
+
+def test_retry_is_discard_then_a_new_check_approval_and_nonce(world):
+    service = world.service("0.1.0")
+    launched(service, *world.release("0.1.0"))
+    first = world.launcher.handovers[-1]
+    service.recover_before_stores()
+    service.discard()  # the "retry" action starts with this; nothing of the old launch is replayed
+    status = service.status()
+    assert status["phase"] == "idle" and status["unconfirmed"] is None and status["recoveryPending"] is False
+    launched(world.service("0.1.0"), *world.release("0.1.0"))  # check again: new request, approval, launch
+    second = world.launcher.handovers[-1]
+    assert second.nonce != first.nonce and len(world.launcher.calls) == 2
+    world.launcher.receipt()  # this time the installer finishes and writes its own receipt
+    result = world.service("0.1.0").recover_before_stores()
+    assert result["result"] == "applied" and result["receipt"] == "verified"
+    assert world.service("0.1.0").status()["unconfirmed"] is None
+
+
 def test_a_receipt_written_when_nothing_was_handed_off_is_discarded(world):
     launched(world.service("0.1.0"), *world.release("0.1.0"))
     world.service("0.1.0").discard()  # the repair was given up; its installer's receipt arrives late

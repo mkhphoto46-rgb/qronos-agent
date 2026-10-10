@@ -604,6 +604,19 @@ def _check_lifecycle(state: Any) -> dict[str, Any]:
     return state
 
 
+def _resolved_unconfirmed(state: dict[str, Any]) -> bool:
+    """True once the barrier resolved the CURRENT handoff as unconfirmed (no valid receipt).
+
+    Approval clears the outcome before a new launch, so an outcome that sits beside a
+    handoff always belongs to that handoff. A restart cannot change this state: the
+    installer has ended, its receipt (if any) was consumed, and the nonce is not kept.
+    Only the person can resolve it, by discarding it or checking the package again.
+    """
+    handoff, outcome = state["handoff"], state["outcome"]
+    return handoff is not None and outcome is not None and outcome["result"] == "unconfirmed" \
+        and outcome["version"] == handoff["version"] and outcome["kind"] == handoff["kind"]
+
+
 def _empty_lifecycle() -> dict[str, Any]:
     return {"schema": LIFECYCLE_SCHEMA, "pending": None, "launchGrant": None, "launching": None, "snapshots": [],
             "handoff": None, "outcome": None, "events": []}
@@ -1014,7 +1027,13 @@ class UpdateService:
             "launchReady": grant(lifecycle["launchGrant"]),
             "updateInProgress": live,
             "launching": lifecycle["launching"] is not None,
-            "recoveryPending": (lifecycle["launching"] is not None or handoff is not None) and not live,
+            # Only what a restart can still change: a dead launch claim, or a handoff the start-up
+            # barrier has not resolved yet. A resolved "unconfirmed" repair is the person's choice.
+            "recoveryPending": not live and (lifecycle["launching"] is not None
+                                             or (handoff is not None and not _resolved_unconfirmed(lifecycle))),
+            "unconfirmed": ({"version": handoff["version"], "kind": handoff["kind"],
+                             "receipt": lifecycle["outcome"]["receipt"], "actions": ["discard", "retry"]}
+                            if _resolved_unconfirmed(lifecycle) and lifecycle["launching"] is None else None),
             "handoff": handoff,
             "outcome": lifecycle["outcome"],
             "snapshots": [{"id": s["id"], "reason": s["reason"], "fromVersion": s["fromVersion"],
@@ -1472,6 +1491,15 @@ class UpdateService:
             staged = store_state["staged"]
             target, kind = staged["version"], staged["kind"]
             handoff = state["handoff"]
+            if claim is None and _resolved_unconfirmed(state):
+                # Resolved once already: no new confirm, no new event. A receipt arriving now cannot
+                # belong to this handoff's installer (it had ended before the first resolution).
+                self._consume_receipts(None)
+                self._save(state)
+                outcome = state["outcome"]
+                return {"result": "unconfirmed", "kind": kind, "version": target, "phase": "handed_off",
+                        "dataMismatch": outcome["dataMismatch"], "dataRestored": outcome["dataRestored"],
+                        "receipt": outcome["receipt"], "recovered": recovered}
             receipt = self._consume_receipts(handoff, staged)
             # Only a receipt bound to this handoff's nonce and version is replacement evidence;
             # never a version comparison, a caller flag or a file without the nonce.
