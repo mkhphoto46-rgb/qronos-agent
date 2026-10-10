@@ -460,51 +460,49 @@ class SupervisorAlreadyRunning(RuntimeError):
 
 class SupervisorInstanceGuard:
     """
-    One supervisor per signed-in Windows session.
+    One supervisor per signed-in Windows session, by OWNING ``Local\\QronosSupervisor``.
 
     A named mutex in the ``Local\\`` namespace is per session by definition,
     so a second sign-in on the same machine gets its own supervisor while a
-    second supervisor in the same session is refused. Off Windows it is a
-    no-op; Qronos's supervisor is a Windows component.
+    second supervisor in the same session is refused. Ownership is a
+    wait-acquisition by a holder thread kept for the supervisor's life
+    (``core.instance_ownership``); creating the mutex, or finding that it
+    exists, proves nothing. After acquiring, the update fence is checked: while
+    an update or its installer is alive the supervisor releases the mutex and
+    refuses (``UpdateInProgress``), after retrying for a bounded time. The
+    updater's quiescence takes this same name, so a live supervisor makes it
+    refuse. Off Windows it is a no-op; the supervisor is a Windows component.
     """
 
     NAME = "Local\\QronosSupervisor"
 
-    def __init__(self, handle: int, close: Callable[[int], None]) -> None:
-        self._handle = handle
-        self._close = close
+    def __init__(self, owned) -> None:
+        self._owned = owned
 
     @classmethod
-    def acquire(cls, create_mutex=None, last_error=None, close_handle=None) -> "SupervisorInstanceGuard":
-        if sys.platform != "win32" and create_mutex is None:
-            return cls(0, lambda handle: None)
+    def acquire(cls, *, api=None, fence_exists=None, retry_seconds: Optional[float] = None,
+                name: Optional[str] = None) -> "SupervisorInstanceGuard":
+        if sys.platform != "win32" and api is None:
+            return cls(None)
 
-        if create_mutex is None:
-            from ctypes import wintypes
+        from core.instance_ownership import ENTRY_RETRY_SECONDS, AlreadyOwned, acquire_unless_updating
 
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
-            kernel32.CreateMutexW.restype = wintypes.HANDLE
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            create_mutex = lambda name: kernel32.CreateMutexW(None, False, name)  # noqa: E731
-            last_error = ctypes.get_last_error
-            close_handle = kernel32.CloseHandle
+        options = {"retry_seconds": ENTRY_RETRY_SECONDS if retry_seconds is None else retry_seconds, "api": api}
+        if fence_exists is not None:
+            options["fence_exists"] = fence_exists
+        try:
+            return cls(acquire_unless_updating(name or cls.NAME, **options))
+        except AlreadyOwned as error:
+            raise SupervisorAlreadyRunning("A Qronos supervisor is already running in this session.") from error
 
-        handle = create_mutex(cls.NAME)
+    @property
+    def owned(self) -> bool:
+        return self._owned is not None and self._owned.owned
 
-        if not handle:
-            raise OSError("Windows could not create the supervisor mutex.")
-
-        if last_error() == 183:  # ERROR_ALREADY_EXISTS
-            close_handle(handle)
-            raise SupervisorAlreadyRunning("A Qronos supervisor is already running in this session.")
-
-        return cls(int(handle), close_handle)
-
-    def release(self) -> None:
-        if self._handle:
-            self._close(self._handle)
-            self._handle = 0
+    def release(self) -> bool:
+        """Release the singleton on its holder thread, once; True only if Windows confirmed it."""
+        owned, self._owned = self._owned, None
+        return owned.release() if owned is not None else True
 
 
 # ------------------------------------------------------- the runtime's half
