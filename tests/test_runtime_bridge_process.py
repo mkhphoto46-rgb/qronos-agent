@@ -25,8 +25,25 @@ import time
 import unittest
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def private_profile_has_local_appdata(isolate_qronos_storage_profile, tmp_path: Path) -> None:
+    """
+    tests/conftest.py points USERPROFILE at a private folder of this test that does not exist yet. A
+    source-mode child bridge with store overrides resolves Windows' known <Local AppData> for its own token
+    (core/startup_admission._known_local_appdata, SHGetKnownFolderPath), which expands that redirected
+    profile and fails while <profile>\\AppData\\Local is missing; start-up then refuses "store", as it
+    must. Create exactly that private folder. Production admission, the known-folder binding and every
+    assertion here are unchanged.
+    """
+    profile = Path(os.environ["USERPROFILE"])
+    assert profile.is_relative_to(tmp_path), profile
+    (profile / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
 
 # Generous: the child has to start an interpreter and import the whole of core,
 # which on a cold filesystem is not instant. Short enough that a hang fails the
