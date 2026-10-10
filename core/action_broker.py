@@ -44,11 +44,19 @@ approved action needs it, and it exits after that one action. It:
            is refused;
     4. performs the action, reports the result, and exits.
 
-Trust boundary, stated plainly: this stops another program running as the same
-user from getting an elevated action without the person's typed secret (and
-the UAC prompt). It does not defend against a same-user account that is
-already fully compromised — malware that can read what the person types or
-inject code into the Qronos runtime.
+Trust boundary, stated precisely. The authority is the approval-secret store
+in the signed-in user's own profile (``<Local AppData>\\Qronos``, found through
+the known-folder API, never the environment). It is an ordinary per-user file
+with no administrator-protected binding, so the supported boundary is another
+Windows user, or a same-user program that does not tamper with that profile:
+a caller-chosen key, pipe, process id, envelope or environment-selected store
+gets nothing without the person's typed secret. A same-user program that
+replaces the store file with one holding its own secret (tested), or relocates
+the Local AppData known folder (source-level), satisfies the check with that
+secret. What then remains is Windows' UAC consent prompt and the fixed
+one-action registry below. Nothing here defends against a same-user account
+already compromised in other ways (malware that reads what the person types or
+injects into the Qronos runtime).
 
 There is no shell, interpreter or command-line action, and the registry
 refuses to hold one. **The production registry holds exactly one action**,

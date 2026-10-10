@@ -120,13 +120,30 @@ All waits in the channel have deadlines.
    then runs the mutual handshake and sends one request: the typed action,
    the envelope and the person's typed secret. It reads one result and waits
    for the broker to exit.
-4. **Cancellation.** Stop, Pause and shutdown are checked at every handoff
-   before the request leaves: before launching, after the UAC prompt
-   returns, and immediately before sending (`BrokerCancelled`). A broker
-   started after a cancellation gets no key and exits on its own. Once the
-   request has left it is not interrupted. The broker performs one action or
-   none, and the result, or "unknown", is reported. The broker's process
-   handle is released on every path.
+4. **Cancellation.** Each approved action has one `Cancellation`, which the
+   coordinator's `discard` (Stop, Pause, shutdown) cancels under the same
+   lock as its epoch change. The session honours it:
+   - before launching, and after the UAC prompt returns;
+   - while waiting for the broker to connect, for the handshake and for its
+     hello. `cancel()` interrupts the listener, and the other waits look
+     every 50 ms, so Stop ends the session at once, not after the 120 s
+     connect timeout;
+   - at key release. The key is written only after `release_key()` grants
+     it, and that grant is the ordering point. A Stop that comes first means
+     no key byte is sent, which covers every Stop made while the session
+     still waits for the broker to connect. A Stop that comes after the
+     grant is ordered after the release: the key is being, or has been,
+     written to the launched, PID-checked broker, and the Stop still ends
+     the handshake and stops the request. The write is not done under the
+     lock, so a stalled peer can never hold up Stop;
+   - at the single commit point, `commit()`, just before the request is
+     sent. A Stop before it means nothing is sent (`BrokerCancelled`, shown
+     as cancelled). A Stop after it cancels nothing: the broker performs one
+     action or none, and the real result, or "unknown", is reported. It is
+     never re-sent.
+   A cancelled session closes its listener and releases the broker's process
+   handle once. A broker that finds no key or no request exits on its own
+   deadline.
 
 The broker (`serve_once`) does the following, in order:
 
@@ -418,9 +435,13 @@ refuses that indirection.
 
 ## What is not done
 
-- The broker is not wired into the runtime yet. The supervisor is wired into
-  the desktop's start, stop and shutdown. The installer starts nothing at
-  sign-in.
+- The bridge does route the broker. `QronosRuntime` builds the coordinator
+  lazily, sends it the person's own chat turn and the prompt decisions, and
+  calls its `discard` on Stop, Pause and shutdown. The desktop frontend does
+  not yet show the `printer_spooler_restart` prompt (Control contract
+  above), so the action cannot be approved from the UI today; it fails
+  closed. The supervisor is wired into the desktop's start, stop and
+  shutdown. The installer starts nothing at sign-in.
 - No live UAC prompt, elevated run, Windows service, scheduled task or
   sign-in entry has been created or exercised.
 - `printer.spooler_restart` has never been run for real: no UAC prompt,
@@ -430,18 +451,42 @@ refuses that indirection.
   administrator's credentials, runs the broker as another user. The broker's
   same-user check then refuses it. This fails closed, but it means such users
   cannot use elevated actions.
-- **Trust boundary.** Another program running as the same user cannot get
-  an elevated action without the person's typed secret, and without the
-  UAC prompt. The test for this is a hostile local "runtime" with its own
-  pipe, key and correctly MAC'd envelope. Nothing here defends against a
-  same-user account that is already fully compromised: malware that reads
-  what the person types, or injects into the Qronos runtime.
+- **Trust boundary, stated precisely.** The broker's authority is the
+  approval-secret store in the signed-in user's own profile,
+  `<Local AppData>\Qronos\approval_secret.sqlite3`. That is an ordinary
+  per-user file: a salted scrypt record with no administrator-protected
+  access list and no integrity binding. The supported boundary is therefore
+  another Windows user, or a same-user program that does not tamper with the
+  person's profile.
+  - Within that boundary, nothing but the person's typed secret gets an
+    elevated action. A caller-chosen key, pipe, process id or MAC'd envelope
+    is not authority, and neither is a secret store chosen through the
+    environment. Tests: a hostile local "runtime" with its own pipe, key and
+    envelope, and a launcher pointing the environment at its own store.
+  - Outside it: a same-user program can REPLACE that store file with one
+    holding a secret it chose. It can then satisfy both a genuine runtime it
+    started and the broker with that secret. This is tested, and it is a
+    known limit. Redirecting the user's Local AppData known folder (the
+    per-user "User Shell Folders" setting, which the same user can write)
+    is the same kind of relocation. That one is source-level and was not
+    tested, because the real registry is not changed.
+  - What still stands against such a program: Windows' UAC consent prompt,
+    which the person must accept, and the fixed registry, which holds one
+    action (stop and start the `Spooler` service, no parameters).
+  - A stronger binding would need a verifier record that only an
+    administrator can write. It does not exist.
+  - Nothing here defends against a same-user account that is already
+    compromised in other ways, for example malware that reads what the
+    person types or injects into the Qronos runtime.
 - **Profile binding.** The elevated broker takes its authority from the
   installed profile, `<Local AppData>\Qronos`. It finds that folder through
   Windows' known-folder API for its own token
   (`SHGetKnownFolderPath(FOLDERID_LocalAppData)`), never from environment
   values a launcher may have chosen, such as `QRONOS_APPROVAL_SECRET_PATH`,
-  `QRONOS_DATA_ROOT` or `QRONOS_PERMISSION_AUDIT_PATH`. Its authority there
+  `QRONOS_DATA_ROOT` or `QRONOS_PERMISSION_AUDIT_PATH`. This removes the
+  environment as a way to choose the store. It does not stop a same-user
+  program from relocating the known folder or replacing the file in it (see
+  the trust boundary above). Its authority there
   is the approval-secret store with its lockout and audit, the single-use
   journal, and its own audit.
   - Tested: a launcher pointing those variables at its own store with
