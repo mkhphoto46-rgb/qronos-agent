@@ -86,37 +86,38 @@ test("the secret is sent once in the approve payload and the client keeps nothin
   assert.equal(JSON.stringify(client).includes("my secret"), false);
 });
 
-test("launch happens only after the runtime really stopped, then the app exits", async () => {
-  const order = [];
-  const { invoke } = backend({ launch: { ok: true, handoff: {} } });
-  const client = update.createUpdateClient(async (c, a) => { order.push(a.operation); return invoke(c, a); });
-  await update.launchUpdate(client, TOKEN, {
-    stopRuntime: async () => { order.push("stop"); return true; },
-    restartRuntime: async () => { order.push("restart"); },
-    exitApp: async () => { order.push("exit"); },
-  });
-  assert.deepEqual(order, ["stop", "launch", "exit"]);
+const LAUNCHED = { ok: true, outcome: "launched", handoff: { version: "0.2.0", handedOver: true }, exiting: true };
+const notStarted = (code, runtimeRestarted) => ({ ok: false, outcome: "not_started", code, error: "fixture",
+                                                  runtimeRestarted });
+
+test("a launch sends only the token, once, through update_command; the desktop does the rest", async () => {
+  const { calls, invoke } = backend({ launch: LAUNCHED });
+  const client = update.createUpdateClient(invoke);
+  const result = await update.launchUpdate(client, TOKEN);
+  assert.equal(result.handedOver, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),
+    [{ command: "update_command", operation: "launch", payload: { launchToken: TOKEN } }]);
+  // No hook exists to stop, restart or close anything from here.
+  assert.equal(update.launchUpdate.length, 2);
 });
 
-test("a runtime that did not stop means no launch request at all", async () => {
-  const { calls, invoke } = backend({});
+test("a stop the desktop could not prove is a typed refusal and the token is kept", async () => {
+  const { calls, invoke } = backend({ launch: notStarted("runtime_stop_unproved", false) });
   const client = update.createUpdateClient(invoke);
-  await assert.rejects(update.launchUpdate(client, TOKEN, {
-    stopRuntime: async () => false, restartRuntime: async () => {}, exitApp: async () => { throw new Error("exit"); },
-  }), (error) => error.code === "runtime_running");
-  assert.equal(calls.length, 0);
+  await assert.rejects(update.launchUpdate(client, TOKEN), (error) => error.code === "runtime_stop_unproved"
+    && /تأیید نشد/.test(error.message));
+  assert.equal(calls.length, 1);
+  assert.equal(update.LAUNCH_TOKEN_KEPT.has("runtime_stop_unproved"), true);
 });
 
-test("a refused launch brings the runtime back and never exits", async () => {
-  const order = [];
-  const { invoke } = backend({ launch: { ok: false, code: "runtime_running" } });
-  const client = update.createUpdateClient(invoke);
-  await assert.rejects(update.launchUpdate(client, TOKEN, {
-    stopRuntime: async () => true,
-    restartRuntime: async () => { order.push("restart"); },
-    exitApp: async () => { order.push("exit"); },
-  }), (error) => error.code === "runtime_running");
-  assert.deepEqual(order, ["restart"]);
+test("a refused launch reports whether the desktop brought the runtime back and never exits from here", async () => {
+  for (const restarted of [true, false]) {
+    const client = update.createUpdateClient(async () => notStarted("runtime_running", restarted));
+    const result = await client.launch(TOKEN);
+    assert.deepEqual(JSON.parse(JSON.stringify(result)),
+      { outcome: "not_started", code: "runtime_running", runtimeRestarted: restarted });
+    await assert.rejects(update.launchUpdate(client, TOKEN), (error) => error.code === "runtime_running");
+  }
 });
 
 test("digests are shown grouped for reading", () => {
@@ -141,35 +142,32 @@ test("the panel compiles, keeps the secret out of storage and uses a password fi
 
 // ---- round 5: review U-1..U-3 and L-2 as required behaviour
 
-test("an ambiguous launch failure never restarts the runtime and never exits on its own", async () => {
-  const order = [];
-  for (const failure of [new Error("IPC pipe closed"), { ok: false, code: "store" }, { ok: true }]) {
-    order.length = 0;
+test("an ambiguous launch answer is outcome unknown, never a refusal that could invite a restart", async () => {
+  const failures = [
+    new Error("IPC pipe closed"),
+    { ok: false, code: "store" },                                   // a backend code without the desktop's verdict
+    { ok: true },                                                   // no outcome
+    { ok: true, outcome: "launched" },                              // no handoff
+    { ok: false, outcome: "unknown", code: "launch_outcome_unknown", exiting: true },
+    { ok: false, outcome: "not_started" },                          // no code
+    { ok: false, outcome: "maybe", code: "launch_failed" },
+    "launched",
+  ];
+  for (const failure of failures) {
     const client = update.createUpdateClient(async () => {
-      order.push("launch");
       if (failure instanceof Error) throw failure;
-      if (failure.ok === false) return failure;
-      throw new Error("unreadable answer");
+      return failure;
     });
-    await assert.rejects(update.launchUpdate(client, TOKEN, {
-      stopRuntime: async () => { order.push("stop"); return true; },
-      restartRuntime: async () => { order.push("restart"); },
-      exitApp: async () => { order.push("exit"); },
-    }), (error) => error.code === "outcome_unknown");
-    assert.deepEqual(order, ["stop", "launch"]);
+    await assert.rejects(update.launchUpdate(client, TOKEN), (error) => error.code === "outcome_unknown",
+      JSON.stringify(String(failure)));
   }
 });
 
-test("only typed refusals that prove nothing started bring the runtime back", async () => {
-  for (const code of ["launch_unavailable", "writers_active", "not_staged", "permission_denied"]) {
-    const order = [];
-    const client = update.createUpdateClient(async () => ({ ok: false, code }));
-    await assert.rejects(update.launchUpdate(client, TOKEN, {
-      stopRuntime: async () => true,
-      restartRuntime: async () => { order.push("restart"); },
-      exitApp: async () => { order.push("exit"); },
-    }), (error) => error.code === code);
-    assert.deepEqual(order, ["restart"]);
+test("the desktop's typed non-start verdicts surface with their own code", async () => {
+  for (const code of ["launch_unavailable", "writers_active", "not_staged", "permission_denied", "package_mismatch",
+                      "desktop_busy", "backend_not_started"]) {
+    const client = update.createUpdateClient(async () => notStarted(code, true));
+    await assert.rejects(update.launchUpdate(client, TOKEN), (error) => error.code === code);
   }
   assert.equal(update.LAUNCH_TOKEN_KEPT.has("launch_unavailable"), true);
   assert.equal(update.LAUNCH_TOKEN_KEPT.has("not_approved"), false); // the token was spent or unknown
@@ -277,14 +275,88 @@ test("retry is a discard followed by a new check; the old launch is never replay
 test("launch_failed is a proved non-start; launch_outcome_unknown is not", async () => {
   assert.equal(update.LAUNCH_NOT_STARTED.has("launch_failed"), true);
   assert.equal(update.LAUNCH_NOT_STARTED.has("launch_outcome_unknown"), false);
-  const order = [];
   const client = update.createUpdateClient(async () => ({ ok: false, code: "launch_outcome_unknown" }));
-  await assert.rejects(update.launchUpdate(client, TOKEN, {
-    stopRuntime: async () => true,
-    restartRuntime: async () => { order.push("restart"); },
-    exitApp: async () => { order.push("exit"); },
-  }), (error) => error.code === "outcome_unknown");
-  assert.deepEqual(order, []);
+  await assert.rejects(update.launchUpdate(client, TOKEN), (error) => error.code === "outcome_unknown");
+});
+
+// ---- round 22: the desktop lifecycle owns the launch; the panel is mounted with a closed launch
+
+test("the desktop's proved-no-start list and this module's are the same round-5 C3 set", () => {
+  const rust = source("../src-tauri/src/runtime/lifecycle.rs");
+  const block = rust.match(/pub\(super\) const PROVED_NO_START: &\[&str\] = &\[([^\]]*)\]/);
+  assert.ok(block, "PROVED_NO_START not found in lifecycle.rs");
+  const codes = [...block[1].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]).sort();
+  assert.deepEqual(codes, [...update.LAUNCH_NOT_STARTED].sort());
+  assert.equal(codes.includes("launch_outcome_unknown"), false);
+});
+
+test("the pickers return only validated paths and a cancel is null", async () => {
+  const installer = "C:\\u\\qronos-desktop_0.2.0_x64-setup.exe";
+  const { calls, invoke } = backend({
+    pick_package: { ok: true, cancelled: false, installer, manifest: `${installer}.qronos-update.json` },
+    pick_folder: { ok: true, cancelled: true },
+  });
+  const client = update.createUpdateClient(invoke);
+  assert.deepEqual(JSON.parse(JSON.stringify(await client.pickPackage())),
+    { installer, manifest: `${installer}.qronos-update.json` });
+  assert.equal(await client.pickFolder(), null);
+  assert.deepEqual(calls.map((call) => [call.operation, call.payload]).map(JSON.stringify),
+    [["pick_package", {}], ["pick_folder", {}]].map(JSON.stringify));
+  for (const answer of [{ ok: true, cancelled: false, installer: "relative.exe", manifest: "relative.exe.qronos-update.json" },
+                        { ok: true, cancelled: false, installer, manifest: "C:\\other.json" }]) {
+    await assert.rejects(update.createUpdateClient(async () => answer).pickPackage(),
+      (error) => error.code === "bad_response");
+  }
+  await assert.rejects(update.createUpdateClient(async () => ({ ok: true, cancelled: false, folder: "x" })).pickFolder(),
+    (error) => error.code === "bad_response");
+  await assert.rejects(update.createUpdateClient(async () => ({ ok: false, code: "picker_unavailable" })).pickFolder(),
+    (error) => error.code === "picker_unavailable" && /انتخاب فایل/.test(error.message));
+});
+
+function loadPanel() {
+  const compiled = ts.transpileModule(source("../src/components/UpdatePanel.tsx"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const exports = {};
+  vm.runInNewContext(compiled, {
+    exports,
+    require(name) {
+      if (name === "react") return { useEffect() {}, useRef() { return { current: 0 }; }, useState(v) { return [v, () => {}]; } };
+      if (name === "react/jsx-runtime") return { jsx() {}, jsxs() {}, Fragment: {} };
+      if (name === "../updateStore") return update;
+      throw new Error(`Unexpected import: ${name}`);
+    },
+    Boolean, Promise, Set, Error,
+  }, { timeout: 1000 });
+  return exports;
+}
+
+test("the launch is structurally closed unless the backend says it is available and approved", () => {
+  const { launchOpen } = loadPanel();
+  const open = { ...update.parseStatus({ ...STATUS, phase: "staged", launchAvailable: true,
+                                         launchReady: { version: "0.2.0" }, outcome: null }) };
+  assert.equal(launchOpen(open, TOKEN, false), true);
+  assert.equal(launchOpen(null, TOKEN, false), false);
+  assert.equal(launchOpen(open, null, false), false);
+  assert.equal(launchOpen(open, TOKEN, true), false, "an unknown or handed-off launch latches it closed");
+  for (const change of [{ launchAvailable: false }, { launchReady: false }, { updateInProgress: true },
+                        { recoveryPending: true }]) {
+    assert.equal(launchOpen({ ...open, ...change }, TOKEN, false), false, JSON.stringify(change));
+  }
+  // Today's product status: the backend's one enablement point is off, so it is closed.
+  assert.equal(launchOpen(update.parseStatus(STATUS), TOKEN, false), false);
+});
+
+test("the panel is mounted in Settings without any stop, restart or exit hook, and drops stale answers", () => {
+  const settings = source("../src/components/SettingsView.tsx");
+  assert.match(settings, /<UpdatePanel client=\{updateClient\} visible=\{phase === "settings" && activeSection === "update"\} \/>/);
+  assert.match(settings, /createUpdateClient\(\(command, args\) => invoke\(command, args\)\)/);
+  const panel = source("../src/components/UpdatePanel.tsx");
+  assert.doesNotMatch(panel, /stopRuntime|restartRuntime|exitApp|start_runtime|stop_runtime/);
+  assert.doesNotMatch(settings.slice(settings.indexOf("renderUpdate")), /stopRuntime|restartRuntime|exitApp/);
+  assert.match(panel, /generation\.current \+= 1/);
+  assert.match(panel, /if \(asked !== generation\.current\) return;/);
+  assert.match(panel, /disabled=\{busy \|\| !launchOpen\(status, launchToken, outcomeUnknown \|\| handedOff\)\}/);
 });
 
 test("the panel offers discard and retry for an unconfirmed repair and never promises recovery for it", () => {

@@ -5,17 +5,17 @@
  * - paths come from native file/folder dialogs, never typed URLs;
  * - an approval needs the token the backend issued for exactly that package
  *   and the person's approval secret, which is sent once and never kept;
- * - a launch needs the backend's single-use launch token, and happens only
- *   after the desktop has really stopped the runtime (the backend proves that
- *   itself); the app exits after a launch. The backend refuses launching
- *   (launch_unavailable) until its runtime/desktop dependencies are accepted.
- * - Only a typed refusal that proves no installer started may bring the
- *   runtime back. Any other failure (a lost transport, an unknown answer) is
- *   "outcome unknown": the installer may be running, so no competing writer
- *   is started and the person is told so.
+ * - a launch sends only the backend's single-use launch token. The desktop
+ *   (Rust, runtime/lifecycle.rs) does everything else and nothing here can skip
+ *   or claim it: it drains every backend request, checks the read-only status,
+ *   stops the runtime and proves it by the runtime's own Job, starts the update
+ *   service without ever killing it, reads its one answer, and brings the
+ *   runtime back only on a typed refusal that proves no installer started. A
+ *   launch or an unknown outcome closes the app. The backend refuses launching
+ *   (launch_unavailable) until its one enablement point is switched on.
  *
- * Tauri command (proposed to Control): update_command(operation, payload),
- * the same shape as permissions_command, running the "update" backend service.
+ * Tauri command: update_command(operation, payload), the same shape as
+ * permissions_command, reaching only the "update" backend service.
  */
 
 export type UpdateInvoke = (
@@ -125,6 +125,15 @@ export const REFUSAL_TEXT: Record<string, string> = {
   not_staged: "به‌روزرسانی تأییدشده آماده نیست.",
   runtime_running: "Qronos هنوز در حال اجراست؛ ابتدا باید متوقف شود.",
   launch_failed: "ویندوز نتوانست نصب‌کننده را اجرا کند.",
+  backend_not_started: "بخش به‌روزرسانی Qronos اجرا نشد؛ چیزی تغییر نکرد.",
+  update_starting: "یک به‌روزرسانی در حال آغاز است؛ این درخواست اجرا نشد.",
+  update_busy: "اجرای نصب‌کننده هم‌اکنون در جریان است.",
+  exit_required: "Qronos برای به‌روزرسانی بسته می‌شود.",
+  desktop_busy: "کار دیگری از Qronos هنوز تمام نشده است؛ چیزی متوقف یا اجرا نشد. کمی بعد دوباره تلاش کنید.",
+  runtime_stop_unproved: "توقف کامل Qronos تأیید نشد؛ نصب‌کننده اجرا نشد. پس از بسته شدن همهٔ بخش‌ها دوباره تلاش کنید.",
+  status_unavailable: "وضعیت به‌روزرسانی خوانده نشد؛ چیزی متوقف یا اجرا نشد.",
+  picker_unavailable: "پنجرهٔ انتخاب فایل باز نشد.",
+  refused: "بخش به‌روزرسانی درخواست را نپذیرفت.",
   launch_outcome_unknown: "معلوم نیست نصب‌کننده اجرا شده باشد؛ نتیجه هنگام شروع دوبارهٔ Qronos مشخص می‌شود.",
   launch_unavailable: "اجرای نصب‌کننده هنوز فعال نشده است؛ بستهٔ تأییدشده آماده باقی می‌ماند.",
   update_in_progress: "یک به‌روزرسانی هم‌اکنون در حال اجراست؛ پس از پایان آن دوباره تلاش کنید.",
@@ -147,16 +156,24 @@ export function refusalText(code: string): string {
  *  bring the runtime back after it was stopped for a launch. */
 export const LAUNCH_NOT_STARTED: ReadonlySet<string> = new Set([
   "launch_unavailable", "runtime_running", "update_in_progress", "writers_active", "recovery_pending",
-  "not_approved", "approval_expired", "permission_denied", "not_staged",
+  "not_approved", "approval_expired", "permission_denied", "not_staged", "package_mismatch",
   // The backend raises launch_failed ONLY when Windows created no installer process (NotStarted);
   // every ambiguous failure is launch_outcome_unknown, which is not in this set.
   "launch_failed",
 ]);
 
-/** Of those, the ones raised before the single-use launch token was spent: keep the token. */
+/** Refused before the single-use launch token was spent (by the backend's exclusion, or by the desktop
+ *  before the update service was asked at all): keep the token. */
 export const LAUNCH_TOKEN_KEPT: ReadonlySet<string> = new Set([
   "launch_unavailable", "runtime_running", "update_in_progress", "writers_active",
+  "desktop_busy", "runtime_stop_unproved", "status_unavailable", "update_busy", "backend_not_started",
 ]);
+
+/** What the desktop's launch reported: the installer was handed to Windows (the app closes now), or a
+ *  typed refusal proved nothing started (runtimeRestarted says whether the desktop brought the runtime back). */
+export type LaunchResult =
+  | { outcome: "launched"; handedOver: boolean }
+  | { outcome: "not_started"; code: string; runtimeRestarted: boolean };
 
 /** A launch whose result is not known (transport lost, unknown answer): the installer may be running. */
 export class UpdateOutcomeUnknown extends Error {
@@ -360,8 +377,40 @@ export function createUpdateClient(invoke: UpdateInvoke) {
       const answer = await call("approve", { approvalToken, secret });
       return { launchToken: token(answer.launchToken) };
     },
-    async launch(launchToken: string): Promise<void> {
-      await call("launch", { launchToken });
+    /** The desktop's whole launch; see launchUpdate. Only the token is sent. */
+    async launch(launchToken: string): Promise<LaunchResult> {
+      // Anything that is not exactly one of the two verdicts, including an unreadable answer, is unknown.
+      let answer: Record<string, unknown>;
+      let handoff: Record<string, unknown> | null = null;
+      try {
+        answer = record(await invoke("update_command", { operation: "launch", payload: { launchToken } }));
+        if (answer.ok === true && answer.outcome === "launched") handoff = record(answer.handoff);
+      } catch {
+        throw new UpdateOutcomeUnknown();
+      }
+      if (handoff !== null) {
+        return { outcome: "launched", handedOver: handoff.handedOver === true };
+      }
+      const code = typeof answer.code === "string" ? answer.code : "";
+      if (answer.ok === false && answer.outcome === "not_started" && code) {
+        return { outcome: "not_started", code, runtimeRestarted: answer.runtimeRestarted === true };
+      }
+      throw new UpdateOutcomeUnknown();
+    },
+    /** Native dialogs in the update service; null when cancelled. Nothing is opened or verified yet. */
+    async pickPackage(): Promise<UpdateCandidate | null> {
+      const answer = await call("pick_package");
+      if (answer.cancelled === true) return null;
+      const [chosen] = parseCandidates([{ installer: answer.installer, manifest: answer.manifest }]);
+      return chosen;
+    },
+    async pickFolder(): Promise<string | null> {
+      const answer = await call("pick_folder");
+      if (answer.cancelled === true) return null;
+      if (typeof answer.folder !== "string" || !ABSOLUTE.test(answer.folder) || answer.folder.length > 4096) {
+        bad("folder");
+      }
+      return answer.folder as string;
     },
     async discard(): Promise<void> {
       await call("discard");
@@ -374,34 +423,18 @@ export function createUpdateClient(invoke: UpdateInvoke) {
   };
 }
 
-/** Stops the runtime, launches, then exits.
+/** Asks the desktop to launch; it drains, stops (proved), launches, and restarts or closes by itself.
  *
- * - A typed refusal that proves nothing started (LAUNCH_NOT_STARTED) brings the runtime
- *   back and is re-thrown; the caller keeps the launch token only for LAUNCH_TOKEN_KEPT.
- * - Anything else is UpdateOutcomeUnknown: the runtime is NOT restarted (the installer may
- *   be running and replacing files) and the app does not exit on its own.
+ * - "launched": the installer was handed to Windows; the desktop closes the app now.
+ * - A typed refusal that proves nothing started is re-thrown as UpdateRefused; the desktop already
+ *   brought the runtime back if it had stopped it. The caller keeps the token only for LAUNCH_TOKEN_KEPT.
+ * - Anything else is UpdateOutcomeUnknown: the installer may be running; the desktop restarts nothing
+ *   and closes the app. Nothing here starts, stops or restarts anything.
  */
-export async function launchUpdate(
-  client: UpdateClient,
-  launchToken: string,
-  hooks: {
-    stopRuntime: () => Promise<boolean>;
-    restartRuntime: () => Promise<void>;
-    exitApp: () => Promise<void>;
-  },
-): Promise<void> {
-  const stopped = await hooks.stopRuntime();
-  if (!stopped) {
-    throw new UpdateRefused("runtime_running", refusalText("runtime_running"));
+export async function launchUpdate(client: UpdateClient, launchToken: string): Promise<{ handedOver: boolean }> {
+  const result = await client.launch(launchToken);
+  if (result.outcome === "launched") {
+    return { handedOver: result.handedOver };
   }
-  try {
-    await client.launch(launchToken);
-  } catch (error) {
-    if (error instanceof UpdateRefused && LAUNCH_NOT_STARTED.has(error.code)) {
-      await hooks.restartRuntime();
-      throw error;
-    }
-    throw new UpdateOutcomeUnknown();
-  }
-  await hooks.exitApp();
+  throw new UpdateRefused(result.code, refusalText(result.code));
 }

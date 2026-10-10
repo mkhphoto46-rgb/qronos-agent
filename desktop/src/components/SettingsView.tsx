@@ -34,6 +34,8 @@ import {
 
 import type { DeviceLinkController } from "../deviceLink";
 import DeviceLinkPanel from "./DeviceLinkPanel";
+import UpdatePanel from "./UpdatePanel";
+import { createUpdateClient } from "../updateStore";
 
 import "./SettingsView.css";
 
@@ -60,7 +62,8 @@ type SectionId =
   | "web"
   | "notifications"
   | "link"
-  | "data";
+  | "data"
+  | "update";
 
 type SectionDefinition = {
   id: SectionId;
@@ -82,6 +85,7 @@ const sections: SectionDefinition[] = [
   { id: "notifications", group: "SYSTEM", label: "اعلان‌ها", english: "Notifications", icon: "08", keywords: ["notification", "warning", "sound", "اعلان", "هشدار", "صدا"] },
   { id: "link", group: "SYSTEM", label: "اتصال گوشی", english: "Device Link", icon: "09", keywords: ["phone", "link", "pair", "device", "revoke", "گوشی", "اتصال", "جفت", "دستگاه"] },
   { id: "data", group: "DATA", label: "داده و پشتیبان‌گیری", english: "Data & Backup", icon: "10", keywords: ["data", "backup", "export", "restore", "داده", "پشتیبان", "خروجی"] },
+  { id: "update", group: "DATA", label: "به‌روزرسانی", english: "Update", icon: "11", keywords: ["update", "install", "version", "به‌روزرسانی", "نصب", "نسخه"] },
 ];
 
 type HotkeyBinding = {
@@ -176,6 +180,7 @@ function SettingRow({
 function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: SettingsViewProps) {
   const deviceLinkView = useSyncExternalStore(deviceLink.subscribe, deviceLink.getSnapshot);
   const [activeSection, setActiveSection] = useState<SectionId>("general");
+  const updateClient = useMemo(() => createUpdateClient((command, args) => invoke(command, args)), []);
   const [query, setQuery] = useState("");
   const [sensitivityDraft, setSensitivityDraft] = useState(56);
   const voiceMutationRef = useRef(false);
@@ -1511,6 +1516,15 @@ function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: Setting
     </>
   );
 
+  // Offline update from a file the person chose. The panel only asks; the desktop runs the launch lifecycle
+  // (runtime/lifecycle.rs) and the backend keeps the launch refused until its one enablement point is on.
+  const renderUpdate = () => (
+    <>
+      <SectionHeader kicker="SIGNED LOCAL UPDATE" title="به‌روزرسانی" description="نصب نسخهٔ امضاشدهٔ Qronos از فایلی که خودتان انتخاب می‌کنید؛ چیزی دانلود نمی‌شود." />
+      <UpdatePanel client={updateClient} visible={phase === "settings" && activeSection === "update"} />
+    </>
+  );
+
   const contentBySection: Record<SectionId, () => React.ReactNode> = {
     general: renderGeneral,
     hotkeys: renderHotkeys,
@@ -1522,6 +1536,7 @@ function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: Setting
     notifications: renderNotifications,
     link: renderDeviceLink,
     data: renderData,
+    update: renderUpdate,
   };
 
   return (
