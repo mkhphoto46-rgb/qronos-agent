@@ -199,9 +199,12 @@ single place a future path-scoped rule would apply.
   `<cache>/subtitle-input/sub-<random>.ass|ssa`; the name never contains the
   user's file name. On Windows that copy is held open with read-only sharing
   until ffmpeg has finished, so no other process can write, truncate, rename
-  or delete it meanwhile; Windows also refuses to rename or delete the folders
-  above it while it is held, so the path ffmpeg opens by name cannot be
-  rebound to another file (tested on this machine). The handle's final path
+  or delete it meanwhile. While it is held, Windows also refuses to rename or
+  delete the folders above it (NTFS; tested for `subtitle-input`, the cache,
+  the media data root and an outer folder in the tested tree). That is the
+  whole namespace claim: same-user changes to name resolution outside that
+  folder tree (for example per-logon DOS device mappings) were not tested and
+  are not covered. The handle's final path
   must be the intended one, and the path is checked for links again before
   use. The copy is re-read and re-hashed through that handle before ffmpeg
   starts and after it ends. Only once the copy is ready is the original
@@ -209,11 +212,24 @@ single place a future path-scoped rule would apply.
   so a refusal that lands while the copy is prepared stops it. Afterwards the
   copy is deleted through a handle whose file identity must match, so a
   different file that took its name is never deleted (that is reported as a
-  failure, not hidden). Copies left by a crash are removed at the start of the
-  next subtitles stage; one still held open by a live owner is skipped and
-  counted, never forced. Same-user limit: another program of the same user
-  can read the copy, but cannot change it or rebind its path while ffmpeg may
-  read it. The decoder keeps
+  failure, not hidden).
+  - **Cleanup never hides a stop (round 19).** If the copy cannot be removed
+    (for example another same-user program reads it without delete sharing)
+    while a permission, cancellation or resource stop is already on its way,
+    that stop is kept as it is: the stage is still requeued with its typed
+    reason, and the cleanup failure is added to it as a note. Without such a
+    stop a failed cleanup fails the track. If the new copy cannot even be
+    identified right after it is created, its handle is closed and the empty
+    file is left for the sweep, never deleted by name.
+  - **Crash sweep (round 19).** Copies left behind are removed at the start
+    of the next subtitles stage: only exact `sub-<32 hex>.ass|ssa` plain files,
+    at most 256 entries looked at per stage, each deleted only if it is still
+    the very file (volume and file index) its check saw, so a file that takes
+    the name in between is left alone. A copy held open by a live owner, or one
+    that changed, is skipped and counted as busy, never forced.
+  Same-user limit: another program of the same user
+  can read the copy, but cannot change, rename or delete it, or rename the
+  folders above it, while ffmpeg may read it. The decoder keeps
   its usual limits (file-only protocol, the `ass` demuxer, the Job object,
   bounded output). Until round 13 ffmpeg reopened the sidecar by name after the
   hash, so a file that grew in between could reach it; that is repaired.

@@ -13,23 +13,29 @@ reach the decoder. So the decoder gets a private copy instead:
 * on Windows the copy is opened with sharing for *read only* and that handle
   is held until the decoder has finished. While it is held no other process can
   open it for writing, truncate, rename or delete it; ffmpeg's read-only open
-  is allowed. Windows also refuses to rename or delete a folder above a file
-  held open this way, so the path ffmpeg opens by name cannot be rebound to
-  another file (tests prove both on this machine). The handle's final path must
+  is allowed. Windows (NTFS) also refuses to rename or delete a folder above a
+  file held open this way; tests prove both for the folders of the tested tree.
+  Same-user name-resolution changes outside that tree (for example per-logon
+  DOS device mappings) are not tested or covered. The handle's final path must
   be the intended path (no junction was in the way when it was created), and
   the path is checked for links again before it is handed out;
 * before the decoder starts and after it ends the copy is re-read through that
   same handle and must still hash to the expected digest;
 * afterwards it is deleted through a new handle whose file identity (volume and
   file index) must be the copy's, so a different file that took its name after
-  the handle closed is never deleted. Copies left by a crash are removed by
-  :func:`sweep_stale_inputs`; one still held open by a live owner is skipped
-  and counted, never forced.
+  the handle closed is never deleted. A cleanup failure never replaces a stop
+  (permission, cancellation, resource) that is already propagating: it is
+  added to that exception as a note and the copy is left for the sweep. A copy
+  that cannot be identified right after creation has its handle closed and is
+  left for the sweep. Copies left by a crash are removed by
+  :func:`sweep_stale_inputs` (at most 256 entries, each only if it is still the
+  file its check saw); one still held open by a live owner is skipped and
+  counted, never forced.
 
-Same-user boundary: another program of the same user cannot change the copy or
-rebind its path while the decoder may read it, but it can read the copy, and it
-could have changed the user's original before it was read (that is refused by
-the digest check, not here).
+Same-user boundary: another program of the same user cannot change, rename or
+delete the copy, or rename the folders above it, while the decoder may read it;
+it can read the copy, and it could have changed the user's original before it
+was read (that is refused by the digest check, not here).
 
 Elsewhere (not a product target) the copy is a new 0600 file with the same
 re-hash before and after the decoder; it is not write-locked and its delete is
