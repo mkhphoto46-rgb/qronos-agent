@@ -47,9 +47,11 @@ def vector_for(text: str) -> list[float]:
 class FakeSidecar:
     """A fake HTTP transport with the request_json signature; records every call."""
 
-    def __init__(self, *, quantization: str = "F16", answer=None, fail_on: int | None = None, on_embed=None) -> None:
+    def __init__(self, *, quantization: str = "F16", answer=None, fail_on: int | None = None, on_embed=None,
+                 tags_error: BaseException | None = None) -> None:
         self.calls: list[dict] = []
         self.embedded: list[str] = []
+        self.tags_error = tags_error  # /api/tags transport failure (before any inference request)
         self.quantization = quantization
         self.answer = answer
         self.fail_on = fail_on
@@ -63,6 +65,8 @@ class FakeSidecar:
             return {"models": ([{"name": "bge-m3:latest", "model": "bge-m3:latest"}] if self.loaded else [])
                     + [{"name": "someone-elses-model:latest"}]}
         if url.endswith("/api/tags"):
+            if self.tags_error is not None:
+                raise self.tags_error
             return {"models": [{"name": "bge-m3:latest", "model": "bge-m3:latest",
                                 "details": {"quantization_level": self.quantization, "family": "bert"}}]}
         embeds = sum(1 for c in self.calls if c["url"].endswith("/api/embed"))
@@ -403,3 +407,184 @@ def test_shared_user_memory_use_never_double_accounts_and_only_exit_proof_frees_
     assert auth.reconcile() is True and auth.ledger.active() == () and auth.governor.active() == ()
     released = [e for e in auth.events if e["event"] == "released"]
     assert released and released[-1]["proof"] == "sidecar_tree_exited"
+
+
+# ------------------------------------------------------------------ round 29: product composition and ownership
+# Main23 F1: build_bridge_media_host always hands the stage an embedder object; with no owned sidecar
+# (QRONOS_MEMORY_RUNTIME off, the default) nothing may be reserved for a model that was never loaded.
+# Root F2: while any media model request is unresolved, no media model is admitted (another model included).
+
+
+def product_host(tmp_path: Path, monkeypatch, owner_check, sidecar: FakeSidecar):
+    """The product composition: build_bridge_media_host on the bridge's own governor and ledger. Its ONE embedder
+    binds core.local_ipc.request_json at construction; that owned transport is the fake sidecar here."""
+    from core import local_ipc
+    from qronos_media.host import build_bridge_media_host
+
+    monkeypatch.setenv("QRONOS_MEDIA_DATA_DIR", str(tmp_path / "media-data"))
+    monkeypatch.setattr(local_ipc, "request_json", sidecar)
+    governor = ResourceGovernor(read_system=lambda: QUIET, read_gpu=lambda: None)
+    ledger = ResourceLedger()
+    host = build_bridge_media_host(governor=governor, ledger=ledger, foreground_busy=lambda: False,
+                                   paused=lambda: False, approvals=None, audit=None, activity=quiet_activity,
+                                   embedding_owner=owner_check)
+    EMBEDDERS[id(host.authority)] = host._embedder()
+    return host, governor, ledger
+
+
+def posts(sidecar: FakeSidecar) -> int:
+    return sum(1 for c in sidecar.calls if c["method"] == "POST")
+
+
+def proofs(auth) -> list:
+    return [e.get("proof") for e in auth.events if e["event"] == "released"]
+
+
+def test_the_embedder_signals_dispatch_only_right_before_the_inference_request():
+    seen: list[int] = []
+    sidecar = FakeSidecar()
+    semantic.MediaEmbedder(lambda: OWNER, transport=sidecar).embed(
+        ["a"], on_dispatch=lambda: seen.append(len(sidecar.calls)))
+    assert seen == [1] and [c["method"] for c in sidecar.calls] == ["GET", "POST"]  # after /api/tags, before POST
+    for embedder in (semantic.MediaEmbedder(lambda: None, transport=FakeSidecar()),
+                     semantic.MediaEmbedder(lambda: OWNER, transport=FakeSidecar(tags_error=TimeoutError("t"))),
+                     semantic.MediaEmbedder(lambda: OWNER, transport=FakeSidecar(quantization="Q4_K_M"))):
+        with pytest.raises(ResourceRefused) as refused:
+            embedder.embed(["a"], on_dispatch=lambda: seen.append(-1))
+        assert refused.value.reason == "model_unavailable"  # a capability refusal, never an unresolved request
+    assert seen == [1]
+    assert semantic.MediaEmbedder(lambda: None).unavailable_reason() == "model_unavailable"
+    assert semantic.MediaEmbedder(lambda: OWNER, transport=FakeSidecar()).unavailable_reason() is None
+
+
+def test_product_host_without_a_sidecar_owner_refuses_index_and_query_before_reserving(tmp_path, monkeypatch):
+    sidecar = FakeSidecar()
+    host, governor, ledger = product_host(tmp_path, monkeypatch, lambda: None, sidecar)
+    service, asset_id = prepared(tmp_path, host.authority, sidecar)
+    report = service.index(max_seconds=60, max_stages=5)
+    assert any(r.endswith("semantic:model_unavailable") for r in report["refused"]), report
+    assert not any(c.endswith(":semantic") for c in report["completed"]), report
+    row = stage(service, asset_id)
+    assert row["state"] == "QUEUED" and row["note"] == "unavailable:model_unavailable"
+    assert windows(service, asset_id) == []
+    answer = service.search_semantic("key")
+    assert answer["semantic"]["reason"] == "model_unavailable" and answer["semantic"]["results"] == []
+    assert list(answer) == ["query", "exact", "semantic"]  # the lexical answer is still given
+    assert not any(e["event"] == "reserve" for e in host.authority.events)  # nothing was ever reserved
+    assert ledger.active() == () and governor.active() == () and sidecar.calls == []
+    assert host.authority.reconcile() is True and host.authority.reconcile() is True
+    assert host.authority.status()["modelSlot"] is None
+
+
+def test_product_host_owner_lost_after_the_grant_frees_the_slot_no_request_was_sent(tmp_path, monkeypatch):
+    owner, sidecar = [OWNER], FakeSidecar()
+    host, governor, ledger = product_host(tmp_path, monkeypatch, lambda: owner[0], sidecar)
+    service, asset_id = prepared(tmp_path, host.authority, sidecar)
+    real_reserve = host.authority.reserve
+
+    def reserve_then_lose(task, needs):
+        lease = real_reserve(task, needs)
+        if needs.model is BGE_M3:
+            owner[0] = None  # the sidecar goes away right after the grant, before anything is sent
+        return lease
+
+    monkeypatch.setattr(host.authority, "reserve", reserve_then_lose)
+    report = service.index(max_seconds=60, max_stages=5)
+    assert any(r.endswith("semantic:model_unavailable") for r in report["refused"]), report
+    assert stage(service, asset_id)["state"] == "QUEUED" and windows(service, asset_id) == []
+    assert posts(sidecar) == 0 and proofs(host.authority) == ["no_request_dispatched"]
+    assert ledger.active() == () and governor.active() == ()
+    owner[0] = OWNER
+    answer = service.search_semantic("key")  # the same for the query
+    assert answer["semantic"]["reason"] == "model_unavailable" and posts(sidecar) == 0
+    assert proofs(host.authority) == ["no_request_dispatched"] * 2 and ledger.active() == ()
+
+
+def test_product_host_model_check_failure_before_any_request_is_not_unresolved(tmp_path, monkeypatch):
+    sidecar = FakeSidecar(tags_error=TimeoutError("tags timed out"))
+    host, governor, ledger = product_host(tmp_path, monkeypatch, lambda: OWNER, sidecar)
+    service, asset_id = prepared(tmp_path, host.authority, sidecar)
+    report = service.index(max_seconds=60, max_stages=5)
+    assert any(r.endswith("semantic:model_unavailable") for r in report["refused"]), report
+    assert posts(sidecar) == 0 and proofs(host.authority) == ["no_request_dispatched"]
+    assert ledger.active() == () and governor.active() == () and host.authority.status()["modelSlot"] is None
+
+
+def test_product_host_a_possibly_dispatched_request_stays_counted_whatever_else_is_seen(tmp_path, monkeypatch):
+    owner, sidecar = [OWNER], FakeSidecar(fail_on=1)  # the first POST fails: the server may still work on it
+    host, governor, ledger = product_host(tmp_path, monkeypatch, lambda: owner[0], sidecar)
+    service, asset_id = prepared(tmp_path, host.authority, sidecar)
+    report = service.index(max_seconds=60, max_stages=5)
+    assert report["stopped"] == "deferred" and "embedding_request_failed" in report["detail"], report
+    assert host.authority.status()["modelSlot"]["state"] == "request_unresolved"
+    assert [o.budget.ram_mb for o in ledger.active()] == [2048] and windows(service, asset_id) == []
+    sent = posts(sidecar)
+    sidecar.loaded = False  # an empty /api/ps proves no drain
+    assert host.authority.reconcile() is False and host.authority.reconcile() is False
+    owner[0] = None  # nor does losing the owner (the product supplies no whole-tree proof: kept until restart)
+    assert host.authority.reconcile() is False and len(ledger.active()) == 1
+    owner[0] = OWNER
+    assert service.search_semantic("key")["semantic"]["reason"] == "request_unresolved"
+    with pytest.raises(ResourceRefused) as refused:
+        host.authority.reserve("media:semantic:again", stages_module.STAGES["semantic"].needs)
+    assert refused.value.reason == "request_unresolved" and posts(sidecar) == sent and len(ledger.active()) == 1
+
+
+def test_product_host_resident_reuse_stays_counted_and_a_fully_cached_run_holds_nothing(tmp_path, monkeypatch):
+    owner, sidecar = [OWNER], FakeSidecar()
+    host, governor, ledger = product_host(tmp_path, monkeypatch, lambda: owner[0], sidecar)
+    service, asset_id = prepared(tmp_path, host.authority, sidecar)
+    service.index(max_seconds=60, max_stages=5)
+    assert stage(service, asset_id)["state"] == "COMPLETED" and windows(service, asset_id)
+    assert host.authority.status()["modelSlot"]["state"] == "resident" and len(ledger.active()) == 1
+    service.search_semantic(CUES_EN[0])
+    assert any(e["event"] == "reuse_resident" for e in host.authority.events) and len(ledger.active()) == 1
+    assert host.authority.status()["modelSlot"]["state"] == "resident"
+    owner[0] = None  # no owner now: new work is refused before reserving, the resident model stays counted
+    assert service.search_semantic("key")["semantic"]["reason"] == "model_unavailable"
+    assert host.authority.reconcile() is False and len(ledger.active()) == 1
+    owner[0] = OWNER
+    sidecar.loaded = False  # the owned sidecar's own /api/ps no longer lists bge-m3: freed (media never asked)
+    assert host.authority.reconcile() is True and ledger.active() == ()
+    sent = posts(sidecar)
+    with service.store.transaction() as tx:  # re-run with every window cached: no request, nothing held after
+        tx.execute("UPDATE stages SET state = 'QUEUED' WHERE stage = 'semantic' AND asset_id = ?", (asset_id,))
+    service.index(max_seconds=60, max_stages=5)
+    assert stage(service, asset_id)["state"] == "COMPLETED" and posts(sidecar) == sent
+    assert proofs(host.authority)[-1] == "no_request_dispatched"
+    assert ledger.active() == () and governor.active() == ()
+
+
+def test_an_unresolved_request_refuses_every_media_model_until_the_whole_tree_proof(tmp_path):
+    from qronos_media.resources import WHISPER_LARGE_V3_TURBO_Q5_0, StageNeeds
+
+    failing = FakeSidecar(fail_on=1)
+    auth, _ = authority(tmp_path, sidecar=failing)
+    service, asset_id = prepared(tmp_path, auth, failing)
+    service.index(max_seconds=60, max_stages=5)
+    assert auth.status()["modelSlot"]["state"] == "request_unresolved"
+    failing.loaded = False
+    with pytest.raises(ResourceRefused) as refused:
+        auth.reserve("media:asr:other", StageNeeds("asr", model=WHISPER_LARGE_V3_TURBO_Q5_0))
+    assert refused.value.reason == "request_unresolved"
+    assert [o.workload for o in auth.ledger.active()] == ["media-model:" + BGE_M3.name]  # nothing else admitted
+    LIFECYCLE[id(auth)][0] = "tree_exited"  # the trusted whole-tree proof resolves it; then Whisper is admitted
+    whisper = auth.reserve("media:asr:other", StageNeeds("asr", model=WHISPER_LARGE_V3_TURBO_Q5_0))
+    assert [o.workload for o in auth.ledger.active()] == ["media-model:" + WHISPER_LARGE_V3_TURBO_Q5_0.name]
+    auth.release(whisper)
+    assert auth.ledger.active() == ()
+
+
+def test_a_proved_resident_model_coexists_with_another_declared_model_both_accounted(tmp_path):
+    from qronos_media.resources import WHISPER_LARGE_V3_TURBO_Q5_0, StageNeeds
+
+    sidecar = FakeSidecar()
+    auth, _ = authority(tmp_path, sidecar=sidecar)
+    service, asset_id = prepared(tmp_path, auth, sidecar)
+    service.index(max_seconds=60, max_stages=5)
+    assert auth.status()["modelSlot"]["state"] == "resident"
+    whisper = auth.reserve("media:asr:other", StageNeeds("asr", model=WHISPER_LARGE_V3_TURBO_Q5_0))
+    assert sorted(o.workload for o in auth.ledger.active()) == sorted(
+        ["media-model:" + BGE_M3.name, "media-model:" + WHISPER_LARGE_V3_TURBO_Q5_0.name])
+    auth.release(whisper)
+    assert [o.workload for o in auth.ledger.active()] == ["media-model:" + BGE_M3.name]  # bge-m3 still resident
