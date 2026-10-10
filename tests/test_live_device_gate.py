@@ -45,6 +45,9 @@ EXPECTED_LIVE_NODES = frozenset({
     "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_the_first_real_reading_is_structurally_valid",
     # Reads this computer's real printer list.
     "tests/test_print_workflow.py::test_windows_spooler_reads_printers_without_side_effects",
+    # The production supervisor entry with the real bridge and production
+    # session mutex/Job names; its child gets no pytest primitive stand-ins.
+    "tests/test_supervisor_relay.py::test_the_production_entry_supervises_the_real_bridge_end_to_end",
 }) | frozenset(
     f"tests/test_screen_capture.py::TestTheRealScreen::{name}"
     for name in (

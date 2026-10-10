@@ -79,6 +79,8 @@ DEFAULT_SEND_TIMEOUT_SECONDS = 5.0
 MAX_TIMEOUT_SECONDS = 3600.0
 KEY_BYTES = 32
 HANDSHAKE_BYTES = 128
+#: How often an interruptible wait looks at its stop signal.
+_WAIT_SLICE_SECONDS = 0.05
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 
 _PIPE_PREFIX = "\\\\.\\pipe\\qronos-"
@@ -89,6 +91,7 @@ _FIELD_TYPES = {"int": int, "float": (int, float), "str": str, "bool": bool, "ob
 _CHALLENGE = b"QIPC1-CHALLENGE:"
 _RESPONSE = b"QIPC1-RESPONSE:"
 _CONFIRM = b"QIPC1-CONFIRM:"
+_KEY = b"QIPC1-KEY:"
 
 PeerPid = Callable[[object], Optional[int]]
 
@@ -103,6 +106,10 @@ class ChannelTimeout(ChannelError):
 
 class _NothingWritten(ChannelTimeout):
     """Out of time before any byte was written; the channel is still whole."""
+
+
+class ChannelCancelled(ChannelError):
+    """The wait was interrupted on purpose (the owner is stopping); nobody was accepted."""
 
 
 class PeerRejected(ChannelError):
@@ -247,15 +254,28 @@ def _remaining(deadline: float) -> float:
     return deadline - time.monotonic()
 
 
-def _receive_raw(connection, deadline: float, limit: int) -> bytes:
-    """One whole message, or an error, within the deadline."""
-    remaining = _remaining(deadline)
+def _receive_raw(connection, deadline: float, limit: int,
+                 interrupted: Optional[Callable[[], bool]] = None) -> bytes:
+    """
+    One whole message, or an error, within the deadline.
 
+    With ``interrupted``, the wait is taken in short slices and ends with
+    ``ChannelCancelled`` as soon as it returns True. Polling does not consume
+    anything, so a message arriving meanwhile is not lost.
+    """
     try:
-        if remaining <= 0 or not connection.poll(remaining):
-            raise ChannelTimeout("The peer did not answer in time.")
+        while True:
+            if interrupted is not None and interrupted():
+                raise ChannelCancelled("Stopped while waiting for the peer.")
+            remaining = _remaining(deadline)
+            if remaining <= 0:
+                raise ChannelTimeout("The peer did not answer in time.")
+            if connection.poll(remaining if interrupted is None else min(remaining, _WAIT_SLICE_SECONDS)):
+                break
+            if interrupted is None:
+                raise ChannelTimeout("The peer did not answer in time.")
         return connection.recv_bytes(limit)
-    except ChannelTimeout:
+    except ChannelError:
         raise
     except (OSError, EOFError, ValueError) as error:
         raise ChannelError("The peer is gone or sent an oversized message.") from error
@@ -359,10 +379,11 @@ def _tag(key: bytes, role: bytes, challenge: bytes) -> bytes:
     return hmac.new(key, role + challenge, "sha256").digest()
 
 
-def _server_handshake(connection, key: bytes, deadline: float) -> None:
+def _server_handshake(connection, key: bytes, deadline: float,
+                      interrupted: Optional[Callable[[], bool]] = None) -> None:
     challenge = secrets.token_bytes(32)
     _send_raw(connection, _CHALLENGE + challenge, deadline)
-    reply = _receive_raw(connection, deadline, HANDSHAKE_BYTES)
+    reply = _receive_raw(connection, deadline, HANDSHAKE_BYTES, interrupted)
 
     if len(reply) != len(_RESPONSE) + 64 or not reply.startswith(_RESPONSE):
         raise ChannelError("The peer failed authentication.")
@@ -460,8 +481,9 @@ class Channel:
             self._pending = overlapped
             return True
 
-    def receive(self, timeout: float) -> dict:
-        data = _receive_raw(self._connection, _deadline(timeout), MAX_MESSAGE_BYTES)
+    def receive(self, timeout: float, interrupted: Optional[Callable[[], bool]] = None) -> dict:
+        """The next message within ``timeout``; ``ChannelCancelled`` once ``interrupted`` returns True."""
+        data = _receive_raw(self._connection, _deadline(timeout), MAX_MESSAGE_BYTES, interrupted)
         return decode_message(data, self._receive)
 
     def close(self) -> None:
@@ -509,9 +531,17 @@ class ChannelServer:
         # No authkey: multiprocessing's handshake reads without a deadline.
         self._listener = Listener(self.address, family="AF_PIPE")
         self._closed = False
+        self._interrupted = threading.Event()
         self.refused_peers = 0
 
-    def accept(self, timeout: float, expected_pid: Optional[int] = None, peer_pid: Optional[PeerPid] = None) -> Channel:
+    def accept(
+        self,
+        timeout: float,
+        expected_pid: Optional[int] = None,
+        peer_pid: Optional[PeerPid] = None,
+        release_key: bool = False,
+        release_gate: Optional[Callable[[], bool]] = None,
+    ) -> Channel:
         """
         The expected, authenticated peer within ``timeout``, or an error.
 
@@ -519,13 +549,31 @@ class ChannelServer:
         one whose process id cannot be read, is closed before anything is read
         from it, and waiting continues until the deadline. ``peer_pid`` stands
         in for the Win32 query in tests.
+
+        With ``release_key``, the session key itself is sent to that exact
+        peer — only after its process id was checked, before anything else —
+        for a peer that could not be given the key any other way without
+        putting it on a command line (``connect_for_key``).
+
+        ``interrupt()`` ends the whole call promptly with ``ChannelCancelled``:
+        the wait for a peer, and the handshake after it. ``release_gate`` is
+        asked once, immediately before the key would be sent; False closes
+        the connection unanswered and raises ``ChannelCancelled``. It is the
+        owner's own serialisation point between "release the key" and
+        "cancel" (see ``core.action_broker_client.Cancellation``), so a
+        cancellation that won it never sees a key leave.
         """
         deadline = _deadline(timeout)
 
         while True:
+            if self._interrupted.is_set():
+                raise ChannelCancelled("Stopped while waiting for the peer.")
+
             connection = self._accept_raw(_remaining(deadline))
 
             if connection is None:
+                if self._interrupted.is_set():
+                    raise ChannelCancelled("Stopped while waiting for the peer.")
                 if self.refused_peers:
                     raise PeerRejected("Only processes other than the launched one connected.")
                 raise ChannelTimeout("No peer connected in time.")
@@ -536,7 +584,13 @@ class ChannelServer:
                 continue
 
             try:
-                _server_handshake(connection, self.key, deadline)
+                if self._interrupted.is_set():
+                    raise ChannelCancelled("Stopped before the peer was answered.")
+                if release_key:
+                    if release_gate is not None and not release_gate():
+                        raise ChannelCancelled("Stopped before the key was released; nothing was sent.")
+                    _send_raw(connection, _KEY + self.key, deadline)
+                _server_handshake(connection, self.key, deadline, self._interrupted.is_set)
             except ChannelError:
                 connection.close()
                 raise
@@ -571,10 +625,17 @@ class ChannelServer:
 
         threading.Thread(target=wait_for_peer, name="qronos-ipc-accept", daemon=True).start()
 
-        if done.wait(remaining):
-            if "error" in result:
-                raise ChannelError("The listener failed.")
-            return result["connection"]
+        # Wait in short slices so ``interrupt`` ends the wait promptly. The
+        # slices are this thread's own waits: nothing extra connects to the
+        # pipe until the wait is over, so a peer arriving meanwhile is not lost.
+        until = time.monotonic() + remaining
+        while True:
+            if done.wait(max(0.0, min(0.05, until - time.monotonic()))):
+                if "error" in result:
+                    raise ChannelError("The listener failed.")
+                return result["connection"]
+            if self._interrupted.is_set() or time.monotonic() >= until:
+                break
 
         # Wake the waiting accept with a connection that never handshakes;
         # opening it is itself bounded.
@@ -589,6 +650,10 @@ class ChannelServer:
             late.close()
         return None
 
+    def interrupt(self) -> None:
+        """End a wait in ``accept`` promptly, from any thread; later accepts refuse."""
+        self._interrupted.set()
+
     def close(self) -> None:
         if self._closed:
             return
@@ -597,6 +662,24 @@ class ChannelServer:
             self._listener.close()
         except OSError:
             pass
+
+
+def _open_checked(address: str, expected_server_pid: Optional[int], peer_pid: Optional[PeerPid], deadline: float):
+    connection = _open_pipe(address, deadline)
+
+    if expected_server_pid is None:
+        connection.close()
+        raise PeerRejected("The expected server process must be named.")
+
+    from core.pipe_peer import server_pid
+
+    actual = (peer_pid or server_pid)(connection)
+
+    if actual is None or actual != expected_server_pid:
+        connection.close()
+        raise PeerRejected("The pipe is not served by the expected process.")
+
+    return connection
 
 
 def connect(
@@ -618,19 +701,7 @@ def connect(
     address = require_local_address(address)
     key = _require_key(key)
     deadline = _deadline(timeout)
-    connection = _open_pipe(address, deadline)
-
-    if expected_server_pid is None:
-        connection.close()
-        raise PeerRejected("The expected server process must be named.")
-
-    from core.pipe_peer import server_pid
-
-    actual = (peer_pid or server_pid)(connection)
-
-    if actual is None or actual != expected_server_pid:
-        connection.close()
-        raise PeerRejected("The pipe is not served by the expected process.")
+    connection = _open_checked(address, expected_server_pid, peer_pid, deadline)
 
     try:
         _client_handshake(connection, key, deadline)
@@ -639,6 +710,43 @@ def connect(
         raise
 
     return Channel(connection, receive, send)
+
+
+def connect_for_key(
+    address: str,
+    receive: MessageSchema,
+    send: MessageSchema,
+    expected_server_pid: Optional[int] = None,
+    peer_pid: Optional[PeerPid] = None,
+    timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+) -> tuple[Channel, bytes]:
+    """
+    Connect to a server that releases the session key on the pipe.
+
+    For a peer started with only public identifiers on its command line (the
+    elevated Action Broker): the server's process id is checked first, and
+    only then is the first message read — the key — followed by the same
+    mutual handshake under it. The server sends the key only after checking
+    this process's id (``ChannelServer.accept(release_key=True)``), so the
+    key never appears on a command line, in the environment or in a log.
+    Returns the channel and the key.
+    """
+    _require_sessions_supported()
+    address = require_local_address(address)
+    deadline = _deadline(timeout)
+    connection = _open_checked(address, expected_server_pid, peer_pid, deadline)
+
+    try:
+        message = _receive_raw(connection, deadline, HANDSHAKE_BYTES)
+        if len(message) != len(_KEY) + KEY_BYTES or not message.startswith(_KEY):
+            raise ChannelError("The server did not release a session key.")
+        key = message[len(_KEY):]
+        _client_handshake(connection, key, deadline)
+    except ChannelError:
+        connection.close()
+        raise
+
+    return Channel(connection, receive, send), key
 
 
 def hmac_sha256(key: bytes, data: bytes) -> str:

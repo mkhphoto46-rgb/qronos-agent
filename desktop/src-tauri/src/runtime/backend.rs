@@ -15,6 +15,9 @@ const EXECUTABLE: &str = "qronos-runtime";
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Service {
     Bridge,
+    /// The supervised runtime: `qronos-runtime supervisor --desktop`, which
+    /// starts the bridge itself and relays its standard input and output.
+    Supervisor,
     Library,
     Memory,
     Audio,
@@ -27,6 +30,7 @@ impl Service {
     fn name(self) -> &'static str {
         match self {
             Self::Bridge => "bridge",
+            Self::Supervisor => "supervisor",
             Self::Library => "library",
             Self::Memory => "memory",
             Self::Audio => "audio",
@@ -36,10 +40,19 @@ impl Service {
         }
     }
 
+    /// Fixed words after the service name; nothing here comes from a caller.
+    fn fixed_arguments(self) -> &'static [&'static str] {
+        match self {
+            Self::Supervisor => &["--desktop"],
+            _ => &[],
+        }
+    }
+
     #[cfg(debug_assertions)]
     fn module(self) -> &'static str {
         match self {
             Self::Bridge => "core.runtime_bridge",
+            Self::Supervisor => "core.supervisor",
             Self::Library => "core.library_cli",
             Self::Memory => "core.memory_cli",
             Self::Audio => "core.audio_output_cli",
@@ -80,6 +93,7 @@ impl Backend {
                 let mut command = Command::new(directory.join(EXECUTABLE));
                 command
                     .arg(service.name())
+                    .args(service.fixed_arguments())
                     .current_dir(directory)
                     .env("QRONOS_PACKAGED_RUNTIME", "1")
                     .env("QRONOS_DATA_ROOT", data_root)
@@ -91,6 +105,7 @@ impl Backend {
                 let mut command = Command::new(resolve_python(root)?);
                 command
                     .args(["-u", "-m", service.module()])
+                    .args(service.fixed_arguments())
                     .current_dir(root);
                 command
             }
@@ -285,6 +300,27 @@ mod tests {
             fixture.0.join("profile/Temp/Chatterbox")
         );
         assert!(!fixture.0.join("profile").exists());
+    }
+
+    #[test]
+    fn the_supervised_runtime_is_a_closed_bundled_command() {
+        let fixture = Fixture::new();
+        let directory = fixture.bundle();
+        let backend = Backend::Packaged {
+            directory: directory.clone(),
+            data_root: fixture.0.join("profile"),
+            asset_root: fixture.0.join("assets"),
+        };
+        let command = backend.command(Service::Supervisor).unwrap();
+        assert_eq!(command.get_program(), directory.join(EXECUTABLE));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("supervisor"), std::ffi::OsStr::new("--desktop")]
+        );
+        assert_eq!(
+            backend.command(Service::Bridge).unwrap().get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("bridge")]
+        );
     }
 
     #[test]

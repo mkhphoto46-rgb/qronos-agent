@@ -68,6 +68,29 @@ def command_parameters(arguments: list[str]) -> str:
     return " ".join(arguments)
 
 
+def _real_win32_calls():
+    """
+    The real shell32/kernel32 functions. The one place they are resolved, so
+    the test suite's side-effect boundary (tests/conftest.py) can refuse it.
+    """
+    if sys.platform != "win32":
+        raise OSError("Elevation through UAC is only available on Windows.")
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
+    kernel32.GetProcessId.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return (shell32.ShellExecuteExW, kernel32.GetProcessId, kernel32.WaitForSingleObject,
+            kernel32.GetExitCodeProcess, kernel32.CloseHandle, ctypes.get_last_error)
+
+
 class Win32:
     """The four Win32 calls used, resolved lazily; injectable for tests."""
 
@@ -81,26 +104,8 @@ class Win32:
         last_error: Optional[Callable[[], int]] = None,
     ) -> None:
         if shell_execute_ex is None:
-            if sys.platform != "win32":
-                raise OSError("Elevation through UAC is only available on Windows.")
-            shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
-            shell32.ShellExecuteExW.restype = wintypes.BOOL
-            kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
-            kernel32.GetProcessId.restype = wintypes.DWORD
-            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-            kernel32.WaitForSingleObject.restype = wintypes.DWORD
-            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            shell_execute_ex = shell32.ShellExecuteExW
-            get_process_id = kernel32.GetProcessId
-            wait_for_single_object = kernel32.WaitForSingleObject
-            get_exit_code_process = kernel32.GetExitCodeProcess
-            close_handle = kernel32.CloseHandle
-            last_error = ctypes.get_last_error
+            (shell_execute_ex, get_process_id, wait_for_single_object,
+             get_exit_code_process, close_handle, last_error) = _real_win32_calls()
         self.shell_execute_ex = shell_execute_ex
         self.get_process_id = get_process_id
         self.wait_for_single_object = wait_for_single_object
@@ -125,9 +130,14 @@ class ElevatedBroker:
             return None
         code = wintypes.DWORD(0)
         ok = self._win32.get_exit_code_process(self._handle, ctypes.byref(code))
-        self._win32.close_handle(self._handle)
-        self._handle = None
+        self.close()
         return int(code.value) if ok else None
+
+    def close(self) -> None:
+        """Release the process handle (it is never used to change the process)."""
+        if self._handle is not None:
+            self._win32.close_handle(self._handle)
+            self._handle = None
 
 
 class UacBrokerLauncher:
@@ -140,14 +150,14 @@ class UacBrokerLauncher:
         self._executable = executable
         self._win32 = win32
 
-    def launch(self, address: str, key: bytes, runtime_pid: int) -> ElevatedBroker:
+    def launch(self, address: str, runtime_pid: int) -> ElevatedBroker:
         win32 = self._win32 or Win32()
         info = SHELLEXECUTEINFOW()
         info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
         info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
         info.lpVerb = "runas"
         info.lpFile = str(self._executable)
-        info.lpParameters = command_parameters(broker_arguments(address, key, runtime_pid))
+        info.lpParameters = command_parameters(broker_arguments(address, runtime_pid))
         info.lpDirectory = str(self._executable.parent)
         info.nShow = SW_HIDE
 

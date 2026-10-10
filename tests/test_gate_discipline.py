@@ -93,6 +93,18 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "supervises, with fixed arguments; holds a per-session named mutex. "
         "It performs no user action and owns no audio, UI or dialog."
     ),
+    "core.supervisor_relay": (
+        "The supervisor's desktop mode: starts only the bundled runtime bridge "
+        "(fixed command, base interpreter from source), relays the desktop's "
+        "pipes to it, binds it to a kill-on-close Job Object and stops only "
+        "that exact child. It performs no user action and owns no audio, UI or dialog."
+    ),
+    "core.spooler_service": (
+        "Stops and starts the one Windows service named Spooler (a constant) "
+        "through the Service Control Manager, with query/stop/start rights "
+        "only. Called only by the broker's registered printer.spooler_restart "
+        "action, after the broker's full verification and its gate re-check."
+    ),
     "core.pipe_peer": (
         "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "
         "ctypes only to read which process is on the other end of a Qronos pipe."

@@ -31,6 +31,8 @@ from security.permissions import ActionCategory
 from tests.fixtures.child_python import child_python
 
 BROKER_CHILD = Path(__file__).parent / "fixtures" / "broker_child.py"
+#: The fixture broker's test-only approval secret (not a real one).
+SECRET = "fixture-typed-secret"
 
 
 def grant_for(request: ActionRequest):
@@ -62,16 +64,22 @@ class ChildBroker:
 
 
 class ChildLauncher:
-    def __init__(self, work: Path, extra: tuple[str, ...] = (), imposter: bool = False):
+    def __init__(self, work: Path, extra: tuple[str, ...] = (), imposter: bool = False,
+                 environment: dict | None = None):
         self.work = work
+        self.environment = dict(environment or {})
         self.extra = extra
         self.imposter = imposter
         self.processes: list[subprocess.Popen] = []
+        self.commands: list[list[str]] = []
 
-    def launch(self, address: str, key: bytes, runtime_pid: int):
+    def launch(self, address: str, runtime_pid: int):
         executable, environment = child_python()
-        command = [executable, str(BROKER_CHILD), str(self.work), *broker_arguments(address, key, runtime_pid)[1:],
+        environment["QRONOS_TEST_BROKER_SECRET"] = SECRET
+        environment.update(self.environment)
+        command = [executable, str(BROKER_CHILD), str(self.work), *broker_arguments(address, runtime_pid)[1:],
                    *self.extra]
+        self.commands.append(command)
         real = subprocess.Popen(command, env=environment)
         self.processes.append(real)
         if self.imposter:
@@ -106,16 +114,18 @@ def test_an_approved_action_runs_once_in_the_broker_process(tmp_path, launchers)
     session = BrokerSession(launcher, accept_timeout_seconds=20, reply_timeout_seconds=20)
     action, request, grant = marker_request("alpha")
 
-    result = session.perform(action, request, grant)
+    result = session.perform(action, request, grant, secret=SECRET)
 
     assert result == BrokerResult(ok=True, outcome="performed", detail="marker alpha written")
+    assert all(SECRET not in part and len(part) < 64 or part.startswith("\\\\.\\pipe\\")
+               for part in launcher.commands[0][3:])  # only public identifiers on the command line
     assert (tmp_path / "markers" / "alpha.done").read_text() == "performed"
     assert launcher.processes[0].wait(10) == 0
     audit = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
     assert [record["outcome"] for record in audit] == ["performed"]
 
     with pytest.raises(BrokerUnavailable, match="already been used"):
-        session.perform(action, request, grant)
+        session.perform(action, request, grant, secret=SECRET)
     assert len(launcher.processes) == 1  # refused before anything was launched
 
 
@@ -124,7 +134,8 @@ def test_a_broker_that_acts_on_other_parameters_is_refused_by_the_digest(tmp_pat
     launcher = ChildLauncher(tmp_path, extra=("--tamper",))
     launchers(launcher)
     action, request, grant = marker_request("alpha")
-    result = BrokerSession(launcher, accept_timeout_seconds=20, reply_timeout_seconds=20).perform(action, request, grant)
+    result = BrokerSession(launcher, accept_timeout_seconds=20, reply_timeout_seconds=20).perform(
+        action, request, grant, secret=SECRET)
     assert result.ok is False and result.outcome == "not_approved"
     assert not (tmp_path / "markers").exists()
 
@@ -137,7 +148,7 @@ def test_a_broker_with_no_such_action_refuses_and_writes_nothing(tmp_path, launc
     request = ActionRequest(category=ActionCategory.CREATE_OR_EDIT_FILE, target="test marker alpha",
                             summary="Write a test marker file.")
     result = BrokerSession(launcher, accept_timeout_seconds=20, reply_timeout_seconds=20).perform(
-        action, request, grant_for(request))
+        action, request, grant_for(request), secret=SECRET)
     assert result.outcome == "unknown_action" and not (tmp_path / "markers").exists()
 
 
@@ -147,7 +158,8 @@ def test_a_process_other_than_the_launched_one_is_never_sent_the_action(tmp_path
     launchers(launcher)
     action, request, grant = marker_request("alpha")
     with pytest.raises(BrokerUnavailable, match="did not connect"):
-        BrokerSession(launcher, accept_timeout_seconds=10, reply_timeout_seconds=5).perform(action, request, grant)
+        BrokerSession(launcher, accept_timeout_seconds=10, reply_timeout_seconds=5).perform(
+            action, request, grant, secret=SECRET)
     assert not (tmp_path / "markers").exists()
 
 
@@ -172,7 +184,7 @@ def test_the_approval_lifetime_is_capped_at_the_broker_limit():
 @windows_only
 def test_a_launch_that_fails_is_reported_and_nothing_is_sent(tmp_path):
     class Failing:
-        def launch(self, address, key, runtime_pid):
+        def launch(self, address, runtime_pid):
             raise UacDeclined("declined")
 
     action, request, grant = marker_request("alpha")
@@ -214,11 +226,11 @@ def test_the_broker_is_started_through_the_normal_uac_prompt(tmp_path):
     fake = FakeWin32()
     executable = tmp_path / "qronos-runtime.exe"
     address = r"\\.\pipe\qronos-action-broker-" + "a" * 32
-    broker = UacBrokerLauncher(executable, fake.build()).launch(address, bytes(range(32)), 1234)
+    broker = UacBrokerLauncher(executable, fake.build()).launch(address, 1234)
 
     assert fake.info["lpVerb"] == "runas"
     assert fake.info["lpFile"] == str(executable)
-    assert fake.info["lpParameters"] == " ".join(broker_arguments(address, bytes(range(32)), 1234))
+    assert fake.info["lpParameters"] == f"action-broker --pipe {address} --runtime-pid 1234"  # no key
     assert fake.info["fMask"] & uac_launch.SEE_MASK_NOCLOSEPROCESS
     assert fake.info["cbSize"] == ctypes.sizeof(SHELLEXECUTEINFOW)
     assert broker.pid == 4321 and broker.wait(1.0) == 0 and fake.closed == [99]
@@ -228,7 +240,7 @@ def test_declining_uac_is_reported_as_declined():
     fake = FakeWin32(succeed=False, error=uac_launch.ERROR_CANCELLED)
     with pytest.raises(UacDeclined):
         UacBrokerLauncher(Path("C:/Qronos/qronos-runtime.exe"), fake.build()).launch(
-            r"\\.\pipe\qronos-action-broker-" + "a" * 32, bytes(32), 1)
+            r"\\.\pipe\qronos-action-broker-" + "a" * 32, 1)
 
 
 @pytest.mark.parametrize("executable", ["qronos-runtime.exe", "C:/Qronos/qronos-runtime.bat", "C:/Qronos/cmd"])
