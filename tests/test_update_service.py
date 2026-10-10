@@ -790,14 +790,27 @@ def test_a_held_installer_cannot_be_written_renamed_or_deleted(tmp_path):
     os.unlink(target)
 
 
-def test_a_failed_launch_records_no_handoff_and_releases_the_claim(world):
-    service = world.service(launcher=Recorder(fail=UpdateError("launch_failed", "fixture")))
+def test_a_verified_non_start_records_no_handoff_and_releases_the_claim(world):
+    """Only NotStarted (Windows created no process) proves nothing changed."""
+    service = world.service(launcher=Recorder(fail=update_service.NotStarted("fixture: CreateProcess failed")))
     _, approved = staged(service, *world.release("0.2.0"))
     with pytest.raises(UpdateError) as refused:
         service.launch(approved["launchToken"])
     assert refused.value.code == "launch_failed"
     status = service.status()
     assert status["handoff"] is None and status["launching"] is False
+    assert world.quiesce.held == 0
+
+
+def test_any_other_launcher_failure_keeps_the_durable_handoff(world):
+    """N4: an arbitrary error after the process may exist is not proof that nothing changed."""
+    service = world.service(launcher=Recorder(fail=UpdateError("launch_failed", "fixture: after the child existed")))
+    _, approved = staged(service, *world.release("0.2.0"))
+    with pytest.raises(UpdateError) as refused:
+        service.launch(approved["launchToken"])
+    assert refused.value.code == "launch_outcome_unknown"
+    state = json.loads(world.lifecycle_text())
+    assert state["launching"]["step"] == "starting" and state["handoff"]["version"] == "0.2.0"
     assert world.quiesce.held == 0
 
 
@@ -901,7 +914,10 @@ def test_a_crash_after_restoring_is_undone_at_the_next_start(world, monkeypatch)
     result = after.startup_check()
 
     assert result["recovered"] is True and voice(world) == "after upgrade"
-    assert after.status()["launching"] is False and after.status()["events"][-2]["event"] == "recovered"
+    # N4: the interrupted claim is recovered first, then its durable handoff is resolved (not applied: the
+    # 0.2.0 build still runs, so its own data was put back).
+    events = [event["event"] for event in after.status()["events"]]
+    assert after.status()["launching"] is False and events[-1] == "not_applied" and "recovered" in events[-3:]
 
 
 def test_a_linked_store_file_is_not_snapshotted_through(world):
@@ -1292,6 +1308,153 @@ def test_start_up_is_refused_while_the_installer_still_runs_then_resolves(world)
     assert update_service.recover_before_stores.__doc__  # module entry exists for the runtime
     world.launcher.finish()
     assert world.service("0.2.0").recover_before_stores()["result"] == "applied"
+
+
+# ------------------------------------------- N4: durable starting state (round-8 contract 2)
+
+
+def _rollback_to_0_1_0(world):
+    """0.1.0 -> 0.2.0 (settings 3, voice 'after upgrade'), then an approved rollback to 0.1.0 (voice 'fixture')."""
+    after = upgraded_world(world)
+    requested = after.request(*world.release("0.1.0", rollback=True, dataStores=stores()))
+    return after, after.approve(requested["approvalToken"], SECRET)
+
+
+def test_a_verified_non_start_puts_todays_data_back_at_once(world):
+    after, approved = _rollback_to_0_1_0(world)
+    failing = world.service("0.2.0", profile=after.profile,
+                            launcher=Recorder(fail=update_service.NotStarted("fixture: CreateProcess failed")))
+    with pytest.raises(UpdateError) as refused:
+        failing.launch(approved["launchToken"])
+    assert refused.value.code == "launch_failed" and voice(world) == "after upgrade"
+    assert failing.status()["handoff"] is None and failing.status()["launching"] is False
+
+
+@pytest.mark.parametrize(("failure", "running", "voice_after"), [
+    ("launcher_error", "0.1.0", "fixture"),           # the installer had acted: the rollback applied
+    ("launcher_error", "0.2.0", "after upgrade"),     # it had not: today's data comes back, by version
+    ("save_after_start", "0.1.0", "fixture"),
+    ("save_after_start", "0.2.0", "after upgrade"),
+    ("interrupted", "0.1.0", "fixture"),
+    ("interrupted", "0.2.0", "after upgrade"),
+])
+def test_an_unknown_launch_outcome_is_resolved_only_by_the_running_version(world, monkeypatch, failure, running,
+                                                                           voice_after):
+    """N4 (Control r5): never restore from an unknown post-start state; the next start decides by version."""
+    after, approved = _rollback_to_0_1_0(world)
+    launcher = Recorder(fail={"launcher_error": UpdateError("busy", "fixture: the hand-over failed"),
+                              "interrupted": KeyboardInterrupt()}.get(failure))
+    service = world.service("0.2.0", profile=after.profile, launcher=launcher)
+    if failure == "save_after_start":
+        original, failed = service._change, []
+
+        def flaky(change):
+            if launcher.calls and not failed:
+                failed.append(True)
+                raise UpdateError("busy", "fixture: the lifecycle file could not be saved")
+            return original(change)
+
+        monkeypatch.setattr(service, "_change", flaky)
+    if failure == "interrupted":
+        monkeypatch.setattr(service, "_release_claim", lambda binding, error: None)  # the process died
+    with pytest.raises((UpdateError, KeyboardInterrupt)) as refused:
+        service.launch(approved["launchToken"])
+    if failure != "interrupted":
+        assert refused.value.code == "launch_outcome_unknown"
+    assert voice(world) == "fixture" and len(launcher.calls) == 1  # started on the restored (rolled-back) data
+    state = json.loads(world.lifecycle_text())
+    assert state["launching"]["step"] == "starting" and state["handoff"]["restoredSnapshot"]
+    assert state["handoff"]["safetySnapshot"] and state["handoff"]["packageSha256"]
+
+    profile = BASE if running == "0.1.0" else after.profile
+    result = world.service(running, profile=profile).recover_before_stores()
+    assert result["recovered"] is True
+    assert result["result"] == ("applied" if running == "0.1.0" else "not_applied")
+    assert voice(world) == voice_after
+    assert json.loads(world.lifecycle_text())["launching"] is None
+
+
+def test_a_real_child_that_already_acted_before_the_launcher_failed_keeps_the_rollback(world):
+    """The child changes the installed state, then the launcher raises: the outcome is decided by what runs next."""
+    from tests.fixtures.child_python import child_python
+
+    after, approved = _rollback_to_0_1_0(world)
+    marker = world.tmp / "installed-version.txt"
+    executable, environment = child_python()
+
+    def acting_launcher(path, arguments, handover):
+        child = subprocess.run([executable, "-B", "-I", "-c",
+                                "import sys; open(sys.argv[1], 'w').write('0.1.0')", str(marker)],
+                               env=environment, timeout=60, check=True)
+        assert child.returncode == 0  # the "installer" has replaced the program
+        raise UpdateError("busy", "fixture: the launcher failed after its child acted")
+
+    service = world.service("0.2.0", profile=after.profile, launcher=acting_launcher)
+    with pytest.raises(UpdateError) as refused:
+        service.launch(approved["launchToken"])
+    assert refused.value.code == "launch_outcome_unknown" and marker.read_text() == "0.1.0"
+    assert voice(world) == "fixture"  # nothing was put back by the launch path
+    result = world.service(marker.read_text(), profile=BASE).recover_before_stores()
+    assert result["result"] == "applied" and voice(world) == "fixture"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows processes and handles")
+def test_a_hand_over_that_fails_after_the_child_exists_is_not_a_verified_non_start(world, tmp_path):
+    """The real start_fenced: the process exists, then duplicating the fence fails. The child's input is closed,
+    the stand-in installer refuses an incomplete record by itself, and the outcome stays with the barrier."""
+    from tests.fixtures.child_python import child_python
+
+    executable, _ = child_python()
+    report, go = tmp_path / "stand-in.json", tmp_path / "go"
+    go.write_text("1")
+    argv = [executable, "-B", "-I", str(Path(__file__).resolve().parent / "fixtures" / "update_installer_child.py"),
+            str(Path(__file__).resolve().parent.parent), f"Local\\QronosUpdateTest-n4-{uuid.uuid4().hex}",
+            str(world.data), "update", str(go), str(report)]
+    started: list = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    handover = update_service.Handover(os.urandom(32), 0x7FFFFFF0, world.data / "Updates" / "receipts", "0.2.0",
+                                       "a" * 64, "b" * 64)  # not a handle of this process
+    import unittest.mock
+
+    with unittest.mock.patch("subprocess.Popen", recording_popen):
+        with pytest.raises(UpdateError) as refused:
+            update_service.start_fenced(argv, str(tmp_path), handover)
+    assert refused.value.code == "launch_outcome_unknown" and not isinstance(refused.value, update_service.NotStarted)
+    assert started and started[0].wait(60) == 3  # the stand-in refused by itself; it was not killed
+    assert json.loads(report.read_text(encoding="utf-8"))["refused"] == "bad_record"
+
+
+@pytest.mark.parametrize("damage", ["no_handoff", "other_package", "other_snapshot", "store_not_handed_off"])
+def test_a_starting_record_that_does_not_match_its_handoff_stops_start_up(world, monkeypatch, damage):
+    """N4: unknown state fails closed BEFORE any store opens; nothing is restored or rewritten."""
+    after, approved = _rollback_to_0_1_0(world)
+    service = world.service("0.2.0", profile=after.profile, launcher=Recorder(fail=KeyboardInterrupt()))
+    monkeypatch.setattr(service, "_release_claim", lambda binding, error: None)
+    with pytest.raises(KeyboardInterrupt):
+        service.launch(approved["launchToken"])
+    path = world.data / "Updates" / update_service.LIFECYCLE_FILE
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if damage == "no_handoff":
+        state["handoff"] = None
+    elif damage == "other_package":
+        state["handoff"]["packageSha256"] = "f" * 64
+    elif damage == "other_snapshot":
+        state["handoff"]["safetySnapshot"] = None
+    if damage == "store_not_handed_off":
+        after.store.discard()
+    else:
+        path.write_text(json.dumps(state), encoding="utf-8")
+    before, data_before = world.lifecycle_text(), voice(world)
+    with pytest.raises(UpdateError) as refused:
+        world.service("0.2.0", profile=after.profile).recover_before_stores()
+    assert refused.value.code == "recovery_failed"
+    assert world.lifecycle_text() == before and voice(world) == data_before == "fixture"
 
 
 def test_an_interrupted_launch_blocks_new_work_until_start_up_recovers_it(world, monkeypatch):

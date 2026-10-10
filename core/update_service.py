@@ -469,7 +469,7 @@ _OUTCOME_FIELDS = frozenset({"result", "kind", "version", "runningVersion", "at"
                              "receipt"})
 _RECEIPTS = ("verified", "absent", "invalid", "not_requested")
 _EVENT_FIELDS = frozenset({"at", "event", "version", "detail"})
-_STEPS = ("claimed", "restoring")
+_STEPS = ("claimed", "restoring", "starting")
 
 
 def _state_error() -> UpdateError:
@@ -767,6 +767,17 @@ class Handover:
     manifest_sha256: str = ""
 
 
+class NotStarted(UpdateError):
+    """VERIFIED: Windows created no installer process, so nothing can have been changed (launch_failed).
+
+    The only launcher failure that lets the launch path put the safety copy back. Any other
+    failure leaves the outcome to the start-up barrier (launch_outcome_unknown).
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__("launch_failed", message)
+
+
 #: Passed on the installer's command line; the record itself travels on its standard input.
 UPDATE_SWITCH = "/QRONOSUPDATE"
 FENCE_RECORD_HEADER = "QRONOS-UPDATE-FENCE 1"
@@ -828,7 +839,7 @@ def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
     if os.name != "nt":
         raise UpdateError("unsupported_platform", "Updates are installed on Windows only.")
     if handover.fence is None:
-        raise UpdateError("launch_failed", "There is no update fence to hand to the installer; nothing was started.")
+        raise NotStarted("There is no update fence to hand to the installer; nothing was started.")
     import _winapi
 
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -837,7 +848,7 @@ def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
         process = subprocess.Popen(argv, cwd=cwd, close_fds=True, creationflags=flags, stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError as error:
-        raise UpdateError("launch_failed", "Windows could not start the update installer.") from error
+        raise NotStarted("Windows could not start the update installer.") from error
     try:
         me = _winapi.GetCurrentProcess()
         fence_in_child = _winapi.DuplicateHandle(me, handover.fence, int(process._handle), _SYNCHRONIZE, False, 0)
@@ -845,13 +856,16 @@ def start_fenced(argv: list[str], cwd: str, handover: Handover) -> Any:
         process.stdin.write(record)
         process.stdin.close()
     except BaseException as error:
-        # The installer is still waiting for its record and has changed nothing: end exactly this child.
-        process.kill()
-        process.wait(30)
-        if isinstance(error, UpdateError):
+        # The process exists, so this is NOT a verified non-start. Closing its input makes the installer
+        # read an incomplete record and refuse by itself; the outcome is left to the start-up barrier.
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        if not isinstance(error, Exception):
             raise
-        raise UpdateError("launch_failed", "The update fence could not be handed to the installer; it was "
-                                           "stopped before changing anything.") from error
+        raise UpdateError("launch_outcome_unknown", "The update fence could not be handed to the installer; "
+                                                    "the installer refuses an incomplete hand-over.") from error
     return process
 
 
@@ -1257,7 +1271,7 @@ class UpdateService:
         try:
             binding = self._claim_launch(token_hash)
             try:
-                handoff, process, nonce = self._launch_claimed(binding, hold)
+                handoff, process, nonce, recorded = self._launch_claimed(binding, hold)
             except BaseException as error:
                 self._release_claim(binding, error)
                 raise
@@ -1276,6 +1290,9 @@ class UpdateService:
             for stream in (getattr(process, "stdout", None),):
                 if stream is not None:
                     stream.close()
+            if not recorded:
+                raise UpdateError("launch_outcome_unknown", "The installer started but its start could not be "
+                                  "recorded; whether the update applied is decided when Qronos next starts.")
             return result
         finally:
             hold.release()
@@ -1355,22 +1372,42 @@ class UpdateService:
                        "nonceSha256": hashlib.sha256(nonce).hexdigest()}
             handover = Handover(nonce, getattr(hold, "fence_handle", lambda: None)(), receipts, binding["version"],
                                 binding["packageSha256"], binding["manifestSha256"])
+
+            def starting(state: dict[str, Any]) -> None:
+                # N4: durable BEFORE the process exists. From here on the outcome is resolved only by the
+                # running version and the receipt, never guessed.
+                state["handoff"] = handoff
+                state["launching"].update(step="starting")
+
+            self._change(starting)  # if this fails, nothing was started (a restoring claim stays for the barrier)
             try:
                 process = self._launcher(installer, (), handover)
-            except UpdateError:
-                if safety is not None:  # the installer never ran: put the current data back
+            except NotStarted:
+                # Verified: Windows created no installer process, so nothing can have changed.
+                if safety is not None:
                     self._restore(self._snapshot_by_id(safety))
-                    self._change(lambda s: s["launching"].update(step="claimed"))  # resolved: the claim may go
+
+                def not_started(state: dict[str, Any]) -> None:
+                    state["handoff"] = None
+                    state["launching"].update(step="claimed")  # resolved: the claim may go
+                self._change(not_started)
                 raise
+            except UpdateError as error:
+                raise UpdateError("launch_outcome_unknown", "The installer may have started; whether the update "
+                                  "was applied is decided when Qronos next starts.") from error
 
             def record(state: dict[str, Any]) -> None:
                 state["launching"] = None
                 state["handoff"] = handoff
                 self._event(state, "launched", binding["version"], binding["kind"])
 
-            self._change(record)
+            try:
+                self._change(record)
+                recorded = True
+            except UpdateError:
+                recorded = False  # the durable starting record and handoff stay; the barrier resolves them
             self._authorizer.record("launched", binding)
-            return handoff, process, nonce
+            return handoff, process, nonce, recorded
         finally:
             closer()
 
@@ -1379,9 +1416,10 @@ class UpdateService:
         try:
             def release(state: dict[str, Any]) -> None:
                 claim = state["launching"]
-                # A claim whose data was restored stays: only the start-up barrier may put it back.
+                # Only a claim that never restored data and never started anything may go here. A restoring
+                # or starting claim stays: only the start-up barrier resolves it.
                 if claim is not None and claim["packageSha256"] == binding["packageSha256"] \
-                        and claim["step"] != "restoring":
+                        and claim["step"] == "claimed":
                     state["launching"] = None
                 self._event(state, "refused", binding["version"], detail)
             self._change(release)
@@ -1418,6 +1456,7 @@ class UpdateService:
             recovered = False
             claim = state["launching"]
             if claim is not None:  # its process is gone (the update mutex no longer exists)
+                self._check_interrupted_claim(claim, state["handoff"])  # fails closed before anything changes
                 if claim["step"] == "restoring" and claim["safetySnapshot"]:
                     self._restore_exclusively(state, claim["safetySnapshot"], claim["version"])
                 state["launching"] = None
@@ -1471,6 +1510,36 @@ class UpdateService:
     #: ``startup_check(context)`` is the separate READ-ONLY status.
     def startup_check(self) -> dict[str, Any]:
         return self.recover_before_stores()
+
+    def _check_interrupted_claim(self, claim: dict[str, Any], handoff: dict[str, Any] | None) -> None:
+        """N4: what an interrupted claim may mean, or recovery_failed before any store opens.
+
+        - "claimed": nothing was restored or started; the claim simply goes.
+        - "restoring": data was being put back and NO installer was started (the
+          handoff is written only together with "starting"); the safety copy is
+          put back.
+        - "starting": the installer may have started. Only the durable handoff,
+          resolved by the running version and the receipt, decides; nothing is
+          restored from the claim. It must match the claim exactly and the
+          update store must be handed off; anything else is unknown state and
+          start-up stops.
+        """
+        if claim["step"] == "starting":
+            store_state = self.store.state()
+            staged = store_state["staged"]
+            if handoff is None or store_state["phase"] != "handed_off" or not staged \
+                    or handoff["packageSha256"] != claim["packageSha256"] \
+                    or staged["packageSha256"] != claim["packageSha256"] \
+                    or handoff["version"] != claim["version"] \
+                    or handoff["restoredSnapshot"] != claim["restoredSnapshot"] \
+                    or handoff["safetySnapshot"] != claim["safetySnapshot"]:
+                raise UpdateError("recovery_failed", "An interrupted update left a start record that does not match "
+                                                     "its handoff. Qronos does not open its data; the update "
+                                                     "lifecycle needs attention.")
+        elif handoff is not None and claim["step"] == "restoring":
+            raise UpdateError("recovery_failed", "An interrupted update left data being restored together with a "
+                                                 "handoff. Qronos does not open its data; the update lifecycle needs "
+                                                 "attention.")
 
     # -- installation receipts (contract round 7, D)
 

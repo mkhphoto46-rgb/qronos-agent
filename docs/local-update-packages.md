@@ -269,13 +269,30 @@ source checkout. A packaged backend without it refuses (`version_unknown`).
        desktop and exits, so none of its files are in use during replacement.
      - Without an acknowledgement, the launching process keeps everything until
        the installer exits.
+   - Before the installer process is created, ONE durable save records the
+     handoff (package and manifest SHA-256, both snapshot ids, nonce hash) and
+     marks the claim `starting`.
+     - Only a VERIFIED non-start (`launch_failed`: Windows created no process)
+       lets the launch put today's data back at once.
+     - Any other failure after that point keeps the durable record and is
+       reported as `launch_outcome_unknown`: the hand-over failed after the
+       process existed, the launcher failed after its child may have acted, or
+       the "launched" save or the process itself was interrupted. The start-up
+       barrier then decides by the version that actually runs and the receipt.
    - Completion is audited.
 6. **The start-up barrier**, `recover_before_stores` (mutating, exclusive,
    awaited; Runtime calls it in-process before any store opens, never in the
    post-ready hook):
    - It refuses while an update is in progress. Liveness is the update mutex,
      never a timer, and it is asked again once the store lock is held.
-   - It recovers an interrupted launch.
+   - It recovers an interrupted launch:
+     - a `claimed` claim simply goes;
+     - a `restoring` claim (no installer was started yet) gets its safety copy
+       back;
+     - a `starting` claim restores nothing itself. Its durable handoff is
+       resolved below. If that handoff is missing or does not match the claim
+       (package, version, snapshot ids), or the update store is not handed
+       off, start-up stops with `recovery_failed` before any store opens.
    - It resolves a handed-off update:
      - **applied** only on a version change;
      - for a same-version repair, **applied** only with that launch's
