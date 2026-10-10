@@ -31,17 +31,22 @@ What must hold, or nothing is signed or verified:
   way, and carries a valid Microsoft Authenticode signature.
 * The certificate file is exactly the configured thumbprint. It is valid now,
   has the Code Signing usage (1.3.6.1.5.5.7.3.3), is not self-signed, and its
-  chain, built offline, passes the Authenticode chain policy to a root held in
-  the LOCAL MACHINE root stores. A root only the current user added is refused.
-  Limit: an administrator-installed enterprise root also passes; the provenance
-  lists the whole chain for the human release review.
+  chain, built offline as ONE simple chain, passes the Authenticode chain
+  policy and ENDS IN A PINNED PUBLIC ROOT: the terminal certificate's DER
+  SHA-256 and SHA-1 must equal an anchor in config/authenticode_public_roots.json,
+  each recorded with its review provenance. Membership in any Windows store,
+  an issuer name or the chain policy alone is never public trust: an
+  enterprise, private or self-signed root is refused. The anchor set ships
+  EMPTY, so today every certificate is refused.
 * The artefact is a plain file named qronos-desktop_<authority version>_x64-
   setup.exe. Its unsigned SHA-256 equals the build provenance's (written by
   build_support.build_desktop), and that provenance is attributable to a clean
   source commit, the commit checked out now.
-* After signing: ``signtool verify /pa /all /tw`` exits 0 (all signatures valid,
-  time-stamped), and WinVerifyTrust (offline) accepts the file with the
-  configured certificate as its signer.
+* After signing, and again whenever the release gate is asked: ``signtool
+  verify /pa /all /tw`` exits 0 (all signatures valid, time-stamped), and
+  WinVerifyTrust (offline) accepts EVERY signature on the file (primary and
+  secondary), each signer chain Windows built ends in a pinned anchor, and the
+  primary signer is the configured certificate.
 
 Revocation is not checked offline here. ``signtool verify`` on the build
 machine may consult revocation services; that is the build machine's own
@@ -68,10 +73,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from build_support import desktop_installer_verify, release_signing  # noqa: E402
-from build_support.desktop_prerequisites import PrerequisiteError, winverifytrust  # noqa: E402
+from build_support.desktop_prerequisites import PrerequisiteError, winverifytrust  # noqa: E402  (signtool's own signer)
 from core import local_update  # noqa: E402
 
 CODE_SIGNING_EKU = "1.3.6.1.5.5.7.3.3"
+#: Reviewed public root certificates a release chain may end in. Ships EMPTY (no reviewed anchor yet).
+ANCHORS_PATH = ROOT / "config" / "authenticode_public_roots.json"
+ANCHOR_FIELDS = frozenset({"subject", "sha256", "sha1", "provenance"})
+PROVENANCE_FIELDS = frozenset({"source", "reviewedBy", "reviewedAt", "evidence"})
 CONFIG_FIELDS = frozenset({"schema", "signtool", "certificate", "thumbprintSha1", "timestampUrl"})
 SIGN_TIMEOUT_SECONDS = 600.0
 VERIFY_TIMEOUT_SECONDS = 300.0
@@ -180,12 +189,6 @@ _CHAIN_DISABLE_AUTH_ROOT_AUTO_UPDATE = 0x00000100
 _POLICY_AUTHENTICODE = 2  # CERT_CHAIN_POLICY_AUTHENTICODE
 _POLICY_IGNORE_ALL_REV_UNKNOWN = 0x00000F00
 _FIND_EXT_ONLY_ENHKEY_USAGE = 0x2
-_FIND_SHA1_HASH = 0x10000
-_STORE_PROV_SYSTEM_W = 10
-_SYSTEM_STORE_LOCAL_MACHINE = 0x00020000
-_SYSTEM_STORE_CURRENT_USER = 0x00010000
-_STORE_READONLY = 0x00008000
-_STORE_OPEN_EXISTING = 0x00004000
 _NAME_RDN_TYPE = 2
 _NAME_ISSUER_FLAG = 0x1
 
@@ -210,9 +213,6 @@ def _crypt32() -> Any:
     bind(c.CertFreeCertificateChain, [ctypes.POINTER(_ChainContext)], None)
     bind(c.CertVerifyCertificateChainPolicy, [PVOID, ctypes.POINTER(_ChainContext), ctypes.POINTER(_PolicyPara),
                                               ctypes.POINTER(_PolicyStatus)], BOOL)
-    bind(c.CertOpenStore, [PVOID, DWORD, PVOID, DWORD, wintypes.LPCWSTR], PVOID)
-    bind(c.CertCloseStore, [PVOID, DWORD], BOOL)
-    bind(c.CertFindCertificateInStore, [PVOID, DWORD, DWORD, DWORD, PVOID, context], context)
     bind(c.CertGetNameStringW, [context, DWORD, DWORD, PVOID, wintypes.LPWSTR, DWORD], DWORD)
     return c
 
@@ -229,23 +229,6 @@ def _filetime(value: wintypes.FILETIME) -> int:
 
 def _blob_bytes(blob: _Blob) -> bytes:
     return ctypes.string_at(blob.pbData, blob.cbData) if blob.cbData else b""
-
-
-def _in_system_store(c: Any, thumbprint: bytes, location: int, store_name: str) -> bool:
-    store = c.CertOpenStore(_STORE_PROV_SYSTEM_W, 0, None, location | _STORE_READONLY | _STORE_OPEN_EXISTING,
-                            store_name)
-    if not store:
-        return False
-    try:
-        buffer = ctypes.create_string_buffer(thumbprint, len(thumbprint))
-        blob = _Blob(len(thumbprint), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
-        found = c.CertFindCertificateInStore(store, _X509 | _PKCS7, 0, _FIND_SHA1_HASH, ctypes.byref(blob), None)
-        if found:
-            c.CertFreeCertificateContext(found)
-            return True
-        return False
-    finally:
-        c.CertCloseStore(store, 0)
 
 
 def certificate_facts(der: bytes) -> dict[str, Any]:
@@ -283,6 +266,11 @@ def certificate_facts(der: bytes) -> dict[str, Any]:
         c.CertFreeCertificateContext(certificate)
 
 
+def _element(subject: str, der: bytes) -> dict[str, str]:
+    return {"subject": subject, "sha1": hashlib.sha1(der).hexdigest().upper(),
+            "sha256": hashlib.sha256(der).hexdigest()}
+
+
 def _chain_facts(c: Any, certificate: Any) -> dict[str, Any]:
     oid = ctypes.c_char_p(CODE_SIGNING_EKU.encode("ascii"))
     para = _ChainPara(ctypes.sizeof(_ChainPara),
@@ -291,7 +279,7 @@ def _chain_facts(c: Any, certificate: Any) -> dict[str, Any]:
     flags = _CHAIN_CACHE_ONLY_URL_RETRIEVAL | _CHAIN_DISABLE_AUTH_ROOT_AUTO_UPDATE  # offline; no revocation flag
     if not c.CertGetCertificateChain(None, certificate, None, None, ctypes.byref(para), flags, None,
                                      ctypes.byref(chain)):
-        return {"chain": [], "chainPolicyError": 0xFFFFFFFF, "rootStore": "none"}
+        return {"chain": [], "chainPolicyError": 0xFFFFFFFF, "simpleChains": 0}
     try:
         status = _PolicyStatus(ctypes.sizeof(_PolicyStatus))
         policy = _PolicyPara(ctypes.sizeof(_PolicyPara), _POLICY_IGNORE_ALL_REV_UNKNOWN, None)
@@ -299,23 +287,14 @@ def _chain_facts(c: Any, certificate: Any) -> dict[str, Any]:
                                                   ctypes.byref(policy), ctypes.byref(status)):
             status.dwError = 0xFFFFFFFF
         elements: list[dict[str, str]] = []
-        root_der = b""
         if chain.contents.cChain:
             simple = chain.contents.rgpChain[0].contents
             for index in range(simple.cElement):
                 element = simple.rgpElement[index].contents.pCertContext
                 encoded = ctypes.string_at(element.contents.pbCertEncoded, element.contents.cbCertEncoded)
-                elements.append({"subject": _name(c, element, False),
-                                 "sha1": hashlib.sha1(encoded).hexdigest().upper()})
-                root_der = encoded
-        root_store = "none"
-        if root_der:
-            digest = hashlib.sha1(root_der).digest()
-            if any(_in_system_store(c, digest, _SYSTEM_STORE_LOCAL_MACHINE, name) for name in ("AuthRoot", "Root")):
-                root_store = "local_machine"
-            elif _in_system_store(c, digest, _SYSTEM_STORE_CURRENT_USER, "Root"):
-                root_store = "current_user_only"
-        return {"chain": elements, "chainPolicyError": int(status.dwError), "rootStore": root_store}
+                elements.append(_element(_name(c, element, False), encoded))
+        return {"chain": elements, "chainPolicyError": int(status.dwError),
+                "simpleChains": int(chain.contents.cChain)}
     finally:
         c.CertFreeCertificateChain(chain)
 
@@ -323,7 +302,50 @@ def _chain_facts(c: Any, certificate: Any) -> dict[str, Any]:
 # ------------------------------------------------------------- the decisions
 
 
-def certificate_problems(facts: dict[str, Any], thumbprint: str) -> list[str]:
+def load_anchors(path: Path = ANCHORS_PATH) -> dict[str, dict[str, Any]]:
+    """The reviewed public root anchors, by DER SHA-256. Fails closed: empty, missing or malformed refuses all."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthenticodeError(f"The public trust anchor list cannot be read ({error.__class__.__name__}); "
+                                "nothing is trusted.") from None
+    if not isinstance(data, dict) or set(data) - {"comment"} != {"schema", "anchors"} or data["schema"] != 1 \
+            or not isinstance(data["anchors"], list):
+        raise AuthenticodeError("The public trust anchor list needs schema 1 and an anchors list; nothing is trusted.")
+    anchors: dict[str, dict[str, Any]] = {}
+    for anchor in data["anchors"]:
+        provenance = anchor.get("provenance") if isinstance(anchor, dict) else None
+        if not isinstance(anchor, dict) or set(anchor) != ANCHOR_FIELDS \
+                or not isinstance(anchor["subject"], str) or not anchor["subject"].strip() \
+                or not isinstance(anchor["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", anchor["sha256"]) \
+                or not isinstance(anchor["sha1"], str) or not re.fullmatch(r"[0-9A-F]{40}", anchor["sha1"]) \
+                or not isinstance(provenance, dict) or set(provenance) != PROVENANCE_FIELDS \
+                or not all(isinstance(provenance[key], str) and provenance[key].strip() for key in PROVENANCE_FIELDS) \
+                or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", provenance["reviewedAt"]):
+            raise AuthenticodeError("A public trust anchor entry is incomplete or malformed (subject, sha256, sha1 "
+                                    "and review provenance are required); nothing is trusted.")
+        if anchor["sha256"] in anchors:
+            raise AuthenticodeError("A public trust anchor is listed twice; nothing is trusted.")
+        anchors[anchor["sha256"]] = anchor
+    if not anchors:
+        raise AuthenticodeError("No reviewed public trust anchor is configured (config/authenticode_public_roots.json "
+                                "is empty), so no release can be signed or verified.")
+    return anchors
+
+
+def pinned_anchor(chain: list[dict[str, str]], anchors: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """The anchor the chain's terminal certificate IS (DER SHA-256 and SHA-1 both match), or None."""
+    if not chain:
+        return None
+    terminal = chain[-1]
+    anchor = anchors.get(str(terminal.get("sha256", "")).lower())
+    if anchor is None or str(terminal.get("sha1", "")).upper() != anchor["sha1"]:
+        return None
+    return anchor
+
+
+def certificate_problems(facts: dict[str, Any], thumbprint: str,
+                         anchors: dict[str, dict[str, Any]]) -> list[str]:
     """Why this certificate may not sign a Qronos release ([] when it may)."""
     problems = []
     if facts.get("sha1", "").upper() != thumbprint.upper():
@@ -337,12 +359,13 @@ def certificate_problems(facts: dict[str, Any], thumbprint: str) -> list[str]:
     chain = facts.get("chain", [])
     if len(chain) < 2 or chain[0].get("sha1", "").upper() != facts.get("sha1", "").upper():
         problems.append("no certificate chain to an issuing authority could be built offline")
+    if facts.get("simpleChains") != 1:
+        problems.append("Windows built an alternate (multi-part) chain; only one simple chain is accepted")
     if facts.get("chainPolicyError") != 0:
         problems.append(f"the chain fails the Authenticode chain policy (0x{facts.get('chainPolicyError', 0):08X})")
-    if facts.get("rootStore") != "local_machine":
-        problems.append("the chain's root is not in the local machine's trusted root stores"
-                        + (" (only the current user added it)" if facts.get("rootStore") == "current_user_only"
-                           else ""))
+    if pinned_anchor(chain, anchors) is None:
+        problems.append("the chain does not end in a reviewed, pinned public root (an enterprise, private or "
+                        "unlisted root is never public trust)")
     return problems
 
 
@@ -374,6 +397,112 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
+class _SignatureSettings(ctypes.Structure):  # WINTRUST_SIGNATURE_SETTINGS
+    _fields_ = [("cbStruct", wintypes.DWORD), ("dwIndex", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("cSecondarySigs", wintypes.DWORD), ("dwVerifiedSigIndex", wintypes.DWORD),
+                ("pCryptoPolicy", ctypes.c_void_p)]
+
+
+class _FileInfo(ctypes.Structure):  # WINTRUST_FILE_INFO
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pcwszFilePath", wintypes.LPCWSTR), ("hFile", wintypes.HANDLE),
+                ("pgKnownSubject", ctypes.c_void_p)]
+
+
+class _TrustData(ctypes.Structure):  # WINTRUST_DATA
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
+                ("pSIPClientData", ctypes.c_void_p), ("dwUIChoice", wintypes.DWORD),
+                ("fdwRevocationChecks", wintypes.DWORD), ("dwUnionChoice", wintypes.DWORD),
+                ("pFile", ctypes.POINTER(_FileInfo)), ("dwStateAction", wintypes.DWORD),
+                ("hWVTStateData", wintypes.HANDLE), ("pwszURLReference", wintypes.LPCWSTR),
+                ("dwProvFlags", wintypes.DWORD), ("dwUIContext", wintypes.DWORD),
+                ("pSignatureSettings", ctypes.POINTER(_SignatureSettings))]
+
+
+class _ProviderSigner(ctypes.Structure):  # CRYPT_PROVIDER_SGNR, leading fields
+    _fields_ = [("cbStruct", wintypes.DWORD), ("sftVerifyAsOf", wintypes.FILETIME), ("csCertChain", wintypes.DWORD),
+                ("pasCertChain", ctypes.c_void_p)]
+
+
+class _ProviderCert(ctypes.Structure):  # CRYPT_PROVIDER_CERT, leading fields (stride = its own cbStruct)
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pCert", ctypes.POINTER(_CertContext))]
+
+
+_WSS_VERIFY_SPECIFIC = 0x1
+_WSS_GET_SECONDARY_SIG_COUNT = 0x2
+_MAX_SIGNATURES = 8
+
+
+def signature_chains(path: Path) -> list[dict[str, Any]]:
+    """Every Authenticode signature on ``path`` as Windows verifies it (offline): its signer and the chain built.
+
+    Raises AuthenticodeError when Windows rejects any signature. Index 0 is the
+    primary signature; the rest are the secondary (nested) ones.
+    """
+    if os.name != "nt":
+        raise AuthenticodeError("Authenticode verification runs on Windows only.")
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                    ("Data4", ctypes.c_ubyte * 8)]
+
+    action = GUID(0x00AAC56B, 0xCD44, 0x11D0, (ctypes.c_ubyte * 8)(0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE))
+    wintrust = ctypes.WinDLL("wintrust")
+    wintrust.WinVerifyTrust.argtypes = (wintypes.HANDLE, ctypes.POINTER(GUID), ctypes.c_void_p)
+    wintrust.WinVerifyTrust.restype = wintypes.LONG
+    wintrust.WTHelperProvDataFromStateData.argtypes = (wintypes.HANDLE,)
+    wintrust.WTHelperProvDataFromStateData.restype = ctypes.c_void_p
+    wintrust.WTHelperGetProvSignerFromChain.argtypes = (ctypes.c_void_p, wintypes.DWORD, wintypes.BOOL,
+                                                        wintypes.DWORD)
+    wintrust.WTHelperGetProvSignerFromChain.restype = ctypes.POINTER(_ProviderSigner)
+    c = _crypt32()
+
+    def verify(index: int, flags: int) -> tuple[int, dict[str, Any]]:
+        file_info = _FileInfo(ctypes.sizeof(_FileInfo), str(path), None, None)
+        settings = _SignatureSettings(ctypes.sizeof(_SignatureSettings), index, flags, 0, 0, None)
+        data = _TrustData()
+        data.cbStruct = ctypes.sizeof(_TrustData)
+        data.dwUIChoice = 2              # WTD_UI_NONE
+        data.fdwRevocationChecks = 0     # WTD_REVOKE_NONE
+        data.dwUnionChoice = 1           # WTD_CHOICE_FILE
+        data.pFile = ctypes.pointer(file_info)
+        data.dwStateAction = 1           # WTD_STATEACTION_VERIFY
+        data.dwProvFlags = 0x1000 | 0x10  # WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE
+        data.pSignatureSettings = ctypes.pointer(settings)
+        result = wintrust.WinVerifyTrust(wintypes.HANDLE(-1), ctypes.byref(action), ctypes.byref(data))
+        found: dict[str, Any] = {"index": index, "secondary": int(settings.cSecondarySigs), "chain": []}
+        try:
+            if result == 0:
+                provider = wintrust.WTHelperProvDataFromStateData(data.hWVTStateData)
+                signer = wintrust.WTHelperGetProvSignerFromChain(provider, 0, False, 0) if provider else None
+                if signer and signer.contents.csCertChain and signer.contents.pasCertChain:
+                    base = signer.contents.pasCertChain
+                    stride = _ProviderCert.from_address(base).cbStruct
+                    for position in range(signer.contents.csCertChain):
+                        entry = _ProviderCert.from_address(base + position * stride)
+                        encoded = ctypes.string_at(entry.pCert.contents.pbCertEncoded,
+                                                   entry.pCert.contents.cbCertEncoded)
+                        found["chain"].append(_element(_name(c, entry.pCert, False), encoded))
+        finally:
+            data.dwStateAction = 2       # WTD_STATEACTION_CLOSE
+            wintrust.WinVerifyTrust(wintypes.HANDLE(-1), ctypes.byref(action), ctypes.byref(data))
+        return result, found
+
+    result, primary = verify(0, _WSS_VERIFY_SPECIFIC | _WSS_GET_SECONDARY_SIG_COUNT)
+    if result != 0 or not primary["chain"]:
+        raise AuthenticodeError(f"Windows does not accept the primary signature (WinVerifyTrust "
+                                f"0x{result & 0xFFFFFFFF:08X}).")
+    if primary["secondary"] > _MAX_SIGNATURES:
+        raise AuthenticodeError("The installer carries more signatures than a release may have.")
+    signatures = [primary]
+    for index in range(1, primary["secondary"] + 1):
+        result, secondary = verify(index, _WSS_VERIFY_SPECIFIC)
+        if result != 0 or not secondary["chain"]:
+            raise AuthenticodeError(f"Windows does not accept signature {index} (WinVerifyTrust "
+                                    f"0x{result & 0xFFFFFFFF:08X}).")
+        signatures.append(secondary)
+    return signatures
+
+
 def check_signtool(path: Path, *, program_files: Callable[[], Path] = program_files_x86,
                    trust: Callable[[Path], dict[str, str]] = winverifytrust) -> dict[str, str]:
     """signtool only from the fixed Windows SDK folder, link-free, signed by Microsoft."""
@@ -396,8 +525,9 @@ def check_signtool(path: Path, *, program_files: Callable[[], Path] = program_fi
             "signerThumbprintSha1": signer.get("thumbprintSha1", "")}
 
 
-def check_certificate(config: dict[str, Any], *,
-                      facts: Callable[[bytes], dict[str, Any]] = certificate_facts) -> dict[str, Any]:
+def check_certificate(config: dict[str, Any], *, facts: Callable[[bytes], dict[str, Any]] = certificate_facts,
+                      anchors: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    anchors = load_anchors() if anchors is None else anchors
     path = _plain_file(Path(config["certificate"]), "certificate file")
     data = path.read_bytes()
     if len(data) > _MAX_CERTIFICATE_BYTES:
@@ -405,10 +535,13 @@ def check_certificate(config: dict[str, Any], *,
     if b"PRIVATE KEY" in data or path.suffix.lower() in {".pfx", ".p12", ".pvk", ".key"}:
         raise AuthenticodeError("Give the PUBLIC certificate (.cer, DER); a private key never belongs in this config.")
     found = facts(data)
-    problems = certificate_problems(found, config["thumbprintSha1"])
+    problems = certificate_problems(found, config["thumbprintSha1"], anchors)
     if problems:
         raise AuthenticodeError("The signing certificate is refused: " + "; ".join(problems) + ".")
-    return {key: found[key] for key in ("sha1", "subject", "issuer", "notBefore", "notAfter", "chain", "rootStore")}
+    anchor = pinned_anchor(found["chain"], anchors)
+    return {**{key: found[key] for key in ("sha1", "subject", "issuer", "notBefore", "notAfter", "chain")},
+            "anchor": {"subject": anchor["subject"], "sha256": anchor["sha256"],
+                       "provenance": anchor["provenance"]}}
 
 
 Runner = Callable[[list[str], float], tuple[int, str]]
@@ -439,26 +572,34 @@ def _artefact(path: Path, root: Path) -> Path:
 def verify_signed(config: dict[str, Any], artefact: Path, *, root: Path = ROOT, runner: Runner = run_signtool,
                   tool: Callable[[Path], dict[str, str]] = check_signtool,
                   facts: Callable[[bytes], dict[str, Any]] = certificate_facts,
-                  trust: Callable[[Path], dict[str, str]] = winverifytrust) -> dict[str, Any]:
-    """The artefact as it is NOW: every signature valid and time-stamped, signed by the configured certificate."""
+                  chains: Callable[[Path], list[dict[str, Any]]] = signature_chains,
+                  anchors: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The artefact as it is NOW: every signature valid, time-stamped and ending in a pinned public root."""
+    anchors = load_anchors() if anchors is None else anchors
     signtool = tool(Path(config["signtool"]))
-    certificate = check_certificate(config, facts=facts)
+    certificate = check_certificate(config, facts=facts, anchors=anchors)
     path = _artefact(artefact, root)
     before = desktop_installer_verify.sha256_file(path)
     code, output = runner([signtool["path"], "verify", "/pa", "/all", "/tw", "/v", str(path)], VERIFY_TIMEOUT_SECONDS)
     if code != 0:
         raise AuthenticodeError(f"signtool verify /pa /all /tw did not succeed (exit {code}; 2 means a warning such "
                                 "as a missing time stamp). Nothing is claimed.")
-    try:
-        signer = trust(path)
-    except PrerequisiteError as error:
-        raise AuthenticodeError(f"Windows does not accept the installer's signature: {error}") from None
-    if signer.get("thumbprintSha1", "").upper() != config["thumbprintSha1"].upper():
+    signatures = chains(path)
+    if not signatures:
+        raise AuthenticodeError("Windows reported no signature on the installer.")
+    for signature in signatures:
+        if pinned_anchor(signature.get("chain", []), anchors) is None:
+            raise AuthenticodeError(f"Signature {signature.get('index')} on the installer does not end in a reviewed, "
+                                    "pinned public root.")
+    signer = signatures[0]["chain"][0]
+    if signer.get("sha1", "").upper() != config["thumbprintSha1"].upper():
         raise AuthenticodeError("The installer is not signed by the configured certificate.")
     if desktop_installer_verify.sha256_file(path) != before:
         raise AuthenticodeError("The installer changed while it was being verified.")
-    return {"artifact": path.name, "sha256": before, "signer": signer, "certificate": certificate,
-            "signtool": signtool, "verifyExit": code,
+    return {"artifact": path.name, "sha256": before, "signer": {"subject": signer.get("subject"),
+                                                                "thumbprintSha1": signer.get("sha1")},
+            "signatures": [{"index": s.get("index"), "root": s["chain"][-1]} for s in signatures],
+            "certificate": certificate, "signtool": signtool, "verifyExit": code,
             "verifyOutputSha256": hashlib.sha256(output.encode("utf-8")).hexdigest()}
 
 
@@ -482,10 +623,12 @@ def _build_provenance(path: Path, artefact: Path, unsigned_sha256: str, root: Pa
 def sign(config: dict[str, Any], artefact: Path, build_provenance: Path, *, root: Path = ROOT,
          runner: Runner = run_signtool, tool: Callable[[Path], dict[str, str]] = check_signtool,
          facts: Callable[[bytes], dict[str, Any]] = certificate_facts,
-         trust: Callable[[Path], dict[str, str]] = winverifytrust) -> Path:
+         chains: Callable[[Path], list[dict[str, Any]]] = signature_chains,
+         anchors: dict[str, dict[str, Any]] | None = None) -> Path:
     """Sign the exact built installer, verify every signature, and write its provenance beside it."""
+    anchors = load_anchors() if anchors is None else anchors
     signtool = tool(Path(config["signtool"]))
-    check_certificate(config, facts=facts)
+    check_certificate(config, facts=facts, anchors=anchors)
     path = _artefact(artefact, root)
     record = path.with_name(path.name + ".authenticode.json")
     if os.path.lexists(record):
@@ -498,17 +641,16 @@ def sign(config: dict[str, Any], artefact: Path, build_provenance: Path, *, root
         raise AuthenticodeError(f"signtool sign did not succeed (exit {code}). The installer may be partly changed; "
                                 "rebuild it before trying again.")
     verified = verify_signed(config, path, root=root, runner=runner, tool=lambda _: signtool, facts=facts,
-                             trust=trust)
+                             chains=chains, anchors=anchors)
     if verified["sha256"] == unsigned:
         raise AuthenticodeError("signtool reported success but the installer is unchanged.")
     provenance = {"schema": 1, "artifact": path.name, "unsignedSha256": unsigned, "signedSha256": verified["sha256"],
                   "build": build, "signtool": signtool, "certificate": verified["certificate"],
-                  "signer": verified["signer"], "timestampUrl": config["timestampUrl"],
+                  "signer": verified["signer"], "signatures": verified["signatures"],
+                  "timestampUrl": config["timestampUrl"],
                   "verify": {"command": "signtool verify /pa /all /tw /v", "exit": verified["verifyExit"],
                              "outputSha256": verified["verifyOutputSha256"], "winVerifyTrust": "valid (offline)"},
-                  "notVerifiedHere": ["certificate revocation (offline build check)",
-                                      "that an enterprise root is a public certificate authority (human review of "
-                                      "the listed chain)"]}
+                  "notVerifiedHere": ["certificate revocation (offline build check)"]}
     with open(record, "x", encoding="utf-8", newline="\n") as handle:  # never replaces a record
         handle.write(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
     return record

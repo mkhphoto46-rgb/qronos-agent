@@ -553,8 +553,8 @@ def _authenticode_gate(root: Path, config: Path, artifact: Path,
     return {"gate": "authenticode", "open": True,
             "detail": f"{result['artifact']} (sha256 {result['sha256']}) verified now: signtool verify /pa /all /tw "
                       f"exit 0 and WinVerifyTrust, signer {result['signer'].get('subject')} "
-                      f"{result['signer'].get('thumbprintSha1')}, chain root in the local machine store. Revocation "
-                      "was not checked offline; the listed chain needs the human release review."}
+                      f"{result['signer'].get('thumbprintSha1')}; every signature ends in a reviewed, pinned public "
+                      "root (config/authenticode_public_roots.json). Revocation was not checked offline."}
 
 
 def preflight(root: Path = ROOT, *, signtool: Callable[[], Path | None] = _find_signtool,
@@ -596,8 +596,9 @@ def preflight(root: Path = ROOT, *, signtool: Callable[[], Path | None] = _find_
         f"{'a thumbprint setting (not used as evidence)' if configured else 'no certificate setting'}. "
         "Needed: an Authenticode code-signing certificate from a public certificate authority (an external, paid "
         "step for the owner), then build_support.authenticode_release sign on the exact built installer (time "
-        "stamp, signtool verify /pa /all, code-signing usage, chain to a root in the local machine store, not "
-        "self-signed). A self-signed certificate is never a substitute.")})
+        "stamp, signtool verify /pa /all, code-signing usage, every chain ending in a reviewed public root pinned "
+        "in config/authenticode_public_roots.json, which ships empty; not self-signed). An enterprise or private "
+        "root is never public trust, and a self-signed certificate is never a substitute.")})
     return {"ok": all(g["open"] for g in gates), "gates": gates}
 
 

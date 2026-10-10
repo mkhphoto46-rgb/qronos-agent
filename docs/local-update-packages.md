@@ -470,11 +470,20 @@ the following hold.
   way, and with a valid Microsoft signature.
 - **Certificate:** the file is the public certificate only (no `.pfx` or
   private key), equals the configured thumbprint, and is valid now. It has the
-  Code Signing usage and is not self-signed. Its chain, built offline, passes
-  the Authenticode chain policy to a root in the local machine's root stores. A
-  root that only the current user added is refused. An administrator-installed
-  enterprise root would also pass, so the provenance lists the whole chain for
-  the human release review.
+  Code Signing usage and is not self-signed. Its chain, built offline as one
+  simple chain, passes the Authenticode chain policy and ends in a **pinned
+  public root**: the terminal certificate's DER SHA-256 and SHA-1 must equal an
+  anchor in `config/authenticode_public_roots.json`.
+  - Being trusted by Windows (any root store), an issuer name or the chain policy
+    is never public trust on its own. An enterprise, private or self-signed root
+    is refused.
+  - Each anchor records the root's subject, both hashes and its review
+    provenance (source, reviewer, date, evidence). A malformed or duplicated
+    entry refuses the whole set.
+  - The set ships **empty** because no public root has been reviewed for this
+    project. Until a reviewed anchor is added in its own reviewed change, every
+    certificate and every signed installer is refused and the release gate
+    stays closed.
 - **Installer:** `qronos-desktop_<version>_x64-setup.exe` for the version
   authority. Its unsigned SHA-256 matches `installer-provenance.json` from
   `build_desktop`, which must be attributable to a clean commit, the one
@@ -486,8 +495,10 @@ then runs:
 1. `signtool sign /fd sha256 /sha1 <thumbprint> /tr <timestampUrl> /td sha256`
 2. `signtool verify /pa /all /tw /v`, which must exit 0. Exit 2, a warning such
    as a missing time stamp, is a failure.
-3. An offline WinVerifyTrust check, whose signer must be the configured
-   certificate.
+3. An offline WinVerifyTrust check of EVERY signature on the file (primary and
+   secondary). The chain Windows built for each signature must end in a pinned
+   anchor, and the primary signer must be the configured certificate. The same
+   check runs again whenever the preflight gate is asked about the file.
 
 It then writes `EXE.authenticode.json`, never over an existing one. That file
 binds:
@@ -495,7 +506,8 @@ binds:
 - the build provenance and the source commit;
 - the unsigned and signed SHA-256;
 - the signtool path, hash and signer;
-- the certificate and its chain;
+- the certificate, its chain and the pinned anchor (with its provenance);
+- the root of every signature on the file;
 - the time-stamp service and the verify results.
 
 Sign the update manifest (`release_signing sign`) after this, over the signed
