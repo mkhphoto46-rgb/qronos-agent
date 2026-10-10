@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[cfg(debug_assertions)]
 use std::process::Stdio;
@@ -24,6 +25,20 @@ pub(super) enum Service {
     Settings,
     Permissions,
     Doctor,
+    /// The offline update service (core/update_cli.py, Installer-owned). Registered
+    /// for one-shot reads and approval steps only; its launch is never run through
+    /// one-shot IPC (see service_ipc.rs), and no command mounts it yet.
+    #[allow(dead_code)]
+    Update,
+}
+
+/// The product version every backend service is told (QRONOS_APP_VERSION): the
+/// desktop's own package version, set once from tauri's package information
+/// (tauri.conf.json). There is no second version constant.
+static APP_VERSION: OnceLock<String> = OnceLock::new();
+
+pub(super) fn set_app_version(version: String) {
+    let _ = APP_VERSION.set(version);
 }
 
 impl Service {
@@ -37,6 +52,7 @@ impl Service {
             Self::Settings => "settings",
             Self::Permissions => "permissions",
             Self::Doctor => "doctor",
+            Self::Update => "update",
         }
     }
 
@@ -59,6 +75,7 @@ impl Service {
             Self::Settings => "core.settings_cli",
             Self::Permissions => "core.permissions_cli",
             Self::Doctor => "core.runtime_preflight",
+            Self::Update => "core.update_cli",
         }
     }
 }
@@ -111,6 +128,10 @@ impl Backend {
             }
         };
         command.env("PYTHONUTF8", "1").env("PYTHONUNBUFFERED", "1");
+        if let Some(version) = APP_VERSION.get() {
+            // The start-up barrier of every store-opening service needs the running version.
+            command.env("QRONOS_APP_VERSION", version);
+        }
         Ok(command)
     }
 }
@@ -300,6 +321,30 @@ mod tests {
             fixture.0.join("profile/Temp/Chatterbox")
         );
         assert!(!fixture.0.join("profile").exists());
+    }
+
+    #[test]
+    fn every_service_is_told_the_desktop_package_version_and_update_is_a_closed_service() {
+        let fixture = Fixture::new();
+        let directory = fixture.bundle();
+        let backend = Backend::Packaged {
+            directory: directory.clone(),
+            data_root: fixture.0.join("profile"),
+            asset_root: fixture.0.join("assets"),
+        };
+        set_app_version("9.8.7".to_string());
+        for service in [Service::Settings, Service::Update, Service::Supervisor] {
+            let command = backend.command(service).unwrap();
+            let version = command
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("QRONOS_APP_VERSION"))
+                .and_then(|(_, value)| value.map(|v| v.to_owned()));
+            assert_eq!(version, Some(std::ffi::OsString::from(APP_VERSION.get().unwrap())));
+        }
+        assert_eq!(
+            backend.command(Service::Update).unwrap().get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("update")]
+        );
     }
 
     #[test]

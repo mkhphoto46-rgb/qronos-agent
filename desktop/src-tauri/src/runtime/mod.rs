@@ -595,6 +595,8 @@ fn require_task_id(task_id: &str) -> Result<&str, String> {
 pub fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir().ok();
     let local_data = app.path().local_data_dir().ok();
+    // Every backend service learns the one product version (tauri.conf.json via package_info).
+    backend::set_app_version(app.package_info().version.to_string());
     let backend = backend::discover(resources.as_deref(), local_data.as_deref())?;
     if let Some(backend) = backend.as_ref() {
         app.asset_protocol_scope()

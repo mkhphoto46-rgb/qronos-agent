@@ -130,6 +130,23 @@ impl Plan {
                 MIB,
                 4 * MIB,
             ),
+            // Reads and approval steps only. "launch" is NEVER a one-shot request: this path
+            // waits for its child and kills it at its deadline, which must not happen to an
+            // update guard or the installer it hands over to (a separate, gated path).
+            Service::Update => (
+                "Update",
+                matches!(
+                    operation,
+                    "status" | "discover" | "verify" | "request" | "approve" | "discard" | "startup_check"
+                ),
+                !matches!(operation, "status" | "discover" | "verify" | "startup_check"),
+                match operation {
+                    "verify" | "request" | "approve" => 900,
+                    _ => 60,
+                },
+                64 * 1024,
+                MIB,
+            ),
             Service::Bridge | Service::Supervisor | Service::Audio => {
                 return Err("This backend service does not support one-shot IPC.".into())
             }
@@ -1146,6 +1163,13 @@ mod tests {
     #[test]
     fn production_routes_and_mutation_budgets_remain_closed() {
         assert!(Plan::new(Service::Bridge, "snapshot").is_err());
+        assert!(Plan::new(Service::Update, "launch").is_err());
+        assert!(Plan::new(Service::Update, " launch").is_err());
+        for operation in ["status", "discover", "verify", "request", "approve", "discard", "startup_check"] {
+            assert!(Plan::new(Service::Update, operation).is_ok(), "{operation}");
+        }
+        assert!(!Plan::new(Service::Update, "status").unwrap().mutation);
+        assert!(Plan::new(Service::Update, "approve").unwrap().mutation);
         assert!(Plan::new(Service::Library, "-m core.runtime_bridge").is_err());
         assert!(Plan::new(Service::Doctor, "https://public.example").is_err());
         assert_eq!(
