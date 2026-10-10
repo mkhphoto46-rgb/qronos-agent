@@ -323,6 +323,133 @@ Documents. It never runs the Qronos installer or reads real user folders.
   absent in the probe harness, so the "Qronos is running" path is covered only
   by a file held open during a probe run, not by a real running app.
 
+## The update fence, hand-over and receipt
+
+The installer's half of the update hand-over in `local-update-packages.md` is
+made of three parts:
+- `installer-hooks/qronos-update-fence.nsh`;
+- the pinned installer template `desktop/src-tauri/installer-template/`
+  (`PROVENANCE.md` there lists every change to Tauri 2.9.4's own template);
+- the hook order in `webview2-offline.nsh`.
+
+The contracts are `work/opus-production-installer-contract-round10.txt` and
+`work/opus-production-installer-contract-round11.txt`, with the round-12
+corrections. `build_desktop` refuses Tauri's stock template, verifies the pinned
+source, and checks the order in the real generated `installer.nsi`.
+
+**Order of an installation.** Before NSIS runs the Install section, only
+`.onInit`, the template's no-op checks and the stock WebView2 section (which
+only reads the registry in "skip" mode) run. In the GUI, the pages also run;
+the reinstall page never starts a previous uninstaller (see below). The
+Install section then runs, in this order:
+1. The update fence and the EXCLUSIVE store admission (update hand-over or
+   manual install).
+2. The install-root check (protected folders and ancestors, links, foreign
+   content).
+3. The previous installation's whole file list, checked against the disk.
+4. Stopping the running app.
+5. Removing exactly the listed files and folders.
+6. The WebView2 child.
+7. Only then `SetOutPath`, the copy, the uninstaller, the registration and the
+   shortcuts.
+
+On a refusal in steps 1-3, no folder or file under the install folder, the start
+menu or the desktop is created, changed or removed, nothing is stopped and the
+installer writes no registry value. Two things can still exist:
+- NSIS's own temporary plug-in folder in `%TEMP%`;
+- the admission lock file `<data root>\.qronos-store-admission.lock`, opened
+  (`OPEN_ALWAYS`) only when the data folder exists.
+
+**What is held.** Two things:
+- the update fence: the named mutex `Local\Qronos.UpdateInProgress.v1`;
+- the exclusive store admission: a byte-range lock on the admission file, the
+  same lock `core/store_admission.py` uses.
+
+Both handles are non-inheritable and never closed by the script. They last
+exactly as long as the installer or uninstaller process, whether it ends
+normally, aborts, crashes or is killed. Nothing it starts can keep them.
+
+**Manual install or uninstall.** The fence and the admission must both be free
+at once. Otherwise the installer stops with "Another Qronos update or
+installation is running" or "Qronos is still running with its data open". An
+absent data folder skips only the admission.
+
+**Update mode** (`<installer> /S /QRONOSUPDATE`, started only by the updater):
+- `/QRONOSUPDATE` without `/S` is refused. The uninstaller refuses
+  `/QRONOSUPDATE`. Update mode never falls back to a manual install.
+- The private record on standard input is bounded: 1023 bytes, 30 s.
+- The guard must be the installer's real parent:
+  - If it can be opened, its creation time must match, and it must exit within
+    60 s before anything is installed.
+  - If it cannot be opened, only proof that it no longer exists (error 87)
+    counts as "gone" (a guard that crashed). Then the fence identity is the
+    proof. Access denied or any other failure refuses before the
+    acknowledgement (independent review Media15, F15-1).
+- The handed fence handle must be another handle to the fence object.
+- The receipts folder must be this installer's own
+  `<data root>\Updates\receipts`. The data root is derived by the installer.
+- The version must be the installer's own.
+
+**Explicit success and the receipt.** In a silent install, NSIS 3.11 lets a
+failed `File`, `CreateDirectory`, `WriteUninstaller`, registry write or
+`CreateShortcut` continue with only the error flag set, and `${GetSize}` clears
+that flag. So:
+- every one of those statements, including each iteration of the resource,
+  program and deep-link loops and each registry write, is followed
+  IMMEDIATELY by `QRONOS_STEP`, which stops the installation;
+- `ClearErrors` appears only right after a checked step.
+
+The build refuses a generated script that breaks this. In update mode the
+receipt (`<pid>-<ticks>.receipt`, `CREATE_NEW`) is written only after
+`QRONOS_INSTALL_COMPLETE`, holding the nonce, the approved package and manifest
+SHA-256, the installer's own version and `result=installed`. A stopped
+installation leaves a partial install and no receipt. The start-up barrier
+then reports the update honestly (unconfirmed or not applied).
+
+**Deletion.** The install-root check and the owned file list come before
+EVERY deletion, every app stop and every registration or shortcut change.
+- The installer deletes nothing else. The stock deletion of an "old main
+  program" named in the registry is removed.
+- The uninstaller removes only the listed files and folders, plus
+  `uninstall.exe` by its exact name. The stock deletion of the program,
+  resources, binaries and resource folders is removed.
+- The "Delete the application data" checkbox (a recursive folder removal) is
+  not offered.
+- The reinstall page never runs a previous uninstaller, a WiX/MSI uninstaller
+  or any child. "Uninstall first" and an MSI registration are refused visibly;
+  passive mode continues in place.
+
+**Writes outside the Install section, for the record.** Modern UI saves the
+chosen language in the registry at the end of a successful installation
+(skipped after an abort). In the GUI, the finish page can create the desktop
+shortcut and start the app. Both happen in the same installer process, after
+the section, while the fence is still held.
+
+**Tests** (inert, silent, current-user probes in temporary folders; never a
+real installer, registry, shortcut or user folder):
+- `tests/test_update_fence_nsis.py` (the fence file in small probes);
+- `tests/test_installer_template.py`, which compiles the WHOLE pinned template
+  with Tauri's own compiler. Its rendering is proven equal to Tauri's real
+  output. The registry and shell folders are swapped for files in the test
+  folder, and every swap is counted. It covers:
+  - refusals before any change;
+  - the reinstall page;
+  - a real failure at the FIRST command of every step group while later
+    commands would succeed;
+  - a real `UpdateService` hand-over;
+  - a guard that cannot be opened;
+  - protected roots, links, junctions and missing or malformed file lists with
+    foreign files (nothing changed);
+  - uninstalls that remove only listed files.
+
+**Limits**
+- NSIS releases the fence's ownership when its install thread ends. The fence
+  object and the admission lock last until the process exits. The app started
+  from the manual finish page can meet a live fence for a moment; Runtime's
+  start-up must retry briefly (contract round 10, section 5, R2).
+- None of this has run as a real Tauri-built installer on a real machine; see
+  below. The default updater launch stays refused.
+
 ## Updates and rollback
 
 Qronos does not use Tauri's network updater. Updates are new installers that a
@@ -366,6 +493,12 @@ acceptance testing is allowed:
 7. Uninstalling with and without "Delete the application data".
    `%LOCALAPPDATA%\Qronos` and the Library should remain; WebView2 should
    remain installed.
+8. The update fence inside a real Tauri-built installer:
+   - a manual install, a reinstall and an uninstall, each while Qronos runs
+     and while it is closed;
+   - an update hand-over (`/S /QRONOSUPDATE`) and its receipt.
+   The default updater launch stays refused until this and the Runtime/Control
+   wiring are accepted.
 
 ## Owner decisions still open
 

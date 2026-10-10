@@ -46,8 +46,12 @@ from build_support.desktop_prerequisites import (
     list_installer,
     load_pin,
     verify_embedded_payload,
+    TEMPLATE_SETTING,
+    verify_generated_order,
     verify_generated_script,
+    verify_hook_wrapper,
     verify_installer,
+    verify_template_source,
     tauri_tools_dir,
     verify_build_tools,
     write_hook_wrapper,
@@ -121,6 +125,10 @@ def check_tauri_config(config: dict[str, Any]) -> None:
         raise ValueError("tauri.conf.json must build only the NSIS target.")
     if nsis.get("installerHooks") != HOOK_SETTING:
         raise ValueError(f"tauri.conf.json must use {HOOK_SETTING} as the NSIS installer hook.")
+    if nsis.get("template") != TEMPLATE_SETTING:
+        raise ValueError(f"tauri.conf.json must use the pinned Qronos template {TEMPLATE_SETTING}: Tauri's stock "
+                         "template creates the install folder and can run a previous uninstaller before the "
+                         "Qronos update fence (installer-template/PROVENANCE.md).")
     if bundle.get("createUpdaterArtifacts") or "updater" in config.get("plugins", {}):
         raise ValueError("Updater artifacts would make Tauri fall back to the WebView2 download bootstrapper; "
                          "authenticated updates need their own reviewed design first.")
@@ -175,6 +183,7 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
         raise ValueError(f"purpose must be one of {', '.join(PURPOSES)}.")
     config = json.loads(TAURI_CONFIG.read_text(encoding="utf-8"))
     check_tauri_config(config)
+    verify_template_source()
     # Everything that can fail quickly is checked before the long build starts.
     pin = load_pin()
     installer = (webview2_installer or CACHE_DIR / pin["fileName"]).absolute()
@@ -196,6 +205,7 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     collect_desktop_notices(notices)
     verify_notice_output(notices)
     wrapper = write_hook_wrapper(work, installer, pin)
+    verify_hook_wrapper(wrapper.read_text(encoding="utf-8"))
     # Every file this installation will own, so a later upgrade or uninstall removes
     # exactly these and never a user's file (installer-hooks/qronos-install-root.nsh).
     ownership = install_manifest.write(work, install_manifest.payload_files(backend, notices, config["productName"]))
@@ -242,7 +252,9 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     shutil.move(str(canonical), str(kept))
     try:
         # The installer is checked as built, not assumed from configuration.
-        verify_generated_script((release / "nsis" / "x64" / "installer.nsi").read_text(encoding="utf-8"), wrapper)
+        generated = (release / "nsis" / "x64" / "installer.nsi").read_text(encoding="utf-8")
+        verify_generated_script(generated, wrapper)
+        verify_generated_order(generated)  # the REAL rendered order, not the template file
         entries = list_installer(kept, seven_zip)
         verify_embedded_payload(entries, pin)
         embedded = extract_and_hash_payload(kept, seven_zip, work / "payload")

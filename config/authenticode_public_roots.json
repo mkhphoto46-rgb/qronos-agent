@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "comment": "Reviewed PUBLIC root certificates a Qronos release's Authenticode chain may end in (build_support/authenticode_release.py). Each anchor needs subject, the root DER's sha256 (lowercase hex) and sha1 (uppercase hex), and review provenance {source, reviewedBy, reviewedAt YYYY-MM-DD, evidence}. EMPTY on purpose: no public root has been reviewed for this project yet, so every certificate and every signed installer is refused and the release gate stays closed. Never add an enterprise, private or self-signed root; adding an anchor is a reviewed change.",
+  "anchors": []
+}

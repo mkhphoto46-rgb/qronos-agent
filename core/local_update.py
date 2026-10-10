@@ -18,8 +18,14 @@ This module checks them entirely offline:
 * Version policy, against the installed version and the recorded security floor:
   upgrades must respect the package's minimum starting version; reinstalling the
   same version is a repair; going back requires a package signed explicitly as a
-  rollback, at or above the security floor, that can read the installed data
-  schema. No package may lower the data schema an upgrade writes.
+  rollback, at or above the security floor, that can read the installed data.
+* Data compatibility. Payload schema 2 (the only one the product accepts) names,
+  per persistent store, the format version the package writes and the range it
+  reads, plus a compatibility epoch; it is checked against the running build's
+  ``DataProfile`` (``core.update_stores``). Every installed store must be listed
+  and readable, an upgrade never lowers a store's format, and the epoch must
+  match. Schema 1 (a single ``dataSchema`` integer) is kept for library callers
+  only; it cannot describe Qronos's separately versioned stores.
 
 ``LocalUpdateStore`` keeps a small state file and copies of verified packages in
 its own folder (``<data root>/Updates``). It deletes only files it created there,
@@ -38,6 +44,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +75,9 @@ _ENVELOPE_FIELDS = frozenset({"schema", "payload", "signatures"})
 _SIGNATURE_FIELDS = frozenset({"keyId", "signature"})
 _PAYLOAD_FIELDS = frozenset({"schema", "product", "version", "architecture", "target", "package", "dataSchema",
                              "minimumVersion", "securityFloor", "rollback", "notes"})
+_PAYLOAD_FIELDS_2 = (_PAYLOAD_FIELDS - {"dataSchema"}) | {"dataStores", "compatibilityEpoch"}
+_STORE_ID = re.compile(r"[a-z][a-z0-9_.-]{0,47}")
+_MAX_STORES = 64
 _PACKAGE_FIELDS = frozenset({"fileName", "bytes", "sha256"})
 _DATA_SCHEMA_FIELDS = frozenset({"writes", "reads"})
 _KEY_FIELDS = frozenset({"keyId", "publicKey", "owner", "revoked"})
@@ -90,11 +100,23 @@ class TrustedKey:
 
 
 @dataclass(frozen=True)
+class DataProfile:
+    """The data formats a running build reads and writes: {store id: format version}, and its epoch."""
+
+    stores: dict[str, int]
+    epoch: int
+
+
+@dataclass(frozen=True)
 class InstalledState:
-    """What the running Qronos knows about itself, plus the recorded security floor."""
+    """What the running Qronos knows about itself, plus the recorded security floor.
+
+    ``data_schema`` is a DataProfile for signed payload schema 2 (the product), or a
+    single integer for schema 1 (library callers); a mismatch is refused.
+    """
 
     version: str
-    data_schema: int
+    data_schema: int | DataProfile
     security_floor: str | None = None
 
 
@@ -251,9 +273,10 @@ def _payload(payload_bytes: bytes) -> dict[str, Any]:
         payload = json.loads(payload_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise UpdateError("malformed", "The signed payload is not JSON.") from error
-    payload = _exact(payload, _PAYLOAD_FIELDS, "The signed payload")
-    if payload["schema"] != 1:
-        raise UpdateError("malformed", "The signed payload must be schema 1.")
+    schema_number = payload.get("schema") if isinstance(payload, dict) else None
+    if type(schema_number) is not int or schema_number not in (1, 2):
+        raise UpdateError("malformed", "The signed payload must be schema 1 or 2.")
+    payload = _exact(payload, _PAYLOAD_FIELDS if schema_number == 1 else _PAYLOAD_FIELDS_2, "The signed payload")
     if payload["product"] != PRODUCT:
         raise UpdateError("wrong_product", f"The update is for {payload['product']!r}, not Qronos.")
     if payload["architecture"] != ARCHITECTURE or payload["target"] != TARGET:
@@ -271,14 +294,66 @@ def _payload(payload_bytes: bytes) -> dict[str, Any]:
             or not 0 < package["bytes"] <= _MAX_PACKAGE_BYTES \
             or not isinstance(package["sha256"], str) or not _SHA256.fullmatch(package["sha256"]):
         raise UpdateError("malformed", "The signed package needs a Qronos installer name, a size and a SHA-256.")
-    schema = _exact(payload["dataSchema"], _DATA_SCHEMA_FIELDS, "The signed data schema")
-    reads = schema["reads"]
-    if not isinstance(schema["writes"], int) or isinstance(schema["writes"], bool) or schema["writes"] < 1 \
-            or not isinstance(reads, list) or len(reads) != 2 \
-            or not all(isinstance(v, int) and not isinstance(v, bool) for v in reads) \
-            or not 1 <= reads[0] <= schema["writes"] <= reads[1]:
-        raise UpdateError("malformed", "dataSchema needs writes and a reads range [oldest, newest] containing it.")
+    if schema_number == 1:
+        _check_format(payload["dataSchema"], "dataSchema")
+        return payload
+    stores = payload["dataStores"]
+    if not isinstance(stores, dict) or not 0 < len(stores) <= _MAX_STORES:
+        raise UpdateError("malformed", f"dataStores must name one to {_MAX_STORES} stores.")
+    for store_id, entry in stores.items():
+        if not _STORE_ID.fullmatch(store_id):
+            raise UpdateError("malformed", f"dataStores names an invalid store id {store_id!r}.")
+        _check_format(entry, f"dataStores[{store_id!r}]")
+    epoch = payload["compatibilityEpoch"]
+    if type(epoch) is not int or not 1 <= epoch <= 1_000_000:
+        raise UpdateError("malformed", "compatibilityEpoch must be a positive integer.")
     return payload
+
+
+def _check_format(entry: Any, what: str) -> None:
+    schema = _exact(entry, _DATA_SCHEMA_FIELDS, what)
+    reads = schema["reads"]
+    if type(schema["writes"]) is not int or schema["writes"] < 1 \
+            or not isinstance(reads, list) or len(reads) != 2 \
+            or not all(type(v) is int for v in reads) \
+            or not 1 <= reads[0] <= schema["writes"] <= reads[1]:
+        raise UpdateError("malformed", f"{what} needs writes and a reads range [oldest, newest] containing it.")
+
+
+def _check_data(payload: dict[str, Any], installed: InstalledState, kind: str) -> None:
+    """Data compatibility between the package and the running build, for either payload schema."""
+    version = payload["version"]
+    if payload["schema"] == 1:
+        if isinstance(installed.data_schema, DataProfile):
+            raise UpdateError("unsupported_schema", "This package describes its data with a single schema number; "
+                                                    "Qronos needs a package that lists every data store.")
+        if kind == "upgrade" and payload["dataSchema"]["writes"] < installed.data_schema:
+            raise UpdateError("data_schema", "This upgrade would write an older data format than the installed one.")
+        low, high = payload["dataSchema"]["reads"]
+        if not low <= installed.data_schema <= high:
+            raise UpdateError("data_schema", f"Version {version} cannot read the data format "
+                                             f"{installed.data_schema} that the installed Qronos keeps.")
+        return
+    profile = installed.data_schema
+    if not isinstance(profile, DataProfile):
+        raise UpdateError("unsupported_schema", "The running Qronos did not describe its data stores.")
+    if payload["compatibilityEpoch"] != profile.epoch:
+        raise UpdateError("data_epoch", f"Version {version} belongs to data compatibility epoch "
+                                        f"{payload['compatibilityEpoch']}, the installed Qronos to {profile.epoch}. "
+                                        "Moving between epochs is not supported.")
+    stores = payload["dataStores"]
+    for store_id, installed_version in sorted(profile.stores.items()):
+        entry = stores.get(store_id)
+        if entry is None:
+            raise UpdateError("data_schema", f"Version {version} does not know the data store {store_id!r} that the "
+                                             "installed Qronos keeps.")
+        low, high = entry["reads"]
+        if not low <= installed_version <= high:
+            raise UpdateError("data_schema", f"Version {version} cannot read format {installed_version} of the data "
+                                             f"store {store_id!r}.")
+        if kind == "upgrade" and entry["writes"] < installed_version:
+            raise UpdateError("data_schema", f"This upgrade would write an older format of the data store "
+                                             f"{store_id!r}.")
 
 
 # --------------------------------------------------------------- package
@@ -340,8 +415,6 @@ def verify_update(envelope: bytes, package: Path, keys: dict[str, TrustedKey],
         minimum = payload["minimumVersion"]
         if minimum is not None and compare_versions(installed.version, minimum) < 0:
             raise UpdateError("upgrade_path", f"Version {version} needs at least {minimum} installed first.")
-        if payload["dataSchema"]["writes"] < installed.data_schema:
-            raise UpdateError("data_schema", "This upgrade would write an older data format than the installed one.")
     elif order == 0:
         kind = "repair"
     else:
@@ -349,10 +422,7 @@ def verify_update(envelope: bytes, package: Path, keys: dict[str, TrustedKey],
             raise UpdateError("unsigned_rollback", f"Version {version} is older than the installed "
                                                    f"{installed.version} and is not signed as a rollback.")
         kind = "rollback"
-    low, high = payload["dataSchema"]["reads"]
-    if not low <= installed.data_schema <= high:
-        raise UpdateError("data_schema", f"Version {version} cannot read the data format {installed.data_schema} "
-                                         "that the installed Qronos keeps.")
+    _check_data(payload, installed, kind)
     return VerifiedUpdate(kind, version, digest, size, payload["package"]["fileName"], signer, payload,
                           payload_bytes)
 
@@ -462,6 +532,11 @@ class LocalUpdateStore:
         self.state_path = self.root / "update-state.json"
         self.staged_dir = self.root / "staged"
         self.lock_path = self.root / "update.lock"
+        # The file lock is held once per store object; nested use by the same thread
+        # (a caller holding the lock across several steps) re-enters without
+        # deadlocking, and other threads of this process wait their turn.
+        self._thread_lock = threading.RLock()
+        self._depth = 0
 
     # -- folders, files and the lock
 
@@ -475,6 +550,29 @@ class LocalUpdateStore:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
+        # Both waits are bounded: another thread of this process holding the store
+        # gives "busy" after lock_timeout, exactly like another process does.
+        if not self._thread_lock.acquire(timeout=self.lock_timeout):
+            raise UpdateError("busy", "Another part of Qronos is changing the update store.")
+        try:
+            if self._depth:
+                self._depth += 1
+                try:
+                    yield
+                finally:
+                    self._depth -= 1
+                return
+            with self._file_locked():
+                self._depth = 1
+                try:
+                    yield
+                finally:
+                    self._depth = 0
+        finally:
+            self._thread_lock.release()
+
+    @contextlib.contextmanager
+    def _file_locked(self) -> Iterator[None]:
         self._check_folders()
         self.root.mkdir(parents=True, exist_ok=True)
         self._check_folders()
@@ -652,11 +750,11 @@ class LocalUpdateStore:
 
     # -- operations
 
-    def installed(self, version: str, data_schema: int) -> InstalledState:
+    def installed(self, version: str, data_schema: int | DataProfile) -> InstalledState:
         return InstalledState(version, data_schema, self.state()["securityFloor"])
 
     def stage(self, manifest: Path, package: Path, keys: dict[str, TrustedKey], version: str,
-              data_schema: int) -> VerifiedUpdate:
+              data_schema: int | DataProfile) -> VerifiedUpdate:
         """Verify user-chosen local files and keep a verified copy for the install step."""
         floor = self.state()["securityFloor"]
         envelope = _read_chosen_file(manifest, _MAX_ENVELOPE_BYTES, "update manifest")
@@ -693,7 +791,7 @@ class LocalUpdateStore:
             self._save(state)
         return update
 
-    def handoff(self, keys: dict[str, TrustedKey], version: str, data_schema: int) -> Path:
+    def handoff(self, keys: dict[str, TrustedKey], version: str, data_schema: int | DataProfile) -> Path:
         """The staged installer, re-verified now, for the user-approved install step."""
         with self._locked():
             state = self._read_state()
@@ -713,8 +811,15 @@ class LocalUpdateStore:
             self._save(state)
         return package
 
-    def confirm(self, version: str) -> str:
-        """Called when Qronos starts: records a completed update. Returns what happened."""
+    def confirm(self, version: str, *, replacement_evidence: bool = False) -> str:
+        """Called when Qronos starts: records a completed update. Returns what happened.
+
+        A version change proves another build is running. A repair (the same
+        version) cannot be told apart from a cancelled one by the version, so it
+        is "unconfirmed" and stays staged unless the caller has reviewed evidence
+        that the replacement ran (``replacement_evidence``; no such receipt
+        exists yet, so the product never passes it).
+        """
         with self._locked():
             state = self._read_state()
             staged = state["staged"]
@@ -722,6 +827,8 @@ class LocalUpdateStore:
                 return "nothing staged"
             if compare_versions(version, staged["version"]) != 0:
                 return "not applied"
+            if staged["kind"] == "repair" and not replacement_evidence:
+                return "unconfirmed"
             floor = state["securityFloor"]
             if floor is None or compare_versions(staged["securityFloor"], floor) > 0:
                 floor = staged["securityFloor"]

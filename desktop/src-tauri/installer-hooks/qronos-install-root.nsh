@@ -33,6 +33,8 @@ Var QronosRelation   ; "same", "inside", "contains" or "apart"
 Var QronosMessage    ; "" when a check passed, otherwise why it refused
 Var QronosLine
 Var QronosHandle
+Var QronosValidateOnly ; "1": QronosRemoveOwnedPayload checks the whole list and the disk, deleting nothing
+Var QronosUninstallerListed ; "1": the validated list names uninstall.exe (the template may delete exactly it)
 Var QronosProfile
 Var QronosLocal
 Var QronosRoaming
@@ -723,6 +725,7 @@ Function ${UN}QronosRemoveOwnedPayload
   Push $1
   Push $2
   StrCpy $QronosMessage ""
+  StrCpy $QronosUninstallerListed ""
   ; The install folder itself must be resolved by Windows and reached without a link
   ; or junction. This comes first: a folder Windows cannot open would otherwise look
   ; like one without a file list.
@@ -773,6 +776,11 @@ Function ${UN}QronosRemoveOwnedPayload
     Goto qronos_remove_done
   ${EndIf}
 
+  ${If} $QronosValidateOnly == "1"
+    FileClose $QronosHandle
+    Goto qronos_remove_done
+  ${EndIf}
+
   !ifdef QRONOS_PROBE_BETWEEN_PASSES
     !insertmacro QRONOS_PROBE_BETWEEN_PASSES
   !endif
@@ -793,7 +801,14 @@ Function ${UN}QronosRemoveOwnedPayload
         ${Break}
       ${EndIf}
       ${If} $QronosLine == "F "
-        ${If} $QronosPath != "${QRONOS_MANIFEST}"
+        ${If} $QronosPath == "${QRONOS_MANIFEST}"
+          ; removed last, once everything it lists is gone
+        !if "${UN}" == "un."
+        ${ElseIf} $QronosPath == "uninstall.exe"
+          ; the running uninstaller, validated as a listed file: the template deletes exactly this name later
+          StrCpy $QronosUninstallerListed "1"
+        !endif
+        ${Else}
           ClearErrors
           Delete "$INSTDIR\$QronosPath"
           ${If} ${Errors}

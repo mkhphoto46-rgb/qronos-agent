@@ -37,6 +37,7 @@
         "type": "skip"
       },
       "nsis": {
+        "template": "installer-template/installer.nsi",
         "installerHooks": "installer-hooks/webview2-offline.nsh"
       }
     },

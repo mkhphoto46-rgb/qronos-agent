@@ -789,8 +789,20 @@ def test_history_is_capped(tmp_path):
     store.state_path.write_text(json.dumps(state), encoding="utf-8")
     store.stage(manifest, installer, keys, "0.2.0", 3)  # a repair of the same version
 
-    assert store.confirm("0.2.0") == "repair"
+    assert store.confirm("0.2.0", replacement_evidence=True) == "repair"
     assert len(store.state()["history"]) == 50
+
+
+def test_a_same_version_repair_is_never_confirmed_by_the_version_alone(tmp_path):
+    """H-1: the same version running again does not prove the repair installer ran."""
+    store, manifest, installer, keys = stage_fixture(tmp_path)
+    store.stage(manifest, installer, keys, "0.1.0", 3)
+    store.confirm("0.2.0")
+    store.stage(manifest, installer, keys, "0.2.0", 3)  # a repair
+    before = store.state()
+
+    assert store.confirm("0.2.0") == "unconfirmed"
+    assert store.state() == before  # still staged, no history entry, floor unchanged
 
 
 def test_a_store_below_a_junctioned_ancestor_is_refused(tmp_path):
