@@ -148,7 +148,7 @@ class StandIn:
 
     def argv(self) -> list[str]:
         executable, _ = child_python()
-        return [executable, "-I", str(INSTALLER_CHILD), str(ROOT), self.fence, str(self.data), self.mode,
+        return [executable, "-B", "-I", str(INSTALLER_CHILD), str(ROOT), self.fence, str(self.data), self.mode,
                 str(self.go), str(self.report)]
 
     def launcher(self, path, arguments, handover):

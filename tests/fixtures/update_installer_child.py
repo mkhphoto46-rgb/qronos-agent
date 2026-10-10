@@ -4,7 +4,7 @@ Run by owned tests as a base-interpreter child (tests/fixtures/child_python.py),
 it changes no program files and touches only the tmp data root and receipts folder it is given. The
 fence name is the test's unique private mutex, never the production one.
 
-    python -I update_installer_child.py REPO FENCE_NAME DATA_ROOT MODE GO_FILE REPORT_FILE
+    python -B -I update_installer_child.py REPO FENCE_NAME DATA_ROOT MODE GO_FILE REPORT_FILE
 
 MODE is a comma list:
 - update      the guard handed over through standard input / output (otherwise: a manual install);
@@ -184,7 +184,7 @@ def main() -> int:
                 "deadline = time.monotonic() + 120\n"
                 "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
                 "    time.sleep(0.05)\n")
-        grandchild = subprocess.Popen([sys.executable, "-I", "-c", code, go_file + ".grandchild"], close_fds=False)
+        grandchild = subprocess.Popen([sys.executable, "-B", "-I", "-c", code, go_file + ".grandchild"], close_fds=False)
         report["grandchildPid"] = grandchild.pid
         Path(report_file).write_text(json.dumps({**report, "refused": None, "installing": True}), encoding="utf-8")
     deadline = time.monotonic() + 120
