@@ -22,6 +22,7 @@ import re
 import sqlite3
 from typing import Callable
 
+from qronos_media.decoder_copy import sweep_stale_inputs, verified_decoder_input
 from qronos_media.identity import FileState, HashCancelled, HashLimitExceeded, checked_asset_id, full_sha256
 from qronos_media.paths import UnsafeMediaPath, owned_child, readable_media_file
 from qronos_media.scope import OutOfScope, admit_sidecar
@@ -240,14 +241,17 @@ def read_bounded(path: Path, limit: int, cancelled) -> bytes:
 
     More than ``limit`` bytes (the file grew after its size was checked)
     refuses the file. Cancellation raises ChildCancelled, never a partial success.
+    Reads go to the unbuffered file underneath ``open`` when there is one, so
+    the operating system is not asked past ``limit + 1`` either (no read-ahead).
     """
     chunks: list[bytes] = []
     total = 0
     with open(path, "rb") as handle:
+        reader = getattr(handle, "raw", handle)
         while True:
             if cancelled():
                 raise ChildCancelled("subtitle read stopped")
-            chunk = handle.read(min(SIDECAR_READ_CHUNK, limit + 1 - total))
+            chunk = reader.read(min(SIDECAR_READ_CHUNK, limit + 1 - total))
             if not chunk:
                 break
             total += len(chunk)
@@ -288,9 +292,12 @@ def _read_sidecar(ctx: StageContext, copy: Path, sidecar, n: int, seen_hashes: s
        The hash read itself is bounded to MAX_SUBTITLE_BYTES + 1 bytes: a file
        that grew after the size check is refused there, with no parse or
        decoder open.
-    3. SRT/VTT are then read in bounded chunks (at most the size limit) and
-       must hash to that same digest, so the stored hash is of exactly the
-       bytes parsed. ASS/SSA are decoded by ffmpeg with bounded output.
+    3. SRT/VTT/ASS/SSA are then read in bounded chunks (at most the size
+       limit) and must hash to that same digest, so the stored hash is of
+       exactly the bytes used. SRT/VTT are parsed from those bytes. ASS/SSA are
+       decoded by ffmpeg from a private, write-locked copy of exactly those
+       bytes (``decoder_copy``), never from the user's file by name, after one
+       more fresh admission made once the copy is ready; ffmpeg's output is bounded.
     4. The file must not have changed (size, mtime, file id) at the end.
 
     The hash and the read/decode are separate opens, so the copy and the
@@ -328,13 +335,13 @@ def _read_sidecar(ctx: StageContext, copy: Path, sidecar, n: int, seen_hashes: s
     ctx.checkpoint_boundary()
     admit_sidecar(ctx.admit(copy), sidecar.path, ctx.excluded)  # fresh, right before the second open
     try:
+        data = read_bounded(sidecar.path, MAX_SUBTITLE_BYTES, ctx.cancelled)
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise SubtitleError("the subtitle file changed while it was read")
         if sidecar.path.suffix.lower() in {".ass", ".ssa"}:
-            track.cues = _extract_embedded(ctx, sidecar.path, 0, demuxers=ASS_DEMUXERS)
+            track.cues = _decode_verified(ctx, copy, sidecar, data, digest)
             track.encoding = "ffmpeg"
         else:
-            data = read_bounded(sidecar.path, MAX_SUBTITLE_BYTES, ctx.cancelled)
-            if hashlib.sha256(data).hexdigest() != digest:
-                raise SubtitleError("the subtitle file changed while it was read")
             text, track.encoding = decode_subtitle_bytes(data)
             track.cues = parse_subtitle_text(text, sidecar.path.suffix)
         if FileState.of(sidecar.path) != before:
@@ -345,8 +352,23 @@ def _read_sidecar(ctx: StageContext, copy: Path, sidecar, n: int, seen_hashes: s
     return track
 
 
+def _decode_verified(ctx: StageContext, copy: Path, sidecar, data: bytes, digest: str) -> list[Cue]:
+    """
+    ASS/SSA: ffmpeg decodes a private copy of exactly the verified bytes.
+
+    The copy is made, flushed and re-hashed first; only then is the original
+    admitted again with a fresh gate answer, immediately before the decoder
+    starts, so a refusal that lands while the copy is prepared stops it.
+    """
+    with verified_decoder_input(ctx.cache_dir, data, digest, sidecar.path.suffix) as private_copy:
+        ctx.checkpoint_boundary()
+        admit_sidecar(ctx.admit(copy), sidecar.path, ctx.excluded)  # fresh, right before the native handoff
+        return _extract_embedded(ctx, private_copy, 0, demuxers=ASS_DEMUXERS)
+
+
 def run_subtitles(ctx: StageContext) -> Commit:
     tracks: list[_Track] = []
+    sweep_stale_inputs(ctx.cache_dir)  # private decoder copies a crash may have left
     video = ctx.primary_file()
     streams = ctx.db.execute(
         "SELECT idx, codec, language, title, forced FROM streams WHERE asset_id = ? AND kind = 'subtitle' ORDER BY idx",

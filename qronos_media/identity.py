@@ -37,16 +37,19 @@ def full_sha256(path: Path, *, cancelled: Callable[[], bool] | None = None, limi
     With ``limit`` (small files such as subtitles), the read itself is bounded:
     no more than ``limit + 1`` bytes are ever requested, and a file holding more
     than ``limit`` bytes (for example one that grew after its size was checked)
-    raises HashLimitExceeded. Video identity passes no limit.
+    raises HashLimitExceeded. Video identity passes no limit. With a limit the
+    unbuffered file underneath ``open`` is read when there is one, so the
+    operating system is not asked past ``limit + 1`` either (no read-ahead).
     """
     digest = hashlib.sha256()
     total = 0
     with open(path, "rb") as handle:
+        reader = handle if limit is None else getattr(handle, "raw", handle)
         while True:
             if cancelled is not None and cancelled():
                 raise HashCancelled(str(path))
             size = CHUNK * 4 if limit is None else min(CHUNK * 4, limit + 1 - total)
-            chunk = handle.read(size)
+            chunk = reader.read(size)
             if not chunk:
                 break
             total += len(chunk)

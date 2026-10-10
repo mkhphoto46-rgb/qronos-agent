@@ -13,13 +13,19 @@
   not committed.
 - The sidecar hash read itself never asks for a byte past the cap + 1: a
   sidecar that grows at or during its hash is refused there (round 9).
+- ASS/SSA are decoded from a private, write-locked copy of exactly the
+  verified capped bytes, never from the user's file by name; bounded reads
+  never ask the operating system past the cap + 1 (round 13).
 
 Production limits and guards are unchanged; time is a fake monotonic clock
 where it matters. Synthetic fixtures only.
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -509,3 +515,407 @@ def test_the_bounded_hash_is_exact_up_to_the_limit_and_requests_at_most_limit_pl
     big = tmp_path / "video-like.bin"
     big.write_bytes(os.urandom(5 * 1024 * 1024))
     assert full_sha256(big) == hashlib.sha256(big.read_bytes()).hexdigest()
+
+
+# ------------------------------- ASS/SSA decode only the verified capped bytes (round 13, Installer r9 F1)
+
+class _RecordingRaw(io.RawIOBase):
+    """The REAL FileIO under the buffered reader ``open`` returns; records every raw (OS-level) read."""
+
+    def __init__(self, raw: io.FileIO, log: list) -> None:
+        self._raw, self._log = raw, log
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        offset = self._raw.tell()
+        count = self._raw.readinto(buffer)
+        self._log.append({"offset": offset, "requested": len(buffer), "delivered": count or 0})
+        return count
+
+    def close(self) -> None:
+        self._raw.close()
+        super().close()
+
+
+def _raw_open(target: Path, log: list):
+    """An ``open`` stand-in: the target is opened exactly as open(path, "rb") would, raw reads recorded."""
+    def opener(path, mode="r", *args, **kwargs):
+        if Path(path) == target and mode == "rb":
+            return io.BufferedReader(_RecordingRaw(io.FileIO(path, "rb"), log), io.DEFAULT_BUFFER_SIZE)
+        return open(path, mode, *args, **kwargs)
+    return opener
+
+
+def _decoder_spawns(monkeypatch, cache_dir: Path, on_spawn=None) -> list:
+    """Record every ffmpeg spawn: its input path, whether it is a private copy, its size and digest at spawn."""
+    real_run = stages_module.run_bounded
+    spawns: list = []
+
+    def recording_run(argv, **kwargs):
+        inputs = [part[len("file:"):] for part in argv if part.startswith("file:")]
+        for item in inputs:
+            path = Path(item)
+            private = path.parent == cache_dir / "subtitle-input"
+            spawns.append({"input": item, "private": private, "size": path.stat().st_size,
+                           "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if private else None})
+            if on_spawn is not None and private:
+                on_spawn(path)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(stages_module, "run_bounded", recording_run)
+    return spawns
+
+
+def _subtitle_fixture(tmp_path, base_video, name: str, content: str, **service_options):
+    library = tmp_path / "library"
+    copy_video(base_video, library / "Film.mkv")
+    (library / name).write_bytes(content.encode("utf-8"))
+    service = make_service(tmp_path / "data", **service_options)
+    service.scan(service.add_root(str(library))["rootId"])
+    _index(service)
+    asset = service.store.db.execute("SELECT asset_id FROM files").fetchone()["asset_id"]
+    service.reindex(asset, "subtitles")
+    return service, asset, library / name
+
+
+def _admissions_of(monkeypatch, target: Path, on_call) -> list:
+    """Count fresh sidecar admissions of ``target``: 1 listing, 2 before the hash, 3 before the read, 4 before ffmpeg."""
+    calls: list = []
+    real_admit = stages_module.admit_sidecar
+
+    def counting_admit(video, raw, excluded):
+        admitted = real_admit(video, raw, excluded)
+        if Path(raw) == target:
+            calls.append(len(calls) + 1)
+            on_call(len(calls))
+        return admitted
+
+    monkeypatch.setattr(stages_module, "admit_sidecar", counting_admit)
+    return calls
+
+
+def _track(service, path: Path) -> dict:
+    row = service.store.db.execute("SELECT status, detail, cue_count, sidecar_sha256 FROM subtitle_tracks "
+                                   "WHERE sidecar_path = ?", (str(path),)).fetchone()
+    return dict(row) if row else {}
+
+
+def _private_copies(service) -> list:
+    folder = service.layout.cache / "subtitle-input"
+    return sorted(p.name for p in folder.iterdir()) if folder.exists() else []
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("suffix", [".ass", ".ssa"])
+def test_an_ass_or_ssa_sidecar_growing_after_its_hash_never_reaches_the_decoder(tmp_path, base_video, monkeypatch,
+                                                                              suffix) -> None:
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, f"Film.big{suffix}", _ASS)
+    admissions = _admissions_of(monkeypatch, sidecar,
+                                lambda n: os.truncate(sidecar, 2 * MAX_SUBTITLE_BYTES) if n == 3 else None)
+    raw_reads: list = []
+    monkeypatch.setattr(stages_module, "open", _raw_open(sidecar, raw_reads), raising=False)
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache)
+    report = service.index(max_seconds=120)
+    track = _track(service, sidecar)
+    furthest = max((r["offset"] + r["requested"] for r in raw_reads), default=0)
+    delivered = sum(r["delivered"] for r in raw_reads)
+    assert admissions == [1, 2, 3], admissions  # it grew AFTER the bounded hash, at the read's fresh admission
+    assert [s for s in spawns if Path(s["input"]).resolve() == sidecar.resolve()] == [], "the decoder was handed the user's file by name"
+    assert [s for s in spawns if s["size"] > MAX_SUBTITLE_BYTES] == [], spawns
+    assert furthest <= MAX_SUBTITLE_BYTES + 1 and delivered <= MAX_SUBTITLE_BYTES + 1, (furthest, delivered)
+    assert track["status"] == "failed" and "too large" in track["detail"] and track["cue_count"] == 0, track
+    assert f"{asset}/subtitles" in report["completed"] and _private_copies(service) == []
+    service.close()
+
+
+@requires_ffmpeg
+def test_a_same_size_substitution_between_hash_and_read_is_refused_before_any_decoder(tmp_path, base_video,
+                                                                                    monkeypatch) -> None:
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, "Film.sub.ass", _ASS)
+    substitute = _ASS.replace("small ass line", "other ass line")
+    assert len(substitute) == len(_ASS)
+    _admissions_of(monkeypatch, sidecar,
+                   lambda n: sidecar.write_bytes(substitute.encode("utf-8")) if n == 3 else None)
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache)
+    report = service.index(max_seconds=120)
+    track = _track(service, sidecar)
+    sidecar_spawns = [s for s in spawns if s["private"] or Path(s["input"]).resolve() == sidecar.resolve()]
+    assert sidecar_spawns == [], "a decoder ran for a substituted sidecar"
+    assert track["status"] == "failed" and "changed" in track["detail"], track
+    assert f"{asset}/subtitles" in report["completed"] and _private_copies(service) == []
+    service.close()
+
+
+@requires_ffmpeg
+def test_the_decoder_reads_only_the_verified_bytes_even_if_the_original_changes_at_spawn(tmp_path, base_video,
+                                                                                         monkeypatch) -> None:
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, "Film.swap.ass", _ASS)
+    verified = hashlib.sha256(_ASS.encode("utf-8")).hexdigest()
+    swapped = _ASS.replace("small ass line", "swapped line!!")
+
+    def swap_original(private: Path) -> None:
+        sidecar.write_bytes(swapped.encode("utf-8"))  # the user's file changes while the decoder starts
+
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache, on_spawn=swap_original)
+    report = service.index(max_seconds=120)
+    track = _track(service, sidecar)
+    private = [s for s in spawns if s["private"]]
+    assert len(private) == 1 and private[0]["sha256"] == verified, spawns  # exactly the hashed bytes
+    assert track["status"] == "failed" and "changed" in track["detail"] and track["cue_count"] == 0, track
+    assert f"{asset}/subtitles" in report["completed"] and _private_copies(service) == []
+    service.close()
+
+
+@requires_ffmpeg
+@pytest.mark.skipif(os.name != "nt", reason="the write lock is a Windows share mode")
+def test_the_private_decoder_copy_cannot_be_written_replaced_or_deleted_while_decoded(tmp_path, base_video,
+                                                                                    monkeypatch) -> None:
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, "Film.lock.ssa", _ASS)
+    attempts: dict = {}
+    other = tmp_path / "other.ssa"
+    other.write_text("x", encoding="utf-8")
+
+    def tamper(private: Path) -> None:
+        for name, action in (("write", lambda: open(private, "r+b").close()),
+                             ("append", lambda: open(private, "ab").close()),
+                             ("replace", lambda: os.replace(other, private)),
+                             ("delete", lambda: os.remove(private))):
+            try:
+                action()
+                attempts[name] = "allowed"
+            except PermissionError:
+                attempts[name] = "refused"
+
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache, on_spawn=tamper)
+    report = service.index(max_seconds=120)
+    track = _track(service, sidecar)
+    assert attempts == {"write": "refused", "append": "refused", "replace": "refused", "delete": "refused"}, attempts
+    assert len([s for s in spawns if s["private"]]) == 1
+    assert track["status"] == "indexed" and track["cue_count"] == 1, track
+    assert track["sidecar_sha256"] == hashlib.sha256(_ASS.encode("utf-8")).hexdigest()
+    assert f"{asset}/subtitles" in report["completed"] and _private_copies(service) == []
+    service.close()
+
+
+@requires_ffmpeg
+def test_a_files_deny_after_the_read_stops_before_the_decoder_handoff(tmp_path, base_video, policy,
+                                                                     monkeypatch) -> None:
+    set_permission_policy("files", "ALLOW")
+    clock = FakeClock()
+    frozen = clock()
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, "Film.deny.ass", _ASS,
+                                                permissions=GatePermissions(monotonic=lambda: frozen),
+                                                monotonic=lambda: frozen)
+    real_read = stages_module.read_bounded
+
+    def read_then_deny(path, *args, **kwargs):
+        data = real_read(path, *args, **kwargs)
+        if Path(path) == sidecar:
+            set_permission_policy("files", "DENY")  # lands after the read, before the native handoff
+        return data
+
+    monkeypatch.setattr(stages_module, "read_bounded", read_then_deny)
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache)
+    report = service.index(max_seconds=60)
+    assert [s for s in spawns if s["private"]] == [], "the decoder ran after a real Files DENY"
+    assert report["stopped"] == "permission" and _stage(service, asset, "subtitles")[0] == "QUEUED", report
+    assert f"{asset}/subtitles" not in report["completed"] and _private_copies(service) == []
+    service.close()
+
+
+@requires_ffmpeg
+def test_private_copies_left_by_a_crash_are_swept_and_nothing_else_is_touched(tmp_path, base_video) -> None:
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, "Film.ok.ass", _ASS)
+    folder = service.layout.cache / "subtitle-input"
+    folder.mkdir(parents=True, exist_ok=True)
+    stale = folder / f"sub-{'a' * 32}.ass"
+    stale.write_text("left by a crash", encoding="utf-8")
+    unrelated = folder / "keep-me.txt"
+    unrelated.write_text("not ours to delete", encoding="utf-8")
+    report = service.index(max_seconds=120)
+    assert not stale.exists() and unrelated.exists()
+    assert _track(service, sidecar)["status"] == "indexed" and f"{asset}/subtitles" in report["completed"]
+    assert _private_copies(service) == ["keep-me.txt"]
+    service.close()
+
+
+@pytest.mark.parametrize("length", [2 * MAX_SUBTITLE_BYTES, MAX_SUBTITLE_BYTES + 1, MAX_SUBTITLE_BYTES])
+def test_bounded_reads_never_ask_the_operating_system_past_cap_plus_one(tmp_path, monkeypatch, length) -> None:
+    from qronos_media import identity as identity_module
+    from qronos_media.identity import HashLimitExceeded, full_sha256
+
+    path = tmp_path / "grown.ass"
+    path.write_bytes(b"")
+    os.truncate(path, length)
+    outcomes, metrics = {}, {}
+    for name, module, call in (
+            ("hash", identity_module, lambda: full_sha256(path, limit=MAX_SUBTITLE_BYTES)),
+            ("read", stages_module, lambda: read_bounded(path, MAX_SUBTITLE_BYTES, lambda: False))):
+        log: list = []
+        monkeypatch.setattr(module, "open", _raw_open(path, log), raising=False)
+        try:
+            call()
+            outcomes[name] = "accepted"
+        except (HashLimitExceeded, SubtitleError):
+            outcomes[name] = "refused"
+        metrics[name] = (max(r["offset"] + r["requested"] for r in log), sum(r["delivered"] for r in log))
+    expected = "refused" if length > MAX_SUBTITLE_BYTES else "accepted"
+    assert outcomes == {"hash": expected, "read": expected}, outcomes
+    for name, (furthest, delivered) in metrics.items():
+        assert furthest <= MAX_SUBTITLE_BYTES + 1 and delivered <= MAX_SUBTITLE_BYTES + 1, (name, furthest, delivered)
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("suffix", [".srt", ".ass"])
+def test_a_same_stat_content_substitution_after_the_hash_is_refused_by_content(tmp_path, base_video, monkeypatch,
+                                                                              suffix) -> None:
+    """Size, mtime and file id unchanged; only the bytes differ. Only the content digest can see it."""
+    original = "1\n00:00:00,500 --> 00:00:01,500\nsmall srt line\n\n" if suffix == ".srt" else _ASS
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, f"Film.stat{suffix}", original)
+    substitute = original.replace("small", "SMALL").encode("utf-8")
+    assert len(substitute) == len(original.encode("utf-8"))
+    before = os.stat(sidecar)
+
+    def substitute_in_place(n: int) -> None:
+        if n == 3:  # after the bounded hash, at the read's fresh admission
+            with open(sidecar, "r+b") as handle:  # same file id
+                handle.write(substitute)
+            os.utime(sidecar, ns=(before.st_atime_ns, before.st_mtime_ns))  # same mtime
+            after = os.stat(sidecar)
+            assert (after.st_size, after.st_mtime_ns, after.st_ino) == (before.st_size, before.st_mtime_ns,
+                                                                         before.st_ino)
+
+    _admissions_of(monkeypatch, sidecar, substitute_in_place)
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache)
+    report = service.index(max_seconds=120)
+    track = _track(service, sidecar)
+    assert track["status"] == "failed" and "changed" in track["detail"] and track["cue_count"] == 0, track
+    assert [s for s in spawns if s["private"]] == []
+    texts = [row[0] for row in service.store.db.execute("SELECT text FROM dialogue WHERE asset_id = ?", (asset,))]
+    assert not any("SMALL" in text for text in texts), texts
+    assert f"{asset}/subtitles" in report["completed"] and _private_copies(service) == []
+    service.close()
+
+
+@requires_ffmpeg
+def test_a_files_deny_while_the_private_copy_is_prepared_stops_before_the_decoder(tmp_path, base_video, policy,
+                                                                                  monkeypatch) -> None:
+    """Deterministic seam: the DENY lands inside the copy's write/flush, after the read's admission."""
+    from qronos_media import decoder_copy
+
+    set_permission_policy("files", "ALLOW")
+    clock = FakeClock()
+    frozen = clock()
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, "Film.prep.ass", _ASS,
+                                                permissions=GatePermissions(monotonic=lambda: frozen),
+                                                monotonic=lambda: frozen)
+    real_write = decoder_copy._LockedFile.write_all
+    landed: list = []
+
+    def write_then_deny(self, data):
+        real_write(self, data)
+        set_permission_policy("files", "DENY")  # while the 16 MiB-capped copy is being prepared
+        landed.append(len(data))
+
+    monkeypatch.setattr(decoder_copy._LockedFile, "write_all", write_then_deny)
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache)
+    report = service.index(max_seconds=60)
+    assert landed, "the seam was not reached"
+    assert [s for s in spawns if s["private"]] == [], "the decoder started after a DENY during copy preparation"
+    assert report["stopped"] == "permission" and _stage(service, asset, "subtitles")[0] == "QUEUED", report
+    assert _private_copies(service) == []
+    service.close()
+
+
+@requires_ffmpeg
+@pytest.mark.skipif(os.name != "nt", reason="Windows folder semantics")
+def test_the_path_ffmpeg_reopens_cannot_be_rebound_while_it_decodes(tmp_path, base_video, monkeypatch) -> None:
+    service, asset, sidecar = _subtitle_fixture(tmp_path, base_video, "Film.ns.ass", _ASS)
+    outcomes: dict = {}
+
+    def rebind(private: Path) -> None:
+        folders = {"subtitle-input": private.parent, "cache": private.parent.parent,
+                   "media data root": service.layout.root}
+        for name, folder in folders.items():
+            try:
+                os.rename(folder, folder.with_name(folder.name + "-moved"))
+                outcomes[name] = "allowed"
+                os.rename(folder.with_name(folder.name + "-moved"), folder)
+            except PermissionError:
+                outcomes[name] = "refused"
+
+    spawns = _decoder_spawns(monkeypatch, service.layout.cache, on_spawn=rebind)
+    report = service.index(max_seconds=120)
+    track = _track(service, sidecar)
+    assert outcomes == {"subtitle-input": "refused", "cache": "refused", "media data root": "refused"}, outcomes
+    assert len([s for s in spawns if s["private"]]) == 1 and track["status"] == "indexed", track
+    assert f"{asset}/subtitles" in report["completed"] and _private_copies(service) == []
+    service.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows share modes")
+def test_the_sweep_never_deletes_a_copy_held_by_a_live_owner_and_says_so(tmp_path) -> None:
+    from qronos_media.decoder_copy import INPUT_DIR, sweep_stale_inputs
+    from tests.fixtures.child_python import child_python
+
+    cache = tmp_path / "cache"
+    (cache / INPUT_DIR).mkdir(parents=True)
+    held = cache / INPUT_DIR / f"sub-{'c' * 32}.ass"
+    stale = cache / INPUT_DIR / f"sub-{'d' * 32}.ssa"
+    stale.write_bytes(b"stale")
+    executable, environment = child_python()
+    holder = subprocess.Popen(
+        [executable, "-I", "-c",
+         "import sys; sys.path[:0] = sys.argv[2:3]; from pathlib import Path\n"
+         "from qronos_media.decoder_copy import _LockedFile\n"
+         "locked = _LockedFile(Path(sys.argv[1])); locked.write_all(b'live'); print('held', flush=True)\n"
+         "sys.stdin.read(); locked.close()",
+         str(held), str(Path(stages_module.__file__).parents[1])],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
+    try:
+        assert holder.stdout.readline().strip() == b"held"
+        counts = sweep_stale_inputs(cache)
+        assert counts == {"removed": 1, "busy": 1}, counts
+        assert held.exists() and not stale.exists()
+    finally:
+        holder.stdin.close()
+        holder.wait(10)
+    assert sweep_stale_inputs(cache) == {"removed": 1, "busy": 0} and not held.exists()
+
+
+def test_cleanup_never_deletes_a_foreign_file_that_took_the_copy_s_name(tmp_path, monkeypatch) -> None:
+    from qronos_media import decoder_copy
+
+    data = b"[Script Info]\n"
+    foreign = tmp_path / "foreign.ass"
+    foreign.write_bytes(b"not ours")
+    real_close = decoder_copy._LockedFile.close
+    seen: dict = {}
+
+    def close_then_swap(self):
+        real_close(self)
+        if "path" in seen and not seen.get("swapped"):
+            os.replace(foreign, seen["path"])  # another file takes the name once the handle is gone
+            seen["swapped"] = True
+
+    monkeypatch.setattr(decoder_copy._LockedFile, "close", close_then_swap)
+    with pytest.raises(decoder_copy.DecoderInputError, match="another file"):
+        with decoder_copy.verified_decoder_input(tmp_path / "cache", data, hashlib.sha256(data).hexdigest(),
+                                                 ".ass") as path:
+            seen["path"] = path
+    assert seen["path"].read_bytes() == b"not ours"  # the foreign file was left alone
+
+
+def test_a_copy_that_is_not_where_it_was_created_is_refused_and_removed(tmp_path, monkeypatch) -> None:
+    from qronos_media import decoder_copy
+
+    data = b"[Script Info]\n"
+    monkeypatch.setattr(decoder_copy, "_same_path", lambda final, intended: False)
+    entered = []
+    with pytest.raises(decoder_copy.DecoderInputError, match="not where it was created"):
+        with decoder_copy.verified_decoder_input(tmp_path / "cache", data, hashlib.sha256(data).hexdigest(),
+                                                 ".ass") as path:
+            entered.append(path)
+    assert entered == [] and list((tmp_path / "cache" / decoder_copy.INPUT_DIR).iterdir()) == []
