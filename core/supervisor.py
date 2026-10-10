@@ -43,6 +43,7 @@ from enum import Enum
 from pathlib import Path
 from typing import BinaryIO, Callable, Optional, Protocol, Sequence
 
+from core.startup_admission import STARTUP_REFUSED_EXIT
 from core.supervisor_ipc import (
     PROTOCOL_VERSION,
     Channel,
@@ -264,6 +265,13 @@ class Supervisor:
             if self._stop.is_set():
                 break
 
+            if child.poll() == STARTUP_REFUSED_EXIT:
+                # The runtime refused to start before opening any store (an update in progress,
+                # unresolved update recovery, an unknown version...). It said why on its own
+                # output; restarting would only repeat the refusal, so this is terminal.
+                self._set(SupervisorState.DEGRADED, "the runtime refused to start; it reported why")
+                return self._state
+
             delay = self._budget.after_failure(self._clock(), self._clock() - started_at)
 
             if delay is None:
@@ -310,6 +318,21 @@ class Supervisor:
         if self._stop.is_set():
             server.interrupt()  # stop() came between launching and here
 
+        # A child that exits before it connects (for example a start-up refusal) ends the
+        # wait at once instead of after the whole connect timeout.
+        connected = threading.Event()
+        exited: list[int] = []
+
+        def watch_child() -> None:
+            while not connected.wait(0.1):
+                code = child.poll()
+                if code is not None:
+                    exited.append(code)
+                    server.interrupt()
+                    return
+
+        threading.Thread(target=watch_child, name="qronos-supervisor-child-watch", daemon=True).start()
+
         channel = None
         try:
             channel = server.accept(
@@ -329,12 +352,15 @@ class Supervisor:
 
             channel.send("welcome", protocol=PROTOCOL_VERSION, supervisor_pid=os.getpid())
         except ChannelCancelled:
+            if exited and not self._stop.is_set():
+                return server, child, None, f"the runtime exited before connecting (code {exited[0]})"
             return server, child, None, "supervisor stopping"
         except ChannelError as error:
             if channel is not None:
                 channel.close()
             return server, child, None, f"the runtime did not connect ({type(error).__name__})"
         finally:
+            connected.set()
             with self._lock:
                 self._connecting = None
 

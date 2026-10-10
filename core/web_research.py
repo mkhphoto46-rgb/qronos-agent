@@ -338,6 +338,12 @@ class WebResearch:
 
 def main() -> None:
     """Run the full pipeline live, stopping at the prompt. Uses real budget."""
+    from core import startup_admission  # before the first store opens (core/startup_admission.py)
+
+    refused = startup_admission.enter_cli("web-research")
+    if refused is not None:
+        raise SystemExit(refused)
+
     import sys
 
     from core.web_cache import WebCache

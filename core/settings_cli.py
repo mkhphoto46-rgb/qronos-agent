@@ -111,6 +111,11 @@ def _payload_for_operation(
 
 
 def main() -> int:
+    from core import startup_admission  # before the first store opens (core/startup_admission.py)
+
+    refused = startup_admission.enter_cli("settings")
+    if refused is not None:
+        return refused
     if len(sys.argv) < 2:
         raise ValueError("Settings operation is required.")
 

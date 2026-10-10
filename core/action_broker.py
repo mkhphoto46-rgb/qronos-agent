@@ -544,8 +544,18 @@ def serve_once(
     owner_check: Callable[[int], bool] = same_user,
     identity_check: Callable[[int], bool] = same_executable,
     verify_secret: Optional[SecretCheck] = None,
+    admit: Optional[Callable[[], object]] = None,
 ) -> dict:
-    """Connect back to the runtime, handle exactly one request, return its result."""
+    """Connect back to the runtime, handle exactly one request, return its result.
+
+    ``admit`` (the product passes core.startup_admission's writer admission) runs
+    right AFTER the runtime is authenticated — same user, the installed image,
+    the pipe served by exactly that process, and the session key received from
+    it, which only a live, already admitted bridge's broker session releases —
+    and BEFORE any store opens: no secret store, journal or audit line is
+    touched first. If it refuses, the pipe is closed before the hello and the
+    runtime reports the broker unavailable, with nothing sent.
+    """
     if not owner_check(runtime_pid):
         raise ChannelError("The launching runtime is not the same user.")
     if not identity_check(runtime_pid):
@@ -554,6 +564,8 @@ def serve_once(
     channel, key = connect_for_key(address, receive=FROM_RUNTIME, send=TO_RUNTIME,
                                    expected_server_pid=runtime_pid, peer_pid=peer_pid)
     try:
+        if admit is not None:
+            admit()  # authenticated parent first; no store has been opened yet
         channel.send("hello", pid=os.getpid(), protocol=PROTOCOL_VERSION)
         message = channel.receive(REQUEST_TIMEOUT_SECONDS)
         result = handle_request(message, key, registry, consumed or ConsumedApprovals(default_consumed_directory()),
@@ -583,9 +595,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps({"ok": False, "error": str(error)}))
         return 2
 
+    # Its stores (approval secret, journal, audit) are the INSTALLED profile's in every mode,
+    # so its shared writer admission there is always taken (installed=True states that fact;
+    # it waives nothing). It runs only after the parent is authenticated (serve_once).
+    from core import startup_admission
+
+    profile = installed_profile()
+
+    def admit() -> object:
+        return startup_admission.enter("action-broker", barrier=False, installed=True, data_root=profile)
+
     try:
-        result = serve_once(address, runtime_pid,
-                            audit=jsonl_audit(installed_profile() / "ActionBroker" / "audit.jsonl"))
+        result = serve_once(address, runtime_pid, audit=jsonl_audit(profile / "ActionBroker" / "audit.jsonl"),
+                            admit=admit)
+    except startup_admission.StartupRefused as refused:
+        print(json.dumps(startup_admission.refusal(refused)))
+        return startup_admission.STARTUP_REFUSED_EXIT
     except (ChannelError, OSError) as error:
         print(json.dumps({"ok": False, "error": type(error).__name__}))
         return 1

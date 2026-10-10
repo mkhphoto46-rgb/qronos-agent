@@ -185,6 +185,11 @@ def _payload() -> dict[str, object]:
 
 
 def main() -> int:
+    from core import startup_admission  # before the first store opens (core/startup_admission.py)
+
+    refused = startup_admission.enter_cli("permissions")
+    if refused is not None:
+        return refused
     operation = sys.argv[1].strip().lower() if len(sys.argv) > 1 else "snapshot"
     payload = _payload()
 

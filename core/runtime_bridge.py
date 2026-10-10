@@ -10866,6 +10866,18 @@ def start_supervision(stream) -> Any:
 def main() -> int:
     supervision = None
 
+    # Before ANY store opens (core/startup_admission.py): own the bridge singleton,
+    # refuse while an update runs, resolve an interrupted update, then hold the shared
+    # writer admission for this process's life. The frozen entry point has already done
+    # this before importing this module; then this is a no-op.
+    from core import startup_admission
+
+    try:
+        startup_admission.enter("bridge", instance=True)
+    except startup_admission.StartupRefused as refused:
+        emit("runtime_error", "error", f"{refused} ({refused.code})")
+        return startup_admission.STARTUP_REFUSED_EXIT
+
     if SUPERVISED_FLAG in sys.argv[1:]:
         try:
             supervision = start_supervision(sys.stdin.buffer)
