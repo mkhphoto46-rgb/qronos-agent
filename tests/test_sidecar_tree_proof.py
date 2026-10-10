@@ -196,6 +196,28 @@ def test_one_tree_per_guard_and_a_closed_guard_starts_nothing(guard, tree):
     assert set(tree.iterdir()) == before  # nothing was started
 
 
+def test_a_proof_bearing_guard_admits_no_later_member_and_its_proof_stays_true(guard, tree, tmp_path):
+    contained(guard, "wait-go", tree)
+    wait_for(tree, "child.pid")
+    release(tree)
+    assert guard.wait_tree_exit(15) is True
+    later = tmp_path / "later"
+    later.mkdir()
+    newcomer = subprocess.Popen(argv("wait-go", later), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
+    try:
+        wait_for(later, "child.pid")
+        with pytest.raises(SidecarGuardUnavailable):
+            guard.bind_process(newcomer.pid, process_handle=newcomer._handle)  # never joins a proved Job
+        with pytest.raises(SidecarGuardUnavailable):
+            contained(guard, "wait-go", later)  # nor a second contained generation
+        assert guard.active_processes() == 0 and guard.tree_state() == "tree_exited"
+        assert newcomer.poll() is None  # and it is left alone
+    finally:
+        release(later)
+        newcomer.wait(timeout=15)
+
+
 def test_a_process_that_cannot_be_contained_is_ended_before_it_ever_runs(guard, tree, monkeypatch):
     real = guard_module._kernel32()
     started = []

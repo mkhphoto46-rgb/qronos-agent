@@ -343,6 +343,10 @@ class WindowsSidecarGuard:
         with self._lock:
             if self._closed or not self._job_handle:
                 raise SidecarGuardUnavailable("Qronos sidecar Job Object is not available.")
+            if self._contained_from_start:
+                # A proof-bearing guard holds exactly one contained generation: no other member may ever join it,
+                # or a sticky tree_exited could describe living work.
+                raise SidecarGuardUnavailable("This sidecar guard's Job holds a contained tree; nothing else joins.")
             kernel32 = _kernel32()
             if (
                 int(kernel32.GetProcessId(process_handle)) != pid
@@ -388,6 +392,12 @@ class WindowsSidecarGuard:
                 raise
             self._contained_from_start = True
             return process
+
+    @property
+    def contains_tree(self) -> bool:
+        """True once spawn_contained made a process a member from its first instruction."""
+        with self._lock:
+            return self._contained_from_start
 
     def active_processes(self) -> int | None:
         """Live processes in this Job (nested Jobs included), or None when Windows cannot say."""
