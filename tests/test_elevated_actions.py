@@ -37,6 +37,7 @@ from core.action_broker_client import (
     BrokerResult,
     BrokerSession,
     BrokerUnavailable,
+    Cancellation,
     TypedAction,
     build_approval,
 )
@@ -274,6 +275,7 @@ class Harness:
         self.performed = []
         self.secrets = []
         self.cancel_checks = []
+        self.during = None  # called inside perform, while the action runs
         self.decision = verdict_decision
         self.paused = False
         self.session_result = session_result or BrokerResult(True, "performed", "done")
@@ -284,10 +286,12 @@ class Harness:
             harness = self
 
             class Session:
-                def perform(self, action, request, grant, secret="", cancelled=lambda: False):
+                def perform(self, action, request, grant, secret="", cancelled=lambda: False, cancellation=None):
                     harness.performed.append((action, request, grant))
                     harness.secrets.append(secret)
-                    harness.cancel_checks.append(cancelled)
+                    harness.cancel_checks.append(cancellation)
+                    if harness.during is not None:
+                        harness.during(cancellation)
                     assert isinstance(grant, gate.ActionGrant) and grant.action_id == request.action_id
                     if harness.session_error is not None:
                         raise harness.session_error
@@ -427,12 +431,18 @@ def test_the_secret_never_appears_in_a_pending_approval_s_repr():
 
 def test_stop_after_approval_cancels_a_session_that_has_not_sent_anything():
     harness = Harness()
+    seen = {}
+
+    def stop_while_running(cancellation):
+        seen["before"] = cancellation.cancelled()
+        harness.coordinator.discard("runtime_paused")
+        seen["after"] = cancellation.cancelled()
+        seen["gates"] = (cancellation.release_key(), cancellation.commit())
+
+    harness.during = stop_while_running
     harness.begin()
     harness.coordinator.resolve(harness.token(), approved=True, secret="correct")
-    (cancelled,) = harness.cancel_checks
-    assert cancelled() is False
-    harness.coordinator.discard("runtime_paused")
-    assert cancelled() is True  # every later handoff in the session now refuses to send
+    assert seen == {"before": False, "after": True, "gates": (False, False)}  # every later handoff refuses
 
 
 def test_an_unexpected_error_still_ends_in_one_visible_result():
@@ -599,10 +609,17 @@ def test_cancelled_just_before_sending_nothing_is_sent(tmp_path, child_launchers
 
     launcher = child_launchers(tmp_path)
     action, request, grant = marker_request("late")
-    checks = iter([False, False, True])  # before launch, after launch, before send
-    with pytest.raises(BrokerCancelled):
+
+    class StopAtTheCommitPoint(Cancellation):
+        """Stop lands exactly at the commit point: after the real hello, before the request."""
+
+        def commit(self):
+            self.cancel()
+            return super().commit()
+
+    with pytest.raises(BrokerCancelled, match="just before the request was sent"):
         BrokerSession(launcher, accept_timeout_seconds=20, reply_timeout_seconds=20).perform(
-            action, request, grant, secret=SECRET, cancelled=lambda: next(checks))
+            action, request, grant, secret=SECRET, cancellation=StopAtTheCommitPoint())
     (broker,) = launcher.processes
     assert broker.wait(30) != 0
     assert not (tmp_path / "markers").exists()
@@ -934,3 +951,332 @@ def test_a_prompt_issued_after_stop_still_works(monkeypatch, real_secret):
     (result,) = finished(events)
     assert result["outcome"] == "refused" and result["message"] == FA["unavailable"]
 
+
+# ------------------------------------- D1: Stop while the session waits for the broker
+#
+# The real coordinator (production run_async, ledger and gate), the real
+# BrokerSession and ChannelServer on private random pipes. The "broker" is a
+# thread of this process driven by the fake launcher below, so the real pipe
+# process-id checks see this process. No UAC, SCM, child process or
+# production mutex is involved, and nothing is performed anywhere.
+
+
+class ThreadBrokerLauncher:
+    """Fake UAC launcher: starts ``peer(address)`` on a thread; the process handle counts closes."""
+
+    def __init__(self, peer):
+        self.peer = peer
+        self.closes = 0
+        self.threads = []
+
+    def launch(self, address, runtime_pid):
+        assert runtime_pid == os.getpid()
+        thread = threading.Thread(target=self.peer, args=(address,), daemon=True)
+        thread.start()
+        self.threads.append(thread)
+        launcher = self
+
+        class Process:
+            pid = os.getpid()
+
+            def wait(self, timeout):
+                return 0
+
+            def close(self):
+                launcher.closes += 1
+
+        return Process()
+
+
+class ListenerProbe:
+    def __init__(self):
+        self.servers = []
+        self.waiting = threading.Event()
+
+
+@pytest.fixture
+def listening(monkeypatch):
+    """Records each session's ChannelServer and signals when the session starts waiting in accept."""
+    from core import action_broker_client
+
+    real = action_broker_client.ChannelServer
+    probe = ListenerProbe()
+
+    class Recording(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            probe.servers.append(self)
+
+        def accept(self, *args, **kwargs):
+            probe.waiting.set()
+            return real.accept(self, *args, **kwargs)
+
+    monkeypatch.setattr(action_broker_client, "ChannelServer", Recording)
+    return probe
+
+
+def d1_coordinator(launcher, events, session_factory=BrokerSession):
+    from tests.test_action_broker_session import SECRET
+
+    return ElevatedActionCoordinator(
+        notify=lambda kind, status, message: events.append((kind, json.loads(message))),
+        verify_secret=lambda secret: secret == SECRET,
+        secret_status=lambda: "ready",
+        paused=lambda: False,
+        launcher_factory=lambda: launcher,
+        session_factory=session_factory,
+    )
+
+
+def d1_approve(coordinator, events, request_id):
+    from tests.test_action_broker_session import SECRET
+
+    assert coordinator.try_begin("restart the print spooler", request_id) == FA["asked"]
+    token = next(body["actionToken"] for kind, body in events
+                 if kind == "app_workflow_approval_required" and body["requestId"] == request_id)
+    coordinator.resolve(token, approved=True, secret=SECRET)
+
+
+def d1_finished(events, request_id, within):
+    """The terminal events for ``request_id`` once the first arrives within ``within`` seconds, else []."""
+    def terminal():
+        return [body for kind, body in events if kind == "app_workflow_finished" and body["requestId"] == request_id]
+
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if terminal():
+            time.sleep(0.2)  # a second terminal event would show up here
+            return terminal()
+        time.sleep(0.01)
+    return []
+
+
+def assert_listener_gone(server):
+    from core.supervisor_ipc import _deadline, _open_checked
+
+    assert server._closed
+    with pytest.raises(Exception):
+        _open_checked(server.address, os.getpid(), None, _deadline(1)).close()
+
+
+@windows_only
+def test_stop_while_waiting_for_the_broker_to_connect_releases_no_key_to_a_late_peer(listening):
+    from core.action_broker import FROM_RUNTIME, TO_RUNTIME
+    from core.supervisor_ipc import ChannelError, connect_for_key
+
+    go, seen = threading.Event(), {}
+
+    def late_broker(address):
+        assert go.wait(20)
+        try:
+            channel, key = connect_for_key(address, receive=FROM_RUNTIME, send=TO_RUNTIME,
+                                           expected_server_pid=os.getpid(), timeout=3)
+        except ChannelError as error:
+            seen["refused"] = type(error).__name__
+            return
+        seen["key"] = key
+        channel.send("hello", pid=os.getpid(), protocol=1)
+        try:
+            seen["request"] = channel.receive(3)["kind"]
+        except ChannelError:
+            pass
+        channel.close()
+
+    launcher, events = ThreadBrokerLauncher(late_broker), []
+    coordinator = d1_coordinator(launcher, events)  # production session defaults (120 s accept)
+    d1_approve(coordinator, events, "req-late")
+    assert listening.waiting.wait(10)  # UAC returned; the session waits for the broker
+    coordinator.discard("runtime_stopped")
+    stopped = time.monotonic()
+    finished = d1_finished(events, "req-late", within=2.0)
+    elapsed = time.monotonic() - stopped
+    go.set()  # the broker finishes starting and tries to connect, after Stop
+    launcher.threads[0].join(10)
+
+    assert [(f["outcome"], f["message"]) for f in finished] == [("refused", FA["cancelled"])], finished
+    assert elapsed < 2.0 and "no key was released" in finished[0]["detail"]
+    assert "key" not in seen and "request" not in seen and seen.get("refused"), seen
+    (server,) = listening.servers
+    assert_listener_gone(server)
+    assert launcher.closes == 1
+    assert coordinator.try_begin("restart the print spooler", "req-after") == FA["asked"]  # not busy
+
+
+@windows_only
+def test_stop_while_waiting_for_a_broker_that_never_connects_ends_at_once_at_production_defaults(listening):
+    launcher, events = ThreadBrokerLauncher(lambda address: None), []  # UAC accepted; no broker ever connects
+    coordinator = d1_coordinator(launcher, events)  # accept timeout 120 s: not what ends the wait
+    d1_approve(coordinator, events, "req-silent")
+    assert listening.waiting.wait(10)
+    coordinator.discard("runtime_paused")
+    stopped = time.monotonic()
+    finished = d1_finished(events, "req-silent", within=2.0)
+    assert time.monotonic() - stopped < 2.0
+    assert [(f["outcome"], f["message"]) for f in finished] == [("refused", FA["cancelled"])], finished
+    (server,) = listening.servers
+    assert_listener_gone(server)
+    assert launcher.closes == 1
+    assert coordinator.try_begin("restart the print spooler", "req-after") == FA["asked"]
+
+
+@windows_only
+def test_stop_during_the_handshake_after_the_key_ends_promptly_and_sends_no_request(listening):
+    from core.supervisor_ipc import _deadline, _open_checked
+
+    took_key, done, seen = threading.Event(), threading.Event(), {"messages": []}
+
+    def stalling_broker(address):
+        connection = _open_checked(address, os.getpid(), None, _deadline(5))
+        try:
+            while not done.is_set():
+                if connection.poll(0.05):
+                    seen["messages"].append(connection.recv_bytes(256))
+                    if len(seen["messages"]) == 2:  # the key, then the challenge it never answers
+                        took_key.set()
+        except (EOFError, OSError):
+            seen["closed"] = True
+        finally:
+            connection.close()
+
+    launcher, events = ThreadBrokerLauncher(stalling_broker), []
+    coordinator = d1_coordinator(launcher, events)
+    d1_approve(coordinator, events, "req-stall")
+    assert took_key.wait(10)
+    coordinator.discard("runtime_stopped")
+    stopped = time.monotonic()
+    finished = d1_finished(events, "req-stall", within=2.0)
+    assert time.monotonic() - stopped < 2.0
+    done.set()
+    launcher.threads[0].join(5)
+    assert [(f["outcome"], f["message"]) for f in finished] == [("refused", FA["cancelled"])], finished
+    assert "the key had already been released to the launched broker" in finished[0]["detail"]
+    assert len(seen["messages"]) == 2 and seen.get("closed")  # nothing after the challenge: no request
+    assert launcher.closes == 1
+    assert_listener_gone(listening.servers[0])
+
+
+@windows_only
+def test_stop_while_waiting_for_the_hello_ends_promptly_and_sends_no_request(listening):
+    from core.action_broker import FROM_RUNTIME, TO_RUNTIME
+    from core.supervisor_ipc import ChannelError, connect_for_key
+
+    connected, done, seen = threading.Event(), threading.Event(), {}
+
+    def silent_broker(address):
+        channel, _ = connect_for_key(address, receive=FROM_RUNTIME, send=TO_RUNTIME, expected_server_pid=os.getpid())
+        connected.set()
+        assert done.wait(10)
+        try:
+            seen["request"] = channel.receive(2)["kind"]
+        except ChannelError as error:
+            seen["after"] = type(error).__name__
+        channel.close()
+
+    launcher, events = ThreadBrokerLauncher(silent_broker), []
+    coordinator = d1_coordinator(launcher, events)
+    d1_approve(coordinator, events, "req-mute")
+    assert connected.wait(10)
+    coordinator.discard("runtime_stopped")
+    stopped = time.monotonic()
+    finished = d1_finished(events, "req-mute", within=2.0)
+    assert time.monotonic() - stopped < 2.0
+    done.set()
+    launcher.threads[0].join(5)
+    assert [(f["outcome"], f["message"]) for f in finished] == [("refused", FA["cancelled"])], finished
+    assert "request" not in seen and seen.get("after"), seen
+    assert launcher.closes == 1
+
+
+@windows_only
+def test_stop_after_the_commit_point_cancels_nothing_and_the_real_result_is_reported(listening):
+    from core.action_broker import FROM_RUNTIME, TO_RUNTIME
+    from core.supervisor_ipc import connect_for_key
+
+    got_request, answer, seen = threading.Event(), threading.Event(), {}
+
+    def acting_broker(address):
+        channel, _ = connect_for_key(address, receive=FROM_RUNTIME, send=TO_RUNTIME, expected_server_pid=os.getpid())
+        channel.send("hello", pid=os.getpid(), protocol=1)
+        seen["request"] = channel.receive(10)["kind"]
+        got_request.set()
+        assert answer.wait(10)
+        channel.send("result", ok=True, outcome="performed", detail="fixture: recorded, nothing restarted")
+        channel.close()
+
+    launcher, events = ThreadBrokerLauncher(acting_broker), []
+    coordinator = d1_coordinator(launcher, events)
+    d1_approve(coordinator, events, "req-committed")
+    assert got_request.wait(10)
+    coordinator.discard("runtime_stopped")  # too late: the request was committed and sent
+    answer.set()
+    finished = d1_finished(events, "req-committed", within=10.0)
+    assert seen["request"] == "request"
+    assert [(f["outcome"], f["message"]) for f in finished] == [("succeeded", FA["done"])], finished
+    assert launcher.closes == 1
+
+
+def test_the_cancellation_orders_key_release_and_commit_against_stop():
+    first = Cancellation()
+    assert first.cancel() is True
+    assert first.release_key() is False and first.commit() is False and first.cancelled() is True
+
+    second = Cancellation()
+    assert second.release_key() is True and second.key_released  # the key went first
+    assert second.cancel() is True  # ordered after the release: it still stops the request
+    assert second.commit() is False
+
+    third = Cancellation()
+    assert third.release_key() is True and third.commit() is True
+    assert third.cancel() is False and third.cancelled() is False  # committed: nothing to cancel
+
+    woken = []
+    fourth = Cancellation()
+    with fourth.waking(lambda: woken.append("now")):
+        fourth.cancel()
+    with fourth.waking(lambda: woken.append("at once")):
+        pass
+    assert woken == ["now", "at once"]
+
+    paused = Cancellation(also=lambda: True)
+    assert paused.cancelled() and not paused.release_key() and not paused.commit()
+
+
+@windows_only
+def test_stop_between_the_peer_check_and_the_key_release_writes_no_key_byte(listening):
+    """Stop lands after the broker connected and passed the PID check, just before the key would leave."""
+    from core.supervisor_ipc import _deadline, _open_checked
+
+    done, seen = threading.Event(), {"messages": []}
+    holder = {}
+
+    def recording_broker(address):
+        connection = _open_checked(address, os.getpid(), None, _deadline(5))
+        try:
+            while not done.is_set():
+                if connection.poll(0.05):
+                    seen["messages"].append(connection.recv_bytes(256))
+        except (EOFError, OSError):
+            seen["closed"] = True
+        finally:
+            connection.close()
+
+    def stop_during_the_pid_check(connection):
+        # The session's PID query runs right before the key release: Stop exactly here.
+        holder["coordinator"].discard("runtime_stopped")
+        return os.getpid()
+
+    launcher, events = ThreadBrokerLauncher(recording_broker), []
+    coordinator = d1_coordinator(launcher, events,
+                                 session_factory=lambda chosen: BrokerSession(chosen, peer_pid=stop_during_the_pid_check))
+    holder["coordinator"] = coordinator
+    d1_approve(coordinator, events, "req-gate")
+    finished = d1_finished(events, "req-gate", within=10.0)
+    deadline = time.monotonic() + 5
+    while not seen.get("closed") and time.monotonic() < deadline:
+        time.sleep(0.02)
+    done.set()
+    launcher.threads[0].join(5)
+    assert [(f["outcome"], f["message"]) for f in finished] == [("refused", FA["cancelled"])], finished
+    assert "no key was released" in finished[0]["detail"]
+    assert seen["messages"] == [] and seen.get("closed")  # closed unanswered: not one key byte
+    assert launcher.closes == 1

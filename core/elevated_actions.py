@@ -33,12 +33,17 @@ outcome is unknown, and the person is told to check the service. One elevated
 action runs at a time. Prompts expire after ``APPROVAL_TTL_SECONDS``.
 
 Stop, Pause and shutdown revoke open prompts AND cancel an approved action
-that has not been sent yet: each approval carries the epoch it was given in,
-and the session re-checks it at every handoff — before launching, after the
-UAC prompt returns, and immediately before the request is sent. Once the
-request has left, it is not interrupted: the broker performs one action or
-none, and its outcome (or "unknown") is reported. Every path ends in exactly
-one visible result, including unexpected errors.
+that has not been sent yet. Each approval carries the epoch it was given in
+(an approval from before a Stop is never run), and a running action has a
+``Cancellation`` (``core/action_broker_client.py``) that ``discard`` cancels
+under the same lock as the epoch change. The session honours it before
+launching, after the UAC prompt returns, during the wait for the broker to
+connect, handshake and say hello (woken at once, not after a timeout), at
+the release of the session key, and at the single commit point just before
+the request is sent. Once committed, the request is not interrupted: the
+broker performs one action or none, and its outcome (or "unknown") is
+reported. Every path ends in exactly one visible result, including
+unexpected errors.
 
 Remote (Device Link) text never reaches this coordinator: the bridge only
 routes the desktop's own chat turns here.
@@ -66,6 +71,7 @@ from core.action_broker_client import (
     BrokerOutcomeUnknown,
     BrokerSession,
     BrokerUnavailable,
+    Cancellation,
     TypedAction,
 )
 from core.actions import ActionRequest
@@ -194,6 +200,8 @@ class ElevatedActionCoordinator:
         self._busy = threading.Lock()
         self._epoch_lock = threading.Lock()
         self._epoch = 0
+        #: The cancellations of approved actions now running; guarded by _epoch_lock.
+        self._inflight: set[Cancellation] = set()
         spec = PRODUCTION_ACTIONS.get(KIND)
         assert spec is not None, "the spooler restart must be a registered broker action"
         self._spec = spec
@@ -304,19 +312,21 @@ class ElevatedActionCoordinator:
         pending = replace(pending, secret=secret or "")  # the epoch stays the one bound at issuance
         self._run_async(lambda: self._perform(pending))
 
-    def _cancelled(self, pending: PendingElevation) -> bool:
-        with self._epoch_lock:
-            current = self._epoch
-        return current != pending.epoch or self._paused()
-
     def discard(self, reason: str) -> int:
         """
         Revoke every open elevation prompt and cancel every approved action
         not yet sent (Stop/Pause/shutdown). Idempotent.
+
+        Each running action's ``Cancellation`` is cancelled under the same
+        lock as the epoch change, which wakes its session's wait for the
+        broker at once. An action whose request was already committed is
+        not cancelled: its real result (or "outcome unknown") is reported.
         """
         with self._epoch_lock:
             self._epoch += 1
             revoked = self._ledger.revoke_kinds((ApprovalKind.APP_WORKFLOW,), reason)
+            for cancellation in self._inflight:
+                cancellation.cancel()
         for ticket in revoked:
             self._notify("app_workflow_stale", "ready", _json({
                 "actionToken": ticket.approval_id, "requestId": ticket.payload.request_id, "reason": reason,
@@ -329,16 +339,25 @@ class ElevatedActionCoordinator:
         if not self._busy.acquire(blocking=False):
             self._finish(pending.request_id, "refused", FA["busy"], "another elevated action is running")
             return
+        # Registered under the epoch lock: a Stop before this point already
+        # outdated the approval's epoch; one after it cancels this object.
+        cancellation = Cancellation(also=self._paused)
+        with self._epoch_lock:
+            if self._epoch != pending.epoch:
+                cancellation.cancel()
+            self._inflight.add(cancellation)
         try:
-            outcome, message, detail = self._run(pending)
+            outcome, message, detail = self._run(pending, cancellation)
         except Exception as error:  # noqa: BLE001 - every path ends in one visible result
             outcome, message, detail = "uncertain", FA["error"], f"unexpected {type(error).__name__}"
         finally:
+            with self._epoch_lock:
+                self._inflight.discard(cancellation)
             self._busy.release()
         self._finish(pending.request_id, outcome, message, detail)
 
-    def _run(self, pending: PendingElevation) -> tuple[str, str, str]:
-        if self._cancelled(pending):
+    def _run(self, pending: PendingElevation, cancellation: Cancellation) -> tuple[str, str, str]:
+        if cancellation.cancelled():
             return "refused", FA["cancelled"], "cancelled before the broker was started"
 
         verdict = self._gate(pending.request)  # fresh: settings may have changed
@@ -361,7 +380,7 @@ class ElevatedActionCoordinator:
         try:
             result = self._session_factory(launcher).perform(
                 TypedAction(KIND, {}), pending.request, grant,
-                secret=pending.secret, cancelled=lambda: self._cancelled(pending),
+                secret=pending.secret, cancellation=cancellation,
             )
         except BrokerCancelled as error:
             return "refused", FA["cancelled"], str(error)[:200]

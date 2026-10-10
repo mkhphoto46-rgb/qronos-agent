@@ -23,6 +23,7 @@ import pytest
 from core import supervisor_ipc as ipc
 from core.supervisor_ipc import (
     MAX_MESSAGE_BYTES,
+    ChannelCancelled,
     ChannelError,
     ChannelServer,
     ChannelTimeout,
@@ -629,6 +630,92 @@ def test_no_key_is_released_to_an_unexpected_process(server):
     peer.join(5)
     assert "data" not in received and received.get("closed")  # closed without a byte: no key
 
+
+
+def _raw_recording_peer(address, record, release):
+    """A raw client of the expected process: records every message the server sends, then waits."""
+    connection = Client(address, family="AF_PIPE")
+    record["connected"] = True
+    try:
+        while True:
+            if connection.poll(0.1):
+                message = connection.recv_bytes(256)
+                record.setdefault("messages", []).append(message)
+            elif release.is_set():
+                break
+    except (EOFError, OSError):
+        record["closed"] = True
+    finally:
+        connection.close()
+
+
+@windows_only
+def test_a_closed_release_gate_sends_no_key_and_cancels(server):
+    """D1: the owner's gate is asked just before the key; a refusal writes no byte."""
+    srv = server()
+    record, release = {}, threading.Event()
+    peer = Peer(lambda: _raw_recording_peer(srv.address, record, release))
+    peer.start()
+    asked = []
+    with pytest.raises(ChannelCancelled):
+        bounded(lambda: srv.accept(5, expected_pid=ME, release_key=True,
+                                   release_gate=lambda: asked.append(True) or False), 5)
+    release.set()
+    peer.join(5)
+    assert asked == [True] and record.get("connected")
+    assert "messages" not in record  # closed unanswered: no key, no challenge
+
+
+@windows_only
+def test_interrupt_ends_the_handshake_after_the_key_promptly(server):
+    """D1: a peer that takes the key and never answers the challenge cannot hold the wait to its deadline."""
+    srv = server()
+    record, release = {}, threading.Event()
+    peer = Peer(lambda: _raw_recording_peer(srv.address, record, release))
+    peer.start()
+    outcome = {}
+
+    def accept():
+        try:
+            srv.accept(30, expected_pid=ME, release_key=True)
+        except ChannelError as error:
+            outcome["error"] = error
+            outcome["at"] = time.monotonic()
+
+    waiter = Peer(accept)
+    waiter.start()
+    deadline = time.monotonic() + 10
+    while len(record.get("messages", [])) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)  # the key, then the challenge: the server now waits for the answer
+    assert len(record.get("messages", [])) == 2
+    interrupted_at = time.monotonic()
+    srv.interrupt()
+    waiter.join(5)
+    release.set()
+    peer.join(5)
+    assert isinstance(outcome.get("error"), ChannelCancelled)
+    assert outcome["at"] - interrupted_at < 1.0
+
+
+@windows_only
+def test_an_interrupted_receive_ends_promptly_and_loses_nothing_before(server):
+    srv = server()
+    holder = {}
+    peer = Peer(lambda: holder.setdefault("pair", ipc.connect_for_key(srv.address, DOWN, UP, expected_server_pid=ME)))
+    peer.start()
+    channel = bounded(lambda: srv.accept(5, expected_pid=ME, release_key=True), 5)
+    peer.join(5)
+    client, _ = holder["pair"]
+    stop = threading.Event()
+    client.send("hello", pid=ME, protocol=1)
+    assert channel.receive(5, interrupted=stop.is_set)["kind"] == "hello"  # a waiting message is delivered
+    threading.Timer(0.3, stop.set).start()
+    started = time.monotonic()
+    with pytest.raises(ChannelCancelled):
+        channel.receive(30, interrupted=stop.is_set)
+    assert time.monotonic() - started < 1.5
+    channel.close()
+    client.close()
 
 @windows_only
 def test_a_client_reads_no_key_from_an_unexpected_server(server):

@@ -79,6 +79,8 @@ DEFAULT_SEND_TIMEOUT_SECONDS = 5.0
 MAX_TIMEOUT_SECONDS = 3600.0
 KEY_BYTES = 32
 HANDSHAKE_BYTES = 128
+#: How often an interruptible wait looks at its stop signal.
+_WAIT_SLICE_SECONDS = 0.05
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 
 _PIPE_PREFIX = "\\\\.\\pipe\\qronos-"
@@ -252,15 +254,28 @@ def _remaining(deadline: float) -> float:
     return deadline - time.monotonic()
 
 
-def _receive_raw(connection, deadline: float, limit: int) -> bytes:
-    """One whole message, or an error, within the deadline."""
-    remaining = _remaining(deadline)
+def _receive_raw(connection, deadline: float, limit: int,
+                 interrupted: Optional[Callable[[], bool]] = None) -> bytes:
+    """
+    One whole message, or an error, within the deadline.
 
+    With ``interrupted``, the wait is taken in short slices and ends with
+    ``ChannelCancelled`` as soon as it returns True. Polling does not consume
+    anything, so a message arriving meanwhile is not lost.
+    """
     try:
-        if remaining <= 0 or not connection.poll(remaining):
-            raise ChannelTimeout("The peer did not answer in time.")
+        while True:
+            if interrupted is not None and interrupted():
+                raise ChannelCancelled("Stopped while waiting for the peer.")
+            remaining = _remaining(deadline)
+            if remaining <= 0:
+                raise ChannelTimeout("The peer did not answer in time.")
+            if connection.poll(remaining if interrupted is None else min(remaining, _WAIT_SLICE_SECONDS)):
+                break
+            if interrupted is None:
+                raise ChannelTimeout("The peer did not answer in time.")
         return connection.recv_bytes(limit)
-    except ChannelTimeout:
+    except ChannelError:
         raise
     except (OSError, EOFError, ValueError) as error:
         raise ChannelError("The peer is gone or sent an oversized message.") from error
@@ -364,10 +379,11 @@ def _tag(key: bytes, role: bytes, challenge: bytes) -> bytes:
     return hmac.new(key, role + challenge, "sha256").digest()
 
 
-def _server_handshake(connection, key: bytes, deadline: float) -> None:
+def _server_handshake(connection, key: bytes, deadline: float,
+                      interrupted: Optional[Callable[[], bool]] = None) -> None:
     challenge = secrets.token_bytes(32)
     _send_raw(connection, _CHALLENGE + challenge, deadline)
-    reply = _receive_raw(connection, deadline, HANDSHAKE_BYTES)
+    reply = _receive_raw(connection, deadline, HANDSHAKE_BYTES, interrupted)
 
     if len(reply) != len(_RESPONSE) + 64 or not reply.startswith(_RESPONSE):
         raise ChannelError("The peer failed authentication.")
@@ -465,8 +481,9 @@ class Channel:
             self._pending = overlapped
             return True
 
-    def receive(self, timeout: float) -> dict:
-        data = _receive_raw(self._connection, _deadline(timeout), MAX_MESSAGE_BYTES)
+    def receive(self, timeout: float, interrupted: Optional[Callable[[], bool]] = None) -> dict:
+        """The next message within ``timeout``; ``ChannelCancelled`` once ``interrupted`` returns True."""
+        data = _receive_raw(self._connection, _deadline(timeout), MAX_MESSAGE_BYTES, interrupted)
         return decode_message(data, self._receive)
 
     def close(self) -> None:
@@ -523,6 +540,7 @@ class ChannelServer:
         expected_pid: Optional[int] = None,
         peer_pid: Optional[PeerPid] = None,
         release_key: bool = False,
+        release_gate: Optional[Callable[[], bool]] = None,
     ) -> Channel:
         """
         The expected, authenticated peer within ``timeout``, or an error.
@@ -536,6 +554,14 @@ class ChannelServer:
         peer — only after its process id was checked, before anything else —
         for a peer that could not be given the key any other way without
         putting it on a command line (``connect_for_key``).
+
+        ``interrupt()`` ends the whole call promptly with ``ChannelCancelled``:
+        the wait for a peer, and the handshake after it. ``release_gate`` is
+        asked once, immediately before the key would be sent; False closes
+        the connection unanswered and raises ``ChannelCancelled``. It is the
+        owner's own serialisation point between "release the key" and
+        "cancel" (see ``core.action_broker_client.Cancellation``), so a
+        cancellation that won it never sees a key leave.
         """
         deadline = _deadline(timeout)
 
@@ -558,9 +584,13 @@ class ChannelServer:
                 continue
 
             try:
+                if self._interrupted.is_set():
+                    raise ChannelCancelled("Stopped before the peer was answered.")
                 if release_key:
+                    if release_gate is not None and not release_gate():
+                        raise ChannelCancelled("Stopped before the key was released; nothing was sent.")
                     _send_raw(connection, _KEY + self.key, deadline)
-                _server_handshake(connection, self.key, deadline)
+                _server_handshake(connection, self.key, deadline, self._interrupted.is_set)
             except ChannelError:
                 connection.close()
                 raise
