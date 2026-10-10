@@ -570,36 +570,46 @@ Limits:
 Signing in pure Python is not constant-time, so the owner signs only on their
 own trusted machine.
 
-## Wiring that other owners do (requested, not done here)
+## Wiring by other owners
 
 The closed contract is `work/opus-production-installer-contract-round5.txt`.
 `work/opus-production-installer-contract-round10.txt` section 5 makes it
-precise for the installer counterpart (R1-R4, N9, C1-C4). The additions are:
-- R2: a bounded retry (proposed: 10 s) before refusing a live fence, because
-  of the finish-page start;
-- N9: the update CLI's own admission;
+precise for the installer counterpart (R1-R4, N9, C1-C4).
+
+**Runtime: present in this composed source.** It comes from Runtime head
+b010516, and the independent review of that head is still pending. Details are
+in `qronos_supervisor_and_broker.md`, "Start-up order, singletons and the update
+fence".
+- R1: the bridge and supervisor OWN their instance mutexes
+  (`core/instance_ownership.py`).
+- R2: the update fence is checked after that acquisition. Entry points retry
+  for up to 10 s while an update stands in the way; sidecars refuse at once.
+- R3: every store-opening process runs `recover_before_stores` on its resolved
+  data root, then `core.store_admission.admit_writer`, before its first store
+  (`core/startup_admission.py`).
+- R4: `SERVICES["update"]`. The desktop backend registers `Service::Update` and
+  passes `QRONOS_APP_VERSION` from the binary to every backend service.
+  One-shot IPC refuses `launch`.
+- N9: the update CLI runs that admission itself for every operation except
+  `launch`.
+- The post-ready hook seam stays empty. Only a reviewed read-only status reader
+  may ever use it.
+
+**Control: still open, so the launch stays refused.**
 - C1: a launch path that never kills, times out or Job-owns the CLI or the
-  installer.
+  installer, and reads the launch's single answer line without waiting for the
+  process to exit.
+- An `update_command`: no Tauri command reaches `Service::Update` yet.
+- The stop result, derived from the actual process exit.
+- Every other backend command blocked and drained during a launch.
+- A runtime restart only on a typed proved-no-start refusal.
+- Mounting `UpdatePanel` after acceptance.
 
-In short:
+**Elevation:** none. Installs are per user (`installMode: currentUser`).
 
-- **Runtime:**
-  - the bridge and supervisor OWN their instance mutexes;
-  - every store-opening process calls `recover_before_stores` first, then
-    `core.store_admission.admit_writer`, then opens stores;
-  - backend services refuse while `update_in_progress()`;
-  - `SERVICES["update"]`;
-  - only the read-only `startup_check` may use the post-ready hook seam.
-- **Control:**
-  - `Service::Update` and `update_command` with `QRONOS_APP_VERSION` from the
-    binary;
-  - the stop result derived from the actual process exit;
-  - every other backend command blocked and drained during a launch;
-  - read the launch's single answer line without waiting for the process to
-    exit;
-  - restart the runtime only on a typed proved-no-start refusal;
-  - mount `UpdatePanel` after acceptance.
-- **Elevation:** none. Installs are per user (`installMode: currentUser`).
+`LAUNCH_DEPENDENCIES` in `core/update_service.py` still lists every dependency.
+The launch opens only when they are all independently accepted together. Its
+first entry's remark that the bridge does not use an instance guard predates R1.
 
 The unsigned review installers built so far are not owner-signed and must not
 be described as such.
