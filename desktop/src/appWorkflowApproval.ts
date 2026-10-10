@@ -1,19 +1,22 @@
 /**
- * Telegram / print / browser workflow prompts from the runtime.
+ * Telegram / print / browser / print-spooler workflow prompts from the runtime.
  *
  * Every prompt carries a single-use backend identity (actionToken). The
  * desktop answers with that identity only. Stop, Pause and shutdown revoke
  * open prompts in the runtime (app_workflow_stale), which dismisses them
  * here without answering. One decision is sent per prompt; an unconfirmed
  * send is reported honestly and never replayed automatically. The approval
- * secret is sent only with an approved print step and is never kept.
+ * secret is sent only with an approved typed-secret step (printing, restarting
+ * the Windows print spooler) and is never kept.
  */
 
 export type WorkflowPhase =
   | "telegram_inspect"
   | "telegram_download"
   | "print"
-  | "browser_navigate";
+  | "browser_navigate"
+  /** core/elevated_actions.py: restart the Windows print spooler (UAC broker), always behind the typed secret. */
+  | "printer_spooler_restart";
 
 export type WorkflowPermission =
   | "require_voice_confirmation"
@@ -25,6 +28,7 @@ const PERMISSION_FOR_PHASE: Record<WorkflowPhase, WorkflowPermission> = {
   telegram_download: "require_ui_confirmation",
   print: "require_typed_secret",
   browser_navigate: "require_voice_confirmation",
+  printer_spooler_restart: "require_typed_secret",
 };
 
 const ACTION_TOKEN = /^[A-Za-z0-9_-]{22,64}$/;
@@ -100,7 +104,8 @@ function isPhase(value: unknown): value is WorkflowPhase {
     value === "telegram_inspect" ||
     value === "telegram_download" ||
     value === "print" ||
-    value === "browser_navigate"
+    value === "browser_navigate" ||
+    value === "printer_spooler_restart"
   );
 }
 
@@ -215,6 +220,8 @@ export function workflowTitle(phase: WorkflowPhase): string {
       return "چاپ یک فایل";
     case "browser_navigate":
       return "باز کردن صفحه در مرورگر";
+    case "printer_spooler_restart":
+      return "راه‌اندازی دوبارهٔ سرویس چاپ ویندوز";
   }
 }
 
@@ -239,6 +246,17 @@ const DETAIL_LABELS: Record<WorkflowPhase, Array<[string, string]>> = {
     ["url", "نشانی"],
     ["query", "عبارت جستجو"],
   ],
+  printer_spooler_restart: [
+    ["service", "سرویس ویندوز"],
+    ["elevation", "اجازهٔ مدیر"],
+  ],
+};
+
+/** Known detail values shown as a Persian sentence; any other value is shown as sent. */
+const DETAIL_VALUE_TEXT: Partial<Record<WorkflowPhase, Record<string, Record<string, string>>>> = {
+  printer_spooler_restart: {
+    elevation: { uac: "پس از تأیید با رمز، ویندوز اجازهٔ مدیر (UAC) را می‌پرسد" },
+  },
 };
 
 /** Only known fields, in a fixed order, with Persian labels. */
@@ -247,12 +265,14 @@ export function workflowDetailRows(prompt: WorkflowPrompt): Array<{ label: strin
   for (const [key, label] of DETAIL_LABELS[prompt.phase]) {
     const value = prompt.details[key];
     if (value === undefined || value === "" || (Array.isArray(value) && value.length === 0)) continue;
-    rows.push({ label, value: Array.isArray(value) ? value.join("، ") : String(value) });
+    const shown = Array.isArray(value) ? value.join("، ") : String(value);
+    const known = DETAIL_VALUE_TEXT[prompt.phase]?.[key];
+    rows.push({ label, value: known && Object.hasOwn(known, shown) ? known[shown] : shown });
   }
   return rows;
 }
 
-/** The runtime action for one answer. The secret travels only with an approved print step. */
+/** The runtime action for one answer. The secret travels only with an approved typed-secret step. */
 export function decisionAction(
   prompt: WorkflowPrompt,
   approved: boolean,
@@ -501,8 +521,12 @@ export function applyWorkflowEvent(
   }
 }
 
-/** Outcomes after which the person may need to release a blocked attempt. */
-export function outcomeNeedsCheck(outcome: string): boolean {
+/**
+ * Outcomes after which the person may need to release a blocked attempt. A print-spooler
+ * restart never enters that list (its uncertain result asks the person to check the service).
+ */
+export function outcomeNeedsCheck(outcome: string, workflow?: string): boolean {
+  if (workflow === "printer_spooler_restart") return false;
   return outcome === "uncertain" || outcome === "needs_attention";
 }
 
@@ -520,6 +544,8 @@ export function outcomeTitle(outcome: string): string {
       return "متوقف شد";
     case "refused":
       return "انجام نشد";
+    case "failed":
+      return "ناموفق";
     default:
       return "نتیجه";
   }

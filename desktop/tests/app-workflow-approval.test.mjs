@@ -527,3 +527,157 @@ test("App routes workflow events to the controller and answers only through it",
     assert.ok(!source.includes("localStorage"), `${file} must never store the secret`);
   }
 });
+
+// ------------------------------------------- print-spooler restart (core/elevated_actions.py)
+
+// Captured verbatim from the real ElevatedActionCoordinator (try_begin, a wrong-secret resolve, then a Stop; the
+// broker path was never reached): work/main-p1-r20/capture_backend.py. The token is the approval ledger's own
+// token_urlsafe(18) form.
+const SPOOLER_TOKEN = "1troLXLc_HCglBgzEgW5hZBk";
+const SPOOLER_PROMPT = '{"actionToken":"1troLXLc_HCglBgzEgW5hZBk","requestId":"req-spooler-1","phase":"printer_spooler_restart","permission":"require_typed_secret","details":{"service":"Spooler","elevation":"uac"},"message":"راه‌اندازی دوبارهٔ سرویس چاپ ویندوز (Spooler): سرویس متوقف و دوباره روشن می‌شود و کار دیگری انجام نمی‌شود. پس از تأیید با رمز، ویندوز اجازهٔ مدیر (UAC) را می‌پرسد."}';
+const SPOOLER_REJECTED = '{"actionToken":"1troLXLc_HCglBgzEgW5hZBk","requestId":"req-spooler-1","message":"رمز تأیید درست نیست یا موقتاً قفل است. کاری انجام نشد."}';
+const SPOOLER_STALE = '{"actionToken":"1troLXLc_HCglBgzEgW5hZBk","requestId":"req-spooler-1","reason":"user_stop"}';
+// The shape of core/elevated_actions.py _finish (outcomes refused | succeeded | failed | uncertain).
+const spoolerFinished = (outcome) => JSON.stringify({
+  requestId: "req-spooler-1", workflow: "printer_spooler_restart", outcome,
+  message: "پاسخ سرویس چاپ", detail: "fixture", result: {},
+});
+
+function invokeHarness() {
+  const calls = [];
+  const pending = [];
+  const controller = workflow.createWorkflowApprovalController((command, args) => {
+    calls.push([command, plain(args)]);
+    const call = deferred();
+    pending.push(call);
+    return call.promise;
+  }, () => {});
+  return {
+    controller, calls, pending,
+    emit(type, message) { return workflow.applyWorkflowEvent(controller, type, message); },
+  };
+}
+
+test("the backend's print-spooler prompt reaches the controller as a typed-secret step", () => {
+  const h = harness();
+  assert.equal(h.emit("app_workflow_approval_required", SPOOLER_PROMPT), true);
+  const shown = h.controller.getSnapshot().prompt;
+  assert.equal(shown?.actionToken, SPOOLER_TOKEN);
+  assert.equal(shown.phase, "printer_spooler_restart");
+  assert.equal(shown.permission, "require_typed_secret");
+  assert.equal(workflow.needsSecret(shown), true);
+  assert.equal(workflow.workflowTitle(shown.phase), "راه‌اندازی دوبارهٔ سرویس چاپ ویندوز");
+  assert.deepEqual(plain(workflow.workflowDetailRows(shown).map((row) => [row.label, row.value])), [
+    ["سرویس ویندوز", "Spooler"],
+    ["اجازهٔ مدیر", "پس از تأیید با رمز، ویندوز اجازهٔ مدیر (UAC) را می‌پرسد"],
+  ]);
+});
+
+test("a print-spooler prompt claiming any weaker tier, or carrying odd details, is never shown as more", () => {
+  const raw = JSON.parse(SPOOLER_PROMPT);
+  for (const permission of ["require_ui_confirmation", "require_voice_confirmation", "allow", "deny"]) {
+    assert.equal(workflow.parseWorkflowPrompt(JSON.stringify({ ...raw, permission })), null, permission);
+  }
+  const extra = workflow.parseWorkflowPrompt(JSON.stringify({
+    ...raw, details: { service: "Spooler", elevation: "something-else", command: "net stop spooler" },
+  }));
+  assert.deepEqual(plain(workflow.workflowDetailRows(extra).map((row) => row.value)), ["Spooler", "something-else"]);
+  assert.equal(workflow.parseWorkflowPrompt(JSON.stringify({ ...raw, actionToken: "short" })), null);
+});
+
+test("approving sends exactly one decision with the typed secret and keeps no secret in the view", async () => {
+  const h = invokeHarness();
+  h.emit("app_workflow_approval_required", SPOOLER_PROMPT);
+  const first = h.controller.answer(SPOOLER_TOKEN, true, "s3cret-typed");
+  const second = h.controller.answer(SPOOLER_TOKEN, true, "s3cret-typed");  // a double click
+  assert.deepEqual(h.calls, [["send_runtime_action", {
+    actionId: "qronos.app_workflow_decision",
+    data: { actionToken: SPOOLER_TOKEN, approved: true, secret: "s3cret-typed" },
+  }]]);
+  assert.equal(h.controller.getSnapshot().submitting, true);
+  assert.ok(!JSON.stringify(h.controller.getSnapshot()).includes("s3cret-typed"), "the secret is never kept");
+  h.pending[0].resolve();
+  await first;
+  await second;
+  // A typed-secret step stays open until the runtime answers (a wrong secret keeps it).
+  assert.equal(h.controller.getSnapshot().prompt?.actionToken, SPOOLER_TOKEN);
+  assert.equal(h.calls.length, 1);
+});
+
+test("an empty or blank secret is never sent, and a denial carries no secret", async () => {
+  const h = invokeHarness();
+  h.emit("app_workflow_approval_required", SPOOLER_PROMPT);
+  await h.controller.answer(SPOOLER_TOKEN, true, "");
+  await h.controller.answer(SPOOLER_TOKEN, true, "   ");
+  assert.deepEqual(h.calls, []);
+  const denial = h.controller.answer(SPOOLER_TOKEN, false, "typed-but-declined");
+  assert.deepEqual(h.calls, [["send_runtime_action", {
+    actionId: "qronos.app_workflow_decision", data: { actionToken: SPOOLER_TOKEN, approved: false },
+  }]]);
+  h.pending[0].resolve();
+  await denial;
+  assert.equal(h.controller.getSnapshot().prompt, null);
+});
+
+test("the backend's wrong-secret answer keeps the prompt for one more single send", async () => {
+  const h = invokeHarness();
+  h.emit("app_workflow_approval_required", SPOOLER_PROMPT);
+  const first = h.controller.answer(SPOOLER_TOKEN, true, "wrong");
+  h.pending[0].resolve();
+  await first;
+  assert.equal(h.emit("app_workflow_secret_rejected", SPOOLER_REJECTED), true);
+  const view = h.controller.getSnapshot();
+  assert.equal(view.prompt?.actionToken, SPOOLER_TOKEN);
+  assert.equal(view.secretRejected, true);
+  assert.equal(view.submitting, false);
+  const retry = h.controller.answer(SPOOLER_TOKEN, true, "the-right-one");
+  assert.equal(h.calls.length, 2);
+  assert.deepEqual(h.calls[1][1].data, { actionToken: SPOOLER_TOKEN, approved: true, secret: "the-right-one" });
+  h.pending[1].resolve();
+  await retry;
+  h.emit("app_workflow_finished", spoolerFinished("succeeded"));
+  assert.equal(h.controller.getSnapshot().prompt, null);
+  assert.equal(h.controller.getSnapshot().result?.workflow, "printer_spooler_restart");
+});
+
+test("the backend's Stop revokes the prompt: no answer is sent and a re-delivery is never shown", async () => {
+  const h = invokeHarness();
+  h.emit("app_workflow_approval_required", SPOOLER_PROMPT);
+  assert.equal(h.emit("app_workflow_stale", SPOOLER_STALE), true);
+  assert.equal(h.controller.getSnapshot().prompt, null);
+  await h.controller.answer(SPOOLER_TOKEN, true, "s3cret");
+  assert.deepEqual(h.calls, []);
+  h.emit("app_workflow_approval_required", SPOOLER_PROMPT);
+  assert.equal(h.controller.getSnapshot().prompt, null);
+});
+
+test("print-spooler results are titled and never offer the unrelated uncertain-attempt list", () => {
+  assert.equal(workflow.outcomeTitle("failed"), "ناموفق");
+  assert.equal(workflow.outcomeNeedsCheck("uncertain", "printer_spooler_restart"), false);
+  assert.equal(workflow.outcomeNeedsCheck("uncertain", "print"), true);
+  assert.equal(workflow.outcomeNeedsCheck("uncertain"), true);
+  const render = mountDialog();
+  for (const outcome of ["uncertain", "failed", "succeeded", "refused"]) {
+    const tree = render({
+      prompt: null, submitting: false, unconfirmed: false, secretRejected: false, recovery: null,
+      result: workflow.parseWorkflowFinished(spoolerFinished(outcome)),
+    });
+    assert.ok(!findAll(tree, (n) => n.type === "button").some((n) => text(n).includes("نیازمند بررسی")), outcome);
+  }
+});
+
+test("the dialog shows the print-spooler step and needs a typed secret before approval", () => {
+  const render = mountDialog();
+  const view = viewFor(SPOOLER_PROMPT);
+  let tree = render(view);
+  assert.ok(text(tree).includes("راه‌اندازی دوبارهٔ سرویس چاپ ویندوز"));
+  assert.ok(text(tree).includes("Spooler"));
+  const input = findAll(tree, (n) => n.type === "input")[0];
+  assert.equal(input.props.type, "password");
+  assert.equal(input.props.autoComplete, "off");
+  const approveDisabled = (t) => findAll(t, (n) => n.type === "button")[1].props.disabled;
+  assert.equal(approveDisabled(tree), true);
+  input.props.onChange({ target: { value: "typed" } });
+  tree = render(view);
+  assert.equal(approveDisabled(tree), false);
+});

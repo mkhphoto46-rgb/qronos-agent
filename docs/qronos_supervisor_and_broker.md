@@ -356,12 +356,20 @@ Outcomes are reported once and never retried:
 Only one elevated action runs at a time. From source, elevation is refused
 before any prompt.
 
-**Desktop contract (Control).** `desktop/src/appWorkflowApproval.ts` accepts
-four phases today, so the frontend drops this prompt until Control adds
-`printer_spooler_restart` with permission `require_typed_secret`. The secret
-should be sent exactly as for `print`. Until then the action is reachable
-in the runtime but not approvable from the UI. It fails closed: the prompt
-simply expires.
+**Desktop contract.** `desktop/src/appWorkflowApproval.ts` accepts
+`printer_spooler_restart` only with permission `require_typed_secret`; any
+weaker tier is not shown. The dialog's title is "راه‌اندازی دوبارهٔ سرویس چاپ
+ویندوز", with two fixed rows (the Windows service, and that Windows asks for
+UAC after the secret). The answer follows the same single-use path as `print`:
+- the secret is typed, sent once and never kept;
+- an empty secret is not sent, and a denial carries no secret;
+- a wrong secret keeps the prompt for another single try;
+- Stop, Pause and revocation dismiss it without an answer.
+An `uncertain` result asks the person to check the print service. It does not
+offer the print/Telegram uncertain-attempt list, which never holds a spooler
+attempt. Verified only with fixture events captured from the real coordinator
+(desktop/tests/app-workflow-approval.test.mjs), never with a real UAC prompt or
+spooler.
 
 ## Start-up order, singletons and the update fence
 

@@ -27,12 +27,13 @@ type Props = {
 };
 
 /**
- * App-native approval for Telegram, print and browser workflow steps.
+ * App-native approval for Telegram, print, browser and print-spooler restart steps.
  *
  * Shows exactly what the runtime will do (the details come from the prompt,
  * in a fixed order), answers only with the prompt's single-use identity,
- * starts on the safe choice, and declines on Escape. A print step needs the
- * approval secret, typed here and sent once; it is never stored. A result
+ * starts on the safe choice, and declines on Escape. A typed-secret step
+ * (printing, restarting the Windows print spooler) needs the approval secret,
+ * typed here and sent once; it is never stored. A result
  * from a page in the browser is shown as untrusted page content.
  *
  * An attempt whose outcome is unclear blocks a repeat of the same work. The
@@ -247,7 +248,7 @@ function WorkflowResultPanel({
         </details>
       )}
       <div className="workflow-result-actions">
-        {outcomeNeedsCheck(result.outcome) && (
+        {outcomeNeedsCheck(result.outcome, result.workflow) && (
           <button type="button" className="file-approval-button" onClick={onOpenRecovery}>
             کارهای نیازمند بررسی
           </button>
