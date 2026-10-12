@@ -4,6 +4,7 @@ The installer is opened with 7-Zip as an archive; nothing is installed or run.
 After extraction:
 
 * the embedded WebView2 installer has exactly the pinned SHA-256;
+* the embedded Visual C++ 2015-2022 x64 redistributable has exactly its pinned SHA-256;
 * no NSIS download plug-in is present;
 * ``qronos-runtime/`` matches its runtime manifest file-for-file and byte-for-byte;
 * ``third-party-notices/`` matches its own notice manifest the same way;
@@ -50,7 +51,8 @@ def extract_installer(setup: Path, seven_zip: Path, destination: Path,
     return destination
 
 
-def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | None = None) -> dict[str, Any]:
+def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | None = None, *,
+                     vcredist_pin: dict[str, Any] | None = None) -> dict[str, Any]:
     """Byte-level checks of an extracted installer; returns the evidence.
 
     With ``install_manifest`` (the ownership manifest the build generated), the
@@ -75,6 +77,16 @@ def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | 
     payload_sha = sha256_file(payload)
     if payload.stat().st_size != pin["bytes"] or payload_sha != pin["sha256"]:
         raise PrerequisiteError(f"The embedded WebView2 installer SHA-256 {payload_sha} does not match the pin.")
+    vcredist = None
+    if vcredist_pin is not None:
+        vc_payload = plugins / vcredist_pin["fileName"]
+        if not vc_payload.is_file():
+            raise PrerequisiteError("The installer does not contain the VC++ redistributable.")
+        vc_sha = sha256_file(vc_payload)
+        if vc_payload.stat().st_size != vcredist_pin["bytes"] or vc_sha != vcredist_pin["sha256"]:
+            raise PrerequisiteError(f"The embedded VC++ redistributable SHA-256 {vc_sha} does not match the pin.")
+        vcredist = {"path": f"{PLUGINS_DIR}/{vcredist_pin['fileName']}", "bytes": vcredist_pin["bytes"],
+                    "sha256": vc_sha}
 
     runtime = root / "qronos-runtime"
     try:
@@ -101,6 +113,7 @@ def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | 
         "plugins": sorted(entry.name for entry in plugins.iterdir()),
         "webview2Installer": {"path": f"{PLUGINS_DIR}/{pin['fileName']}", "bytes": pin["bytes"],
                               "sha256": payload_sha},
+        "vcredistInstaller": vcredist,
         "mainExecutableSha256": sha256_file(root / MAIN_EXECUTABLE),
         "runtimeManifestSha256": sha256_file(runtime_manifest),
         "runtimeFiles": len(json.loads(runtime_manifest.read_text(encoding="utf-8"))["files"]),
@@ -133,7 +146,8 @@ def source_state(root: Path) -> dict[str, Any]:
 
 
 def provenance_record(*, setup: Path, root: Path, pin: dict[str, Any], extracted: dict[str, Any],
-                      backend_source: str, purpose: str, tauri_cli: str) -> dict[str, Any]:
+                      backend_source: str, purpose: str, tauri_cli: str,
+                      vcredist_pin: dict[str, Any] | None = None) -> dict[str, Any]:
     source = source_state(root)
     return {
         "schema": 1,
@@ -152,6 +166,11 @@ def provenance_record(*, setup: Path, root: Path, pin: dict[str, Any], extracted
                            "files": extracted["desktopNoticeFiles"]},
         "webview2": {"runtimeVersion": pin["runtime"]["version"], "installerSha256": pin["sha256"],
                      "installerBytes": pin["bytes"], "url": pin["url"], "embeddedAt": extracted["webview2Installer"]["path"]},
+        "vcredist": None if vcredist_pin is None else {
+            "runtimeVersion": vcredist_pin["runtime"]["version"], "installerSha256": vcredist_pin["sha256"],
+            "installerBytes": vcredist_pin["bytes"], "url": vcredist_pin["url"],
+            "embeddedAt": (extracted.get("vcredistInstaller") or {}).get("path"),
+            "licence": vcredist_pin["licence"]["terms"]},
         "extracted": {"topLevel": extracted["topLevel"], "plugins": extracted["plugins"],
                       "mainExecutableSha256": extracted["mainExecutableSha256"]},
         "toolchain": {
@@ -160,9 +179,10 @@ def provenance_record(*, setup: Path, root: Path, pin: dict[str, Any], extracted
             "cargo": _command_output(["cargo", "-V"], root),
             "node": _command_output(["node", "--version"], root),
         },
-        "ownerGates": pin["ownerGates"],
+        "ownerGates": pin["ownerGates"] + ([] if vcredist_pin is None else vcredist_pin["ownerGates"]),
         "notVerifiedHere": [
             "installation on a clean Windows machine (offline, with and without WebView2, standard user)",
+            "installation with and without the Visual C++ runtime, including the UAC consent it may need",
             "Authenticode signing of this installer",
         ],
     }

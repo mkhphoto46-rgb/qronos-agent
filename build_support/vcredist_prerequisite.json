@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "comment": "The exact Microsoft Visual C++ 2015-2022 Redistributable (x64) embedded in the Qronos NSIS installer. The runtime assets (whisper.cpp) and native components need MSVCP140, VCRUNTIME140(_1) and VCOMP140. The build does not download it: a developer fetches the pinned URL into .cache/vcredist/ once, and build_support.build_desktop verifies these bytes offline before every build. The installer runs it only when the registered x64 runtime is missing or older than this version, before anything of a previous installation changes. Re-pinning is a reviewed change.",
+  "component": "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
+  "target": "x86_64-pc-windows-msvc",
+  "architecture": "x64",
+  "fileName": "vc_redist.x64.exe",
+  "bytes": 25635768,
+  "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+  "url": "https://download.visualstudio.microsoft.com/download/pr/bd1c8d9d-ba95-4eee-bc6e-df1fcc876373/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe",
+  "resolvedFrom": "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+  "resolvedOn": "2026-10-12",
+  "runtime": {
+    "version": "14.44.35211.0",
+    "major": 14,
+    "minor": 44,
+    "build": 35211,
+    "registryKey": "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64",
+    "evidence": "ProductVersion/FileVersion 14.44.35211.0 of the signed file; the download URL embeds this file's SHA-256; byte-identical to VS Build Tools 2022 VC\\Redist\\MSVC\\14.44.35112\\vc_redist.x64.exe. Registry values Installed/Major/Minor/Bld follow Microsoft's detection guidance for the Visual C++ Redistributable."
+  },
+  "bundle": {
+    "productName": "Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.44.35211",
+    "companyName": "Microsoft Corporation",
+    "requestedExecutionLevel": "asInvoker (WiX Burn bundle; it requests elevation itself for the per-machine runtime)"
+  },
+  "authenticode": {
+    "signer": "Microsoft Corporation",
+    "issuer": "Microsoft Code Signing PCA 2011",
+    "signerCertificateSha1": "8F985BE8FD256085C90A95D3C74580511A1DB975",
+    "verifiedWith": "WinVerifyTrust (build_support.desktop_prerequisites.winverifytrust, no revocation network access), 2026-10-12: valid"
+  },
+  "installArguments": "/install /quiet /norestart",
+  "successExitCodes": [0, 1638, 3010],
+  "licence": {
+    "terms": "Microsoft Software License Terms for Visual Studio 2022, 'Distributable Code', with the Visual Studio 2022 Distributable Code list (REDIST.txt)",
+    "listUrl": "https://learn.microsoft.com/visualstudio/releases/2022/redistribution",
+    "listEntry": "Visual C++ Runtime Files: 'Subject to the License Terms for the software, you may copy and distribute with your program any of the files within the following folder and its subfolders except as noted below. You may not modify these files. [VisualStudioFolder]\\VC\\redist'",
+    "condition": "Microsoft: 'Distribution of the Visual C++ Runtime Redistributable package ... is limited to licensed Visual Studio users and is subject to its license terms.'"
+  },
+  "ownerGates": [
+    "Redistribution is limited to licensed Visual Studio users: the owner must hold a valid Visual Studio 2022 licence covering this redistribution (the build machine has VS Build Tools 2022). This is a recorded licence condition, not a clearance given here.",
+    "The Qronos installer that embeds it is unsigned; Authenticode signing of the Qronos installer is a separate owner gate.",
+    "The redistributable runs per-machine and asks Windows for administrator consent (UAC) when it must install; a standard user without that consent cannot complete the Qronos installation on a machine that lacks the runtime, and nothing is changed in that case.",
+    "This pinned runtime version ages; a machine with a newer 14.x runtime keeps it (the installer then skips this step)."
+  ],
+  "references": [
+    "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist",
+    "https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files",
+    "https://learn.microsoft.com/visualstudio/releases/2022/redistribution"
+  ]
+}

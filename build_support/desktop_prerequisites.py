@@ -25,6 +25,12 @@ Instead:
   checked: no download mode, no NSIS download plugin, and exactly the pinned
   bytes embedded.
 
+The Microsoft Visual C++ 2015-2022 Redistributable (x64) is handled the same
+way (``build_support/vcredist_prerequisite.json``, ``.cache/vcredist/``): pinned
+bytes, SHA-256 and signer, verified offline, embedded once by the same hook,
+and run only when the registered x64 runtime is missing or older than the pin,
+before anything of a previous installation changes.
+
 Verification is technical evidence. It is not Microsoft redistribution
 clearance, and it does not sign the Qronos installer.
 """
@@ -59,6 +65,16 @@ DOWNLOAD_PLUGINS = ("nsisdl.dll", "inetc.dll", "nsisdownload.dll")
 _PIN_FIELDS = frozenset({"schema", "comment", "component", "target", "architecture", "fileName", "bytes",
                          "sha256", "url", "resolvedFrom", "resolvedOn", "runtime", "setupStub",
                          "authenticode", "installArguments", "ownerGates", "references"})
+
+VCREDIST_PIN_PATH = ROOT / "build_support" / "vcredist_prerequisite.json"
+VCREDIST_CACHE_DIR = ROOT / ".cache" / "vcredist"
+#: Where the hook stores the embedded Visual C++ Redistributable inside the NSIS archive.
+VCREDIST_EMBEDDED_PATH = "$PLUGINSDIR\\vc_redist.x64.exe"
+_VCREDIST_PIN_FIELDS = frozenset({"schema", "comment", "component", "target", "architecture", "fileName", "bytes",
+                                  "sha256", "url", "resolvedFrom", "resolvedOn", "runtime", "bundle", "authenticode",
+                                  "installArguments", "successExitCodes", "licence", "ownerGates", "references"})
+#: What the hook accepts from vc_redist: success, a newer runtime already present, success needing a restart.
+VCREDIST_SUCCESS_EXIT_CODES = (0, 1638, 3010)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RUNTIME_VERSION = re.compile(r"[0-9]{1,5}(\.[0-9]{1,5}){3}")
 _NSIS_UNSAFE = re.compile(r'["$`\r\n;]')
@@ -124,6 +140,42 @@ def load_pin(path: Path = PIN_PATH) -> dict[str, Any]:
     return pin
 
 
+def load_vcredist_pin(path: Path = VCREDIST_PIN_PATH) -> dict[str, Any]:
+    """The pinned Microsoft Visual C++ 2015-2022 Redistributable (x64)."""
+    pin = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(pin, dict) or set(pin) != _VCREDIST_PIN_FIELDS or pin.get("schema") != 1:
+        raise PrerequisiteError(f"The VC++ pin must have exactly the fields {sorted(_VCREDIST_PIN_FIELDS)}.")
+    if pin["target"] != WINDOWS_TARGET or pin["architecture"] != "x64" or pin["fileName"] != "vc_redist.x64.exe":
+        raise PrerequisiteError(f"The VC++ pin must be vc_redist.x64.exe for {WINDOWS_TARGET}.")
+    if not isinstance(pin["bytes"], int) or isinstance(pin["bytes"], bool) or pin["bytes"] <= 0:
+        raise PrerequisiteError("The VC++ pin needs a positive byte size.")
+    if not isinstance(pin["sha256"], str) or not _SHA256.fullmatch(pin["sha256"]):
+        raise PrerequisiteError("The VC++ pin needs a lower-case SHA-256.")
+    url = pin["url"]
+    # Microsoft's immutable download URL names the file's SHA-256 in its path.
+    if not isinstance(url, str) or not url.startswith("https://download.visualstudio.microsoft.com/download/pr/") \
+            or f"/{pin['sha256'].upper()}/" not in url or not url.lower().endswith("/vc_redist.x64.exe"):
+        raise PrerequisiteError("The VC++ pin URL must be Microsoft's immutable download URL naming the pinned SHA-256.")
+    runtime = pin["runtime"]
+    numbers = [runtime.get(name) if isinstance(runtime, dict) else None for name in ("major", "minor", "build")]
+    if not all(isinstance(n, int) and not isinstance(n, bool) and 0 <= n < 100000 for n in numbers) \
+            or numbers[0] != 14 or not _RUNTIME_VERSION.fullmatch(str(runtime.get("version", ""))) \
+            or not str(runtime["version"]).startswith(f"{numbers[0]}.{numbers[1]}.{numbers[2]}."):
+        raise PrerequisiteError("The VC++ pin must declare the 14.x runtime version and its major/minor/build.")
+    authenticode = pin["authenticode"]
+    if not isinstance(authenticode, dict) or not re.fullmatch(r"[0-9A-Fa-f]{40}",
+                                                               str(authenticode.get("signerCertificateSha1", ""))) \
+            or authenticode.get("signer") != "Microsoft Corporation" or not authenticode.get("issuer"):
+        raise PrerequisiteError("The VC++ pin must record Microsoft's signer, issuer and SHA-1 thumbprint.")
+    if pin["installArguments"] != "/install /quiet /norestart" \
+            or tuple(pin["successExitCodes"]) != VCREDIST_SUCCESS_EXIT_CODES:
+        raise PrerequisiteError("The VC++ pin must use the install arguments and exit codes the hook applies.")
+    if not isinstance(pin["ownerGates"], list) or not pin["ownerGates"] or not isinstance(pin["licence"], dict) \
+            or not pin["licence"].get("terms") or not pin["licence"].get("condition"):
+        raise PrerequisiteError("The VC++ pin must keep its licence terms and owner gates visible.")
+    return pin
+
+
 # ------------------------------------------------------- the cached file
 
 
@@ -144,7 +196,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def winverifytrust(path: Path) -> dict[str, str]:
+def winverifytrust(path: Path, what: str = "The WebView2 installer") -> dict[str, str]:
     """A valid Authenticode signature chaining to a trusted root, checked offline.
 
     Returns the identity of the certificate that signed the file (its SHA-1
@@ -228,10 +280,10 @@ def winverifytrust(path: Path) -> dict[str, str]:
         data.dwStateAction = 2       # WTD_STATEACTION_CLOSE
         wintrust.WinVerifyTrust(wintypes.HANDLE(-1), ctypes.byref(generic_verify_v2), ctypes.byref(data))
     if result != 0:
-        raise PrerequisiteError(f"The WebView2 installer has no valid Authenticode signature "
+        raise PrerequisiteError(f"{what} has no valid Authenticode signature "
                                 f"(WinVerifyTrust 0x{result & 0xFFFFFFFF:08X}).")
     if not identity:
-        raise PrerequisiteError("The WebView2 installer's signing certificate could not be read.")
+        raise PrerequisiteError(f"{what}'s signing certificate could not be read.")
     return identity
 
 
@@ -239,26 +291,28 @@ def verify_installer(
     path: Path,
     pin: dict[str, Any],
     trust: Callable[[Path], dict[str, str]] = winverifytrust,
+    *,
+    what: str = "WebView2 installer",
 ) -> dict[str, Any]:
     """The cached installer is exactly the pinned file, signed by the pinned certificate."""
     if _is_link(path) or _is_link(path.parent):
-        raise PrerequisiteError("The cached WebView2 installer is missing, or it or its folder is a link.")
+        raise PrerequisiteError(f"The cached {what} is missing, or it or its folder is a link.")
     if not path.is_file():
-        raise PrerequisiteError("The cached WebView2 installer is not a regular file.")
+        raise PrerequisiteError(f"The cached {what} is not a regular file.")
     if path.name != pin["fileName"]:
-        raise PrerequisiteError(f"The cached WebView2 installer must be named {pin['fileName']}.")
+        raise PrerequisiteError(f"The cached {what} must be named {pin['fileName']}.")
     size = path.stat().st_size
     if size != pin["bytes"]:
-        raise PrerequisiteError(f"The cached WebView2 installer has {size} bytes; the pin says {pin['bytes']}.")
+        raise PrerequisiteError(f"The cached {what} has {size} bytes; the pin says {pin['bytes']}.")
     digest = sha256_file(path)
     if digest != pin["sha256"]:
-        raise PrerequisiteError(f"The cached WebView2 installer SHA-256 {digest} does not match the pin.")
+        raise PrerequisiteError(f"The cached {what} SHA-256 {digest} does not match the pin.")
     signer = trust(path)
     expected = pin["authenticode"]
     if (signer.get("thumbprintSha1", "").upper() != expected["signerCertificateSha1"].upper()
             or signer.get("subject") != expected["signer"] or signer.get("issuer") != expected["issuer"]):
         raise PrerequisiteError(
-            f"The WebView2 installer is signed by {signer.get('subject')!r} (issuer {signer.get('issuer')!r}, "
+            f"The {what} is signed by {signer.get('subject')!r} (issuer {signer.get('issuer')!r}, "
             f"thumbprint {signer.get('thumbprintSha1')}), not the pinned {expected['signer']!r} certificate "
             f"{expected['signerCertificateSha1']}.")
     return {"fileName": path.name, "bytes": size, "sha256": digest, "runtimeVersion": pin["runtime"]["version"],
@@ -298,18 +352,29 @@ def verify_build_tools(tools: Path, tauri_cli_version: str) -> dict[str, Any]:
 # ------------------------------------------------------------ NSIS hook
 
 
-def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *, owned_manifest: Path) -> str:
-    """The generated NSIS include that hands the verified installer and this build's install manifest (the
-    exact files the update transaction claims, installer-hooks/qronos-update-transaction.nsh) to the hook."""
-    for value in (str(installer), str(hook), str(owned_manifest)):
+def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *, owned_manifest: Path,
+                 vcredist: tuple[Path, dict[str, Any]]) -> str:
+    """The generated NSIS include that hands the verified WebView2 installer, the verified Visual C++
+    Redistributable (``vcredist`` = (file, pin)) and this build's install manifest (the exact files the update
+    transaction claims, installer-hooks/qronos-update-transaction.nsh) to the hook."""
+    vc_installer, vc_pin = vcredist
+    for value in (str(installer), str(hook), str(owned_manifest), str(vc_installer)):
         if _NSIS_UNSAFE.search(value):
-            raise PrerequisiteError("A WebView2 hook path contains characters NSIS would interpret.")
+            raise PrerequisiteError("A prerequisite hook path contains characters NSIS would interpret.")
+    runtime = vc_pin["runtime"]
     return "\n".join((
         "; Generated by build_support.build_desktop for one build. Do not edit.",
         f"; Pinned WebView2 installer SHA-256 {pin['sha256']} ({pin['bytes']} bytes).",
+        f"; Pinned VC++ 2015-2022 x64 redistributable SHA-256 {vc_pin['sha256']} ({vc_pin['bytes']} bytes).",
         f'!define QRONOS_WEBVIEW2_INSTALLER "{installer}"',
         f'!define QRONOS_WEBVIEW2_VERSION "{pin["runtime"]["version"]}"',
         f'!define QRONOS_WEBVIEW2_SHA256 "{pin["sha256"]}"',
+        f'!define QRONOS_VCREDIST_INSTALLER "{vc_installer}"',
+        f'!define QRONOS_VCREDIST_VERSION "{runtime["version"]}"',
+        f'!define QRONOS_VCREDIST_MAJOR "{int(runtime["major"])}"',
+        f'!define QRONOS_VCREDIST_MINOR "{int(runtime["minor"])}"',
+        f'!define QRONOS_VCREDIST_BUILD "{int(runtime["build"])}"',
+        f'!define QRONOS_VCREDIST_SHA256 "{vc_pin["sha256"]}"',
         f'!define QRONOS_OWNED_MANIFEST "{owned_manifest}"',
         f'!include "{hook}"',
         "",
@@ -317,10 +382,10 @@ def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *
 
 
 def write_hook_wrapper(directory: Path, installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *,
-                       owned_manifest: Path) -> Path:
+                       owned_manifest: Path, vcredist: tuple[Path, dict[str, Any]]) -> Path:
     wrapper = directory / "qronos-installer-hooks.nsh"
     with open(wrapper, "x", encoding="utf-8", newline="\r\n") as handle:  # never replaces a file
-        handle.write(hook_wrapper(installer, pin, hook, owned_manifest=owned_manifest))
+        handle.write(hook_wrapper(installer, pin, hook, owned_manifest=owned_manifest, vcredist=vcredist))
     return wrapper
 
 
@@ -471,6 +536,10 @@ def verify_hook_wrapper(text: str) -> None:
         raise PrerequisiteError("The hook wrapper defines a test-probe value.")
     if not re.search(r'^!define\s+QRONOS_OWNED_MANIFEST\s+"[^"\r\n]+"', text, re.MULTILINE):
         raise PrerequisiteError("The hook wrapper does not name the install manifest the update transaction needs.")
+    for name in ("QRONOS_VCREDIST_INSTALLER", "QRONOS_VCREDIST_MAJOR", "QRONOS_VCREDIST_MINOR",
+                 "QRONOS_VCREDIST_BUILD"):
+        if not re.search(rf'^!define\s+{name}\s+"[^"\r\n]+"', text, re.MULTILINE):
+            raise PrerequisiteError(f"The hook wrapper does not define {name} (the verified VC++ redistributable).")
 
 
 def find_seven_zip() -> Path:
@@ -525,27 +594,60 @@ def verify_embedded_payload(entries: dict[str, int | None], pin: dict[str, Any])
                                 f"the pin says {pin['bytes']}.")
 
 
+def verify_vcredist_installer(path: Path, pin: dict[str, Any],
+                              trust: Callable[[Path], dict[str, str]] | None = None) -> dict[str, Any]:
+    """The cached VC++ redistributable is exactly the pinned file, signed by the pinned Microsoft certificate."""
+    return verify_installer(path, pin, trust or (lambda file: winverifytrust(file, "The VC++ redistributable")),
+                            what="VC++ redistributable")
+
+
+def extract_and_hash_vcredist(setup: Path, seven_zip: Path, scratch: Path,
+                              runner: Callable[..., Any] = subprocess.run) -> str:
+    """SHA-256 of the embedded VC++ redistributable, extracted into a new scratch folder."""
+    return extract_and_hash_payload(setup, seven_zip, scratch, runner, member=VCREDIST_EMBEDDED_PATH)
+
+
+def verify_embedded_vcredist(entries: dict[str, int | None], pin: dict[str, Any]) -> None:
+    """The installer embeds exactly one VC++ redistributable, of the pinned size (bytes compared on extraction)."""
+    embedded = [name for name in entries if name.lower().endswith("\\" + pin["fileName"].lower())
+                or name.lower() == pin["fileName"].lower()]
+    if embedded != [VCREDIST_EMBEDDED_PATH]:
+        raise PrerequisiteError(f"The installer must embed the VC++ redistributable exactly once at "
+                                f"{VCREDIST_EMBEDDED_PATH}; found {embedded or 'none'}.")
+    if entries[VCREDIST_EMBEDDED_PATH] is not None and entries[VCREDIST_EMBEDDED_PATH] != pin["bytes"]:
+        raise PrerequisiteError(f"The embedded VC++ redistributable has {entries[VCREDIST_EMBEDDED_PATH]} bytes; "
+                                f"the pin says {pin['bytes']}.")
+
+
 def extract_and_hash_payload(setup: Path, seven_zip: Path, scratch: Path,
-                             runner: Callable[..., Any] = subprocess.run) -> str:
-    """SHA-256 of the embedded WebView2 installer, extracted into a new scratch folder."""
+                             runner: Callable[..., Any] = subprocess.run, member: str = EMBEDDED_PATH) -> str:
+    """SHA-256 of one embedded prerequisite (default: the WebView2 installer), extracted into a new scratch
+    folder."""
     scratch.mkdir(parents=True, exist_ok=False)
-    result = runner([str(seven_zip), "e", "-y", f"-o{scratch}", str(setup), EMBEDDED_PATH],
+    result = runner([str(seven_zip), "e", "-y", f"-o{scratch}", str(setup), member],
                     capture_output=True, text=True, encoding="utf-8", check=False)
-    extracted = scratch / EMBEDDED_PATH.rsplit("\\", 1)[-1]
+    extracted = scratch / member.rsplit("\\", 1)[-1]
     if result.returncode != 0 or not extracted.is_file():
-        raise PrerequisiteError("7-Zip could not extract the embedded WebView2 installer.")
+        raise PrerequisiteError(f"7-Zip could not extract the embedded {member.rsplit(chr(92), 1)[-1]}.")
     return sha256_file(extracted)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify a cached WebView2 installer against the pin (offline).")
     parser.add_argument("installer", type=Path, nargs="?", default=None,
-                        help="Default: .cache/wv2/<pinned file name>.")
+                        help="Default: .cache/wv2/<pinned file name> (with --vcredist: .cache/vcredist/<pinned>).")
+    parser.add_argument("--vcredist", action="store_true",
+                        help="Verify the cached Visual C++ 2015-2022 x64 redistributable against its pin instead.")
     arguments = parser.parse_args(argv)
     try:
-        pin = load_pin()
-        installer = arguments.installer or CACHE_DIR / pin["fileName"]
-        evidence = verify_installer(installer, pin)
+        if arguments.vcredist:
+            pin = load_vcredist_pin()
+            installer = arguments.installer or VCREDIST_CACHE_DIR / pin["fileName"]
+            evidence = verify_vcredist_installer(installer, pin)
+        else:
+            pin = load_pin()
+            installer = arguments.installer or CACHE_DIR / pin["fileName"]
+            evidence = verify_installer(installer, pin)
     except (PrerequisiteError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 2

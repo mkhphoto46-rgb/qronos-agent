@@ -458,7 +458,8 @@ def test_the_production_wrapper_must_name_the_install_manifest(tmp_path):
 
     pin = {"sha256": "0" * 64, "bytes": 1, "runtime": {"version": "1.2.3.4"}}
     wrapper = prerequisites.hook_wrapper(tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe", pin,
-                                         owned_manifest=tmp_path / "qronos-install-manifest.txt")
+                                         owned_manifest=tmp_path / "qronos-install-manifest.txt",
+                                         vcredist=(tmp_path / "vc_redist.x64.exe", prerequisites.load_vcredist_pin()))
     prerequisites.verify_hook_wrapper(wrapper)
     with pytest.raises(prerequisites.PrerequisiteError):
         prerequisites.verify_hook_wrapper(wrapper.replace("QRONOS_OWNED_MANIFEST", "QRONOS_OTHER"))

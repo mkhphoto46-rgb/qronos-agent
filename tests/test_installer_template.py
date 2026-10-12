@@ -905,7 +905,8 @@ def test_the_production_hook_wrapper_carries_no_probe_value(tmp_path):
     from build_support import desktop_prerequisites as prerequisites
 
     wrapper = prerequisites.hook_wrapper(tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
-                                         prerequisites.load_pin(), owned_manifest=tmp_path / "m.txt")
+                                         prerequisites.load_pin(), owned_manifest=tmp_path / "m.txt",
+                                         vcredist=(tmp_path / "vc_redist.x64.exe", prerequisites.load_vcredist_pin()))
     prerequisites.verify_hook_wrapper(wrapper)
     with pytest.raises(prerequisites.PrerequisiteError):
         prerequisites.verify_hook_wrapper(wrapper + '!define QRONOS_UPDATE_FENCE_NAME "Local-x"\n')

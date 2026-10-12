@@ -20,6 +20,23 @@
 !ifndef QRONOS_WEBVIEW2_VERSION
   !error "QRONOS_WEBVIEW2_VERSION is not defined."
 !endif
+; The Microsoft Visual C++ 2015-2022 Redistributable (x64), verified against build_support/
+; vcredist_prerequisite.json and embedded the same way.
+!ifndef QRONOS_VCREDIST_INSTALLER
+  !error "Qronos installers must be built with build_support.build_desktop: the verified Visual C++ redistributable was not provided."
+!endif
+!ifndef QRONOS_VCREDIST_VERSION
+  !error "QRONOS_VCREDIST_VERSION is not defined."
+!endif
+!ifndef QRONOS_VCREDIST_MAJOR
+  !error "QRONOS_VCREDIST_MAJOR is not defined."
+!endif
+!ifndef QRONOS_VCREDIST_MINOR
+  !error "QRONOS_VCREDIST_MINOR is not defined."
+!endif
+!ifndef QRONOS_VCREDIST_BUILD
+  !error "QRONOS_VCREDIST_BUILD is not defined."
+!endif
 
 !include "LogicLib.nsh"
 !include "x64.nsh"
@@ -95,6 +112,68 @@
   ${EndIf}
 !macroend
 
+!define QRONOS_VCREDIST_FILE "vc_redist.x64.exe"
+!define QRONOS_VCREDIST_KEY "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+
+; Reads the registered x64 Visual C++ 2015-2022 runtime from one registry view into $R9 ("1" installed),
+; $R6 (major), $R5 (minor) and $R4 (build); values a view does not have read as "".
+!macro QRONOS_VCREDIST_READ_VIEW VIEW
+  SetRegView ${VIEW}
+  ReadRegDWORD $R9 HKLM "${QRONOS_VCREDIST_KEY}" "Installed"
+  ReadRegDWORD $R6 HKLM "${QRONOS_VCREDIST_KEY}" "Major"
+  ReadRegDWORD $R5 HKLM "${QRONOS_VCREDIST_KEY}" "Minor"
+  ReadRegDWORD $R4 HKLM "${QRONOS_VCREDIST_KEY}" "Bld"
+!macroend
+
+; Puts "1" in $R9 when the x64 Visual C++ 2015-2022 runtime is registered at the pinned version or newer,
+; else "". Registry location and values follow Microsoft's detection guidance (64-bit view, then 32-bit).
+!macro QRONOS_VCREDIST_SATISFIED_TO_R9
+  !insertmacro QRONOS_VCREDIST_READ_VIEW 64
+  ${If} $R9 != "1"
+    !insertmacro QRONOS_VCREDIST_READ_VIEW 32
+  ${EndIf}
+  SetRegView lastused
+  ${If} $R9 == "1"
+    StrCpy $R9 ""
+    ${If} $R6 > ${QRONOS_VCREDIST_MAJOR}
+      StrCpy $R9 "1"
+    ${ElseIf} $R6 = ${QRONOS_VCREDIST_MAJOR}
+      ${If} $R5 > ${QRONOS_VCREDIST_MINOR}
+        StrCpy $R9 "1"
+      ${ElseIf} $R5 = ${QRONOS_VCREDIST_MINOR}
+      ${AndIf} $R4 >= ${QRONOS_VCREDIST_BUILD}
+        StrCpy $R9 "1"
+      ${EndIf}
+    ${EndIf}
+  ${Else}
+    StrCpy $R9 ""
+  ${EndIf}
+!macroend
+
+; Unpacks the embedded redistributable and runs it (it asks Windows for administrator consent itself when it
+; must install). Accepted exit codes: 0 (installed), 1638 (a newer version is already installed) and 3010
+; (installed, a restart completes it); anything else, or a process that cannot be started, stops here.
+!macro QRONOS_VCREDIST_RUN_INSTALLER
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\${QRONOS_VCREDIST_FILE}" "${QRONOS_VCREDIST_INSTALLER}"
+  StrCpy $R8 ""
+  ClearErrors
+  ExecWait '"$PLUGINSDIR\${QRONOS_VCREDIST_FILE}" /install /quiet /norestart' $R8
+  ${If} ${Errors}
+    Delete "$PLUGINSDIR\${QRONOS_VCREDIST_FILE}"
+    !insertmacro QRONOS_FAIL "The Microsoft Visual C++ Redistributable installer could not be started. Qronos was not installed."
+  ${EndIf}
+  Delete "$PLUGINSDIR\${QRONOS_VCREDIST_FILE}"
+  ${If} $R8 == ""
+    !insertmacro QRONOS_FAIL "The Microsoft Visual C++ Redistributable could not be installed (no exit code). Qronos was not installed."
+  ${EndIf}
+  ${If} $R8 <> 0
+  ${AndIf} $R8 <> 1638
+  ${AndIf} $R8 <> 3010
+    !insertmacro QRONOS_FAIL "The Microsoft Visual C++ Redistributable could not be installed (exit code $R8). Qronos was not installed."
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   Push $R7
   Push $R8
@@ -156,6 +235,32 @@
   ${Else}
     DetailPrint "Microsoft Edge WebView2 Runtime $R9 is already installed."
   ${EndIf}
+  ; The Visual C++ runtime too, still BEFORE anything of the previous installation changes.
+  Push $R4
+  Push $R5
+  Push $R6
+  !insertmacro QRONOS_VCREDIST_SATISFIED_TO_R9
+  ${If} $R9 == ""
+    ${IfNot} ${IsNativeAMD64}
+      !insertmacro QRONOS_FAIL "Qronos needs the Microsoft Visual C++ Redistributable (x64), which does not match this computer. Nothing was installed."
+    ${EndIf}
+    DetailPrint "Installing the Microsoft Visual C++ Redistributable (x64) ${QRONOS_VCREDIST_VERSION} from this installer (no internet needed)..."
+    !insertmacro QRONOS_VCREDIST_RUN_INSTALLER
+    ${If} $R8 = 3010
+      DetailPrint "Windows needs a restart to finish the Microsoft Visual C++ Redistributable."
+    ${EndIf}
+    ; The exit code alone is not trusted: the pinned runtime (or newer) must now be registered.
+    !insertmacro QRONOS_VCREDIST_SATISFIED_TO_R9
+    ${If} $R9 == ""
+      !insertmacro QRONOS_FAIL "The Microsoft Visual C++ Redistributable installer finished but the runtime is still not registered. Qronos was not installed."
+    ${EndIf}
+    DetailPrint "Microsoft Visual C++ Redistributable (x64) is installed."
+  ${Else}
+    DetailPrint "Microsoft Visual C++ Redistributable (x64) ${QRONOS_VCREDIST_VERSION} or newer is already installed."
+  ${EndIf}
+  Pop $R6
+  Pop $R5
+  Pop $R4
   ; Replace, never mix, never lose: once Qronos is not running, the previous installation's listed files
   ; are SET ASIDE (kept byte for byte, identity journaled) and every path of the new payload is claimed.
   ; Any later failure puts the previous version back (QRONOS_STEP, QRONOS_INSTALL_COMPLETE, .onInstFailed).

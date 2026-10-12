@@ -44,6 +44,15 @@ def fake_pin(data: bytes) -> dict:
     return {**pin, "bytes": len(data), "sha256": sha256(data)}
 
 
+def vc_stand_in(tmp_path: Path) -> tuple[Path, dict]:
+    """A small stand-in for the pinned VC++ redistributable and the committed pin re-pointed at it."""
+    data = b"MZ stand-in for the pinned VC++ redistributable\n" * 32
+    path = tmp_path / "vcredist" / "vc_redist.x64.exe"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(data)
+    return path, {**prerequisites.load_vcredist_pin(), "bytes": len(data), "sha256": sha256(data)}
+
+
 def pinned_signer(pin: dict | None = None) -> dict:
     authenticode = (pin or committed_pin())["authenticode"]
     return {"thumbprintSha1": authenticode["signerCertificateSha1"], "subject": authenticode["signer"],
@@ -308,20 +317,31 @@ def test_unprepared_build_tools_stop_before_anything_is_built(tmp_path, monkeypa
 def test_the_hook_wrapper_names_the_verified_file_and_refuses_unsafe_paths(tmp_path):
     pin = committed_pin()
     manifest = tmp_path / "qronos-install-manifest.txt"
-    wrapper = prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest)
+    vc = vc_stand_in(tmp_path)
+    wrapper = prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest,
+                                               vcredist=vc)
 
     text = wrapper.read_text(encoding="utf-8")
+    assert f'!define QRONOS_VCREDIST_INSTALLER "{vc[0]}"' in text
+    assert '!define QRONOS_VCREDIST_MAJOR "14"' in text and '!define QRONOS_VCREDIST_MINOR "44"' in text
+    assert '!define QRONOS_VCREDIST_BUILD "35211"' in text
+    prerequisites.verify_hook_wrapper(text)
     assert f'!define QRONOS_WEBVIEW2_INSTALLER "{tmp_path / pin["fileName"]}"' in text
     assert f'!define QRONOS_WEBVIEW2_VERSION "{pin["runtime"]["version"]}"' in text
     assert f'!define QRONOS_OWNED_MANIFEST "{manifest}"' in text
     assert f'!include "{prerequisites.HOOK_PATH}"' in text
     with pytest.raises(FileExistsError):
-        prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest)
+        prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest,
+                                         vcredist=vc)
     for unsafe in ('a"b', "a$b", "a\nb", "a;b"):
         with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / unsafe / pin["fileName"], pin, owned_manifest=manifest)
+            prerequisites.hook_wrapper(tmp_path / unsafe / pin["fileName"], pin, owned_manifest=manifest, vcredist=vc)
         with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=tmp_path / unsafe / "m.txt")
+            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=tmp_path / unsafe / "m.txt",
+                                       vcredist=vc)
+        with pytest.raises(PrerequisiteError, match="NSIS"):
+            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=manifest,
+                                       vcredist=(tmp_path / unsafe / "vc_redist.x64.exe", vc[1]))
 
 
 def compile_hook(tmp_path: Path, wrapper_text: str | None) -> subprocess.CompletedProcess:
@@ -359,7 +379,9 @@ def test_the_compiled_hook_embeds_exactly_the_pinned_bytes_and_no_downloader(tmp
     manifest = tmp_path / "qronos-install-manifest.txt"  # the update transaction embeds the build's own list
     manifest.write_bytes(b"stand-in list (embedded under $PLUGINSDIR, never installed as a payload file)")
 
-    result = compile_hook(tmp_path, prerequisites.hook_wrapper(payload, pin, owned_manifest=manifest))
+    vc_payload, vc_pin = vc_stand_in(tmp_path)
+    result = compile_hook(tmp_path, prerequisites.hook_wrapper(payload, pin, owned_manifest=manifest,
+                                                               vcredist=(vc_payload, vc_pin)))
 
     assert result.returncode == 0, result.stdout + result.stderr
     tool = seven_zip()
@@ -367,6 +389,9 @@ def test_the_compiled_hook_embeds_exactly_the_pinned_bytes_and_no_downloader(tmp
     assert EMBEDDED_PATH in entries  # 7-Zip may not know the size of a solid stream's last entry
     prerequisites.verify_embedded_payload(entries, pin)
     assert prerequisites.extract_and_hash_payload(tmp_path / "probe.exe", tool, tmp_path / "out") == pin["sha256"]
+    prerequisites.verify_embedded_vcredist(entries, vc_pin)
+    assert prerequisites.extract_and_hash_vcredist(tmp_path / "probe.exe", tool, tmp_path / "vc-out") == \
+        vc_pin["sha256"]
     # The script runs the embedded file silently and never names a download URL.
     hook = prerequisites.HOOK_PATH.read_text(encoding="utf-8")
     assert "/silent /install" in hook and "NSISdl" not in hook and "http" not in hook.lower()
@@ -541,12 +566,13 @@ def test_the_install_and_app_data_folders_are_not_the_user_data_folder():
     assert config["productName"].casefold() != "qronos" and config["identifier"].casefold() != "qronos"
     build_desktop.check_tauri_config(config)
     # Nothing in the hooks removes recursively or by wildcard. The only removals are the
-    # hook's own temporary payload, files and folders the previous installation's
-    # manifest lists, the manifest itself and the install folder when it is empty.
+    # hook's own temporary payloads (WebView2 and the VC++ redistributable), files and folders the previous
+    # installation's manifest lists, the manifest itself and the install folder when it is empty.
     hooks = (prerequisites.HOOK_PATH.read_text(encoding="utf-8")
              + (prerequisites.HOOK_PATH.parent / "qronos-install-root.nsh").read_text(encoding="utf-8"))
     removals = {line.strip() for line in hooks.splitlines() if line.strip().lower().startswith(("rmdir", "delete"))}
     assert removals == {'RMDir "$INSTDIR"', 'Delete "$PLUGINSDIR\\${QRONOS_WEBVIEW2_FILE}"',
+                        'Delete "$PLUGINSDIR\\${QRONOS_VCREDIST_FILE}"',
                         'Delete "$INSTDIR\\$QronosPath"', 'RMDir "$INSTDIR\\$QronosPath"',
                         'Delete "$INSTDIR\\${QRONOS_MANIFEST}"'}
 
@@ -561,6 +587,8 @@ class FakeBuild:
                  mode: str = "") -> None:
         self.tmp_path, self.pin, self.calls = tmp_path, pin, []
         self.embedded_sha = embedded_sha or pin["sha256"]
+        self.vc_pin = prerequisites.load_vcredist_pin()
+        self.embedded_vc_sha = self.vc_pin["sha256"]
         self.mode = mode
         self.overlays: list[dict] = []
         self.records: list[dict] = []
@@ -603,6 +631,8 @@ def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
     monkeypatch.setattr(build_desktop, "DESKTOP_BUILDS_ROOT", tmp_path / "runtime/package/desktop-builds")
     monkeypatch.setattr(build_desktop, "verify_installer",
                         lambda path, pin: fake.calls.append("prerequisite") or {"sha256": pin["sha256"]})
+    monkeypatch.setattr(build_desktop, "verify_vcredist_installer",
+                        lambda path, pin: fake.calls.append("vcredist") or {"sha256": pin["sha256"]})
     monkeypatch.setattr(build_desktop, "find_seven_zip", lambda: tmp_path / "7z.exe")
     monkeypatch.setattr(build_desktop, "tauri_tools_dir", lambda: tmp_path / "tools")
     monkeypatch.setattr(build_desktop, "verify_build_tools",
@@ -621,9 +651,13 @@ def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
     monkeypatch.setattr(build_desktop, "verify_notice_output", lambda path: fake.calls.append("notices-verified"))
     monkeypatch.setattr(build_desktop.subprocess, "run", fake.run)
     monkeypatch.setattr(build_desktop, "list_installer",
-                        lambda setup, tool: fake.calls.append("listed") or {EMBEDDED_PATH: fake.pin["bytes"]})
+                        lambda setup, tool: fake.calls.append("listed") or {
+                            EMBEDDED_PATH: fake.pin["bytes"],
+                            prerequisites.VCREDIST_EMBEDDED_PATH: fake.vc_pin["bytes"]})
     monkeypatch.setattr(build_desktop, "extract_and_hash_payload",
                         lambda setup, tool, scratch: fake.calls.append("payload-hashed") or fake.embedded_sha)
+    monkeypatch.setattr(build_desktop, "extract_and_hash_vcredist",
+                        lambda setup, tool, scratch: fake.calls.append("vcredist-hashed") or fake.embedded_vc_sha)
 
     def extract(setup, tool, destination):
         fake.calls.append("extracted")
@@ -632,7 +666,8 @@ def wire(tmp_path: Path, monkeypatch, fake: FakeBuild) -> Path:
         return destination
 
     monkeypatch.setattr(build_desktop, "extract_installer", extract)
-    def verify_extracted(root, pin, install_manifest=None):
+    def verify_extracted(root, pin, install_manifest=None, vcredist_pin=None):
+        assert vcredist_pin == fake.vc_pin  # the build always checks the embedded VC++ bytes too
         fake.calls.append("extracted-verified")
         fake.install_manifests.append(install_manifest)
         return {"root": root}
@@ -658,8 +693,8 @@ def test_a_build_verifies_the_prerequisite_first_and_the_installer_last(tmp_path
                                 backend_source="7e12e2b (builder statement)")
     second = build_desktop.build(backend, target_dir=tmp_path / "t", work_root=tmp_path / "w")
 
-    assert fake.calls == ["prerequisite", "backend", "notices", "notices-verified", "tauri", "listed",
-                          "payload-hashed", "extracted", "extracted-verified", "provenance"] * 2
+    assert fake.calls == ["prerequisite", "vcredist", "backend", "notices", "notices-verified", "tauri", "listed",
+                          "payload-hashed", "vcredist-hashed", "extracted", "extracted-verified", "provenance"] * 2
     assert first["work"] != second["work"] and first["work"].parent == second["work"].parent == tmp_path / "w"
     # Each build keeps its own installer copy and provenance record; nothing is overwritten.
     for result in (first, second):
@@ -747,7 +782,7 @@ def test_an_extraction_failure_quarantines_the_installer(tmp_path, monkeypatch):
     fake = FakeBuild(tmp_path, committed_pin())
     backend = wire(tmp_path, monkeypatch, fake)
 
-    def refuse(root, pin, install_manifest=None):
+    def refuse(root, pin, install_manifest=None, vcredist_pin=None):
         raise PrerequisiteError("qronos-runtime does not match its manifest")
 
     monkeypatch.setattr(build_desktop, "verify_extracted", refuse)
@@ -962,6 +997,8 @@ def run_probe(tmp_path: Path, payload: Path) -> tuple[str, Path]:
         "Unicode true", "SetCompressor /SOLID lzma", 'Name "probe"', f'OutFile "{tmp_path / "probe.exe"}"',
         "RequestExecutionLevel user", "SilentInstall silent", f'InstallDir "{install_dir}"',
         f'!define QRONOS_WEBVIEW2_INSTALLER "{payload}"', '!define QRONOS_WEBVIEW2_VERSION "1.2.3.4"',
+        f'!define QRONOS_VCREDIST_INSTALLER "{payload}"', '!define QRONOS_VCREDIST_VERSION "14.0.0.0"',
+        '!define QRONOS_VCREDIST_MAJOR "14"', '!define QRONOS_VCREDIST_MINOR "0"', '!define QRONOS_VCREDIST_BUILD "0"',
         f'!define QRONOS_PROBE_RESULT "{result_file}"', f'!include "{prerequisites.HOOK_PATH}"',
         "Section", "  !insertmacro QRONOS_WEBVIEW2_RUN_INSTALLER",  # before SetOutPath (Qronos template)
         '  FileOpen $R7 "${QRONOS_PROBE_RESULT}" w', '  FileWrite $R7 "ran, exit code $R8"', "  FileClose $R7",

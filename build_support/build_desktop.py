@@ -1,7 +1,8 @@
 """Build a Tauri installer with a verified standalone Qronos backend.
 
 This build-time tool requires a prepared Python bundle, the locked desktop
-dependencies, the pinned offline WebView2 installer in .cache/wv2/, the Cargo
+dependencies, the pinned offline WebView2 installer in .cache/wv2/, the pinned
+Visual C++ 2015-2022 x64 redistributable in .cache/vcredist/, the Cargo
 crates already fetched and Tauri's NSIS tool folder already prepared (one-time
 developer steps in docs/offline-windows-installer.md). It never packages local
 models, voice binaries or user state. It runs Cargo with --offline and refuses
@@ -41,17 +42,22 @@ from build_support.desktop_installer_verify import (
 from build_support.desktop_prerequisites import (
     CACHE_DIR,
     PrerequisiteError,
+    VCREDIST_CACHE_DIR,
     extract_and_hash_payload,
+    extract_and_hash_vcredist,
     find_seven_zip,
     list_installer,
     load_pin,
+    load_vcredist_pin,
     verify_embedded_payload,
+    verify_embedded_vcredist,
     TEMPLATE_SETTING,
     verify_generated_order,
     verify_generated_script,
     verify_hook_wrapper,
     verify_installer,
     verify_template_source,
+    verify_vcredist_installer,
     tauri_tools_dir,
     verify_build_tools,
     write_hook_wrapper,
@@ -176,6 +182,7 @@ def _tauri_cli_version() -> str:
 
 
 def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | None = None,
+          vcredist_installer: Path | None = None,
           target_dir: Path | None = None, work_root: Path | None = None,
           backend_source: str = "not stated", purpose: str = "packaging-check") -> dict[str, Any]:
     require_windows_x64(bundles)
@@ -188,6 +195,9 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     pin = load_pin()
     installer = (webview2_installer or CACHE_DIR / pin["fileName"]).absolute()
     prerequisite = verify_installer(installer, pin)
+    vc_pin = load_vcredist_pin()
+    vc_installer = (vcredist_installer or VCREDIST_CACHE_DIR / vc_pin["fileName"]).absolute()
+    vc_prerequisite = verify_vcredist_installer(vc_installer, vc_pin)
     seven_zip = find_seven_zip()
     build_tools = verify_build_tools(tauri_tools_dir(), _tauri_cli_version())
     backend = backend.resolve(strict=True)
@@ -208,7 +218,7 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     # exactly these and never a user's file (installer-hooks/qronos-install-root.nsh). The
     # update transaction claims exactly these paths (installer-hooks/qronos-update-transaction.nsh).
     ownership = install_manifest.write(work, install_manifest.payload_files(backend, notices, config["productName"]))
-    wrapper = write_hook_wrapper(work, installer, pin, owned_manifest=ownership)
+    wrapper = write_hook_wrapper(work, installer, pin, owned_manifest=ownership, vcredist=(vc_installer, vc_pin))
     verify_hook_wrapper(wrapper.read_text(encoding="utf-8"))
     overlay = work / "tauri-overlay.json"
     overlay.write_text(json.dumps({
@@ -261,15 +271,21 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
         embedded = extract_and_hash_payload(kept, seven_zip, work / "payload")
         if embedded != pin["sha256"]:
             raise PrerequisiteError(f"The embedded WebView2 installer SHA-256 {embedded} does not match the pin.")
+        verify_embedded_vcredist(entries, vc_pin)
+        embedded_vc = extract_and_hash_vcredist(kept, seven_zip, work / "vcredist")
+        if embedded_vc != vc_pin["sha256"]:
+            raise PrerequisiteError(f"The embedded VC++ redistributable SHA-256 {embedded_vc} does not match "
+                                    "the pin.")
         extracted = verify_extracted(extract_installer(kept, seven_zip, work / "x"), pin,
-                                     install_manifest=ownership.read_bytes())
-        record = provenance_record(setup=kept, root=ROOT, pin=pin, extracted=extracted,
+                                     install_manifest=ownership.read_bytes(), vcredist_pin=vc_pin)
+        record = provenance_record(setup=kept, root=ROOT, pin=pin, vcredist_pin=vc_pin, extracted=extracted,
                                    backend_source=backend_source, purpose=purpose, tauri_cli=_tauri_cli_version())
         write_record(work / "installer-provenance.json", record)
     except BaseException:
         quarantine(kept)
         raise
-    return {"installer": kept, "work": work, "prerequisite": prerequisite, "entries": entries,
+    return {"installer": kept, "work": work, "prerequisite": prerequisite, "vcredist": vc_prerequisite,
+            "entries": entries,
             "provenance": record, "buildTools": build_tools}
 
 
@@ -279,6 +295,8 @@ def main() -> int:
     parser.add_argument("--bundles", default="nsis", choices=SUPPORTED_BUNDLES)
     parser.add_argument("--webview2-installer", type=Path, default=None,
                         help="Pinned offline WebView2 installer (default: .cache/wv2/<pinned file name>).")
+    parser.add_argument("--vcredist-installer", type=Path, default=None,
+                        help="Pinned VC++ 2015-2022 x64 redistributable (default: .cache/vcredist/vc_redist.x64.exe).")
     parser.add_argument("--target-dir", type=Path, default=None,
                         help="Short Cargo target directory, to stay clear of Windows MAX_PATH.")
     parser.add_argument("--work-root", type=Path, default=None,
@@ -289,6 +307,7 @@ def main() -> int:
     parser.add_argument("--purpose", default="packaging-check", choices=PURPOSES)
     arguments = parser.parse_args()
     result = build(arguments.backend, bundles=arguments.bundles, webview2_installer=arguments.webview2_installer,
+                   vcredist_installer=arguments.vcredist_installer,
                    target_dir=arguments.target_dir, work_root=arguments.work_root,
                    backend_source=arguments.backend_source, purpose=arguments.purpose)
     print(json.dumps({"installer": str(result["installer"]), "work": str(result["work"]),

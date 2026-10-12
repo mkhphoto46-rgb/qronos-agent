@@ -90,6 +90,21 @@ into the ignored `.cache/wv2/` folder.
    address, the pin has to be reviewed and replaced; never edit the hash to
    match a different file.
 
+   Then the pinned Microsoft Visual C++ 2015-2022 Redistributable (x64)
+   (`build_support/vcredist_prerequisite.json`; Microsoft's download address
+   carries the file's SHA-256):
+
+   ```powershell
+   New-Item -ItemType Directory -Force .cache\vcredist | Out-Null
+   curl.exe -L -o .cache\vcredist\vc_redist.x64.exe "https://download.visualstudio.microsoft.com/download/pr/bd1c8d9d-ba95-4eee-bc6e-df1fcc876373/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe"
+   .\.venv-build\Scripts\python.exe -m build_support.desktop_prerequisites --vcredist
+   ```
+
+   Success prints JSON with `"authenticode": "valid (WinVerifyTrust); signer
+   Microsoft Corporation, ..."`, 25,635,768 bytes and version 14.44.35211.0. The
+   same file ships with Visual Studio Build Tools 2022
+   (`VC\Redist\MSVC\14.44.35112\vc_redist.x64.exe`, byte-identical).
+
 5. Install **7-Zip** from https://www.7-zip.org/ if it is not installed. The
    build uses it only to read the finished installer, not to install anything.
    If `7z.exe` is not in `C:\Program Files\7-Zip`, set the `QRONOS_7ZIP`
@@ -200,6 +215,27 @@ missing.
 A failed or unregistered runtime install stops the Qronos installation; it does
 not leave a half-working app. Uninstalling Qronos does not remove WebView2,
 because other applications share it.
+
+Next, still before anything of a previous installation is changed, the hook
+checks the **Microsoft Visual C++ 2015-2022 Redistributable (x64)**: the
+registry key `HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64`
+(64-bit view, then 32-bit view) must say `Installed=1` with a version of at
+least 14.44.35211 (the pinned file). The runtime assets (whisper.cpp) need
+MSVCP140, VCRUNTIME140(_1) and VCOMP140.
+
+- **If that runtime (or a newer one) is present:** nothing happens.
+- **If it is missing or older on an x64 machine:** the hook unpacks the
+  embedded `vc_redist.x64.exe` into the installer's temporary folder and runs
+  it with `/install /quiet /norestart`. The redistributable installs
+  per-machine, so Windows asks for administrator consent (UAC). Exit codes 0,
+  1638 (a newer version is already there) and 3010 (a restart finishes it) are
+  accepted; the registry is then checked again. Anything else, including a
+  refused consent, stops the Qronos installation with nothing changed and the
+  previous version kept as it was.
+- **On another kind of machine:** installation stops with a clear message.
+
+Uninstalling Qronos does not remove the Visual C++ runtime; other applications
+share it.
 
 ## Upgrading, uninstalling and user data
 
@@ -596,4 +632,11 @@ acceptance testing is allowed:
 - **Keeping the pin current:** the pinned runtime ages. Installed copies update
   themselves when online; fresh offline installs get 154.0.4258.62 until the pin
   is replaced in a reviewed change.
-- **Installer size:** the installer grows by about 212 MB.
+- **Installer size:** the installer grows by about 212 MB, plus about 26 MB
+  for the Visual C++ redistributable.
+- **Visual C++ redistribution:** Microsoft's Visual Studio 2022 Distributable
+  Code list covers the files under `VC\redist` (where `vc_redist.x64.exe`
+  lives), unmodified, and states that distribution of the redistributable "is
+  limited to licensed Visual Studio users and is subject to its license
+  terms". The owner must hold a Visual Studio 2022 licence that covers this.
+  This is a recorded condition, not a clearance given here.

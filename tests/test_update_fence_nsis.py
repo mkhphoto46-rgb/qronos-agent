@@ -726,7 +726,9 @@ def test_the_production_hook_compiles_in_tauris_include_order_and_is_never_run(t
     pin = prerequisites.load_pin()
     manifest = tmp_path / "qronos-install-manifest.txt"
     manifest.write_bytes(b"stand-in list")
-    (tmp_path / "hooks.nsh").write_text(prerequisites.hook_wrapper(payload, pin, owned_manifest=manifest),
+    (tmp_path / "vc_redist.x64.exe").write_bytes(b"never run")  # embedded by the compile, never executed
+    (tmp_path / "hooks.nsh").write_text(prerequisites.hook_wrapper(payload, pin, owned_manifest=manifest,
+                                                                     vcredist=(tmp_path / "vc_redist.x64.exe", prerequisites.load_vcredist_pin())),
                                         encoding="utf-8")
     script = tmp_path / "tauri-order.nsi"
     script.write_text("\n".join((
@@ -768,7 +770,8 @@ def test_the_build_wrapper_never_sets_a_probe_only_define(tmp_path):
     from build_support import desktop_prerequisites as prerequisites
 
     wrapper = prerequisites.hook_wrapper(tmp_path / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
-                                         prerequisites.load_pin(), owned_manifest=tmp_path / "m.txt")
+                                         prerequisites.load_pin(), owned_manifest=tmp_path / "m.txt",
+                                         vcredist=(tmp_path / "vc_redist.x64.exe", prerequisites.load_vcredist_pin()))
     for name in ("QRONOS_UPDATE_FENCE_NAME", "QRONOS_PROBE_"):
         assert name not in wrapper
         for source in (ROOT / "build_support").rglob("*.py"):

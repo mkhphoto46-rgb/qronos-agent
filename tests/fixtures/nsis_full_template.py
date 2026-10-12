@@ -42,6 +42,7 @@ PLUGINS = MAKENSIS.parent / "Plugins" / "x86-unicode" / "additional" if MAKENSIS
 PRODUCT = "Qronos Probe"
 BINARY = "qronos-probe"
 WEBVIEW2_KEY = "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+VCREDIST_KEY = "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64"
 UNINSTKEY = f"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{PRODUCT}"
 
 _REGISTRY = [
@@ -281,6 +282,8 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
                        encoding="utf-8")
     defines = {
         "QRONOS_WEBVIEW2_INSTALLER": str(webview2), "QRONOS_WEBVIEW2_VERSION": "1.2.3.4",
+        "QRONOS_VCREDIST_INSTALLER": str(webview2), "QRONOS_VCREDIST_VERSION": "14.44.35211.0",
+        "QRONOS_VCREDIST_MAJOR": "14", "QRONOS_VCREDIST_MINOR": "44", "QRONOS_VCREDIST_BUILD": "35211",
         "QRONOS_OWNED_MANIFEST": str(payload / install_manifest.FILE_NAME),
         **({"QRONOS_OWNED_MANIFEST": str(work / "owned-list-mismatch.txt")} if owned_manifest_files else {}),
         "QRONOS_UPDATE_FENCE_NAME": fence, "QRONOS_PROBE_DATA_ROOT": str(data_root),
@@ -386,8 +389,9 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
 
 
 def seed_registry(probe: FullProbe, sections: dict[str, dict[str, str]]) -> None:
-    """The fake registry file (UTF-16 INI). WebView2 is always reported present."""
-    sections = {WEBVIEW2_KEY: {"pv": "120.0.0.0"}, **sections}
+    """The fake registry file (UTF-16 INI). WebView2 and the pinned VC++ runtime are always reported present."""
+    sections = {WEBVIEW2_KEY: {"pv": "120.0.0.0"},
+                VCREDIST_KEY: {"Installed": "1", "Major": "14", "Minor": "44", "Bld": "35211"}, **sections}
     lines = []
     for section, values in sections.items():
         lines.append(f"[{section}]")
