@@ -21,7 +21,7 @@ from core.config import CONFIG
 from core.local_ipc import (
     local_base_url, local_port, local_timeout, process_owns_listener, request_json,
 )
-from core.windows_sidecar_guard import WindowsSidecarGuard
+from core.windows_sidecar_guard import TREE_EXITED, TREE_RUNNING, TREE_UNKNOWN, WindowsSidecarGuard
 from core.user_memory import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_VERSION,
@@ -47,6 +47,10 @@ MEMORY_MAX_CONTEXT_CHARS = 1600
 MEMORY_VALUE_MAX_CHARS = 420
 MEMORY_SUPERVISOR_INTERVAL_SECONDS = 30.0
 MEMORY_UNSAFE_RETRY_SECONDS = 15.0
+#: After the exact server is ended: how long its contained tree may take to end by itself, then how long the owned
+#: Job backstop may take. Without the observed empty Job the guard (Job, mutex) is retained, never released.
+MEMORY_SIDECAR_TREE_GRACE_SECONDS = 3.0
+MEMORY_SIDECAR_TREE_BACKSTOP_SECONDS = 5.0
 
 _SAFE_ACTIVITY_MODES = {
     ActivityMode.IDLE,
@@ -154,6 +158,56 @@ class SidecarEmbeddingProvider(EmbeddingProvider):
             raise EmbeddingUnavailable("Local memory embedding request failed.") from None
 
 
+_LIFECYCLE_ISSUER = object()
+
+
+class SidecarLifecycle:
+    """An immutable, read-only lifecycle capability for ONE memory sidecar generation.
+
+    Issued only by :class:`MemorySidecarManager` when it starts a server inside its guard's Job (contained from the
+    first instruction). ``state()`` is that generation's whole-tree state: ``tree_exited`` only from the guard's
+    observation of an empty Job while its handle was held (sticky), ``running`` while any member lives, and
+    ``unknown`` otherwise (no guard, a failed query, a handle lost before the observation). It is not the
+    connection owner (``owned_process`` stays the psutil identity) and carries no authority to stop, unload or
+    talk to the server. A later generation's capability never answers for an earlier one.
+    """
+
+    __slots__ = ("_generation", "_guard", "_server_pid", "_server_create_time")
+
+    def __init__(self, issuer: object, generation: int, guard, server_pid: int, server_create_time: float) -> None:
+        if issuer is not _LIFECYCLE_ISSUER:
+            raise TypeError("a SidecarLifecycle is issued by the memory sidecar manager only")
+        object.__setattr__(self, "_generation", int(generation))
+        object.__setattr__(self, "_guard", guard)
+        object.__setattr__(self, "_server_pid", int(server_pid))
+        object.__setattr__(self, "_server_create_time", float(server_create_time))
+
+    def __setattr__(self, name, value):
+        raise AttributeError("SidecarLifecycle is immutable")
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def server_pid(self) -> int:
+        return self._server_pid
+
+    @property
+    def server_create_time(self) -> float:
+        return self._server_create_time
+
+    def state(self) -> str:
+        guard = self._guard
+        if guard is None:
+            return TREE_UNKNOWN
+        try:
+            state = guard.tree_state()
+        except Exception:  # an unreadable state is never proof
+            return TREE_UNKNOWN
+        return state if state in (TREE_RUNNING, TREE_EXITED) else TREE_UNKNOWN
+
+
 class MemorySidecarManager:
     """Own the optional local CPU-only BGE sidecar without touching primary Ollama."""
 
@@ -182,6 +236,10 @@ class MemorySidecarManager:
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
         self._owned = False
+        # Each started server is a generation with its own guard (Job + mutex) and lifecycle capability. A guard
+        # whose tree is not proved ended is retained here: no second server starts and nothing is released.
+        self._generation = 0
+        self._lifecycle: SidecarLifecycle | None = None
         self._supervisor_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._pid_file = CONFIG.paths.temp / "qronos_memory_sidecar_owner.json" if (
@@ -249,10 +307,60 @@ class MemorySidecarManager:
                 return str(candidate)
         return None
 
+    def owned_generation(self) -> tuple[psutil.Process, SidecarLifecycle] | None:
+        """The connection owner and ITS generation's lifecycle capability, read together under one lock.
+
+        None unless the exact server currently owns the listener and was started contained (the capability's server
+        pid and creation time are that owner's). Consumers capture this pair once at admission, so an owner and a
+        capability from different generations can never be combined by two separate reads.
+        """
+        with self._lock:
+            owner = self._identity if self._owns_server() else None
+            lifecycle = self._lifecycle
+            if owner is None or lifecycle is None:
+                return None
+            try:
+                same = owner.pid == lifecycle.server_pid and owner.create_time() == lifecycle.server_create_time
+            except Exception:  # an unreadable identity is no match
+                same = False
+            return (owner, lifecycle) if same else None
+
+    @property
+    def lifecycle(self) -> SidecarLifecycle | None:
+        """The latest generation's lifecycle capability (None before any contained start)."""
+        with self._lock:
+            return self._lifecycle
+
+    def _tree_proved_ended(self, guard) -> bool:
+        """Observe the contained tree end (grace), else the owned Job backstop; True only on the observation."""
+        if getattr(guard, "contains_tree", False) is not True:
+            return False
+        if guard.wait_tree_exit(MEMORY_SIDECAR_TREE_GRACE_SECONDS) is True:
+            return True
+        return guard.end_contained_tree(MEMORY_SIDECAR_TREE_BACKSTOP_SECONDS) is True
+
+    def _retire_previous_tree(self) -> bool:
+        """Before a new server: the previous generation must be proved ended. False keeps everything held."""
+        guard = self._sidecar_guard
+        if guard is None:
+            return True
+        if self._process is not None and self._process.poll() is None:
+            return False  # our server is still alive: never a second one, and never ended from here
+        if not self._tree_proved_ended(guard):
+            return False  # a runner may still hold the model: the guard, its Job and the mutex stay ours
+        guard.close()
+        self._sidecar_guard = None
+        self._identity = None
+        self._process = None
+        self._owned = False
+        return True
+
     def ensure_server(self) -> bool:
         with self._lock:
             if self._api_ready():
                 return self._owns_server()
+            if not self._retire_previous_tree():
+                return False
             if self._port_open():
                 # Never interfere with an unrelated service occupying the port.
                 return False
@@ -281,24 +389,28 @@ class MemorySidecarManager:
                 creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
             try:
+                options = {
+                    "cwd": str(self.project_root),
+                    "env": env,
+                    "stdin": subprocess.DEVNULL,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL,
+                    "creationflags": creationflags,
+                }
                 if os.name == "nt":
                     self._sidecar_guard = self._sidecar_guard_factory()
-                self._process = subprocess.Popen(
-                    [executable, "serve"],
-                    cwd=str(self.project_root),
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                )
+                    # Suspended, made a Job member through its own handle, then resumed: the server and every
+                    # runner it starts are contained from the first instruction (no breakaway).
+                    self._process = self._sidecar_guard.spawn_contained([executable, "serve"], **options)
+                else:
+                    self._process = subprocess.Popen([executable, "serve"], **options)
                 self._identity = psutil.Process(self._process.pid)
-                self._identity.create_time()  # Capture PID lifetime before publishing ownership.
-                if self._sidecar_guard is not None:
-                    self._sidecar_guard.bind_process(
-                        self._process.pid, process_handle=getattr(self._process, "_handle", None),
-                    )
+                created = self._identity.create_time()  # Capture PID lifetime before publishing ownership.
                 self._owned = True
+                self._generation += 1
+                self._lifecycle = SidecarLifecycle(
+                    _LIFECYCLE_ISSUER, self._generation, self._sidecar_guard, self._process.pid, created,
+                )
                 try:
                     # Diagnostics only; a read-only installation must not undo
                     # verified live/job ownership or prevent local inference.
@@ -321,9 +433,13 @@ class MemorySidecarManager:
                         self._process.wait(timeout=2.0)
                     except Exception:
                         pass
-                if self._sidecar_guard is not None:
-                    self._sidecar_guard.close()
-                self._sidecar_guard = None
+                guard = self._sidecar_guard
+                if guard is not None and (
+                    getattr(guard, "contains_tree", False) is not True or self._tree_proved_ended(guard)
+                ):
+                    guard.close()  # nothing was contained, or its whole tree was observed ended
+                    self._sidecar_guard = None
+                # else: the guard (Job, mutex) is retained until a later retire proves the tree ended.
                 self._identity = None
                 self._process = None
                 self._owned = False
@@ -473,6 +589,10 @@ class MemorySidecarManager:
         self._stop_event.set()
         with self._lock:
             if not self._owned:
+                guard = self._sidecar_guard
+                if guard is not None and self._tree_proved_ended(guard):
+                    guard.close()  # a retained generation, now proved ended
+                    self._sidecar_guard = None
                 return
             # Never reconstruct authority from persisted metadata or a process name.
             proc = self._identity
@@ -487,9 +607,12 @@ class MemorySidecarManager:
                 except psutil.Error:
                     pass
             guard = self._sidecar_guard
-            self._sidecar_guard = None
-            if guard is not None:
+            if guard is not None and self._tree_proved_ended(guard):
+                # Released only after the whole contained tree was observed ended (Job empty).
+                self._sidecar_guard = None
                 guard.close()
+            # Otherwise the guard, its Job and the mutex are retained: ownership never escapes unproved, and no
+            # second sidecar starts until a later retire observes the tree ended (Windows ends it at our exit).
             self._identity = None
             self._process = None
             self._owned = False

@@ -11,7 +11,7 @@ package information when it starts this service, or, in a source checkout,
 ``desktop/src-tauri/tauri.conf.json``. A packaged backend without it refuses.
 
 Operations: status, discover, verify, request, approve, launch, discard,
-startup_check.
+startup_check, pick_package, pick_folder.
 
 * ``request`` {installer, manifest} verifies and returns the offer and a
   single-use ``approvalToken``.
@@ -20,7 +20,15 @@ startup_check.
   this stdin JSON (never argv or the environment) and is never echoed.
 * ``launch`` {launchToken} is REFUSED (``launch_unavailable``) until the
   launch dependencies in ``core.update_service.LAUNCH_DEPENDENCIES`` exist and
-  are accepted; nothing in a request can enable it.
+  are accepted; nothing in a request can enable it. ``LAUNCH_ENABLED`` below is
+  the one enablement point: while it is False the product supplies
+  ``launch_unavailable``; once it is True, only the trusted wired provider
+  (``owned_launch_hold`` on the data root: the exclusive store admission, then
+  the owned runtime mutexes). The desktop runs ``launch`` only through its own
+  update lifecycle (drain, proved stop, one-line read, never killed).
+* ``pick_package`` / ``pick_folder`` show a native dialog and return the chosen
+  absolute paths (or null when cancelled). Nothing is opened or verified until
+  ``request`` / ``discover``.
 * ``startup_check`` is read-only status; the mutating start-up barrier runs
   inside the runtime, before any store opens, not through this command.
 
@@ -41,10 +49,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.local_update import UpdateError  # noqa: E402
-from core.update_service import UpdateService  # noqa: E402
+from core.update_service import UpdateService, launch_unavailable, owned_launch_hold  # noqa: E402
 
 _PAYLOAD_LIMIT = 64 * 1024
-OPERATIONS = ("status", "discover", "verify", "request", "approve", "launch", "discard", "startup_check")
+OPERATIONS = ("status", "discover", "verify", "request", "approve", "launch", "discard", "startup_check",
+              "pick_package", "pick_folder")
+PICK_OPERATIONS = ("pick_package", "pick_folder")
+
+#: The ONE enablement point of the installer launch. False until every entry of
+#: core.update_service.LAUNCH_DEPENDENCIES, the desktop lifecycle included, is independently accepted together
+#: with the launch path; changing it is a reviewed source change, never a request, environment or frontend value.
+LAUNCH_ENABLED = False
+
+
+def launch_quiescence(data_root: Path) -> Callable[[], Any]:
+    """The product's quiescence provider: the refusing default, or only the trusted wired provider once enabled."""
+    if not LAUNCH_ENABLED:
+        return launch_unavailable
+    return owned_launch_hold(Path(data_root))
 
 
 def _text(payload: dict[str, Any], name: str, limit: int = 4096) -> str:
@@ -59,6 +81,37 @@ def _path(payload: dict[str, Any], name: str) -> Path:
     if not path.is_absolute():
         raise UpdateError("bad_request", f"{name} must be an absolute path.")
     return path
+
+
+def _pick(operation: str) -> dict[str, Any]:
+    """A native dialog in this one-shot process. Only paths come back; nothing is opened, hashed or verified."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            if operation == "pick_folder":
+                chosen = filedialog.askdirectory(title="پوشهٔ بستهٔ به‌روزرسانی Qronos")
+            else:
+                chosen = filedialog.askopenfilename(
+                    title="نصب‌کنندهٔ به‌روزرسانی Qronos",
+                    filetypes=[("Qronos installer", "qronos-desktop_*_x64-setup.exe")])
+        finally:
+            root.destroy()
+    except Exception:
+        raise UpdateError("picker_unavailable", "The file dialog could not be shown.") from None
+    if not chosen:
+        return {"ok": True, "cancelled": True}
+    path = Path(chosen)
+    if not path.is_absolute():
+        raise UpdateError("bad_request", "The dialog did not return an absolute path.")
+    if operation == "pick_folder":
+        return {"ok": True, "cancelled": False, "folder": str(path)}
+    return {"ok": True, "cancelled": False, "installer": str(path),
+            "manifest": str(path) + ".qronos-update.json"}
 
 
 def running_version(environ: dict[str, str] | None = None, root: Path = ROOT) -> str:
@@ -82,11 +135,16 @@ def running_version(environ: dict[str, str] | None = None, root: Path = ROOT) ->
 def run(operation: str, payload: dict[str, Any],
         service_factory: Callable[[str], UpdateService] | None = None,
         version: str | None = None,
-        emit: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        emit: Callable[[dict[str, Any]], None] | None = None,
+        pick: Callable[[str], dict[str, Any]] = _pick) -> dict[str, Any]:
     if operation not in OPERATIONS:
         raise UpdateError("bad_request", f"Unsupported update operation: {operation}")
     if "runningVersion" in payload:
         raise UpdateError("bad_request", "The running version is not taken from the request.")
+    if operation in PICK_OPERATIONS:
+        if payload:
+            raise UpdateError("bad_request", "A picker takes no request fields.")
+        return pick(operation)
     version = version or running_version()
     if service_factory is None:
         import os
@@ -97,7 +155,8 @@ def run(operation: str, payload: dict[str, Any],
 
         audit_path = os.environ.get("QRONOS_PERMISSION_AUDIT_PATH", "").strip() or DEFAULT_ACTION_AUDIT_PATH
         audit = ActionAuditLog(Path(audit_path).expanduser())
-        service = UpdateService(CONFIG.paths.data, version, authorizer=GateAuthorizer(audit_log=audit))
+        service = UpdateService(CONFIG.paths.data, version, authorizer=GateAuthorizer(audit_log=audit),
+                                quiesce=launch_quiescence(Path(CONFIG.paths.data)))
     else:
         service = service_factory(version)
     if operation == "status":

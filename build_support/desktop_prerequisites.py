@@ -298,9 +298,10 @@ def verify_build_tools(tools: Path, tauri_cli_version: str) -> dict[str, Any]:
 # ------------------------------------------------------------ NSIS hook
 
 
-def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH) -> str:
-    """The generated NSIS include that hands the verified installer to the committed hook."""
-    for value in (str(installer), str(hook)):
+def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *, owned_manifest: Path) -> str:
+    """The generated NSIS include that hands the verified installer and this build's install manifest (the
+    exact files the update transaction claims, installer-hooks/qronos-update-transaction.nsh) to the hook."""
+    for value in (str(installer), str(hook), str(owned_manifest)):
         if _NSIS_UNSAFE.search(value):
             raise PrerequisiteError("A WebView2 hook path contains characters NSIS would interpret.")
     return "\n".join((
@@ -309,15 +310,17 @@ def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH) -
         f'!define QRONOS_WEBVIEW2_INSTALLER "{installer}"',
         f'!define QRONOS_WEBVIEW2_VERSION "{pin["runtime"]["version"]}"',
         f'!define QRONOS_WEBVIEW2_SHA256 "{pin["sha256"]}"',
+        f'!define QRONOS_OWNED_MANIFEST "{owned_manifest}"',
         f'!include "{hook}"',
         "",
     ))
 
 
-def write_hook_wrapper(directory: Path, installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH) -> Path:
+def write_hook_wrapper(directory: Path, installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *,
+                       owned_manifest: Path) -> Path:
     wrapper = directory / "qronos-installer-hooks.nsh"
     with open(wrapper, "x", encoding="utf-8", newline="\r\n") as handle:  # never replaces a file
-        handle.write(hook_wrapper(installer, pin, hook))
+        handle.write(hook_wrapper(installer, pin, hook, owned_manifest=owned_manifest))
     return wrapper
 
 
@@ -463,9 +466,11 @@ def verify_generated_order(script: str) -> None:
 
 
 def verify_hook_wrapper(text: str) -> None:
-    """The generated hook wrapper never carries a test-probe value."""
+    """The generated hook wrapper never carries a test-probe value, and names this build's install manifest."""
     if _PROBE_ONLY.search(text):
         raise PrerequisiteError("The hook wrapper defines a test-probe value.")
+    if not re.search(r'^!define\s+QRONOS_OWNED_MANIFEST\s+"[^"\r\n]+"', text, re.MULTILINE):
+        raise PrerequisiteError("The hook wrapper does not name the install manifest the update transaction needs.")
 
 
 def find_seven_zip() -> Path:

@@ -204,11 +204,12 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     notices = work / "notices"
     collect_desktop_notices(notices)
     verify_notice_output(notices)
-    wrapper = write_hook_wrapper(work, installer, pin)
-    verify_hook_wrapper(wrapper.read_text(encoding="utf-8"))
     # Every file this installation will own, so a later upgrade or uninstall removes
-    # exactly these and never a user's file (installer-hooks/qronos-install-root.nsh).
+    # exactly these and never a user's file (installer-hooks/qronos-install-root.nsh). The
+    # update transaction claims exactly these paths (installer-hooks/qronos-update-transaction.nsh).
     ownership = install_manifest.write(work, install_manifest.payload_files(backend, notices, config["productName"]))
+    wrapper = write_hook_wrapper(work, installer, pin, owned_manifest=ownership)
+    verify_hook_wrapper(wrapper.read_text(encoding="utf-8"))
     overlay = work / "tauri-overlay.json"
     overlay.write_text(json.dumps({
         "bundle": {

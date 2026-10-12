@@ -25,10 +25,10 @@ pub(super) enum Service {
     Settings,
     Permissions,
     Doctor,
-    /// The offline update service (core/update_cli.py, Installer-owned). Registered
-    /// for one-shot reads and approval steps only; its launch is never run through
-    /// one-shot IPC (see service_ipc.rs), and no command mounts it yet.
-    #[allow(dead_code)]
+    /// The offline update service (core/update_cli.py, Installer-owned), reached
+    /// only through `update_command`: one-shot reads, approval steps and pickers
+    /// through service_ipc.rs; `launch` only through the update lifecycle
+    /// (lifecycle.rs), never through one-shot IPC.
     Update,
 }
 

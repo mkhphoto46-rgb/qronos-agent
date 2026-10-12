@@ -1102,6 +1102,76 @@ def test_the_cli_as_a_real_process_is_fail_closed_with_the_shipped_trust(world):
     assert (world.data / "Updates").is_dir() and not (world.data / "Updates" / "staged").exists()
 
 
+def _product_config(monkeypatch, world):
+    from core import config
+
+    monkeypatch.setattr(config, "CONFIG", config.QronosConfig(paths=config.resolve_paths(
+        environ={"QRONOS_DATA_ROOT": str(world.data), "LOCALAPPDATA": str(world.tmp)}, packaged=True)))
+    monkeypatch.setenv("QRONOS_PERMISSION_AUDIT_PATH", str(world.tmp / "audit.jsonl"))
+    return config.CONFIG
+
+
+def test_the_product_launch_stays_refused_at_its_one_enablement_point(world, monkeypatch):
+    """Round 22: the product composition supplies launch_unavailable while LAUNCH_ENABLED is False, whatever the
+    request says; the service default is unchanged."""
+    _product_config(monkeypatch, world)
+    assert update_cli.LAUNCH_ENABLED is False
+    assert update_cli.launch_quiescence(world.data) is update_service.launch_unavailable
+    assert update_cli.run("status", {}, version="0.1.0")["status"]["launchAvailable"] is False
+    for payload in ({"launchToken": "A" * 43}, {"launchToken": "A" * 43, "launchEnabled": True,
+                                                "runtimeStopped": True, "quiesce": "owned"}):
+        with pytest.raises(UpdateError) as refused:
+            update_cli.run("launch", payload, version="0.1.0")
+        assert refused.value.code == "launch_unavailable"
+
+
+def test_once_enabled_the_product_supplies_only_the_owned_launch_hold_on_its_data_root(world, monkeypatch):
+    config = _product_config(monkeypatch, world)
+    built = []
+
+    class RecordingHold:
+        def __init__(self, data_root):
+            built.append(Path(data_root))
+            raise UpdateError("writers_active", "fixture: a writer is inside")
+
+    monkeypatch.setattr(update_service, "LaunchHold", RecordingHold)
+    monkeypatch.setattr(update_cli, "LAUNCH_ENABLED", True)
+    provider = update_cli.launch_quiescence(Path(config.paths.data))
+    assert provider is not update_service.launch_unavailable and built == []  # nothing taken until a launch
+    assert update_cli.run("status", {}, version="0.1.0")["status"]["launchAvailable"] is True
+    with pytest.raises(UpdateError) as refused:
+        update_cli.run("launch", {"launchToken": "A" * 43}, version="0.1.0")
+    assert refused.value.code == "writers_active" and built == [Path(config.paths.data)]
+
+
+def test_the_pickers_return_only_paths_and_take_no_request_fields(world, monkeypatch):
+    import types
+
+    asked = []
+    dialog = types.SimpleNamespace(
+        askopenfilename=lambda **options: asked.append(("file", options["title"])) or
+        "C:\\Chosen\\qronos-desktop_0.2.0_x64-setup.exe",
+        askdirectory=lambda **options: asked.append(("folder", options["title"])) or "")
+
+    class Root:
+        def withdraw(self): pass
+        def attributes(self, *args): pass
+        def destroy(self): asked.append(("destroyed",))
+
+    tkinter = types.SimpleNamespace(Tk=Root, filedialog=dialog)
+    monkeypatch.setitem(sys.modules, "tkinter", tkinter)
+    monkeypatch.setitem(sys.modules, "tkinter.filedialog", dialog)
+    assert update_cli.run("pick_package", {}, version="0.1.0") == {
+        "ok": True, "cancelled": False, "installer": "C:\\Chosen\\qronos-desktop_0.2.0_x64-setup.exe",
+        "manifest": "C:\\Chosen\\qronos-desktop_0.2.0_x64-setup.exe.qronos-update.json"}
+    assert update_cli.run("pick_folder", {}, version="0.1.0") == {"ok": True, "cancelled": True}
+    assert [entry[0] for entry in asked] == ["file", "destroyed", "folder", "destroyed"]
+    with pytest.raises(UpdateError) as refused:
+        update_cli.run("pick_folder", {"folder": "C:\\elsewhere"}, version="0.1.0")
+    assert refused.value.code == "bad_request"
+    assert not (world.data / "Updates").exists()  # a picker opens no store
+
+
 def test_the_cli_main_prints_a_typed_refusal(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["update", "format_disk"])
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({})))
@@ -1669,6 +1739,7 @@ def test_the_update_mutex_lives_as_long_as_the_inheriting_installer_process(tmp_
     import _winapi
 
     from tests.fixtures.child_python import child_python
+    from tests.fixtures.handle_list_spawn import spawn_inheriting
 
     name = f"Local\\QronosUpdateTest-life-{uuid.uuid4().hex}"
     go = tmp_path / "installer-may-exit"
@@ -1680,7 +1751,7 @@ def test_the_update_mutex_lives_as_long_as_the_inheriting_installer_process(tmp_
                 "deadline = time.monotonic() + 60\n"
                 "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
                 "    time.sleep(0.05)\n")
-        child = update_service.spawn_inheriting([executable, "-B", "-I", "-c", code, str(go)], hold.handles())
+        child = spawn_inheriting([executable, "-B", "-I", "-c", code, str(go)], hold.handles())
     finally:
         hold.release()  # the launching process lets go, as launch() does
     try:

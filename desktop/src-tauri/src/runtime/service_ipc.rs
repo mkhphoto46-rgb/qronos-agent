@@ -1,6 +1,7 @@
 //! Bounded one-shot IPC for the closed bundled backend services.
 
 use super::backend::{Backend, Service};
+use super::lifecycle::Ticket;
 use serde_json::Value;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -28,6 +29,9 @@ struct Plan {
     limits: Limits,
     mutation: bool,
     doctor: bool,
+    /// The update service's refusals reach the caller as {"ok": false, "code"}:
+    /// the panel needs the typed code. Only the code, never the backend's text.
+    typed_refusals: bool,
 }
 
 impl Plan {
@@ -130,18 +134,31 @@ impl Plan {
                 MIB,
                 4 * MIB,
             ),
-            // Reads and approval steps only. "launch" is NEVER a one-shot request: this path
-            // waits for its child and kills it at its deadline, which must not happen to an
-            // update guard or the installer it hands over to (a separate, gated path).
+            // Reads, approval steps and the native pickers only. "launch" is NEVER a one-shot
+            // request: this path waits for its child and kills it at its deadline, which must not
+            // happen to an update guard or the installer it hands over to. It runs only through
+            // the update lifecycle (lifecycle.rs), which never kills it.
             Service::Update => (
                 "Update",
                 matches!(
                     operation,
-                    "status" | "discover" | "verify" | "request" | "approve" | "discard" | "startup_check"
+                    "status"
+                        | "discover"
+                        | "verify"
+                        | "request"
+                        | "approve"
+                        | "discard"
+                        | "startup_check"
+                        | "pick_package"
+                        | "pick_folder"
                 ),
-                !matches!(operation, "status" | "discover" | "verify" | "startup_check"),
+                !matches!(
+                    operation,
+                    "status" | "discover" | "verify" | "startup_check" | "pick_package" | "pick_folder"
+                ),
                 match operation {
                     "verify" | "request" | "approve" => 900,
+                    "pick_package" | "pick_folder" => 300,
                     _ => 60,
                 },
                 64 * 1024,
@@ -164,6 +181,7 @@ impl Plan {
             },
             mutation,
             doctor: matches!(service, Service::Doctor),
+            typed_refusals: matches!(service, Service::Update),
         })
     }
 
@@ -203,12 +221,17 @@ enum Failure {
     Refused,
 }
 
+/// `ticket` is the service-gate admission (lifecycle.rs). It moves into the
+/// owned worker with the settings guard and is released only after the child is
+/// reaped, so an update launch's drain waits for this whole request. Only the
+/// update lifecycle itself, which owns the closed gate, passes None.
 pub(super) async fn request(
     backend: &Backend,
     service: Service,
     operation: &str,
     payload: Option<Value>,
     settings_gate: Option<Arc<Mutex<()>>>,
+    ticket: Option<Ticket>,
 ) -> Result<Value, String> {
     let operation = operation.trim().to_ascii_lowercase();
     let plan = Plan::new(service, &operation)?;
@@ -234,7 +257,7 @@ pub(super) async fn request(
         },
         plan,
         payload,
-        guard,
+        (guard, ticket),
         deadline,
     )
     .await
@@ -707,6 +730,17 @@ async fn execute(
         return Err(plan.error(Failure::Reply, true));
     }
     if !plan.doctor && value.get("ok").and_then(Value::as_bool) != Some(true) {
+        if plan.typed_refusals {
+            let code = value
+                .get("code")
+                .and_then(Value::as_str)
+                .filter(|code| {
+                    (1..=48).contains(&code.len())
+                        && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                })
+                .unwrap_or("refused");
+            return Ok(serde_json::json!({ "ok": false, "code": code }));
+        }
         return Err(plan.error(Failure::Refused, true));
     }
     checkpoint().map_err(|failure| plan.error(failure, true))?;
@@ -805,6 +839,7 @@ mod tests {
         Plan {
             label: "Fixture",
             doctor: false,
+            typed_refusals: false,
             mutation,
             limits: Limits {
                 input: MIB,
@@ -1165,8 +1200,14 @@ mod tests {
         assert!(Plan::new(Service::Bridge, "snapshot").is_err());
         assert!(Plan::new(Service::Update, "launch").is_err());
         assert!(Plan::new(Service::Update, " launch").is_err());
-        for operation in ["status", "discover", "verify", "request", "approve", "discard", "startup_check"] {
+        for operation in [
+            "status", "discover", "verify", "request", "approve", "discard", "startup_check", "pick_package",
+            "pick_folder",
+        ] {
             assert!(Plan::new(Service::Update, operation).is_ok(), "{operation}");
+        }
+        for operation in ["pick_package", "pick_folder"] {
+            assert!(!Plan::new(Service::Update, operation).unwrap().mutation, "{operation}");
         }
         assert!(!Plan::new(Service::Update, "status").unwrap().mutation);
         assert!(Plan::new(Service::Update, "approve").unwrap().mutation);

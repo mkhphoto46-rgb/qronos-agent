@@ -25,6 +25,9 @@
 
 !define QRONOS_MANIFEST "qronos-install-manifest.txt"
 !define QRONOS_MANIFEST_HEADER "QRONOS-INSTALL-MANIFEST 1 com.qronos.agent"
+; The update transaction folder and its journal header (qronos-update-transaction.nsh).
+!define QRONOS_TXN_FOLDER ".qronos-update"
+!define QRONOS_TXN_HEADER "QRONOS-UPDATE-JOURNAL 1 com.qronos.agent"
 
 Var QronosPath       ; argument and result of QronosCanonical
 Var QronosInstall    ; canonical install folder
@@ -34,6 +37,8 @@ Var QronosMessage    ; "" when a check passed, otherwise why it refused
 Var QronosLine
 Var QronosHandle
 Var QronosValidateOnly ; "1": QronosRemoveOwnedPayload checks the whole list and the disk, deleting nothing
+Var QronosSetAside   ; "1": QronosRemoveOwnedPayload MOVES each listed file into the update transaction instead
+                     ; of deleting it (installer only; qronos-update-transaction.nsh, QronosTxnSetAsideOne)
 Var QronosUninstallerListed ; "1": the validated list names uninstall.exe (the template may delete exactly it)
 Var QronosProfile
 Var QronosLocal
@@ -486,7 +491,39 @@ Function ${UN}QronosCheckInstallRoot
       !insertmacro QRONOS_TRIM_LINE
     ${EndIf}
     ${If} $QronosLine != "${QRONOS_MANIFEST_HEADER}"
-      StrCpy $QronosMessage "The chosen folder already contains files and is not a Qronos installation. Choose an empty folder or the folder of an existing Qronos installation."
+      ; An interrupted Qronos update may have set its file list aside. A journal header alone proves nothing (anyone
+      ; can write one), so the folder counts as Qronos's only when the plain (not linked) transaction folder holds
+      ; BOTH a journal with the journal header AND the set-aside Qronos file list (the same evidence as a file list in
+      ; place). Recovery (qronos-update-transaction.nsh) then decides, and refuses what it cannot prove.
+      StrCpy $QronosLine ""
+      System::Call 'kernel32::GetFileAttributesW(w "$QronosInstall\${QRONOS_TXN_FOLDER}") i .r1'
+      ${If} $1 <> -1
+        IntOp $2 $1 & 0x410
+        ${If} $2 = 0x10
+          ClearErrors
+          FileOpen $QronosHandle "$QronosInstall\${QRONOS_TXN_FOLDER}\old\${QRONOS_MANIFEST}" r
+          ${IfNot} ${Errors}
+            FileReadUTF16LE $QronosHandle $QronosLine
+            FileClose $QronosHandle
+            !insertmacro QRONOS_TRIM_LINE
+          ${EndIf}
+          ${If} $QronosLine == "${QRONOS_MANIFEST_HEADER}"
+            StrCpy $QronosLine ""
+            ClearErrors
+            FileOpen $QronosHandle "$QronosInstall\${QRONOS_TXN_FOLDER}\journal" r
+            ${IfNot} ${Errors}
+              FileReadUTF16LE $QronosHandle $QronosLine
+              FileClose $QronosHandle
+              !insertmacro QRONOS_TRIM_LINE
+            ${EndIf}
+          ${Else}
+            StrCpy $QronosLine ""
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+      ${If} $QronosLine != "${QRONOS_TXN_HEADER}"
+        StrCpy $QronosMessage "The chosen folder already contains files and is not a Qronos installation. Choose an empty folder or the folder of an existing Qronos installation."
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 qronos_check_done:
@@ -808,6 +845,15 @@ Function ${UN}QronosRemoveOwnedPayload
           ; the running uninstaller, validated as a listed file: the template deletes exactly this name later
           StrCpy $QronosUninstallerListed "1"
         !endif
+        !if "${UN}" == ""
+        ${ElseIf} $QronosSetAside == "1"
+          ; Update transaction: the previous file is kept, byte for byte, in the transaction folder
+          ; (identity journaled, moved by handle), so a failed update can put it back.
+          Call QronosTxnSetAsideOne
+          ${If} $QronosMessage != ""
+            ${Break}
+          ${EndIf}
+        !endif
         ${Else}
           ClearErrors
           Delete "$INSTDIR\$QronosPath"
@@ -823,6 +869,13 @@ Function ${UN}QronosRemoveOwnedPayload
   ${EndIf}
   FileClose $QronosHandle
   ${If} $QronosMessage == ""
+    !if "${UN}" == ""
+      ${If} $QronosSetAside == "1"
+        StrCpy $QronosPath "${QRONOS_MANIFEST}"
+        Call QronosTxnSetAsideOne
+        Goto qronos_remove_done
+      ${EndIf}
+    !endif
     Delete "$INSTDIR\${QRONOS_MANIFEST}"
   ${EndIf}
 qronos_remove_done:

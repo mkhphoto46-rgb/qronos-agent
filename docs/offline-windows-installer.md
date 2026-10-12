@@ -349,16 +349,20 @@ Install section then runs, in this order:
    manual install).
 2. The install-root check (protected folders and ancestors, links, foreign
    content).
-3. The previous installation's whole file list, checked against the disk.
-4. Stopping the running app.
-5. Removing exactly the listed files and folders.
-6. The WebView2 child.
-7. Only then `SetOutPath`, the copy, the uninstaller, the registration and the
-   shortcuts.
+3. An interrupted earlier update: an empty leftover folder is removed,
+   anything else refuses (see "Update transaction" below).
+4. The previous installation's whole file list, checked against the disk.
+5. The WebView2 child, before anything of the previous installation changes.
+6. Stopping the running app.
+7. The update transaction begins: the previous listed files are SET ASIDE
+   (kept byte for byte) and every path of the new payload is claimed.
+8. Only then `SetOutPath`, the copy, the uninstaller, the registration and the
+   shortcuts, then the commit and, in update mode, the receipt.
 
-On a refusal in steps 1-3, no folder or file under the install folder, the start
-menu or the desktop is created, changed or removed, nothing is stopped and the
-installer writes no registry value. Two things can still exist:
+On a refusal in steps 1-5, no folder or file under the install folder, the start
+menu or the desktop is created, changed or removed (except an empty leftover
+`.qronos-update` folder in step 3), nothing is stopped and the installer writes no
+registry value. Two things can still exist:
 - NSIS's own temporary plug-in folder in `%TEMP%`;
 - the admission lock file `<data root>\.qronos-store-admission.lock`, opened
   (`OPEN_ALWAYS`) only when the data folder exists.
@@ -453,16 +457,75 @@ real installer, registry, shortcut or user folder):
 - None of this has run as a real Tauri-built installer on a real machine; see
   below. The default updater launch stays refused.
 
+**Update transaction** (installer-hooks/qronos-update-transaction.nsh). A
+failed update leaves the previously installed program usable.
+- The installer creates `<install folder>\.qronos-update` after the fence, the
+  exclusive admission and the install-root checks. Its journal records, before
+  each action takes effect, the exact file identity (volume serial and file
+  index) the installer itself observed:
+  - each previous listed file it moves aside to `.qronos-update\old`;
+  - each new folder it creates;
+  - each new file path it claims (created new, never opened if something is
+    already there).
+  Then come "W" (writes may begin) and "C" (committed).
+- **No mixing, no overwriting.** A new payload path that is already occupied
+  refuses the update before anything new is written. Unlisted files are
+  never moved, overwritten or deleted.
+- **Normal failure.** Any failed step, a failed commit, or any other stop after
+  the transaction began puts the previous version back. It deletes only new
+  files whose current identity is the claimed one, removes only empty created
+  folders, and moves each set-aside file back by handle when its identity
+  matches and its place is free. In the same run it also restores the Apps &
+  features values, the install-location value and the previous Start-menu and
+  desktop shortcuts. No receipt is written.
+- **Trust.** The running installer keeps its own journal open (shared for
+  reading only) from creation to commit or rollback, so no other program can
+  change it. Only that run's rollback deletes the new files it claimed.
+- **Commit and receipt.** "C" is written only after every step succeeded and
+  the installed file list equals the installer's own list (no file written
+  without a claim). Then the set-aside files are deleted (each only if it is
+  still that file). The update receipt follows the commit. If it cannot be
+  written, the new version stays installed and the start-up barrier reports
+  the update as unconfirmed, never as confirmed.
+- **Interrupted work.** A crash or kill leaves `.qronos-update` behind. Nothing
+  in it can be proved to be that installer's own: anyone can write a journal
+  header, file identities can be observed and a file list can be copied. So
+  the next installer never acts on it.
+  - An empty folder is removed.
+  - Anything else is refused, with nothing moved or deleted. The message says
+    that the previous version's files are kept under `.qronos-update\old` at
+    their own paths.
+  - Recovery is then a manual step: move those files back or restore a backup,
+    or reinstall into an empty folder.
+  A journal header alone never makes a folder a Qronos installation: the
+  set-aside Qronos file list must be there too. The uninstaller refuses while
+  the folder exists.
+- **Limits.**
+  - Atomicity across power loss is not claimed (each step is one NTFS
+    operation, decided from what exists, but this was not tested with power
+    loss).
+  - Registry values are restored only in the same run, not after a crash.
+  - A shortcut the failed run newly created is left; it names the same program
+    path.
+  - Any interrupted update needs manual recovery (above). So does a commit
+    whose clean-up of the kept files failed: the update itself is complete,
+    but the leftover folder must be removed by hand before the next update.
+  - An installer whose own list missed a file it writes would leave that one
+    unclaimed file after a rollback. build_desktop makes both lists from one
+    file and verifies the package against it, so a shipped installer has no
+    such gap.
+  - Tested only with inert fixture installers (tests/test_installer_update_transaction.py),
+    never with a real installation.
+
 **Open installer gates** (independent review Media18; nothing here is
 activated):
-- **O-A, availability: a defect to repair before activation.** Step 5 removes
-  the previous installation's listed files before the WebView2 child and
-  before every later checked step. If the WebView2 child or any later step
-  fails, neither the old nor the new program is left usable. The installer
-  stops with an honest message, and user data is untouched. Qronos does not
-  restore the previous program; reinstalling is the only recovery today. The
-  update launch and any release stay gated until a reviewed repair keeps a
-  usable program through such a failure.
+- **O-A, availability: repaired by the update transaction (round 19,
+  awaiting independent review).** Before, the previous installation's
+  listed files were removed before the WebView2 child and every later
+  step, so a failure left no usable program. Now the WebView2 child comes
+  first and the previous files are set aside, then restored after any
+  failure (see "Update transaction"). The update launch and any release stay
+  gated until that repair is independently accepted.
 - **O-B, defence in depth.** `verify_generated_order` does not inspect the
   sections that run before the Install section. That they do nothing rests on
   the configuration checks: `check_tauri_config` (WebView2 "skip", no minimum

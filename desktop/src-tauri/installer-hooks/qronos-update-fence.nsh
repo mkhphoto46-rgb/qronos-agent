@@ -82,6 +82,10 @@ Var QronosInstallComplete ; "1" only after every material install step succeeded
 !macro QRONOS_STEP STEP
   ${If} ${Errors}
     StrCpy $QronosInstallComplete "0"
+    ; The update transaction puts the previous version back before the installation stops.
+    !ifmacrodef QRONOS_TXN_ON_FAILURE
+      !insertmacro QRONOS_TXN_ON_FAILURE
+    !endif
     !ifdef QRONOS_PROBE_RESULT
       Push "${STEP}"
       Call QronosProbeStepFailed
@@ -93,6 +97,10 @@ Var QronosInstallComplete ; "1" only after every material install step succeeded
 ; Immediately before NSIS_HOOK_POSTINSTALL: every step above passed its QRONOS_STEP.
 !macro QRONOS_INSTALL_COMPLETE
   !insertmacro QRONOS_STEP "the last install step"
+  ; The update transaction's commit point; a failed commit is rolled back and stops (no receipt).
+  !ifmacrodef QRONOS_TXN_COMMIT
+    !insertmacro QRONOS_TXN_COMMIT
+  !endif
   StrCpy $QronosInstallComplete "1"
 !macroend
 

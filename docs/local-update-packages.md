@@ -211,7 +211,11 @@ reviewed code in the new build.
 `LAUNCH_DEPENDENCIES` exist and are independently accepted together with this
 code: the runtime's own instance ownership, store admission in every
 store-opening process, the awaited start-up barrier, and the desktop's drain of
-its writers. No request field, flag or frontend value can open it. The exact
+its writers. No request field, flag or frontend value can open it. The product's
+one enablement point is `LAUNCH_ENABLED` in `core/update_cli.py` (False): while
+it is False the CLI supplies `launch_unavailable`; once it is True, only
+`owned_launch_hold` on the data root. The `UpdateService` default stays
+`launch_unavailable`. The exact
 cross-owner contract is in `work/opus-production-installer-contract-round5.txt`
 (coordination file, outside the repository).
 
@@ -595,20 +599,60 @@ fence".
 - The post-ready hook seam stays empty. Only a reviewed read-only status reader
   may ever use it.
 
-**Control: still open, so the launch stays refused.**
-- C1: a launch path that never kills, times out or Job-owns the CLI or the
-  installer, and reads the launch's single answer line without waiting for the
-  process to exit.
-- An `update_command`: no Tauri command reaches `Service::Update` yet.
-- The stop result, derived from the actual process exit.
-- Every other backend command blocked and drained during a launch.
-- A runtime restart only on a typed proved-no-start refusal.
-- Mounting `UpdatePanel` after acceptance.
+**Control: present in this source (round 22), independent review pending; the
+launch stays refused at its enablement point.** In
+`desktop/src-tauri/src/runtime/` (`lifecycle.rs`, `job.rs`, `mod.rs`):
+- `update_command(operation, payload)` reaches only `Service::Update`. Reads,
+  approval steps and the native pickers (`pick_package`, `pick_folder`) are gated
+  one-shot requests whose refusals reach the panel as `{"ok": false, "code"}`
+  (the code only). `launch` goes only to the lifecycle; one-shot IPC still
+  refuses it. The approval secret travels only on the child's standard input.
+- Service gate: every backend one-shot, native playback and runtime start holds
+  a ticket until its child is reaped. A launch closes the gate (new requests are
+  refused at once, nothing starts), stops playback through its existing stop,
+  and drains running requests for at most 30 s; otherwise it refuses
+  (`desktop_busy`) with the runtime untouched.
+- Preflight: the read-only status must report `launchAvailable`, a ready launch,
+  no update in progress and no pending recovery; otherwise a typed refusal with
+  the runtime untouched.
+- C2 stop result: the supervisor is created suspended, made a member of a
+  desktop-owned Job Object (no kill-on-close, no breakaway) and then resumed. A
+  stop is proved only when the exact supervisor exited and the Job has no live
+  process (the supervisor's kill-on-close Job ends the bridge, sidecars and media
+  workers). An unproved stop launches nothing and restarts nothing; the Job is
+  kept as busy ownership, so a runtime start or a launch is refused until it is
+  proved empty. The status reports `stopping` meanwhile.
+- C1 launch path: the update service is started with `launch`, the token on its
+  standard input, no `kill_on_drop`, no Job and no timeout kill; exactly one
+  answer line is read within 900 s, and the process is never waited for or
+  killed.
+- C3: only the proved-no-start codes (`launch_unavailable`, `runtime_running`,
+  `update_in_progress`, `writers_active`, `recovery_pending`, `not_approved`,
+  `approval_expired`, `permission_denied`, `not_staged`, `package_mismatch`,
+  `launch_failed`), or an update-service process Windows would not create,
+  restart a runtime that was running. A launch, `launch_outcome_unknown` or any
+  other answer or transport failure ends the phase in `ExitRequired`: the gate
+  stays closed, nothing starts again and the app exits after 2.5 s without
+  killing the update service. Each app start begins in `Idle`; the durable truth
+  across exit and restart is the update lifecycle file and the start-up barrier.
+- C4: `UpdatePanel` is mounted in Settings ("به‌روزرسانی"). Its launch button
+  opens only when the backend reports `launchAvailable`, a ready launch, nothing
+  in progress or pending, and no earlier launch from the panel is unresolved, so
+  it is closed today. The panel has no stop, restart or exit hook; stale answers
+  are dropped.
+- Media: this source has no media host. The required composition is that the
+  bridge's existing shutdown calls the media host's `shutdown()` before it exits.
+  The desktop's Job proof covers any remaining media or model child either way,
+  because the media Jobs nest inside the supervisor's Job, which nests in the
+  desktop's.
+- Not proved here: a real runtime, installer or update. The tests use inert
+  base-interpreter process trees in real private Jobs and fake update services.
 
 **Elevation:** none. Installs are per user (`installMode: currentUser`).
 
 `LAUNCH_DEPENDENCIES` in `core/update_service.py` still lists every dependency.
-The launch opens only when they are all independently accepted together. Its
+The launch opens only when they are all independently accepted together, by
+switching `LAUNCH_ENABLED` in `core/update_cli.py` in a reviewed change. Its
 first entry's remark that the bridge does not use an instance guard predates R1.
 
 The unsigned review installers built so far are not owner-signed and must not

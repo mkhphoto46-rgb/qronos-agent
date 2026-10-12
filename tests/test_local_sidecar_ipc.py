@@ -396,12 +396,15 @@ def test_memory_launch_captures_identity_and_binds_child_lifetime(tmp_path, monk
     child._handle = 200
     identity = Mock()
     identity.is_running.return_value = True
+    identity.create_time.return_value = 1700000000.5
     guard = Mock()
+    guard.spawn_contained.return_value = child
+    popen = Mock(return_value=child)
     manager = MemorySidecarManager(project_root=tmp_path, sidecar_guard_factory=lambda: guard)
     monkeypatch.setattr(manager, "_api_ready", Mock(side_effect=[False, True]))
     monkeypatch.setattr(manager, "_port_open", lambda: False)
     monkeypatch.setattr(manager, "_ollama_executable", lambda: "owned-ollama")
-    monkeypatch.setattr("core.memory_runtime.subprocess.Popen", Mock(return_value=child))
+    monkeypatch.setattr("core.memory_runtime.subprocess.Popen", popen)
     monkeypatch.setattr("core.memory_runtime.psutil.Process", Mock(return_value=identity))
     monkeypatch.setattr("core.memory_runtime.process_owns_listener", Mock(return_value=True))
     if diagnostic_failure:
@@ -410,7 +413,15 @@ def test_memory_launch_captures_identity_and_binds_child_lifetime(tmp_path, monk
     assert manager.owned_process is identity
     identity.create_time.assert_called_once_with()
     if os.name == "nt":
-        guard.bind_process.assert_called_once_with(child.pid, process_handle=child._handle)
+        # Round 24: the child's lifetime is bound by creating it INSIDE the guard's Job (suspended, assigned,
+        # resumed), never by binding an already running Popen.
+        (argv,), options = guard.spawn_contained.call_args
+        assert argv == ["owned-ollama", "serve"] and options["env"]["OLLAMA_HOST"] == "127.0.0.1:11435"
+        popen.assert_not_called()
+        guard.bind_process.assert_not_called()
+        lifecycle = manager.lifecycle
+        assert (lifecycle.generation, lifecycle.server_pid, lifecycle.server_create_time) == (1, child.pid,
+                                                                                             1700000000.5)
     manager.shutdown()
     identity.terminate.assert_called_once_with()
 

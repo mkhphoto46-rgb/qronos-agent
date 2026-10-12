@@ -736,34 +736,6 @@ def hold_and_hash(path: Path) -> tuple[Callable[[], None], str, int]:
     return stream.close, digest.hexdigest(), size
 
 
-def spawn_inheriting(argv: list[str], handles: tuple[int, ...], cwd: str | None = None) -> Any:
-    """Start a detached process that inherits exactly ``handles`` (plus null standard handles).
-
-    The handles are made inheritable only for this call and restricted with the
-    process-thread attribute handle list, so nothing else of this process leaks.
-    """
-    import subprocess
-
-    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    startup = None
-    if handles:
-        startup = subprocess.STARTUPINFO()
-        startup.lpAttributeList = {"handle_list": list(handles)}
-        for handle in handles:
-            os.set_handle_inheritable(handle, True)
-    try:
-        return subprocess.Popen(argv, cwd=cwd, close_fds=True, creationflags=flags, startupinfo=startup,
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError as error:
-        raise UpdateError("launch_failed", "Windows could not start the update installer.") from error
-    finally:
-        for handle in handles:
-            try:
-                os.set_handle_inheritable(handle, False)
-            except OSError:
-                pass
-
-
 @dataclass(frozen=True)
 class Handover:
     """What the installer is handed (work/opus-production-installer-contract-round7.txt, B and G).
