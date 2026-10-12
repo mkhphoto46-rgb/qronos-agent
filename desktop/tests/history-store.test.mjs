@@ -66,8 +66,18 @@ test("an undo prompt is accepted only for the undo this panel asked for", () => 
   assert.equal(state.prompt, null, "a prompt for another action is ignored");
   state = model.reduceHistory({ ...model.INITIAL_HISTORY, requested: "act-1" }, "history_undo_approval_required",
                               prompt);
-  assert.deepEqual(plain(state.prompt), JSON.parse(prompt));
+  // Round 34 (documented interface change): the prompt also says whether the copy's original is read once more.
+  assert.deepEqual(plain(state.prompt), { ...JSON.parse(prompt), readsSource: false });
   assert.equal(state.requested, null);
+  const reading = JSON.stringify({ ...JSON.parse(prompt), readsSource: true });
+  state = model.reduceHistory({ ...model.INITIAL_HISTORY, requested: "act-1" }, "history_undo_approval_required",
+                              reading);
+  assert.equal(state.prompt.readsSource, true);
+  assert.match(model.reversalText("delete_created", "notes.txt", true), /خوانده می‌شود/);
+  const malformed = JSON.stringify({ ...JSON.parse(prompt), readsSource: "yes" });
+  state = model.reduceHistory({ ...model.INITIAL_HISTORY, requested: "act-1" }, "history_undo_approval_required",
+                              malformed);
+  assert.equal(state.prompt, null, "a malformed prompt is refused");
 });
 
 test("answers count only for the open prompt; late, unknown or other answers change nothing", () => {

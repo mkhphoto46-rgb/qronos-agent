@@ -100,7 +100,7 @@ function HistoryDrawer({ hidden }: HistoryDrawerProps) {
 
           {prompt && (
             <div className="history-drawer-confirm" role="alertdialog" aria-label="تأیید بازگرداندن">
-              <p>{reversalText(prompt.reversal, prompt.name)}</p>
+              <p>{reversalText(prompt.reversal, prompt.name, prompt.readsSource)}</p>
               {prompt.needsSecret && (
                 <label>
                   رمز تأیید

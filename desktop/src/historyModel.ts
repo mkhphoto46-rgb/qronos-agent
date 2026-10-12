@@ -37,6 +37,8 @@ export type UndoPrompt = {
   reversal: string;
   name: string;
   needsSecret: boolean;
+  /** The confirmation also covers reading the copy's original once more (round 34). */
+  readsSource: boolean;
 };
 
 export type HistoryState = {
@@ -141,11 +143,12 @@ export function parsePrompt(message: string): UndoPrompt | null {
   if (!data || typeof data.actionToken !== "string" || !TOKEN.test(data.actionToken)
       || typeof data.actionId !== "string" || !ID.test(data.actionId)
       || typeof data.reversal !== "string" || !REVERSALS.has(data.reversal)
-      || typeof data.name !== "string" || !NAME.test(data.name) || typeof data.needsSecret !== "boolean") {
+      || typeof data.name !== "string" || !NAME.test(data.name) || typeof data.needsSecret !== "boolean"
+      || (data.readsSource !== undefined && typeof data.readsSource !== "boolean")) {
     return null;
   }
   return { actionToken: data.actionToken, actionId: data.actionId, reversal: data.reversal, name: data.name,
-           needsSecret: data.needsSecret };
+           needsSecret: data.needsSecret, readsSource: data.readsSource === true };
 }
 
 export const CATEGORY_TEXT: Record<string, string> = {
@@ -198,8 +201,11 @@ export function categoryText(category: string): string {
 }
 
 /** The reversal in words, for the confirmation. */
-export function reversalText(reversal: string, name: string): string {
+export function reversalText(reversal: string, name: string, readsSource = false): string {
   if (reversal === "move_back") return `«${name}» به جای قبلی‌اش برگردانده می‌شود.`;
+  if (reversal === "delete_created" && readsSource) {
+    return `«${name}» که Qronos ساخته بود حذف می‌شود؛ پیش از آن فایل اصلی یک بار دیگر خوانده می‌شود تا مطمئن شویم هنوز همان محتوا را دارد (اصل فایل دست نمی‌خورد).`;
+  }
   if (reversal === "delete_created") return `«${name}» که Qronos ساخته بود حذف می‌شود (اصل فایل دست نمی‌خورد).`;
   return "";
 }

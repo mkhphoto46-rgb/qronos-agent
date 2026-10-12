@@ -44,15 +44,20 @@ Ownership evidence:
   its size and modification time; for a copy also its SHA-256, up to 256 MiB.
 - An undo refuses when the object there is not that one: replaced (even with identical bytes), edited, or reached
   through a link or junction.
-- It also refuses when a copy's source is gone or differs.
+- It also refuses when a copy's source is gone or differs: before a created copy is removed, the source must still
+  hold the original bytes (its bounded SHA-256 equals the hash recorded when Qronos made the copy), so removing the
+  copy loses nothing. A same-size edit of the source refuses and keeps both files.
 - Older entries recorded without this evidence are shown as "unverifiable" and never offered.
 
 Checks and order:
 - Opening the list reads metadata only, and only for the one stack-top candidate.
-- An undo request first asks the permission gate (CREATE_OR_EDIT_FILE for the exact reversal path). Only if the gate
-  does not refuse is the copy's content hashed.
-- The answer re-checks, in order: metadata, the gate, the typed secret when the policy requires it, then the
-  content again. Only then does the executor undo it; the audit records APPROVED and UNDONE.
+- An undo request first asks the permission gate (CREATE_OR_EDIT_FILE for the exact reversal path), and for a copy
+  also the Files gate for reading its source (READ_NON_SENSITIVE, recorded under the undo request). Only if neither
+  refuses are the copy and its source hashed.
+- The answer re-checks, in order: metadata, the gate, the typed secret when the policy requires it, the source-read
+  gate, then the content (copy and source) again.
+- The typed secret is verified through the Library's borrowed check (core.library_executor.WorkflowSecretCheck); the
+  bridge never opens the secret store itself. Only then does the executor undo it; the audit records APPROVED and UNDONE.
 - Every undo needs the panel's single-use confirmation (an `ApprovalKind.HISTORY_UNDO` identity). It is revoked by
   Pause, Stop and shutdown; a late, unknown, used or wrong-kind answer does nothing.
 - A wrong secret spends the confirmation (a new request is needed). The secret is never stored or echoed, and the

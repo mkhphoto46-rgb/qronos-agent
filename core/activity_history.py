@@ -117,11 +117,22 @@ def evidence_state(entry: UndoEntry) -> str:
         return "changed_since"
 
 
-def content_check(entry: UndoEntry) -> bool:
-    """The one content read: a created copy still hashes to what Qronos wrote. Call only after the gate."""
+def source_read_path(entry: UndoEntry) -> str | None:
+    """The source file an undo must read (a created copy's source), or None when the undo reads no source."""
+    if entry.reversal is Reversal.DELETE_CREATED and str(entry.restoration.get("identity", "")).startswith("v1f:"):
+        return str(entry.target)
+    return None
+
+
+def content_check(entry: UndoEntry, *, source: bool = True) -> bool:
+    """The content reads, only after the gates allowed them: a created copy still hashes to what Qronos wrote, AND
+    (with ``source``) its source still holds those same original bytes, so removing the copy loses nothing (both
+    bounded). ``source`` is False only before a confirmation the source read still requires; the answer reads it."""
     if entry.reversal is Reversal.DELETE_CREATED and str(entry.restoration.get("identity", "")).startswith("v1f:"):
         recorded = str(entry.restoration.get("sha256", ""))
-        return bool(recorded) and bounded_sha256(Path(str(entry.restoration["path"]))) == recorded
+        if not recorded or bounded_sha256(Path(str(entry.restoration["path"]))) != recorded:
+            return False
+        return not source or bounded_sha256(Path(str(entry.target))) == recorded
     return True
 
 
@@ -249,11 +260,12 @@ def snapshot(audit: Any, journal: Any) -> dict[str, Any]:
     return {"schemaVersion": 1, "actions": out, "truncated": len(ordered) > MAX_ACTIONS}
 
 
-def undoable_entry(journal: Any, action_id: str, *, content: bool = False) -> tuple[UndoEntry | None, str]:
+def undoable_entry(journal: Any, action_id: str, *, content: bool = False,
+                   source: bool = True) -> tuple[UndoEntry | None, str]:
     """The live entry for ``action_id`` when it can be undone now, else (None, the honest state).
 
-    Metadata only, unless ``content`` (allowed only after the gate permitted the undo): then a created copy's
-    bytes are hashed against the evidence recorded when Qronos made it.
+    Metadata only, unless ``content`` (allowed only after the gates permitted it): then a created copy's bytes are
+    hashed against the evidence recorded when Qronos made it, and (``source``) its source's bytes too.
     """
     live, top = live_journal(journal)
     earlier = _earlier_journal(journal)
@@ -261,7 +273,7 @@ def undoable_entry(journal: Any, action_id: str, *, content: bool = False) -> tu
     if view.state != "available":
         return None, view.state
     entry = live[str(action_id)]
-    if content and not content_check(entry):
+    if content and not content_check(entry, source=source):
         return None, "changed_since"
     return entry, "available"
 

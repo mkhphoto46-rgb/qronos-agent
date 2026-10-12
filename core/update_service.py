@@ -242,28 +242,29 @@ class GateAuthorizer:
             self._audit_log.record(AuditEvent.COMPLETED, _install_request(binding, "launch"),
                                    outcome=ActionOutcome.SUCCEEDED)
 
-    def secret_problem(self) -> str | None:
-        from core.approval_secret import ApprovalSecretError, ApprovalSecretStore
+    # The approval secret is checked through the Library's narrow borrowed check (only core.library_executor and
+    # the Permissions CLI open the secret store): the same default per-profile store, resolved per call, and the
+    # same persisted lockout.
+    _SECRET_PROBLEMS = {
+        "not_configured": "Set an approval secret in Settings first; updates need it.",
+        "locked": "Too many wrong approval secrets; try again later.",
+        "unavailable": "The approval secret store is unavailable.",
+    }
 
-        try:
-            status = ApprovalSecretStore().status()
-        except ApprovalSecretError as error:
-            return str(error)
-        if not status.configured:
-            return "Set an approval secret in Settings first; updates need it."
-        if status.locked_until:
-            return "Too many wrong approval secrets; try again later."
-        return None
+    def secret_problem(self) -> str | None:
+        from core.library_executor import WorkflowSecretCheck
+
+        return self._SECRET_PROBLEMS.get(WorkflowSecretCheck().status())  # "ready" -> None
 
     def verify_secret(self, secret: str) -> bool:
-        from core.approval_secret import ApprovalSecretError, ApprovalSecretStore, InvalidApprovalSecret
+        from core.library_executor import WorkflowSecretCheck
 
-        try:
-            return ApprovalSecretStore().verify(secret)
-        except InvalidApprovalSecret:
-            return False
-        except ApprovalSecretError as error:
-            raise UpdateError("approval_secret_unavailable", str(error)) from None
+        check = WorkflowSecretCheck()
+        status = check.status()
+        if status != "ready":
+            # Not configured, locked out or unreadable: refused as unavailable (never counted as a wrong secret).
+            raise UpdateError("approval_secret_unavailable", self._SECRET_PROBLEMS.get(status, status))
+        return check.verify(secret)
 
 
 # ----------------------------------------------------------------- quiescence
