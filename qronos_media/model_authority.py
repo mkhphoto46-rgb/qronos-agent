@@ -97,6 +97,9 @@ class ModelLease:
         # lease, or the lease took over a slot already resident. Neither: the sidecar was never asked to load it.
         self.dispatched = False
         self.inherited_resident = False
+        # The memory-sidecar generation (its immutable lifecycle capability) this slot's work was bound to. Only
+        # THAT capability's whole-tree proof frees the slot; a later generation never answers for it.
+        self.capability: object | None = None
 
     # ---- SpawnObserver (called by run_bounded)
 
@@ -156,6 +159,18 @@ class ModelLease:
         """A request to the memory sidecar failed or timed out; its server-side work is not proven stopped."""
         with self._lock:
             self.unresolved = True
+
+    def bind_capability(self, capability: object | None) -> None:
+        """Bind this slot to one sidecar generation; a different generation for the same slot is refused."""
+        if capability is None:
+            return
+        with self._lock:
+            if self.closed:
+                raise ResourceRefused("lease_released", self.task_id)
+            if self.capability is None:
+                self.capability = capability
+            elif self.capability is not capability:
+                raise ResourceRefused("generation_changed", self.task_id)
 
     def mark_dispatched(self) -> None:
         """An inference request is about to be sent to the memory sidecar (it may load the model from here on)."""
@@ -342,6 +357,7 @@ class HostedModelAuthority:
                     # The model is still loaded in the sidecar under media's one reservation: reuse it.
                     lease = ModelLease(self, held.task_id, spec, held.granted_at, held.ledger_id)
                     lease.inherited_resident = True
+                    lease.capability = held.capability  # the resident model belongs to that generation
                     self._slots[spec.name] = lease
                     self._event("reuse_resident", held.task_id, model=spec.name)
                     return lease
@@ -425,7 +441,10 @@ class HostedModelAuthority:
             return
         if slot.spec.served_by == "memory_sidecar":
             try:
-                lifecycle = self._sidecar_lifecycle()
+                # The slot's OWN captured generation decides; the authority-level seam is only for a slot with no
+                # bound capability (legacy owner-only composition), and the product supplies none.
+                lifecycle = (slot.capability.state() if slot.capability is not None
+                             else self._sidecar_lifecycle())
             except Exception:  # noqa: BLE001 - an unreadable state is not proof
                 lifecycle = "unknown"
             if lifecycle == "tree_exited":
@@ -434,7 +453,7 @@ class HostedModelAuthority:
             if slot.state != "resident":
                 return  # request_unresolved: a negative model list or a closed client connection proves no drain
             try:
-                proof = self._residency()
+                proof = self._residency(slot.capability) if slot.capability is not None else self._residency()
             except Exception:  # noqa: BLE001
                 proof = "unknown"
             if proof == "unloaded":

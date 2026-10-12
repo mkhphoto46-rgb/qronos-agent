@@ -689,6 +689,9 @@ def test_the_bridge_host_uses_the_queue_governor_the_shared_ledger_and_the_bridg
         def _memory_sidecar_owner(self):  # round 26: the bridge also hands over its memory sidecar owner
             return None
 
+        def _memory_sidecar_generation(self):  # round 32: the atomic owner + generation pair replaces it
+            return None
+
     bridge = Bridge()
     host = runtime_bridge.QronosRuntime.ensure_media_host(bridge)
     try:

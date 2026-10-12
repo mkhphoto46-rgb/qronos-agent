@@ -647,10 +647,17 @@ class StageRunner:
                     cleanup(db, asset_id)
             report.completed.append(key)
             return "completed"
+        sidecar_binding = None
         if getattr(spec.needs.model, "served_by", "") == "memory_sidecar":
             # No runtime embedder in this process, or no owned sidecar process behind it right now: nothing could
             # run, so no model slot is reserved for it (a reservation would claim a model that was never loaded).
-            missing = "model_unavailable" if self.embedder is None else self.embedder.unavailable_reason()
+            # Otherwise the sidecar generation (owner + lifecycle capability) is captured ONCE, here, for this run.
+            missing = "model_unavailable" if self.embedder is None else None
+            if missing is None:
+                try:
+                    sidecar_binding = self.embedder.bind()
+                except ResourceRefused as refused:
+                    missing = refused.reason
             if missing is not None:
                 with self.store.transaction() as db:
                     db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
@@ -706,6 +713,7 @@ class StageRunner:
                 admit=self._admit_now,
                 lease=lambda: holder[0],
                 embedder=self.embedder,
+                sidecar_binding=sidecar_binding,
             )
             try:
                 commit = RUNNERS[stage](ctx)

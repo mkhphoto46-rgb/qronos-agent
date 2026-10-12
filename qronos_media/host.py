@@ -214,15 +214,24 @@ def build_bridge_media_host(
     audit: Any,
     activity: Any = None,
     embedding_owner: Callable[[], Any] = lambda: None,
+    embedding_generation: Callable[[], Any] | None = None,
+    secrets: Any = None,
 ) -> MediaHost:
-    """The bridge's one media host, bound to the bridge's own governor, ledger, approvals and audit."""
+    """The bridge's one media host, bound to the bridge's own governor, ledger, approvals and audit.
+
+    ``embedding_generation`` is the runtime's atomic ``MemorySidecarManager.owned_generation`` (owner + that
+    generation's lifecycle capability, or None); the product passes it. ``embedding_owner`` is the older owner-only
+    seam (it can never prove a whole-tree exit). ``secrets`` verifies a typed approval secret (the bridge lends its
+    narrow WorkflowSecretCheck; this module never opens the secret store).
+    """
     from qronos_media.service import default_data_dir, tools_from_environment
 
     from qronos_media.semantic import MediaEmbedder
 
     data_dir = default_data_dir()
-    # ONE embedder for the host: its residency proof (owned /api/ps, captured process exit) frees the bge-m3 slot.
-    shared_embedder = MediaEmbedder(embedding_owner)
+    # ONE embedder for the host: per bound generation it checks F16 and answers residency for that generation only.
+    shared_embedder = (MediaEmbedder(generation_check=embedding_generation) if embedding_generation is not None
+                       else MediaEmbedder(embedding_owner))
     authority = issue_hosted_authority(governor=governor, ledger=ledger, disk_root=data_dir,
                                        foreground_busy=foreground_busy, paused=paused, activity=activity,
                                        residency=shared_embedder.residency)
@@ -230,7 +239,7 @@ def build_bridge_media_host(
     def permissions() -> Any:
         from qronos_media.permissions import GatePermissions
 
-        return GatePermissions(audit=audit, ledger=approvals)
+        return GatePermissions(audit=audit, ledger=approvals, secrets=secrets)
 
     def embedder() -> Any:
         # The runtime's EXISTING bge-m3 memory sidecar (core/memory_runtime.py); media never starts a server.

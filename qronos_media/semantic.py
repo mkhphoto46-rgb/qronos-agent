@@ -70,54 +70,107 @@ def model_version() -> str:
     return f"{_fixed_profile()['version']}+media{SEMANTIC_VERSION}"
 
 
-class MediaEmbedder:
-    """bge-m3 through the runtime-owned memory sidecar, with the provider's exact request profile."""
+@dataclass(frozen=True)
+class SidecarBinding:
+    """One memory-sidecar generation as captured at admission: its connection owner and its lifecycle capability.
 
-    def __init__(self, owner_check: Callable[[], object], *, transport: Callable[..., Any] | None = None) -> None:
+    ``capability`` is the runtime's immutable per-generation ``SidecarLifecycle`` (``state()``), read together with
+    the owner in ONE call (``MemorySidecarManager.owned_generation``). It is None only for the legacy owner-only
+    seam, which can then never prove a whole-tree exit.
+    """
+
+    owner: object
+    capability: object | None
+
+
+def _same_generation(current: "SidecarBinding", bound: "SidecarBinding") -> bool:
+    if bound.capability is not None or current.capability is not None:
+        if current.capability is not bound.capability:
+            return False
+    if current.owner is bound.owner:
+        return True
+    try:
+        return int(getattr(current.owner, "pid")) == int(getattr(bound.owner, "pid"))
+    except Exception:  # noqa: BLE001 - an unreadable identity is no match
+        return False
+
+
+class MediaEmbedder:
+    """bge-m3 through the runtime-owned memory sidecar, with the provider's exact request profile.
+
+    The product passes ``generation_check`` (the runtime's atomic owner + lifecycle pair). A request binds that pair
+    once (:meth:`bind`) and every call made for it re-reads the pair and refuses ``generation_changed`` before
+    sending anything if the generation is no longer the bound one. The F16 check is cached per bound generation.
+    """
+
+    def __init__(self, owner_check: Callable[[], object] | None = None, *,
+                 generation_check: Callable[[], object] | None = None,
+                 transport: Callable[..., Any] | None = None) -> None:
         from core.local_ipc import request_json
 
+        if (owner_check is None) == (generation_check is None):
+            raise TypeError("exactly one of owner_check or generation_check is required")
         self._owner_check = owner_check
+        self._generation_check = generation_check
         self._transport = transport or request_json  # tests: a fake HTTP transport only
         self._profile = _fixed_profile()
-        self._verified = False
+        self._verified_for: object = None  # the bound generation whose model check passed (never lifetime-wide)
         self._last_owner: object = None  # the owned sidecar process last used (diagnostics only; not a proof)
 
-    def _owner(self) -> object:
+    def _current(self) -> SidecarBinding | None:
         try:
+            if self._generation_check is not None:
+                pair = self._generation_check()
+                if not isinstance(pair, tuple) or len(pair) != 2:
+                    return None
+                owner, capability = pair
+                if owner is None or owner is False or not callable(getattr(capability, "state", None)):
+                    return None
+                return SidecarBinding(owner, capability)
             owner = self._owner_check()
         except Exception:  # noqa: BLE001 - unreadable ownership is no ownership
-            owner = None
+            return None
         if owner is None or owner is False:
+            return None
+        return SidecarBinding(owner, None)
+
+    def bind(self) -> SidecarBinding:
+        """Capture the current generation once (admission). No owned sidecar: model_unavailable, nothing reserved."""
+        current = self._current()
+        if current is None:
             raise ResourceRefused("model_unavailable", "the bge-m3 memory sidecar is not running under Qronos ownership")
-        self._last_owner = owner
-        return owner
+        return current
+
+    def _owner(self, binding: SidecarBinding | None = None) -> object:
+        current = self.bind()
+        if binding is not None and not _same_generation(current, binding):
+            raise ResourceRefused("generation_changed", "the memory sidecar is not the generation this request bound")
+        self._last_owner = current.owner
+        return current.owner
 
     def unavailable_reason(self) -> str | None:
         """Asked BEFORE a model slot is reserved (no IPC): "model_unavailable" while no owned sidecar process
         exists, so nothing is reserved for a model that cannot be asked; None when a request may be tried."""
-        try:
-            self._owner()
-        except ResourceRefused as refused:
-            return refused.reason
-        return None
+        return None if self._current() is not None else "model_unavailable"
 
-    def residency(self) -> str:
+    def residency(self, capability: object | None = None) -> str:
         """Whether the sidecar still lists bge-m3: "loaded", "unloaded" or "unknown" (never a guess).
 
         "unloaded": the owned sidecar's own /api/ps no longer lists bge-m3 (its runner was let go). That frees a
         RESIDENT slot only; it never proves that a failed or timed-out request has drained (a queued request may
         not be listed yet). The server process merely exiting is not reported as proof either: its model runner
-        may outlive it. No current owner is "unknown", which keeps the reservation counted.
+        may outlive it. No current owner is "unknown", which keeps the reservation counted. With ``capability``
+        (the slot's captured generation), any other current generation is "unknown": a later server's model list
+        says nothing about the earlier one (its own lifecycle capability decides).
         """
-        try:
-            owner = self._owner_check()
-        except Exception:  # noqa: BLE001
-            owner = None
-        if owner is None or owner is False:
+        current = self._current()
+        if current is None:
+            return "unknown"
+        if capability is not None and current.capability is not capability:
             return "unknown"
         try:
             listed = self._transport("GET", self._profile["base"] + "/api/ps", timeout=TAGS_TIMEOUT_SECONDS,
-                                     json=None, owner=owner, max_bytes=MAX_TAGS_BYTES)
+                                     json=None, owner=current.owner, max_bytes=MAX_TAGS_BYTES)
         except Exception:  # noqa: BLE001
             return "unknown"
         models = listed.get("models") if isinstance(listed, dict) else None
@@ -130,8 +183,9 @@ class MediaEmbedder:
         return "unloaded"
 
     def _call(self, method: str, path: str, *, timeout: float, max_bytes: int, payload: dict | None = None,
-              failure: str = "embedding_request_failed", on_dispatch: Callable[[], None] | None = None) -> Any:
-        owner = self._owner()  # no owner: refused before anything is sent
+              failure: str = "embedding_request_failed", on_dispatch: Callable[[], None] | None = None,
+              binding: SidecarBinding | None = None) -> Any:
+        owner = self._owner(binding)  # no owner or another generation: refused before anything is sent
         if on_dispatch is not None:
             on_dispatch()  # from here on the request may reach the server
         try:
@@ -142,15 +196,17 @@ class MediaEmbedder:
         except Exception as exc:  # noqa: BLE001 - IPC failures are typed, retried later
             raise ResourceRefused(failure, type(exc).__name__) from None
 
-    def verify(self) -> None:
-        """The sidecar must serve bge-m3 in F16 (checked once per embedder).
+    def verify(self, binding: SidecarBinding | None = None) -> None:
+        """The bound generation's sidecar must serve bge-m3 in F16 (checked once per bound generation).
 
         /api/tags starts no inference, so its failure is a capability refusal ("model_unavailable"), never an
         unresolved request."""
-        if self._verified:
+        binding = binding if binding is not None else self.bind()
+        key = binding.capability if binding.capability is not None else binding.owner
+        if self._verified_for is not None and self._verified_for is key:
             return
         tags = self._call("GET", "/api/tags", timeout=TAGS_TIMEOUT_SECONDS, max_bytes=MAX_TAGS_BYTES,
-                          failure="model_unavailable")
+                          failure="model_unavailable", binding=binding)
         models = tags.get("models") if isinstance(tags, dict) else None
         for item in models if isinstance(models, list) else []:
             if not isinstance(item, dict):
@@ -158,25 +214,28 @@ class MediaEmbedder:
             names = {str(item.get("name", "")).casefold(), str(item.get("model", "")).casefold()}
             details = item.get("details") if isinstance(item.get("details"), dict) else {}
             if names & ACCEPTED_MODEL_NAMES and details.get("quantization_level") == REQUIRED_QUANTIZATION:
-                self._verified = True
+                self._verified_for = key
                 return
         raise ResourceRefused("model_unavailable", "the sidecar does not serve bge-m3 in F16")
 
     def embed(self, texts: Sequence[str], *, timeout: float = EMBED_TIMEOUT_SECONDS,
-              on_dispatch: Callable[[], None] | None = None) -> list[bytes]:
+              on_dispatch: Callable[[], None] | None = None,
+              binding: SidecarBinding | None = None) -> list[bytes]:
         """Normalised float32 vectors (little-endian bytes) for at most EMBED_BATCH bounded texts.
 
-        ``on_dispatch`` is called once the owner is resolved and the model verified, immediately before the POST
-        that may make the sidecar load bge-m3 (the lease's evidence that a request was possibly dispatched)."""
+        ``binding`` is the generation captured at admission (default: bound now). ``on_dispatch`` is called once
+        the owner is resolved and the model verified, immediately before the POST that may make the sidecar load
+        bge-m3 (the lease's evidence that a request was possibly dispatched)."""
         cleaned = [str(text).strip() for text in texts]
         if not cleaned or len(cleaned) > EMBED_BATCH or any(not t or len(t) > MAX_TEXT_CHARS for t in cleaned):
             raise ValueError("embedding input must be 1..8 non-empty texts of at most 1200 characters")
-        self.verify()
+        binding = binding if binding is not None else self.bind()
+        self.verify(binding)
         payload = {"model": self._profile["model"], "input": cleaned, "truncate": False,
                    "keep_alive": self._profile["keep_alive"], "options": {"num_gpu": 0}}
         answer = self._call("POST", "/api/embed", timeout=timeout,
                             max_bytes=BYTES_PER_VECTOR_JSON * len(cleaned) + 4096, payload=payload,
-                            on_dispatch=on_dispatch)
+                            on_dispatch=on_dispatch, binding=binding)
         if not isinstance(answer, dict):
             raise EmbeddingInvalid("the embedding answer is not an object")
         echoed = answer.get("model")

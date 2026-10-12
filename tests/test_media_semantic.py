@@ -146,7 +146,10 @@ def stage(service, asset_id):
 
 
 def test_the_embedder_uses_only_the_fixed_sidecar_profile_through_the_owned_connection():
-    assert list(inspect.signature(semantic.MediaEmbedder).parameters) == ["owner_check", "transport"]
+    # Round 32 (public interface change, documented): the atomic owner + generation seam joins; still no URL, port
+    # or model parameter.
+    assert list(inspect.signature(semantic.MediaEmbedder).parameters) == ["owner_check", "generation_check",
+                                                                          "transport"]
     sidecar = FakeSidecar()
     vectors = semantic.MediaEmbedder(lambda: OWNER, transport=sidecar).embed(["first line", "second line"])
     tags, embed = sidecar.calls

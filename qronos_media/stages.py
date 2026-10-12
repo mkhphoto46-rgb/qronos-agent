@@ -150,6 +150,8 @@ class StageContext:
     lease: Callable[[], object] = lambda: None
     #: The runtime's bge-m3 embedder (qronos_media.semantic.MediaEmbedder) or None.
     embedder: object = None
+    #: The memory-sidecar generation captured at admission (qronos_media.semantic.SidecarBinding) or None.
+    sidecar_binding: object = None
 
     def checkpoint_boundary(self) -> None:
         if self.interrupted():
@@ -770,6 +772,10 @@ def run_semantic(ctx: StageContext) -> Commit:
         raise ResourceRefused("model_lease_required", "semantic")
     if ctx.embedder is None:
         raise ResourceRefused("model_unavailable", "no bge-m3 sidecar capability in this process")
+    binding = ctx.sidecar_binding if ctx.sidecar_binding is not None else ctx.embedder.bind()
+    # The slot belongs to the generation captured at admission (a reused resident slot of another generation is
+    # refused here, before any request).
+    lease.bind_capability(getattr(binding, "capability", None))
     ctx.primary_file()  # the asset's root is admitted now and bound: a revocation stops the work and the commit
     windows = semantic.build_windows(ctx.db, ctx.asset_id)
     keys = sorted({w.cache_key for w in windows})
@@ -789,7 +795,8 @@ def run_semantic(ctx: StageContext) -> Commit:
         ctx.checkpoint_boundary()  # Stop, Pause, deadline, permission, the person's foreground turn
         ctx.renew()
         try:
-            vectors = ctx.embedder.embed([text for _, text in batch], on_dispatch=lease.mark_dispatched)
+            vectors = ctx.embedder.embed([text for _, text in batch], on_dispatch=lease.mark_dispatched,
+                                         binding=binding)
         except semantic.EmbeddingInvalid as exc:
             raise StageFailed(f"bge-m3 answer rejected: {exc}") from None
         except ResourceRefused as exc:

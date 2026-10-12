@@ -495,10 +495,17 @@ change requeues it), `MediaService.search_semantic`.
   while ANY media model request is unresolved, no media model is admitted
   (Whisper included; Root round-29 decision), and an empty `/api/ps` does NOT
   free it (a queued
-  request may not be listed); only the contained lifecycle proof does. The
-  runtime supplies no such lifecycle proof today and the server process merely
-  exiting is not accepted (a runner may outlive it), so after a sidecar exit
-  the reservation stays counted until the bridge restarts. A proved `resident`
+  request may not be listed); only the contained lifecycle proof does. Since
+  round 32 the bridge hands media the runtime's atomic
+  `MemorySidecarManager.owned_generation()` pair (owner + that generation's
+  immutable `SidecarLifecycle`, accepted 767b87e). A request binds it once at
+  admission; every call refuses `generation_changed` before sending when the
+  sidecar is no longer that generation; the slot keeps the captured
+  capability and is freed only when THAT capability's `state()` is
+  `tree_exited` (a later generation, its empty model list, a parent PID exit,
+  a timeout, an HTTP close or an issued terminate never free it). The F16
+  check is cached per bound generation. The server process merely exiting is
+  not accepted (a runner may outlive it). A proved `resident`
   bge-m3 is not uncertain work: it coexists with another declared model
   through the governor and ledger, both accounted. Yielding is checked
   between batches (8 texts); one in-flight batch is bounded by its timeout

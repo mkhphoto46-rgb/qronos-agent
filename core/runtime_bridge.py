@@ -1602,6 +1602,8 @@ class QronosRuntime:
             from core.resource_ownership import GLOBAL_RESOURCE_LEDGER
             from qronos_media.host import build_bridge_media_host
 
+            from core.library_executor import WorkflowSecretCheck
+
             scheduler = self.ensure_scheduler()
             audit = self.action_audit.record_verdict if self.action_audit is not None else None
             self._media_host = build_bridge_media_host(
@@ -1611,7 +1613,10 @@ class QronosRuntime:
                 paused=lambda: self.runtime_paused,
                 approvals=self._approvals,
                 audit=audit,
-                embedding_owner=self._memory_sidecar_owner,
+                # The owner and THAT generation's lifecycle capability, read together (one lock) per admission.
+                embedding_generation=self._memory_sidecar_generation,
+                # The bridge never opens the secret store itself; media borrows the narrow typed-secret check.
+                secrets=WorkflowSecretCheck(),
             )
             return self._media_host
 
@@ -1620,6 +1625,22 @@ class QronosRuntime:
         memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
         sidecar = getattr(memory, "sidecar", None)
         return getattr(sidecar, "owned_process", None) if sidecar is not None else None
+
+    def _memory_sidecar_generation(self) -> Any:
+        """(owner, lifecycle capability) of the owned bge-m3 sidecar's CURRENT generation, atomically, or None.
+
+        ``MemorySidecarManager.owned_generation`` reads both under one lock; media binds that pair per admission and
+        frees a slot only on THAT capability's whole-tree proof. Off or missing: None (unavailable).
+        """
+        memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
+        sidecar = getattr(memory, "sidecar", None)
+        owned_generation = getattr(sidecar, "owned_generation", None) if sidecar is not None else None
+        if not callable(owned_generation):
+            return None
+        try:
+            return owned_generation()
+        except Exception:  # an unreadable generation is no generation
+            return None
 
     def _preempt_media(self, reason: str) -> None:
         host = self._media_host
