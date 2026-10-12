@@ -148,6 +148,11 @@ def test_the_run_accepts_only_the_pinned_exit_codes_and_clears_errors_first():
     assert order == sorted(order)
     assert "/install /quiet /norestart" in run and "http" not in run.lower()
     assert "${If} $R8 <> 0" in run and "${AndIf} $R8 <> 1638" in run and "${AndIf} $R8 <> 3010" in run
+    # 3010 (installed; a restart finishes it) is reported, and is still followed by the registry check, like 0.
+    pre = _preinstall(hook)
+    run_at, restart_at = pre.index("!insertmacro QRONOS_VCREDIST_RUN_INSTALLER"), pre.index("${If} $R8 = 3010")
+    assert run_at < restart_at < pre.rindex("!insertmacro QRONOS_VCREDIST_SATISFIED_TO_R9")
+    assert "QRONOS_FAIL" not in pre[restart_at:pre.index("${EndIf}", restart_at)]
     detect = hook[hook.index("!macro QRONOS_VCREDIST_SATISFIED_TO_R9"):]
     detect = detect[:detect.index("!macroend")]
     assert "QRONOS_VCREDIST_READ_VIEW 64" in detect and "QRONOS_VCREDIST_READ_VIEW 32" in detect
