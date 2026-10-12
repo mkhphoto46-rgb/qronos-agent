@@ -296,3 +296,38 @@ voice, wake-word and vision acceptance requires the corresponding approved
 assets. Wake-word training/data quality, model redistribution licenses,
 installer signing, updates and clean-machine/live hardware acceptance remain
 release requirements. This build is not a signed public release.
+
+### Reviewed runtime asset identities
+
+`build_support/runtime_assets.json` lists every asset the setup report checks (and the whisper DLLs beside
+them).
+
+- A **verified** entry carries the size and SHA-256 its official publisher publishes. That is the Hugging Face
+  LFS object id, or for the openWakeWord v0.5.1 release files, the official release file re-downloaded and hashed.
+- An **unverified** entry carries no hash at all, because no published identity matches the local file.
+- A **missing** entry is configured but absent.
+- Each entry states its licence position. "owner-review-required" marks terms this project has not settled. Note
+  that openWakeWord's README places its pre-trained models under CC BY-NC-SA 4.0.
+
+Check an asset folder, read only (nothing is opened beyond hashing, followed, started or downloaded):
+
+```powershell
+.\.venv-build\Scripts\python.exe -m build_support.runtime_assets --root "$env:LOCALAPPDATA\Qronos\RuntimeAssets"
+```
+
+Each entry is reported as verified, mismatch, unverified, missing or refused (a link or not a regular file).
+`--require-verified` exits 1 unless every entry is present and verified; that is the release gate for assets.
+
+State on 2026-10-12:
+- **Verified (6):**
+  - the three openWakeWord feature models;
+  - `ggml-large-v3-turbo-q5_0.bin`;
+  - `ggml-silero-v6.2.0.bin`;
+  - `chatterbox-s3gen-q8_0.gguf`.
+- **Unverified (5):**
+  - the whisper.cpp binaries: a local 1.9.3-dev build tuned to the build machine's CPU, so not portable;
+  - `crispasr.exe`;
+  - the Persian `t3-fa-q4_k.gguf`: most likely a local quantization of the published f16 model.
+- **Missing (3):**
+  - the project's wake-word head and its data;
+  - `whisper-server.exe`.
