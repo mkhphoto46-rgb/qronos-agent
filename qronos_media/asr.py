@@ -88,7 +88,14 @@ class WhisperAssets:
 
     def provenance(self) -> dict[str, object]:
         return {"model": self.spec.name, "modelSha256": self.spec.weights.sha256,
-                "executableSha256": self.spec.executable.sha256}
+                "executableSha256": self.spec.executable.sha256, "runtime": self.spec.runtime,
+                "companionsSha256": companions_digest(self.spec)}
+
+
+def companions_digest(spec: ModelSpec) -> str:
+    """One digest over the pinned libraries the executable loads (name and SHA-256 of each)."""
+    lines = sorted(f"{asset.parts[-1]}:{asset.sha256}" for asset in spec.companions)
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 
 _VERIFIED: dict[tuple, bool] = {}
@@ -120,6 +127,8 @@ def locate_whisper(runtime_assets: Path, spec: ModelSpec = WHISPER_LARGE_V3_TURB
     executable = Path(runtime_assets, *spec.executable.parts)
     weights = Path(runtime_assets, *spec.weights.parts)
     _verify(executable, spec.executable)
+    for companion in spec.companions:  # every library it loads is the pinned one (a planted DLL refuses)
+        _verify(Path(runtime_assets, *companion.parts), companion)
     _verify(weights, spec.weights)
     return WhisperAssets(executable, weights, spec)
 
@@ -195,6 +204,7 @@ def plan_key(asset_sha: str, choice: AudioChoice, assets: WhisperAssets) -> str:
     material = json.dumps({"v": ASR_VERSION, "asset": asset_sha, "stream": choice.stream_index,
                            "audioStart": choice.audio_start_ms, "origin": choice.asset_origin_ms,
                            "model": assets.spec.weights.sha256, "exe": assets.spec.executable.sha256,
+                           "runtime": assets.spec.runtime, "libs": companions_digest(assets.spec),
                            "chunkMs": CHUNK_MS}, sort_keys=True)
     return hashlib.sha256(material.encode()).hexdigest()
 

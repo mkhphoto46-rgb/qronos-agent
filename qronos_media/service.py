@@ -349,6 +349,8 @@ class MediaService:
             "keyframeBytes": db.execute("SELECT COALESCE(SUM(bytes), 0) FROM keyframes").fetchone()[0],
             "cacheQuotaBytes": self.cache_quota_bytes,
             "toolsAvailable": self.tools is not None,
+            # Which ffmpeg build is in use: the pinned shipping identity (with its known limits) or an unpinned override.
+            "tools": self.tools.provenance() if self.tools is not None and hasattr(self.tools, "provenance") else None,
             "pending": list(PENDING_CAPABILITIES),
         }
 

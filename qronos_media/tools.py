@@ -37,6 +37,17 @@ from qronos_media.containment import DECODER_LIMITS, ChildLimits, Containment
 from qronos_media.paths import decoder_input, local_path
 
 FFMPEG_DIR_ENV = "QRONOS_MEDIA_FFMPEG_DIR"
+#: The shipped FFmpeg (Main28 r28 contract A2; staged set verified by Root): 9.0.2 built by Qronos from the signed
+#: official source https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz, LGPL v2.1 or later, no GPL, version3, nonfree or network
+#: code; protocols file and pipe only; reproduced byte-for-byte by a second clean build. Only these exact files are
+#: admitted from <runtime>/ffmpeg/bin. Known limit: AV1 video does not decode (no libdav1d); probing still works.
+SHIPPED_FFMPEG_IDENTITY = "ffmpeg 9.0.2 LGPL-2.1-or-later (Qronos build of the signed official source)"
+SHIPPED_FFMPEG = {"ffmpeg": (21947392, "6c3fc768ef1de9ee4d514ae15b789ed77dc39f95a3a379b75bec4fcf4e0c65b9"),
+                  "ffprobe": (21726208, "ef43e6e32a54646d1ba38957ebba4396699a1032f9be1e6c402bcb87c2ac6406")}
+SHIPPED_FFMPEG_LIMITS = ("av1_video_decode_unavailable",)
+#: A developer/test override (QRONOS_MEDIA_FFMPEG_DIR) is never pinned and is reported as such.
+UNPINNED_IDENTITY = "development override (unpinned; not a shipping build)"
+_PINNED_OK: dict[tuple, bool] = {}
 
 # Demuxers for real local containers. Deliberately absent: concat, hls, dash,
 # image2, sdp, rtsp, tee and every other demuxer that opens further inputs.
@@ -262,12 +273,43 @@ def _seconds(value: float) -> str:
     return f"{_number(value, 0.0, 10 * 24 * 3600, 'time'):.3f}"
 
 
+def _plain_files(*paths: Path) -> bool:
+    return all(path.is_file() and not path.is_symlink() for path in paths)
+
+
+def _pinned(path: Path, name: str) -> bool:
+    """The file is exactly the pinned shipping executable (size, then SHA-256; cached per file state)."""
+    import hashlib
+
+    size, sha256 = SHIPPED_FFMPEG[name]
+    try:
+        info = os.stat(path)
+    except OSError:
+        return False
+    if info.st_size != size:
+        return False
+    key = (str(path), info.st_size, info.st_mtime_ns, getattr(info, "st_ino", 0), sha256)
+    if key not in _PINNED_OK:
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:  # read-only; never executed here
+            for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                digest.update(block)
+        _PINNED_OK[key] = digest.hexdigest() == sha256
+    return _PINNED_OK[key]
+
+
 @dataclass(frozen=True)
 class MediaTools:
     """Located ffmpeg/ffprobe plus the only command lines this package runs."""
 
     ffmpeg: Path
     ffprobe: Path
+    identity: str = UNPINNED_IDENTITY
+    pinned: bool = False
+
+    @property
+    def limits(self) -> tuple[str, ...]:
+        return SHIPPED_FFMPEG_LIMITS if self.pinned else ()
 
     @classmethod
     def locate(
@@ -278,26 +320,31 @@ class MediaTools:
     ) -> "MediaTools | None":
         """Find a provisioned build. ``PATH`` is never searched.
 
-        Order: ``QRONOS_MEDIA_FFMPEG_DIR``, then ``<runtime>/ffmpeg/bin`` and
-        ``<runtime>/ffmpeg``. Both executables must be regular files.
+        Order: ``QRONOS_MEDIA_FFMPEG_DIR`` (a development/test override, reported as unpinned), then the
+        provisioned ``<runtime>/ffmpeg/bin``, admitted ONLY when both files are exactly the pinned shipping build
+        (size and SHA-256, read-only; never executed here). Both executables must be regular files.
         """
         environment = os.environ if environ is None else environ
-        candidates: list[Path] = []
+        suffix = ".exe" if os.name == "nt" else ""
         configured = environment.get(FFMPEG_DIR_ENV, "").strip()
         if configured:
             try:
-                candidates.append(local_path(configured))
+                directory = local_path(configured)
             except ValueError:
                 return None
-        if runtime_assets is not None:
-            candidates += [runtime_assets / "ffmpeg" / "bin", runtime_assets / "ffmpeg"]
-        suffix = ".exe" if os.name == "nt" else ""
-        for directory in candidates:
-            ffmpeg = directory / f"ffmpeg{suffix}"
-            ffprobe = directory / f"ffprobe{suffix}"
-            if ffmpeg.is_file() and ffprobe.is_file() and not ffmpeg.is_symlink() and not ffprobe.is_symlink():
+            ffmpeg, ffprobe = directory / f"ffmpeg{suffix}", directory / f"ffprobe{suffix}"
+            if _plain_files(ffmpeg, ffprobe):
                 return cls(ffmpeg, ffprobe)
+        if runtime_assets is not None:
+            directory = runtime_assets / "ffmpeg" / "bin"
+            ffmpeg, ffprobe = directory / f"ffmpeg{suffix}", directory / f"ffprobe{suffix}"
+            if _plain_files(ffmpeg, ffprobe) and _pinned(ffmpeg, "ffmpeg") and _pinned(ffprobe, "ffprobe"):
+                return cls(ffmpeg, ffprobe, SHIPPED_FFMPEG_IDENTITY, True)
         return None
+
+    def provenance(self) -> dict[str, object]:
+        """Which build is in use (no execution): the pinned shipping identity, or an unpinned override."""
+        return {"identity": self.identity, "pinned": self.pinned, "limits": list(self.limits)}
 
     def child_env(self) -> dict[str, str]:
         env = {"PATH": str(self.ffmpeg.parent)}

@@ -134,7 +134,7 @@ def dispatch(service: MediaService, args: argparse.Namespace) -> Any:
     if command == "open-timestamp":
         return service.open_timestamp(args.asset_id, args.start_ms, player=args.player)
     if command == "tools":
-        return service.tools.describe() if service.tools else {"available": False}
+        return {**service.tools.describe(), **service.tools.provenance()} if service.tools else {"available": False}
     raise MediaRequestError(f"unknown command {command}")
 
 
