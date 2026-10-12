@@ -61,6 +61,7 @@ import CrossViewParticleTransition from "./components/CrossViewParticleTransitio
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
 import HistoryDrawer from "./components/HistoryDrawer";
+import MediaDrawer from "./components/MediaDrawer";
 import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
 import AppWorkflowDialog from "./components/AppWorkflowDialog";
 import QronosOrb from "./components/QronosOrb";
@@ -2498,6 +2499,15 @@ function App() {
 
       {/* What Qronos did, what was allowed, what failed, and what can actually be undone. */}
       <HistoryDrawer
+        hidden={
+          viewPhase !== "home" &&
+          viewPhase !== "conversations"
+        }
+      />
+
+      {/* The media library: chosen folders, background indexing, search with evidence cards, open at a time
+          and reports, all through the runtime's one media host (qronos.media actions). */}
+      <MediaDrawer
         hidden={
           viewPhase !== "home" &&
           viewPhase !== "conversations"
