@@ -19,7 +19,11 @@ def smoke(executable: Path, profile: Path) -> dict[str, Any]:
         raise ValueError("The smoke profile must be outside the runtime bundle.")
     profile.mkdir(parents=True)
     environment = dict(os.environ)
+    # Match the desktop-owned version contract, including the CI smoke run.
+    desktop_config = Path(__file__).resolve().parents[1] / "desktop" / "src-tauri" / "tauri.conf.json"
+    product_version = json.loads(desktop_config.read_text(encoding="utf-8"))["version"]
     environment.update({
+        "QRONOS_APP_VERSION": product_version,
         "QRONOS_PACKAGED_RUNTIME": "1",
         "QRONOS_DATA_ROOT": str(profile / "Qronos"),
         "QRONOS_ASSET_ROOT": str(profile / "assets"),

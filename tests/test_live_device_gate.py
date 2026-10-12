@@ -189,7 +189,7 @@ def test_live_diagnostic_scripts_are_never_collected():
     assert parser["pytest"]["testpaths"].split() == ["tests"]
     import ast
     for script in sorted((ROOT / "tools").rglob("*.py")):
-        tree = ast.parse(script.read_text(encoding="utf-8"))
+        tree = ast.parse(script.read_text(encoding="utf-8-sig"))
         names = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))]
         assert not [n for n in names if n.startswith(("test", "Test"))], script.name
 

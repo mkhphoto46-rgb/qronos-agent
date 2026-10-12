@@ -4,9 +4,8 @@ These instructions apply to every task whose Codex instruction-discovery path in
 
 ## Communication language
 
-- Communicate with the user in English, including reasoning, implications, recommendations, reports, and status notes. This standing user-authored rule takes precedence over the earlier rule to explain these in Persian.
-- Use precise English for technical terms, concepts, patterns, methods, metrics, and named frameworks.
-- Qronos product user-interface copy stays Persian unless a task explicitly changes it; this rule governs communication with the user, not product text.
+- Use English for technical terms, concepts, patterns, methods, metrics, and named frameworks.
+- Explain reasoning, implications, and recommendations in Persian.
 
 ## Critical collaboration protocol
 
@@ -39,14 +38,6 @@ For consequential proposals, use this sequence when applicable:
 - If a new rule conflicts with an existing rule, a higher-priority instruction, safety, or technical reality, identify the conflict and resolve it explicitly instead of silently overwriting or pretending both can be followed.
 - Do not claim that this project file governs unrelated repositories or already-running tasks that have not reloaded their instruction chain.
 
-## Agent orchestration
-
-- Delegate substantive implementation and investigation work in this repository to actual Claude Opus 5.5 high-effort terminal agents. Codex coordinates the work, reviews the results, and integrates them.
-- Reuse already-authorized Opus workers when their context suits the task, instead of starting new ones.
-- Stay within the number of workers the user currently authorizes. At the time this rule was recorded, that is up to three Opus 5.5 workers plus one Sol worker for checks and integration.
-- If the exact Opus 5.5 model or its terminal CLI is unavailable, report that limitation. Never present another model or agent as Opus.
-- This rule applies to this repository only. It is not a global Codex setting and does not govern unrelated projects.
-
 ## Presentation style
 
 - Organize substantial responses into clear, visually appealing categories with descriptive headings.
@@ -58,7 +49,7 @@ For consequential proposals, use this sequence when applicable:
 ## Beginner-first technical guidance
 
 - Assume the user has no prior knowledge of coding, command lines, Git, IDEs, configuration files, or software-development workflows.
-- Explain technical work in simple English without being condescending. Define each necessary technical term when first used.
+- Explain technical work in simple Persian without being condescending. Define each necessary English technical term when first used.
 - Provide complete, sequential, step-by-step instructions. Do not skip setup, navigation, clicking, opening, saving, running, testing, or verification steps.
 - State exactly which application to open, where to navigate, which folder and file to open, what to select, what to type or paste, and what result should appear.
 - Give one action at a time when an earlier mistake would invalidate later steps.

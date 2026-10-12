@@ -13,6 +13,7 @@ class StopResponseRuntimeTests(unittest.TestCase):
         runtime = QronosRuntime.__new__(QronosRuntime)
         runtime._lock = threading.RLock()
         runtime._busy = False
+        runtime._media_host = None
         runtime._voice_playback_complete = threading.Event()
         runtime._voice_playback_id = 1
         runtime._pending_playback_id = None

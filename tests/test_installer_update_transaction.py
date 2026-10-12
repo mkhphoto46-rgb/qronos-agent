@@ -46,6 +46,7 @@ def sha(data: bytes) -> str:
 
 def plant_previous(probe, *, webview2: bool = True) -> dict:
     """The private previous installation; returns what 'usable and byte-exact' means for it."""
+    from tests.fixtures.nsis_full_template import VCREDIST_KEY
     root = probe.instdir
     for entry, data in {**OLD, **PRIVATE}.items():
         path = root / entry
@@ -55,7 +56,10 @@ def plant_previous(probe, *, webview2: bool = True) -> dict:
     (root / install_manifest.FILE_NAME).write_bytes(install_manifest.render(listed))
     (probe.smprograms / "Qronos Probe.lnk").write_bytes(OLD_LNK["start"])
     (probe.desktop / "Qronos Probe.lnk").write_bytes(OLD_LNK["desktop"])
-    sections = {UNINSTKEY: dict(OLD_VALUES)}
+    # Preserve the newly required prerequisite in the private fake registry.
+    # This fixture replaces the initial INI when planting the old application.
+    sections = {VCREDIST_KEY: {"Installed": "1", "Major": "14", "Minor": "44", "Bld": "35211"},
+                UNINSTKEY: dict(OLD_VALUES)}
     if webview2:
         sections = {tt_webview2_key(): {"pv": "120.0.0.0"}, **sections}
     lines = []

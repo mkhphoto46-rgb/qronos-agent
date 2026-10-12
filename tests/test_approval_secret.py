@@ -78,8 +78,10 @@ def reopen(store: ApprovalSecretStore, clock: Clock) -> ApprovalSecretStore:
 # ---------------------------------------------------------------- not configured
 
 
-def test_tests_never_use_the_real_profile_store() -> None:
-    assert "pytest" in str(approval_secret_path()).lower() or "tmp" in str(approval_secret_path()).lower()
+def test_tests_never_use_the_real_profile_store(tmp_path: Path) -> None:
+    path = approval_secret_path().resolve()
+    assert path == (tmp_path / "approval_secret.sqlite3").resolve()
+    assert path.is_relative_to(tmp_path.resolve())
 
 
 def test_unconfigured_store_fails_closed_with_a_setup_path(store: ApprovalSecretStore) -> None:

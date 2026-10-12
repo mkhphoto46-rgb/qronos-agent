@@ -77,7 +77,7 @@ def test_an_unreadable_store_is_unavailable_never_ready(store):
     assert store.path.read_bytes() == b"not a database", "a damaged store is never reinitialised"
 
 
-def test_the_default_check_uses_the_per_profile_secret_path():
+def test_the_default_check_uses_the_per_profile_secret_path(tmp_path):
     # conftest points the per-profile path at this test's temporary folder.
     assert WorkflowSecretCheck().store.path == approval_secret_path()
-    assert "tmp" in str(approval_secret_path()).lower() or "pytest" in str(approval_secret_path()).lower()
+    assert approval_secret_path().resolve() == (tmp_path / "approval_secret.sqlite3").resolve()
