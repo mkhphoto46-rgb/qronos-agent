@@ -124,7 +124,7 @@ class GatePermissions:
                 "approval_required",
                 f"{verdict.decision.value}: approve this in Qronos; a standalone process cannot wait for approval",
             )
-        ticket = self.ledger.issue(ApprovalKind.FILE_ACTION, question,
+        ticket = self.ledger.issue(ApprovalKind.MEDIA_ACTION, question,
                                    payload={**payload, "request": request})
         return Pending(ticket.approval_id, verdict.decision.value, preview)
 
@@ -147,7 +147,7 @@ class GatePermissions:
         if self.ledger is None:
             raise MediaPermissionRefused("approval_required", "no approval ledger in this process")
         try:
-            ticket = self.ledger.take(approval_id, kinds=(ApprovalKind.FILE_ACTION,))
+            ticket = self.ledger.take(approval_id, kinds=(ApprovalKind.MEDIA_ACTION,))
         except StaleApproval as exc:
             raise MediaPermissionRefused("stale_approval", exc.reason) from None
         payload = ticket.payload if isinstance(ticket.payload, dict) else {}
@@ -261,6 +261,6 @@ class GatePermissions:
         if self.ledger is None:
             raise MediaPermissionRefused("approval_required", "no approval ledger in this process")
         try:
-            self.ledger.take(approval_id, kinds=(ApprovalKind.FILE_ACTION,))
+            self.ledger.take(approval_id, kinds=(ApprovalKind.MEDIA_ACTION,))
         except StaleApproval as exc:
             raise MediaPermissionRefused("stale_approval", exc.reason) from None

@@ -1729,13 +1729,17 @@ MAX_MEDIA_START_SECONDS = 7 * 24 * 3600.0
 
 
 def trusted_media_players(*, refresh: bool = False) -> dict[str, AppSpec]:
-    """Catalog applications whose executable is mpv or VLC (app_id -> spec), never a caller path."""
+    """Catalog applications whose executable is an mpv or VLC ``.exe`` (app_id -> spec), never a caller path.
+
+    Only a real program: Windows runs a .cmd/.bat through cmd.exe, which would parse the arguments (a shell).
+    """
     players: dict[str, AppSpec] = {}
     for app_id, spec in application_catalog(refresh=refresh).items():
         if not spec.executable:
             continue
         stem = Path(spec.executable).stem.casefold()
-        if stem in MEDIA_PLAYER_START_OPTIONS and Path(spec.executable).name.lower() not in _BLOCKED_EXECUTABLES:
+        if stem in MEDIA_PLAYER_START_OPTIONS and Path(spec.executable).suffix.lower() == ".exe" \
+                and Path(spec.executable).name.lower() not in _BLOCKED_EXECUTABLES:
             players[app_id] = spec
     return players
 
@@ -1749,7 +1753,7 @@ def media_player_argv(spec: AppSpec, media_path: str, start_seconds: float) -> l
         raise InvalidAction("That player is no longer in the trusted application catalog.")
     executable = Path(spec.executable).resolve(strict=False)
     stem = executable.stem.casefold()
-    if stem not in MEDIA_PLAYER_START_OPTIONS or not executable.is_file():
+    if stem not in MEDIA_PLAYER_START_OPTIONS or executable.suffix.lower() != ".exe" or not executable.is_file():
         raise InvalidAction("The catalog player failed validation.")
     target = Path(media_path)
     if not target.is_absolute() or target.is_symlink() or not target.is_file():

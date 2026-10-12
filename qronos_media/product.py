@@ -8,8 +8,9 @@ command, a SQL statement, an approval decision or a resource budget.
 Approvals: a gated operation answers ``approval_required`` with a single-use ``approvalId`` and ``needsSecret``. The
 gate decision behind that id stays here (the request only says approved yes/no); a decision for an id this route
 did not issue, or one already answered, is refused before anything runs. A typed secret is passed in-process only
-and never echoed, stored or put in a result. Approvals are FILE_ACTION tickets of the bridge's ledger, so its
-Pause/Stop/shutdown points revoke them; a late answer is stale.
+and never echoed, stored or put in a result. Approvals are MEDIA_ACTION tickets of the bridge's one ledger (never
+file-action tickets, so no file consumer reads their payload); its Pause/Stop/shutdown points revoke them, and a
+late answer is stale.
 """
 from __future__ import annotations
 

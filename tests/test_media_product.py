@@ -242,7 +242,8 @@ def test_a_declined_or_revoked_approval_runs_nothing(world, monkeypatch):
     assert ask(world, "decline", "b2", approvalId=pending["approvalId"])["declined"] is True
     assert ask(world, "decide", "b3", approvalId=pending["approvalId"], approved=True)["code"] == "stale_approval"
     revoked = ask(world, "roots.add", "b4", path=str(world.library))
-    world.approvals.revoke_kinds((ApprovalKind.FILE_ACTION,), "paused")  # the bridge's Pause/Stop point
+    # what the bridge's Pause/Stop/close revoke (tests/test_media_approval_lifecycle.py drives the real ones)
+    world.approvals.revoke_kinds((ApprovalKind.MEDIA_ACTION,), "paused")
     late = ask(world, "decide", "b5", approvalId=revoked["approvalId"], approved=True)
     assert late["ok"] is False and late["code"] == "stale_approval"
     assert ask(world, "roots.list", "b6")["roots"] == []

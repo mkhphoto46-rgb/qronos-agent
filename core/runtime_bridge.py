@@ -2740,6 +2740,7 @@ class QronosRuntime:
 
         if paused:
             self._discard_pending_file_approvals(CANCEL_REASON_PAUSE)
+            self._discard_pending_media_approvals(CANCEL_REASON_PAUSE)
             self._discard_pending_history_undo(CANCEL_REASON_PAUSE)
             # Pause stops GUI work the same way Stop does: in-flight actions
             # are cancelled cooperatively (releasing held buttons), turns in
@@ -7090,6 +7091,15 @@ class QronosRuntime:
         self._clear_file_write_approval_lease(reason)
         return len(revoked)
 
+    def _discard_pending_media_approvals(self, reason: str) -> int:
+        """
+        Revoke every media library question (MEDIA_ACTION) at the same Pause,
+        Stop and shutdown points as the file approvals. Their payloads belong
+        to the media route and are never read here; a late answer is stale
+        there. Idempotent.
+        """
+        return len(self._approvals.revoke_kinds((ApprovalKind.MEDIA_ACTION,), reason))
+
     def _notify_file_stale(self, action_token: str, reason: str) -> None:
         self._notify(
             "file_action_stale",
@@ -7222,6 +7232,7 @@ class QronosRuntime:
         pending_file_approvals_discarded = self._discard_pending_file_approvals(
             CANCEL_REASON_USER_STOP
         )
+        self._discard_pending_media_approvals(CANCEL_REASON_USER_STOP)
         self._discard_pending_history_undo(CANCEL_REASON_USER_STOP)
 
         with self._lock:
@@ -9925,6 +9936,7 @@ class QronosRuntime:
                 pass
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
+        self._discard_pending_media_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_history_undo(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
