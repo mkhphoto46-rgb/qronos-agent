@@ -315,7 +315,10 @@ Check an asset folder, read only (nothing is opened beyond hashing, followed, st
 .\.venv-build\Scripts\python.exe -m build_support.runtime_assets --root "$env:LOCALAPPDATA\Qronos\RuntimeAssets"
 ```
 
-Each entry is reported as verified, mismatch, unverified, missing or refused (a link or not a regular file).
+Each entry is reported as verified, mismatch, unverified, missing or refused. Refused means the file is not a
+regular file, or the file, the root or a folder between them is a link, or the file Windows opened is not the
+intended one. A registry path must be plainly relative: no drive, root, UNC or device prefix, `..`, stream or
+reserved name.
 `--require-verified` exits 1 unless every entry is present and verified; that is the release gate for assets.
 
 State on 2026-10-12:

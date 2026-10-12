@@ -15,6 +15,7 @@ import pytest
 
 from build_support import runtime_assets
 from core.runtime_preflight import ASSET_GROUPS
+from tests.fixtures.owned_junction import owned_junction
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -45,6 +46,10 @@ def test_the_registry_covers_every_configured_asset_and_vouches_only_with_an_ide
     {"path": "a.bin", "status": "unverified", "sha256": "a" * 64},
     {"path": "../outside.bin", "status": "missing"},
     {"path": "a.bin", "status": "probably_fine"},
+    *({"path": path, "status": "missing"} for path in (
+        "C:\\outside\\asset.bin", "C:/outside/asset.bin", "C:asset.bin", "\\\\server\\share\\asset.bin",
+        "//server/share/asset.bin", "\\\\?\\C:\\asset.bin", "\\\\.\\C:\\asset.bin", "/asset.bin",
+        "models/NUL", "models/asset.bin:stream", "models /asset.bin", "models/a\x01.bin")),
 ])
 def test_a_malformed_registry_is_refused(tmp_path, bad):
     registry = tmp_path / "registry.json"
@@ -68,6 +73,44 @@ def test_each_state_is_reported_and_only_an_exact_file_is_verified(tmp_path):
                       "models/local.bin": "unverified", "models/absent.bin": "missing",
                       "models/folder.bin": "refused"}
     assert report["allVerified"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows")
+def test_a_linked_root_or_folder_on_the_way_refuses_the_asset_even_when_the_bytes_match(tmp_path):
+    good = b"official bytes"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "good.bin").write_bytes(good)
+    (outside / "local.bin").write_bytes(b"something local")
+    root = tmp_path / "root"
+    root.mkdir()
+    assets = [entry("models/good.bin", good), entry("models/local.bin")]
+    with owned_junction(outside, root / "models"):
+        report = runtime_assets.check(root, assets)
+    assert [item["state"] for item in report["assets"]] == ["refused", "refused"]
+    (outside / "models").mkdir()
+    (outside / "models" / "good.bin").write_bytes(good)
+    with owned_junction(outside, tmp_path / "linked-root"):
+        report = runtime_assets.check(tmp_path / "linked-root", assets)
+    assert [item["state"] for item in report["assets"]] == ["refused", "refused"]  # the root itself is a link
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows")
+def test_the_hash_is_read_only_through_the_intended_file(tmp_path, monkeypatch):
+    # A folder swapped for a link after the folder checks: the handle's final path still refuses it.
+    good = b"official bytes"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "good.bin").write_bytes(good)
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime_assets, "is_link_or_reparse_point", lambda path: False)
+    with owned_junction(outside, root / "models"):
+        report = runtime_assets.check(root, [entry("models/good.bin", good)])
+    assert report["assets"][0]["state"] == "refused"
+    (root / "plain").mkdir()
+    (root / "plain" / "good.bin").write_bytes(good)
+    assert runtime_assets.check(root, [entry("plain/good.bin", good)])["assets"][0]["state"] == "verified"
 
 
 def test_the_command_is_a_release_gate_and_reads_only(tmp_path):
