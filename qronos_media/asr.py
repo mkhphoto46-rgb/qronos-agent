@@ -127,10 +127,28 @@ def locate_whisper(runtime_assets: Path, spec: ModelSpec = WHISPER_LARGE_V3_TURB
     executable = Path(runtime_assets, *spec.executable.parts)
     weights = Path(runtime_assets, *spec.weights.parts)
     _verify(executable, spec.executable)
-    for companion in spec.companions:  # every library it loads is the pinned one (a planted DLL refuses)
+    for companion in spec.companions:  # each pinned library is exactly the pinned file
         _verify(Path(runtime_assets, *companion.parts), companion)
+    # whisper-cli (GGML_BACKEND_DL) loads EVERY ggml-<backend>*.dll in its own folder and in its working directory
+    # (ggml_backend_load_all), and Windows prefers DLLs beside the executable: no unpinned DLL may sit there. The
+    # child also runs with this verified folder as its working directory (whisper_cwd), so that search adds nothing.
+    pinned = {companion.parts[-1].casefold() for companion in spec.companions
+              if Path(runtime_assets, *companion.parts).parent == executable.parent}
+    try:
+        unpinned = sorted(entry.name for entry in os.scandir(executable.parent)
+                          if entry.name.casefold().endswith(".dll") and entry.name.casefold() not in pinned)
+    except OSError:
+        raise AsrUnavailable(f"{Path(*spec.executable.parts[:-1])} cannot be listed") from None
+    if unpinned:
+        raise AsrUnavailable(f"{Path(*spec.executable.parts[:-1])} holds libraries that are not pinned: "
+                             f"{', '.join(unpinned[:5])}")
     _verify(weights, spec.weights)
     return WhisperAssets(executable, weights, spec)
+
+
+def whisper_cwd(assets: WhisperAssets) -> Path:
+    """The whisper child's working directory: its verified bin folder (never the caller's or a media folder)."""
+    return assets.executable.parent
 
 
 def whisper_language(tag: str | None) -> str:

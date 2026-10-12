@@ -439,7 +439,10 @@ Nothing about media runs, probes or opens at startup or on import.
   b5454, commit d1be6fde; archive `whisper-bin-x64.zip` `6ba69e34…`):
   `whisper-cli.exe` 479,744 B `331dba46…` AND its 12 libraries (whisper.dll,
   ggml.dll, ggml-base.dll and the ggml-cpu-* variants), each pinned; a missing
-  or planted library refuses. The model is unchanged:
+  or changed library refuses, and so does ANY other `.dll` in that folder
+  (whisper-cli loads every `ggml-<backend>*.dll` beside it and in its working
+  directory). The whisper child runs with that verified folder as its working
+  directory. The model is unchanged:
   `ggml-large-v3-turbo-q5_0.bin` 574,041,195 B `39422170…`. Missing or
   different means `model_unavailable` and nothing runs. The runtime and the
   library digest are part of the ASR provenance and of the chunk plan key, so

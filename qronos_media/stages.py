@@ -698,7 +698,7 @@ def run_asr(ctx: StageContext) -> Commit:
                         asr.launcher(asr.whisper_argv(assets, wav, out_base, asr.whisper_language(choice.language))),
                         timeout_seconds=max(300.0, length / 1000.0 * 10.0), stdout_limit=1024 * 1024,
                         stderr_limit=1024 * 1024, cancelled=ctx.cancelled, env=asr.whisper_env(assets),
-                        limits=asr.ASR_CHILD_LIMITS, observer=lease,
+                        limits=asr.ASR_CHILD_LIMITS, observer=lease, cwd=asr.whisper_cwd(assets),
                     )
                 except ChildTerminationUnproven:
                     raise ResourceRefused("termination_unproven", f"asr chunk {index}") from None

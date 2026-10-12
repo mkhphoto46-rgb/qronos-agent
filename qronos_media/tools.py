@@ -130,6 +130,7 @@ def run_bounded(
     limits: ChildLimits | None = DECODER_LIMITS,
     observer: SpawnObserver | None = None,
     containment_factory: Callable[[ChildLimits], Containment] | None = None,
+    cwd: Path | None = None,
 ) -> ChildResult:
     """Run ``argv`` with a deadline, a cancel check, output caps and OS limits.
 
@@ -145,9 +146,13 @@ def run_bounded(
     handles whether the exit is proven (``finish``). When it is not, the job
     stays open in the observer's hands and :class:`ChildTerminationUnproven`
     is raised. ``containment_factory`` is a test seam for the job type only.
+    ``cwd`` is a caller-chosen, already verified folder (never a request value); by default the child
+    inherits this process's working directory.
     """
     if not argv or not all(isinstance(part, str) for part in argv):
         raise ValueError("argv must be a non-empty list of strings")
+    if cwd is not None and (not isinstance(cwd, Path) or not cwd.is_absolute() or not cwd.is_dir()):
+        raise ValueError("cwd must be an existing absolute folder")
     if not (0 < timeout_seconds <= 24 * 3600) or not math.isfinite(timeout_seconds):
         raise ValueError("timeout_seconds out of range")
     if observer is not None:
@@ -173,6 +178,7 @@ def run_bounded(
             stderr=subprocess.PIPE,
             shell=False,
             env=dict(env) if env is not None else None,
+            cwd=str(cwd) if cwd is not None else None,
             **kwargs,
         )
     except OSError as exc:
