@@ -31,6 +31,7 @@ if hasattr(sys.stderr, "reconfigure"):
 from core.foreground_lifecycle import ForegroundBusy, ForegroundLifecycle
 from core.inference_cancellation import LocalInferenceCancelled, inference_checkpoint
 from core.action_audit import ActionAuditLog
+from core import activity_history
 from core.config import CONFIG
 from core.actions import ActionOutcome, ActionResult
 from core.app_workflow_runtime import (
@@ -171,6 +172,11 @@ RUNTIME_SET_PAUSED_COMMAND = "runtime_set_paused"
 DESKTOP_WAKE_BOOTSTRAP_ENV = "QRONOS_DESKTOP_WAKE_BOOTSTRAP"
 CONVERSATION_HISTORY_REQUEST_ACTION = "qronos.conversation_history_request"
 FILE_ACTION_DECISION_ACTION = "qronos.file_action_decision"
+# The desktop's activity history (core/activity_history.py): a read-only snapshot, and undo of one supported file
+# change behind a single-use history confirmation (plus the typed secret when the gate requires it).
+HISTORY_REQUEST_ACTION = "qronos.history_request"
+HISTORY_UNDO_REQUEST_ACTION = "qronos.history_undo_request"
+HISTORY_UNDO_DECISION_ACTION = "qronos.history_undo_decision"
 FILE_WRITE_APPROVAL_LEASE_SECONDS = 10 * 60.0
 MAX_TEXT_MESSAGE_LENGTH = 16_000
 MAX_TEXT_REQUEST_ID_LENGTH = 128
@@ -182,6 +188,12 @@ class PendingFileTextAction:
     prepared: PreparedFileAction
     request_id: str
     started_at: float
+
+
+@dataclass(frozen=True)
+class PendingHistoryUndo:
+    action_id: str
+    needs_secret: bool
 
 
 @dataclass(frozen=True)
@@ -2728,6 +2740,7 @@ class QronosRuntime:
 
         if paused:
             self._discard_pending_file_approvals(CANCEL_REASON_PAUSE)
+            self._discard_pending_history_undo(CANCEL_REASON_PAUSE)
             # Pause stops GUI work the same way Stop does: in-flight actions
             # are cancelled cooperatively (releasing held buttons), turns in
             # progress cannot start new actions, and pending approvals are
@@ -3387,6 +3400,137 @@ class QronosRuntime:
             "ready",
             self.conversation_history.snapshot_json(),
         )
+
+    # ------------------------------------------------------------ activity history
+
+    def _history_records(self) -> tuple[ActionAuditLog, UndoJournal]:
+        """The trail and journal the executors already write (created the same way they are)."""
+        if self.action_audit is None:
+            self.action_audit = ActionAuditLog()
+            set_default_audit_sink(self.action_audit.record_verdict)
+        if self.undo_journal is None:
+            self.undo_journal = UndoJournal()
+        return self.action_audit, self.undo_journal
+
+    def _history_json(self, event_type: str, status: str, payload: dict[str, Any]) -> None:
+        self._notify(event_type, status, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+    def emit_history_snapshot(self) -> None:
+        """The bounded, redacted activity history (read only; nothing is collected or replayed)."""
+        audit, journal = self._history_records()
+        self._history_json("history_snapshot", "ready", activity_history.snapshot(audit, journal))
+
+    def _history_undo_request(self, entry):
+        from core.actions import ActionRequest
+        from security.permissions import ActionCategory
+
+        return ActionRequest(
+            category=ActionCategory.CREATE_OR_EDIT_FILE,
+            target=activity_history.target_for(entry),
+            summary=activity_history.UNDO_REQUEST_SUMMARY,
+            parameters={"undoesActionId": entry.action_id, "reversal": entry.reversal.value},
+        )
+
+    def request_history_undo(self, action_id: str) -> None:
+        """Prepare the undo of one history entry: exact checks, the gate, then a single-use confirmation."""
+        from security.gate import evaluate
+
+        action_id = str(action_id or "").strip()[:128]
+        if self.runtime_paused:
+            self._history_json("history_undo_refused", "ready", {"actionId": action_id, "reason": "paused"})
+            return
+        audit, journal = self._history_records()
+        entry, state = activity_history.undoable_entry(journal, action_id)
+        if entry is None or self.file_executor is None or self.file_executor.journal is not journal:
+            self._history_json("history_undo_refused", "ready",
+                               {"actionId": action_id, "reason": state if entry is None else "unsupported"})
+            return
+        verdict = evaluate(self._history_undo_request(entry), audit=audit.record_verdict)
+        if verdict.refused:
+            self._history_json("history_undo_refused", "ready", {"actionId": action_id, "reason": "permission_denied"})
+            return
+        # Only now, with the gate's permission, is any file content read (a created copy's hash).
+        entry, state = activity_history.undoable_entry(journal, action_id, content=True)
+        if entry is None:
+            self._history_json("history_undo_refused", "ready", {"actionId": action_id, "reason": state})
+            return
+        needs_secret = verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET
+        with self._approval_lock:
+            self._approvals.revoke_kinds((ApprovalKind.HISTORY_UNDO,), STALE_SUPERSEDED)
+            ticket = self._approvals.issue(
+                ApprovalKind.HISTORY_UNDO,
+                "history_undo",
+                payload=PendingHistoryUndo(action_id=entry.action_id, needs_secret=needs_secret),
+            )
+        self._history_json("history_undo_approval_required", "approval_required", {
+            "actionToken": ticket.approval_id,
+            "actionId": entry.action_id,
+            "reversal": entry.reversal.value,
+            "name": activity_history._name(activity_history.target_for(entry)),
+            "needsSecret": needs_secret,
+        })
+
+    def _verify_history_secret(self, secret: str | None) -> bool:
+        verifier = getattr(self, "_history_secret_verifier", None)
+        if verifier is None:
+            from core.approval_secret import ApprovalSecretStore
+
+            verifier = ApprovalSecretStore().verify
+        try:
+            return bool(isinstance(secret, str) and secret and verifier(secret))
+        except Exception:  # an unverifiable secret is a refusal, never a pass
+            return False
+
+    def resolve_history_undo(self, action_token: str, *, approved: bool, secret: str | None = None) -> None:
+        """Answer one history undo confirmation, exactly once. Stale, late or unknown answers do nothing."""
+        from core.action_audit import AuditEvent
+        from core.approval_ledger import StaleApproval
+        from security.gate import evaluate
+
+        token = str(action_token or "").strip()
+        if self.runtime_paused:
+            self._history_json("history_undo_stale", "ready", {"actionToken": token, "reason": "paused"})
+            return
+        try:
+            ticket = self._approvals.take(token, kinds=(ApprovalKind.HISTORY_UNDO,))
+        except StaleApproval as exc:
+            self._history_json("history_undo_stale", "ready", {"actionToken": token, "reason": exc.reason})
+            return
+        pending: PendingHistoryUndo = ticket.payload
+        audit, journal = self._history_records()
+        if not approved:
+            self._history_json("history_undo_declined", "ready", {"actionToken": token, "actionId": pending.action_id})
+            return
+        entry, state = activity_history.undoable_entry(journal, pending.action_id)
+        outcome = state
+        if entry is not None and self.file_executor is not None and self.file_executor.journal is journal:
+            request = self._history_undo_request(entry)
+            verdict = evaluate(request, audit=audit.record_verdict)
+            if verdict.refused:
+                outcome = "refused"
+            elif (pending.needs_secret or verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET) \
+                    and not self._verify_history_secret(secret):
+                self._history_json("history_undo_secret_rejected", "ready",
+                                   {"actionToken": token, "actionId": pending.action_id})
+                return
+            elif activity_history.undoable_entry(journal, pending.action_id, content=True)[0] is None:
+                outcome = "changed_since"  # checked again, with permission, immediately before the undo
+            else:
+                audit.record(AuditEvent.APPROVED, request, decision=verdict.decision)
+                try:
+                    self.file_executor.undo(entry.action_id)
+                    outcome = "undone"
+                except Exception:
+                    outcome = "failed"
+        elif entry is not None:
+            outcome = "unsupported"
+        self._history_json("history_undo_result", "ready",
+                           {"actionToken": token, "actionId": pending.action_id, "outcome": outcome})
+        self.emit_history_snapshot()
+
+    def _discard_pending_history_undo(self, reason: str) -> int:
+        """Revoke an open history undo confirmation; its late answer is stale and does nothing."""
+        return len(self._approvals.revoke_kinds((ApprovalKind.HISTORY_UNDO,), reason))
 
     def _conversation_brain_context(
         self,
@@ -7078,6 +7222,7 @@ class QronosRuntime:
         pending_file_approvals_discarded = self._discard_pending_file_approvals(
             CANCEL_REASON_USER_STOP
         )
+        self._discard_pending_history_undo(CANCEL_REASON_USER_STOP)
 
         with self._lock:
             busy = bool(self._busy or self._foreground.active)
@@ -9780,6 +9925,7 @@ class QronosRuntime:
                 pass
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
+        self._discard_pending_history_undo(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
 
@@ -10008,6 +10154,8 @@ def handle_action(
 
     pause_safe_actions = {
         CONVERSATION_HISTORY_REQUEST_ACTION,
+        HISTORY_REQUEST_ACTION,
+        HISTORY_UNDO_DECISION_ACTION,
         FILE_ACTION_DECISION_ACTION,
         VOICE_PLAYBACK_STARTED_ACTION,
         VOICE_PLAYBACK_COMPLETE_ACTION,
@@ -10027,6 +10175,24 @@ def handle_action(
 
     if action_id == CONVERSATION_HISTORY_REQUEST_ACTION:
         runtime.emit_conversation_history_snapshot()
+        return
+
+    if action_id == HISTORY_REQUEST_ACTION:
+        runtime.emit_history_snapshot()
+        return
+
+    if action_id in (HISTORY_UNDO_REQUEST_ACTION, HISTORY_UNDO_DECISION_ACTION):
+        data = payload.get("data", {})
+        if not isinstance(data, dict):
+            raise ValueError("History undo data must be an object.")
+        if action_id == HISTORY_UNDO_REQUEST_ACTION:
+            runtime.request_history_undo(str(data.get("actionId", "")))
+            return
+        approved = data.get("approved", False)
+        secret = data.get("secret")
+        if not isinstance(approved, bool) or not (secret is None or isinstance(secret, str)):
+            raise ValueError("History undo decision needs a boolean approved and an optional text secret.")
+        runtime.resolve_history_undo(str(data.get("actionToken", "")), approved=approved, secret=secret)
         return
 
     if action_id == SETTINGS_RELOAD_ACTION:

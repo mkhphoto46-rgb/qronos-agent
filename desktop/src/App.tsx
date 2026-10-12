@@ -60,6 +60,7 @@ import { setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
+import HistoryDrawer from "./components/HistoryDrawer";
 import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
 import AppWorkflowDialog from "./components/AppWorkflowDialog";
 import QronosOrb from "./components/QronosOrb";
@@ -2493,6 +2494,14 @@ function App() {
           setConversationFocusMessageId(messageId);
           openConversations();
         }}
+      />
+
+      {/* What Qronos did, what was allowed, what failed, and what can actually be undone. */}
+      <HistoryDrawer
+        hidden={
+          viewPhase !== "home" &&
+          viewPhase !== "conversations"
+        }
       />
 
       <section className="core-zone">

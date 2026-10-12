@@ -55,6 +55,8 @@ class ApprovalKind(Enum):
     # One step of an application workflow (Telegram inspect/download, print).
     # The payload names the exact workflow phase and plan it approves.
     APP_WORKFLOW = "app_workflow"
+    # Undoing one earlier file change from the desktop history (core/activity_history.py).
+    HISTORY_UNDO = "history_undo"
 
 
 class StaleApproval(LookupError):
