@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -428,7 +429,8 @@ class FileExecutor:
             return (
                 f"Copied {source} to {target}",
                 Reversal.DELETE_CREATED,
-                {"path": str(target)},
+                {"path": str(target), "identity": file_identity(target),
+                 "sha256": bounded_sha256(target) or ""},
             )
 
         if operation is FileOperation.MOVE_FILE:
@@ -458,6 +460,7 @@ class FileExecutor:
                 {
                     "from": str(target),
                     "to": original,
+                    "identity": file_identity(target),
                 },
             )
 
@@ -487,6 +490,7 @@ class FileExecutor:
                 {
                     "from": str(target),
                     "to": original,
+                    "identity": file_identity(target),
                 },
             )
 
@@ -515,7 +519,7 @@ class FileExecutor:
             return (
                 f"Created folder {target}",
                 Reversal.DELETE_CREATED,
-                {"path": str(target)},
+                {"path": str(target), "identity": file_identity(target)},
             )
 
         raise InvalidAction(
@@ -526,6 +530,18 @@ class FileExecutor:
         self,
         entry: UndoEntry,
     ) -> None:
+        recorded = entry.restoration.get("identity")
+        if recorded:
+            # The exact object this action left behind, or nothing is reversed.
+            current = (
+                entry.restoration.get("from")
+                if entry.reversal is Reversal.MOVE_BACK
+                else entry.restoration.get("path")
+            )
+            if file_identity(Path(str(current or ""))) != recorded:
+                raise RuntimeError(
+                    "The file is no longer the one this action left; nothing was undone."
+                )
         if entry.reversal is Reversal.MOVE_BACK:
             source = _absolute_path(
                 str(entry.restoration["from"]),
@@ -603,6 +619,39 @@ def _absolute_path(
         )
 
     return path.resolve(strict=False)
+
+
+#: A created copy larger than this keeps no content hash, so its removal is never offered.
+MAX_EVIDENCE_HASH_BYTES = 256 * 1024 * 1024
+
+
+def file_identity(path: Path) -> str:
+    """The exact object at ``path`` (not following a link): volume, file id, and for a file its size and mtime.
+
+    Recorded right after an action changes it, so an undo can refuse when the object there was replaced or
+    edited since. Empty when it cannot be read.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return ""
+    if os.path.isdir(path) and not os.path.islink(path):
+        return f"v1d:{info.st_dev}:{info.st_ino}"
+    return f"v1f:{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+
+
+def bounded_sha256(path: Path) -> str | None:
+    """SHA-256 of a file up to MAX_EVIDENCE_HASH_BYTES; None when larger or unreadable."""
+    try:
+        if os.lstat(path).st_size > MAX_EVIDENCE_HASH_BYTES:
+            return None
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def _existing_file(value: str) -> Path:
