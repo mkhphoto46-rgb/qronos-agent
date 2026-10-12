@@ -35,7 +35,7 @@ newer implementation.
 - Initialize the Media host field in the legacy bare-runtime Stop fixture.
 - Show complete synthetic index status in failing test diagnostics.
 
-## Validation before final aggregate run
+## Validation
 
 - Frontend: TypeScript/Vite Build and 143 tests passed; production dependency
   audit reported zero vulnerabilities.
@@ -52,7 +52,20 @@ newer implementation.
 - The first aggregate run recorded 6518 passed, 73 failed, 113 skipped and
   12 setup errors, plus 1523 passed subtests. The failures above were repaired
   or traced to low free disk space. It is retained as a failed run, not
-  described as green. A final full run follows on a sufficiently large drive.
+  described as green.
+- Final complete aggregate on the repaired source: **6687 passed, 29 skipped,
+  1523 subtests passed**, no failures or setup errors, in 857.88 seconds. Test
+  profiles and child temporary files were placed on a drive with sufficient
+  space; an explicit development FFmpeg override enabled synthetic decoding.
+- GitHub-hosted checks failed before runner allocation: the five jobs had no
+  runner and no steps. They did not execute the code. Local Windows validation
+  is recorded independently; hosted/Linux validation is not claimed.
+
+The delivered unsigned desktop executable has SHA-256
+`7a0798c8d83c90f5d75c66b72154fa5d72fb31281359edd725399814e925f217`.
+Its adjacent frozen-runtime manifest was verified after copying. Read-only
+Doctor found all configured voice/wake assets and all three configured local
+model tags. Whisper's verified executable also passed its no-model help probe.
 
 ## Delivery limits
 
