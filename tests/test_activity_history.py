@@ -284,9 +284,10 @@ def test_no_file_content_is_read_to_list_history_or_before_the_gate_allows_the_u
     monkeypatch.setattr(activity_history, "bounded_sha256", lambda path: reads.append(path) or real(path))
     h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
     token = h.payload("history_undo_approval_required")["actionToken"]
-    assert len(reads) == 1  # after the gate allowed it
+    # Round 34 (R2, documented): the copy AND its source are read, only after the gates allowed it.
+    assert [Path(p).parent.name for p in reads] == ["Backup", "source"]
     h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=token, approved=True)
-    assert len(reads) == 2 and h.payload("history_undo_result")["outcome"] == "undone"  # and again before it
+    assert len(reads) == 4 and h.payload("history_undo_result")["outcome"] == "undone"  # and again before it
 
 
 def test_a_moved_file_goes_back_only_while_it_is_the_same_file(h):
@@ -311,3 +312,133 @@ def test_a_moved_file_goes_back_only_while_it_is_the_same_file(h):
         h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=token, approved=True)
         assert h.payload("history_undo_result")["outcome"] == "undone"
         assert source.read_text(encoding="utf-8") == "report body" and not moved.exists()
+
+
+# ---------------------------------------------------------------- round 34: the copy's source must still hold its bytes
+
+
+def test_a_copy_whose_source_changed_with_the_same_size_is_never_removed(h):
+    source = h.source("c.txt", "original-bytes")
+    action_id = h.copy(source)
+    source.write_text("modified-bytes", encoding="utf-8")  # same length, different content
+    assert h.entry(action_id)["undo"]["state"] == "available"  # the list reads metadata only (sizes agree)
+    h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+    assert h.payload("history_undo_refused")["reason"] == "changed_since"  # the source no longer holds the bytes
+    assert (h.backup / "c.txt").read_text(encoding="utf-8") == "original-bytes"
+    assert source.read_text(encoding="utf-8") == "modified-bytes"
+
+
+def test_a_source_changed_after_the_prompt_is_checked_again_at_the_answer(h):
+    source = h.source("d.txt", "first-version")
+    action_id = h.copy(source)
+    h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+    token = h.payload("history_undo_approval_required")["actionToken"]
+    source.write_text("other-version", encoding="utf-8")  # same length, while the prompt is open
+    h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=token, approved=True)
+    assert h.payload("history_undo_result")["outcome"] == "changed_since"
+    assert (h.backup / "d.txt").read_text(encoding="utf-8") == "first-version"
+    assert h.audit.count(AuditEvent.UNDONE) == 0
+
+
+def test_a_source_that_may_not_be_read_now_is_never_read_and_the_copy_stays(h, monkeypatch):
+    action_id = h.copy(h.source())
+    reads = []
+    real_hash = activity_history.bounded_sha256
+    monkeypatch.setattr(activity_history, "bounded_sha256", lambda path: reads.append(path) or real_hash(path))
+    real_evaluate = gate_module.evaluate
+
+    def files_read_denied(request, audit=None):
+        if request.category is ActionCategory.READ_NON_SENSITIVE:
+            return Verdict(request=request, decision=PermissionDecision.DENY, outcome=ActionOutcome.REFUSED,
+                           reason="fixture: reading the source is denied")
+        return real_evaluate(request, audit=audit)
+
+    monkeypatch.setattr(gate_module, "evaluate", files_read_denied)
+    h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+    assert h.payload("history_undo_refused")["reason"] == "permission_denied" and reads == []
+    monkeypatch.setattr(gate_module, "evaluate", real_evaluate)
+    h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+    token = h.payload("history_undo_approval_required")["actionToken"]
+    monkeypatch.setattr(gate_module, "evaluate", files_read_denied)  # revoked while the prompt was open
+    reads.clear()
+    h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=token, approved=True)
+    assert h.payload("history_undo_result")["outcome"] == "refused" and reads == []
+    assert (h.backup / "notes.txt").exists()
+    kinds = {item["kind"] for item in h.history()["actions"] if item["category"] == "read_non_sensitive"}
+    assert kinds <= {"undo_request"}  # the source-read check is part of the undo request, not a new action row
+
+
+def _policy(read: PermissionDecision, delete: PermissionDecision = PermissionDecision.ALLOW):
+    """Files policy fixture: reading (the copy's source) gets ``read``; the removal gets ``delete``."""
+    def decide(request, audit=None):
+        decision = read if request.category is ActionCategory.READ_NON_SENSITIVE else delete
+        outcome = (ActionOutcome.SUCCEEDED if decision is PermissionDecision.ALLOW else ActionOutcome.REFUSED
+                   if decision is PermissionDecision.DENY else ActionOutcome.AWAITING_APPROVAL)
+        return Verdict(request=request, decision=decision, outcome=outcome, reason="fixture policy")
+    return decide
+
+
+def _count_reads(monkeypatch) -> list:
+    reads = []
+    real_hash = activity_history.bounded_sha256
+    monkeypatch.setattr(activity_history, "bounded_sha256", lambda path: reads.append(Path(path)) or real_hash(path))
+    return reads
+
+
+def test_a_source_read_needing_the_typed_secret_needs_it_even_when_removal_is_allowed(h, monkeypatch):
+    source = h.source()
+    action_id = h.copy(source)
+    reads = _count_reads(monkeypatch)
+    monkeypatch.setattr(gate_module, "evaluate", _policy(PermissionDecision.REQUIRE_TYPED_SECRET))
+    h.runtime._history_secret_verifier = lambda secret: secret == "correct horse"
+    for answer in (None, "wrong guess", "correct horse"):
+        reads.clear()
+        h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+        prompt = h.payload("history_undo_approval_required")
+        assert prompt["needsSecret"] is True and prompt["readsSource"] is True
+        assert source not in reads  # the secret is not satisfied yet: the source is not read
+        data = {"actionToken": prompt["actionToken"], "approved": True}
+        if answer is not None:
+            data["secret"] = answer
+        h.act(HISTORY_UNDO_DECISION_ACTION, **data)
+        if answer != "correct horse":
+            assert h.payload("history_undo_secret_rejected")["actionId"] == action_id
+            assert source not in reads and (h.backup / "notes.txt").exists()
+    assert h.payload("history_undo_result")["outcome"] == "undone" and source in reads
+    assert not (h.backup / "notes.txt").exists() and source.read_text(encoding="utf-8") == "qronos-history"
+
+
+def test_a_source_read_needing_confirmation_is_read_only_after_the_yes(h, monkeypatch):
+    source = h.source()
+    action_id = h.copy(source)
+    reads = _count_reads(monkeypatch)
+    monkeypatch.setattr(gate_module, "evaluate", _policy(PermissionDecision.REQUIRE_UI_CONFIRMATION))
+    h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+    prompt = h.payload("history_undo_approval_required")
+    assert prompt["needsSecret"] is False and prompt["readsSource"] is True
+    assert source not in reads  # no source read before the person's confirmation
+    h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=prompt["actionToken"], approved=True)
+    assert h.payload("history_undo_result")["outcome"] == "undone" and source in reads
+
+
+def test_a_source_read_policy_tightened_after_the_prompt_is_enforced_at_the_answer(h, monkeypatch):
+    source = h.source()
+    action_id = h.copy(source)
+    reads = _count_reads(monkeypatch)
+    monkeypatch.setattr(gate_module, "evaluate", _policy(PermissionDecision.ALLOW))
+    h.runtime._history_secret_verifier = lambda secret: secret == "correct horse"
+    h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+    prompt = h.payload("history_undo_approval_required")
+    assert prompt["needsSecret"] is False
+    monkeypatch.setattr(gate_module, "evaluate", _policy(PermissionDecision.REQUIRE_TYPED_SECRET))
+    reads.clear()
+    h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=prompt["actionToken"], approved=True)  # no secret given
+    assert h.payload("history_undo_secret_rejected")["actionId"] == action_id
+    assert reads == [] and (h.backup / "notes.txt").exists()
+    h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
+    token = h.payload("history_undo_approval_required")["actionToken"]
+    monkeypatch.setattr(gate_module, "evaluate", _policy(PermissionDecision.DENY))
+    reads.clear()
+    h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=token, approved=True, secret="correct horse")
+    assert h.payload("history_undo_result")["outcome"] == "refused" and reads == []
+    assert (h.backup / "notes.txt").exists() and h.audit.count(AuditEvent.UNDONE) == 0

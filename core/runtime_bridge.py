@@ -3302,6 +3302,25 @@ class QronosRuntime:
             parameters={"undoesActionId": entry.action_id, "reversal": entry.reversal.value},
         )
 
+    def _history_source_read_verdict(self, entry, audit):
+        """The CURRENT Files verdict for reading a created copy's SOURCE (the undo reads it to prove removing the copy
+        loses nothing), or None when the undo reads no source. Recorded under the undo request's summary. The full
+        verdict is kept: a refusal means no read; a required confirmation or typed secret must be satisfied first."""
+        from core.actions import ActionRequest
+        from security.gate import evaluate
+        from security.permissions import ActionCategory
+
+        source = activity_history.source_read_path(entry)
+        if source is None:
+            return None
+        request = ActionRequest(
+            category=ActionCategory.READ_NON_SENSITIVE,
+            target=source,
+            summary=activity_history.UNDO_REQUEST_SUMMARY,
+            parameters={"undoesActionId": entry.action_id, "reads": "copy_source"},
+        )
+        return evaluate(request, audit=audit.record_verdict)
+
     def request_history_undo(self, action_id: str) -> None:
         """Prepare the undo of one history entry: exact checks, the gate, then a single-use confirmation."""
         from security.gate import evaluate
@@ -3317,15 +3336,19 @@ class QronosRuntime:
                                {"actionId": action_id, "reason": state if entry is None else "unsupported"})
             return
         verdict = evaluate(self._history_undo_request(entry), audit=audit.record_verdict)
-        if verdict.refused:
+        read_verdict = self._history_source_read_verdict(entry, audit)
+        if verdict.refused or (read_verdict is not None and read_verdict.refused):
             self._history_json("history_undo_refused", "ready", {"actionId": action_id, "reason": "permission_denied"})
             return
-        # Only now, with the gate's permission, is any file content read (a created copy's hash).
-        entry, state = activity_history.undoable_entry(journal, action_id, content=True)
+        # Only now, with the gates' permission, is file content read: the copy's hash, and its source's only when
+        # reading the source is allowed outright (a required confirmation or secret is satisfied at the answer first).
+        source_now = read_verdict is None or read_verdict.allowed
+        entry, state = activity_history.undoable_entry(journal, action_id, content=True, source=source_now)
         if entry is None:
             self._history_json("history_undo_refused", "ready", {"actionId": action_id, "reason": state})
             return
-        needs_secret = verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET
+        needs_secret = verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET or (
+            read_verdict is not None and read_verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET)
         with self._approval_lock:
             self._approvals.revoke_kinds((ApprovalKind.HISTORY_UNDO,), STALE_SUPERSEDED)
             ticket = self._approvals.issue(
@@ -3339,6 +3362,8 @@ class QronosRuntime:
             "reversal": entry.reversal.value,
             "name": activity_history._name(activity_history.target_for(entry)),
             "needsSecret": needs_secret,
+            # The confirmation also covers reading the copy's original once more (shown to the person).
+            "readsSource": read_verdict is not None,
         })
 
     def _verify_history_secret(self, secret: str | None) -> bool:
@@ -3379,13 +3404,17 @@ class QronosRuntime:
         if entry is not None and self.file_executor is not None and self.file_executor.journal is journal:
             request = self._history_undo_request(entry)
             verdict = evaluate(request, audit=audit.record_verdict)
-            if verdict.refused:
-                outcome = "refused"
-            elif (pending.needs_secret or verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET) \
-                    and not self._verify_history_secret(secret):
+            # Both CURRENT policies decide again: the removal, and reading the copy's source.
+            read_verdict = self._history_source_read_verdict(entry, audit)
+            secret_needed = pending.needs_secret or verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET or (
+                read_verdict is not None and read_verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET)
+            if verdict.refused or (read_verdict is not None and read_verdict.refused):
+                outcome = "refused"  # nothing is read or removed
+            elif secret_needed and not self._verify_history_secret(secret):
                 self._history_json("history_undo_secret_rejected", "ready",
                                    {"actionToken": token, "actionId": pending.action_id})
                 return
+            # The person's yes to this single-use confirmation is the confirmation both policies may require.
             elif activity_history.undoable_entry(journal, pending.action_id, content=True)[0] is None:
                 outcome = "changed_since"  # checked again, with permission, immediately before the undo
             else:
