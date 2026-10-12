@@ -55,6 +55,8 @@ def load_registry(path: Path = REGISTRY) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema") != 1 or not isinstance(data.get("assets"), list):
         raise RegistryError("unsupported runtime asset registry")
+    if not data["assets"]:
+        raise RegistryError("the runtime asset registry lists no asset; nothing can be verified")
     seen: set[str] = set()
     for entry in data["assets"]:
         relative = entry.get("path")
@@ -139,16 +141,21 @@ def check(root: Path, assets: list[dict[str, Any]] | None = None) -> dict[str, A
     counts = {state: sum(1 for item in results if item["state"] == state)
               for state in ("verified", "mismatch", "unverified", "missing", "refused")}
     return {"schemaVersion": 1, "root": str(root), "assets": results, "counts": counts,
-            "allVerified": counts["verified"] == len(results)}
+            "allVerified": bool(results) and counts["verified"] == len(results)}  # zero entries verify nothing
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, required=True, help="The runtime asset folder to check.")
     parser.add_argument("--require-verified", action="store_true",
-                        help="Exit 1 unless every registry entry is present and verified (release gate).")
+                        help="Exit 1 unless every registry entry is present and verified (release gate). "
+                             "An unusable or empty registry exits 2.")
     arguments = parser.parse_args(argv)
-    report = check(arguments.root)
+    try:
+        report = check(arguments.root)
+    except RegistryError as error:  # an unusable or empty registry is a refusal, never a pass
+        sys.stdout.write(json.dumps({"schemaVersion": 1, "error": str(error), "allVerified": False}) + "\n")
+        return 2
     sys.stdout.write(json.dumps(report, ensure_ascii=False) + "\n")
     if any(report["counts"][state] for state in ("mismatch", "refused")):
         return 2

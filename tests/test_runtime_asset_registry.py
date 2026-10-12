@@ -58,6 +58,21 @@ def test_a_malformed_registry_is_refused(tmp_path, bad):
         runtime_assets.load_registry(registry)
 
 
+def test_an_empty_registry_fails_closed_at_every_layer(tmp_path, monkeypatch, capsys):
+    # Media35 C1: zero entries must never read as "all verified".
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": 1, "assets": []}), encoding="utf-8")
+    with pytest.raises(runtime_assets.RegistryError):
+        runtime_assets.load_registry(registry)
+    assert runtime_assets.check(tmp_path, [])["allVerified"] is False
+    real_load = runtime_assets.load_registry
+    monkeypatch.setattr(runtime_assets, "load_registry", lambda path=None: real_load(registry))  # the real loader
+    for arguments in (["--require-verified"], []):
+        assert runtime_assets.main(["--root", str(tmp_path), *arguments]) == 2
+    printed = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(printed) == 2 and all(item["allVerified"] is False and "no asset" in item["error"] for item in printed)
+
+
 def test_each_state_is_reported_and_only_an_exact_file_is_verified(tmp_path):
     good, other = b"official bytes", b"official bytez"
     (tmp_path / "models").mkdir()
