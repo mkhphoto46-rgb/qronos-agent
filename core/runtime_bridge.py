@@ -3344,9 +3344,11 @@ class QronosRuntime:
     def _verify_history_secret(self, secret: str | None) -> bool:
         verifier = getattr(self, "_history_secret_verifier", None)
         if verifier is None:
-            from core.approval_secret import ApprovalSecretStore
+            # The bridge never opens the secret store itself: it borrows the Library's narrow check (the same
+            # per-profile store and persisted lockout as every other typed-secret approval).
+            from core.library_executor import WorkflowSecretCheck
 
-            verifier = ApprovalSecretStore().verify
+            verifier = WorkflowSecretCheck().verify
         try:
             return bool(isinstance(secret, str) and secret and verifier(secret))
         except Exception:  # an unverifiable secret is a refusal, never a pass
