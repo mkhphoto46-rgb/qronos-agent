@@ -506,6 +506,12 @@ def test_concurrent_cli_commits_with_wrong_secrets_all_count(
     for name, sub in (("LOCALAPPDATA", "Local"), ("USERPROFILE", "Home"), ("HOME", "Home"), ("APPDATA", "Roaming")):
         (tmp_path / sub).mkdir(exist_ok=True)
         monkeypatch.setenv(name, str(tmp_path / sub))
+    # Each child's start-up admission asks Windows for its Local AppData known folder, which expands the redirected
+    # profile; without that private folder every child refuses "store" (exit 78) before any secret is checked
+    # (Media35). Create the private known folders, as tests/test_runtime_bridge_process.py does. Production
+    # admission and every assertion below are unchanged.
+    for known in ("Local", "Roaming"):
+        (tmp_path / "Home" / "AppData" / known).mkdir(parents=True, exist_ok=True)
 
     registry = ArtifactRegistry()
     assert str(registry.path).startswith(str(tmp_path))
