@@ -688,6 +688,29 @@ def test_the_real_secret_store_without_a_secret_refuses(monkeypatch, tmp_path):
     assert refused.value.code == "approval_secret_unavailable"
 
 
+def test_the_borrowed_secret_check_keeps_the_typed_secret_lockout_and_unavailable_refusals(monkeypatch, tmp_path):
+    """Round 34: GateAuthorizer verifies through core.library_executor.WorkflowSecretCheck (the same default store)."""
+    from core.approval_secret import ApprovalSecretStore
+
+    monkeypatch.setenv("QRONOS_APPROVAL_SECRET_PATH", str(tmp_path / "secret" / "approval.sqlite3"))
+    monkeypatch.setenv("QRONOS_PERMISSION_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    ApprovalSecretStore().set_secret("correct horse battery")
+    authorizer = update_service.GateAuthorizer()
+    assert authorizer.secret_problem() is None
+    assert authorizer.verify_secret("correct horse battery") is True
+    assert authorizer.verify_secret("wrong guess") is False  # counted toward the persisted lockout
+    for _ in range(10):
+        try:
+            if authorizer.verify_secret("wrong guess") is False:
+                continue
+        except UpdateError:
+            break
+    assert authorizer.secret_problem() == "Too many wrong approval secrets; try again later."
+    with pytest.raises(UpdateError) as refused:
+        authorizer.verify_secret("correct horse battery")  # locked: refused as unavailable, never checked
+    assert refused.value.code == "approval_secret_unavailable"
+
+
 # ---------------------------------------------------------------- launch rules
 
 
