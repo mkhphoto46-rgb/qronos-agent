@@ -53,6 +53,7 @@ from core.runtime_bridge import (
     parse_payload,
 )
 from core.task_router import TaskRouter, TaskType
+from core.settings_service import DEFAULT_DEFINITIONS, SettingsService
 
 
 class FakeClock:
@@ -185,7 +186,11 @@ class FakeOrchestrator:
         self.error = error
         self.plans: list[Any] = []
 
-    def execute_plan(self, plan: Any) -> list[StepResult]:
+    def execute_plan(
+        self,
+        plan: Any,
+        conversation_messages=None,
+    ) -> list[StepResult]:
         self.plans.append(plan)
 
         if self.error is not None:
@@ -242,7 +247,16 @@ def prepared_runtime(
     attributes in is enough to make the real code path run without touching
     hardware. Nothing is patched.
     """
-    runtime = QronosRuntime()
+    # Unit tests must never inherit the user's production Settings file.
+    # In particular, voice.language can legitimately be "auto", "fa", or "en"
+    # in production. Use shipped in-memory defaults so this helper is
+    # deterministic and cannot make a user's preference fail an unrelated test.
+    runtime = QronosRuntime(
+        settings=SettingsService(
+            DEFAULT_DEFINITIONS,
+            path=None,
+        )
+    )
 
     runtime.audio_input = FakeAudioInput()
     runtime.vad_runtime = object()
@@ -276,6 +290,13 @@ def captured_events(action: Any) -> list[dict[str, Any]]:
 
 def event_types(events: list[dict[str, Any]]) -> list[str]:
     return [event["eventType"] for event in events]
+
+
+def screen_prompt_id(events: list[dict[str, Any]]) -> str:
+    """The single-use identity a voice_needs_screen prompt must be answered with."""
+    prompts = [e for e in events if e["eventType"] == "voice_needs_screen"]
+    assert prompts, "no screen prompt was issued"
+    return json.loads(prompts[-1]["message"])["approvalId"]
 
 
 class TestEmit(unittest.TestCase):
@@ -344,6 +365,34 @@ class TestParsePayload(unittest.TestCase):
 
 
 class TestHandleAction(unittest.TestCase):
+    def test_playback_completion_action_releases_pending_playback(self) -> None:
+        runtime = prepared_runtime()
+
+        playback_id = (
+            runtime._begin_voice_playback_wait()
+        )
+
+        events = captured_events(
+            lambda: runtime_bridge.handle_action(
+                runtime,
+                {
+                    "actionId":
+                        runtime_bridge.VOICE_PLAYBACK_COMPLETE_ACTION,
+                    "playbackId":
+                        playback_id,
+                },
+            )
+        )
+
+        self.assertIn(
+            "voice_playback_acknowledged",
+            event_types(events),
+        )
+
+        self.assertTrue(
+            runtime._wait_for_voice_playback_complete()
+        )
+
     def test_an_empty_action_id_is_rejected(self) -> None:
         runtime = prepared_runtime()
 
@@ -415,10 +464,15 @@ class TestPushToTalkSequence(unittest.TestCase):
         events = captured_events(runtime.push_to_talk)
         types = event_types(events)
 
-        # The spectrum frames are interleaved and counted separately; what
-        # matters here is that the milestones arrive in this order.
+        # Spectrum frames and canonical history events are additive.
+        # The PTT contract itself is the ordered voice milestone sequence.
         milestones = [
-            name for name in types if not name.startswith("voice_audio")
+            name
+            for name in types
+            if (
+                name.startswith("voice_")
+                and not name.startswith("voice_audio")
+            )
         ]
 
         self.assertEqual(
@@ -432,6 +486,22 @@ class TestPushToTalkSequence(unittest.TestCase):
                 "voice_synthesizing",
                 "voice_turn_complete",
             ],
+        )
+
+        canonical_messages = [
+            json.loads(event["message"])
+            for event in events
+            if event["eventType"]
+            == "conversation_message_added"
+        ]
+
+        self.assertEqual(
+            [message["role"] for message in canonical_messages],
+            ["user", "qronos"],
+        )
+        self.assertEqual(
+            [message["source"] for message in canonical_messages],
+            ["voice", "voice"],
         )
 
     def test_the_transcript_reaches_the_interface_unchanged(self) -> None:
@@ -571,6 +641,57 @@ class TestAudioSpectrum(unittest.TestCase):
         self.assertEqual(spectra[-1]["level"], 0.0)
 
 
+class TestPendingScreenApproval(unittest.TestCase):
+    def test_pending_screen_approval_suspends_followup_capture(self) -> None:
+        runtime = prepared_runtime()
+
+        runtime.conversation_session.start()
+        runtime.pending_look = (
+            "به این پنجره نگاه کن"
+        )
+
+        self.assertFalse(
+            runtime._should_continue_followup_session()
+        )
+
+        runtime.pending_look = None
+
+        self.assertTrue(
+            runtime._should_continue_followup_session()
+        )
+
+
+class TestCalculatorCommandDetection(unittest.TestCase):
+    def test_real_persian_calculator_variants_are_local_actions(self) -> None:
+        self.assertTrue(
+            runtime_bridge._looks_like_calculator_semantic_action(
+                "\u062a\u0648\u06cc \u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628 \u062f\u0648 \u0631\u0648 \u0636\u0631\u0628\u062f\u0631 \u0686\u0647\u0627\u0631 \u0628\u06a9\u0646\u06cc"
+            )
+        )
+
+        self.assertTrue(
+            runtime_bridge._looks_like_calculator_semantic_action(
+                "\u062a\u0648\u06cc \u06a9\u0644\u06a9\u0648\u0644\u06cc\u062a\u0631 \u062f\u0648 \u0631\u0648 \u0632\u0628 \u062f\u0631 \u0686\u0647\u0627\u0631 \u0628\u06a9\u0646\u06cc\u0645"
+            )
+        )
+
+        candidate = (
+            runtime_bridge._calculator_action_candidate(
+                "\u062a\u0648\u06cc \u06a9\u0644\u06a9\u0648\u0644\u06cc\u062a\u0631 \u062f\u0648 \u0631\u0648 \u0628\u0647 \u0627\u0636\u0627\u0641\u0647 \u0686\u0647\u0627\u0631 \u0628\u06a9\u0646\u06cc\u0645"
+            )
+        )
+
+        self.assertIn(
+            "\u0645\u0627\u0634\u06cc\u0646 \u062d\u0633\u0627\u0628",
+            candidate,
+        )
+
+        self.assertIn(
+            "\u0628\u0647 \u0639\u0644\u0627\u0648\u0647",
+            candidate,
+        )
+
+
 class TestPushToTalkFailures(unittest.TestCase):
     def test_a_second_request_mid_turn_is_refused_not_queued(self) -> None:
         # Two overlapping turns would fight over one microphone. The refusal
@@ -643,6 +764,158 @@ class TestPushToTalkFailures(unittest.TestCase):
 
         self.assertIn("runtime_error", event_types(events))
         self.assertIn("microphone disappeared", events[-2]["message"])
+
+    def test_followup_brain_timeout_keeps_conversation_active_with_spoken_retry(
+        self,
+    ) -> None:
+        runtime = prepared_runtime(
+            orchestrator=FakeOrchestrator(
+                error=TimeoutError(
+                    "brain request timed out"
+                )
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="followup"
+        )
+
+        self.assertGreater(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertTrue(
+            runtime.conversation_session.is_active
+        )
+
+        self.assertTrue(
+            runtime._should_continue_followup_session()
+        )
+
+        self.assertTrue(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
+
+        self.assertEqual(
+            runtime.voice_output.calls[-1],
+            runtime_bridge.VOICE_RETRY_RESPONSE,
+        )
+
+    def test_followup_resource_block_keeps_conversation_active_with_spoken_retry(
+        self,
+    ) -> None:
+        runtime = prepared_runtime(
+            orchestrator=FakeOrchestrator(
+                results=[
+                    StepResult(
+                        order=1,
+                        success=False,
+                        output="",
+                        error=(
+                            "Qronos blocked this task because the current "
+                            "resource state is normal and the resource "
+                            "policy returned block."
+                        ),
+                    )
+                ]
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="followup"
+        )
+
+        self.assertGreater(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertTrue(
+            runtime.conversation_session.is_active
+        )
+
+        self.assertTrue(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
+
+        self.assertEqual(
+            runtime.voice_output.calls[-1],
+            runtime_bridge.VOICE_RETRY_RESPONSE,
+        )
+
+    def test_wake_turn_with_valid_speech_is_not_marked_as_false_wake_after_brain_failure(
+        self,
+    ) -> None:
+        runtime = prepared_runtime(
+            orchestrator=FakeOrchestrator(
+                results=[
+                    StepResult(
+                        order=1,
+                        success=False,
+                        output="",
+                        error=(
+                            "recoverable brain failure"
+                        ),
+                    )
+                ]
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="wake_word"
+        )
+
+        self.assertGreater(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertTrue(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
+
+        self.assertTrue(
+            runtime.conversation_session.is_active
+        )
+
+    def test_followup_no_speech_timeout_closes_conversation(self) -> None:
+        runtime = prepared_runtime(
+            recorder=FakeCommandRecorder(
+                error=TimeoutError(
+                    "No speech was detected before the start timeout."
+                )
+            )
+        )
+
+        runtime.conversation_session.start()
+
+        playback_seconds = runtime._run_voice_turn(
+            trigger_source="followup"
+        )
+
+        self.assertEqual(
+            playback_seconds,
+            0.0,
+        )
+
+        self.assertFalse(
+            runtime.conversation_session.is_active
+        )
+
+        self.assertFalse(
+            runtime._should_continue_followup_session()
+        )
+
+        self.assertFalse(
+            runtime._last_voice_turn_had_valid_speech_evidence
+        )
 
     def test_the_runtime_is_free_again_after_a_failure(self) -> None:
         # A turn that failed must not leave the runtime marked busy, or every
@@ -774,7 +1047,7 @@ class TestRoutingIsReported(unittest.TestCase):
 
         self.assertEqual(normalise_qronos_invocation(transcript), transcript)
 
-    def test_prepare_registers_the_production_web_worker(self) -> None:
+    def test_prepare_does_not_register_direct_web_worker(self) -> None:
         runtime = QronosRuntime()
 
         with patch("core.runtime_bridge.AudioInput"), patch(
@@ -792,7 +1065,7 @@ class TestRoutingIsReported(unittest.TestCase):
             runtime.prepare()
 
         assert runtime.orchestrator is not None
-        self.assertIn(TaskType.BROWSER, runtime.orchestrator.workers.registered())
+        self.assertNotIn(TaskType.BROWSER, runtime.orchestrator.workers.registered())
 
 
 
@@ -930,7 +1203,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         events = captured_events(
             lambda: runtime.look_at_screen(
-                approved=False, question="What is this?"
+                approved=False, question="What is this?", direct=True
             )
         )
         kinds = [event["eventType"] for event in events]
@@ -943,7 +1216,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         runtime = prepared_runtime()
 
         events = captured_events(
-            lambda: runtime.look_at_screen(question="What is this?")
+            lambda: runtime.look_at_screen(question="What is this?", direct=True)
         )
 
         self.assertIn(
@@ -956,7 +1229,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         events = captured_events(
             lambda: runtime.look_at_screen(
-                approved=True, question="What is on my screen?"
+                approved=True, question="What is on my screen?", direct=True
             )
         )
         kinds = [event["eventType"] for event in events]
@@ -971,7 +1244,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         captured_events(
             lambda: runtime.look_at_screen(
-                approved=True, question="What is on my screen?"
+                approved=True, question="What is on my screen?", direct=True
             )
         )
 
@@ -994,7 +1267,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         )
 
         events = captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
         kinds = [event["eventType"] for event in events]
 
@@ -1006,7 +1279,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         runtime = prepared_runtime(orchestrator=orchestrator)
 
         captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
 
         self.assertIsNone(orchestrator.plans[0].steps[0].images[0].source)
@@ -1018,8 +1291,10 @@ class TestLookingAtTheScreen(unittest.TestCase):
             orchestrator=orchestrator,
         )
 
-        captured_events(runtime.push_to_talk)
-        captured_events(lambda: runtime.look_at_screen(approved=True))
+        approval_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+        captured_events(
+            lambda: runtime.look_at_screen(approved=True, approval_id=approval_id)
+        )
 
         self.assertEqual(orchestrator.plans[0].goal, "به این پنجره نگاه کن")
 
@@ -1032,8 +1307,10 @@ class TestLookingAtTheScreen(unittest.TestCase):
             speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن")
         )
 
-        captured_events(runtime.push_to_talk)
-        captured_events(lambda: runtime.look_at_screen(approved=True))
+        approval_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+        captured_events(
+            lambda: runtime.look_at_screen(approved=True, approval_id=approval_id)
+        )
 
         self.assertIsNone(runtime.pending_look)
 
@@ -1042,15 +1319,19 @@ class TestLookingAtTheScreen(unittest.TestCase):
             speech=FakeSpeechRuntime(transcript="به این پنجره نگاه کن")
         )
 
-        captured_events(runtime.push_to_talk)
-        captured_events(lambda: runtime.look_at_screen(approved=False))
+        approval_id = screen_prompt_id(captured_events(runtime.push_to_talk))
+        captured_events(
+            lambda: runtime.look_at_screen(approved=False, approval_id=approval_id)
+        )
 
         self.assertIsNone(runtime.pending_look)
 
     def test_looking_with_nothing_asked_is_an_error(self) -> None:
         runtime = prepared_runtime()
 
-        events = captured_events(lambda: runtime.look_at_screen(approved=True))
+        events = captured_events(
+            lambda: runtime.look_at_screen(approved=True, direct=True)
+        )
 
         self.assertIn(
             "runtime_error",
@@ -1075,7 +1356,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         )
 
         events = captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
         kinds = [event["eventType"] for event in events]
 
@@ -1097,7 +1378,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         )
 
         events = captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
         message = next(
             event["message"]
@@ -1119,7 +1400,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
 
         captured_events(
             lambda: runtime.look_at_screen(
-                approved=True, question="What?", window_only=True
+                approved=True, question="What?", window_only=True, direct=True
             )
         )
 
@@ -1132,7 +1413,7 @@ class TestLookingAtTheScreen(unittest.TestCase):
         runtime.last_foreground_window = 4242
 
         captured_events(
-            lambda: runtime.look_at_screen(approved=True, question="What?")
+            lambda: runtime.look_at_screen(approved=True, question="What?", direct=True)
         )
 
         self.assertEqual(asked, [None])
@@ -1157,6 +1438,7 @@ class TestTheLookActionIsDispatched(unittest.TestCase):
                     "approved": True,
                     "question": "What is this?",
                     "windowOnly": True,
+                    "direct": True,
                 },
             )
         )
@@ -1171,6 +1453,8 @@ class TestTheLookActionIsDispatched(unittest.TestCase):
                     "approved": True,
                     "question": "What is this?",
                     "window_only": True,
+                    "approval_id": "",
+                    "direct": True,
                 }
             ],
         )

@@ -5,41 +5,17 @@ import {
   useState,
 } from "react";
 
+import {
+  cancelQueuedConversation,
+  resumeQueuedConversation,
+  sendConversationMessage,
+  useConversationStore,
+} from "../conversationStore";
+import type {
+  ConversationAttachment,
+} from "../conversationStore";
+
 import "./ConversationsView.css";
-
-type ConversationAttachment =
-  | {
-      id: string;
-      type: "file";
-      title: string;
-      meta: string;
-      unread?: boolean;
-    }
-  | {
-      id: string;
-      type: "image";
-      title: string;
-      meta: string;
-      unread?: boolean;
-    }
-  | {
-      id: string;
-      type: "link";
-      title: string;
-      meta: string;
-      href: string;
-      unread?: boolean;
-    };
-
-type ConversationMessage = {
-  id: string;
-  role:
-    | "user"
-    | "qronos";
-  time: string;
-  text: string;
-  attachments?: ConversationAttachment[];
-};
 
 type ViewPhase =
   | "home"
@@ -50,6 +26,8 @@ type ViewPhase =
 type ConversationsViewProps = {
   phase: ViewPhase;
   onClose: () => void;
+  focusMessageId?: string | null;
+  onFocusConsumed?: () => void;
 };
 
 type FlowParticle = {
@@ -73,71 +51,6 @@ type FlowParticle = {
 const MAX_DPR = 1;
 const TRANSITION_MS = 1120;
 const PARTICLE_COUNT = 520;
-
-const initialMessages: ConversationMessage[] = [
-  {
-    id: "m1",
-    role: "qronos",
-    time: "19:08",
-    text:
-      "نسخه‌ی جدید رابط ذخیره شد. گزارش وضعیت فعلی پروژه و تغییرات UI آماده است.",
-    attachments: [
-      {
-        id: "a1",
-        type: "file",
-        title: "Qronos_UI_Checkpoint.pdf",
-        meta: "PDF • 2.4 MB",
-        unread: true,
-      },
-    ],
-  },
-  {
-    id: "m2",
-    role: "user",
-    time: "19:10",
-    text:
-      "خوبه. نسخه‌ی تصویری وضعیت فعلی هم بساز و لینک ریپازیتوری رو هم بفرست.",
-  },
-  {
-    id: "m3",
-    role: "qronos",
-    time: "19:12",
-    text:
-      "این هم پیش‌نمایش تصویری رابط فعلی. فایل فقط به عنوان نمونه‌ی نمایشی این صفحه قرار گرفته.",
-    attachments: [
-      {
-        id: "a2",
-        type: "image",
-        title: "Qronos UI Preview",
-        meta: "PNG • GENERATED",
-        unread: true,
-      },
-      {
-        id: "a3",
-        type: "link",
-        title: "qronos-agent",
-        meta: "GITHUB REPOSITORY",
-        href:
-          "https://github.com/mkhphoto46-rgb/qronos-agent",
-        unread: true,
-      },
-    ],
-  },
-  {
-    id: "m4",
-    role: "user",
-    time: "19:14",
-    text:
-      "می‌خوام تاریخچه‌ی گفتگوها همین‌جا قابل مرور باشه و صفحه حس یک اپ چت معمولی نده.",
-  },
-  {
-    id: "m5",
-    role: "qronos",
-    time: "19:15",
-    text:
-      "نمای گفتگوها به صورت یک جریان زنده طراحی شده؛ پیام‌های شما سمت راست و پاسخ‌های Qronos سمت چپ قرار می‌گیرند و DNA فقط به عنوان یک حضور محو و پویا در پس‌زمینه باقی می‌ماند.",
-  },
-];
 
 function clamp01(
   value: number,
@@ -1006,17 +919,18 @@ function AttachmentIcon({
   );
 }
 
+
 function ConversationsView({
   phase,
   onClose,
+  focusMessageId = null,
+  onFocusConsumed,
 }: ConversationsViewProps) {
-  const [
+  const {
     messages,
-    setMessages,
-  ] =
-    useState<ConversationMessage[]>(
-      initialMessages,
-    );
+    pendingRequestId,
+  } =
+    useConversationStore();
 
   const [
     draft,
@@ -1035,43 +949,16 @@ function ConversationsView({
     );
 
   const sendMessage =
-    () => {
+    async () => {
       const text =
         draft.trim();
 
-      if (!text) {
+      if (
+        !text ||
+        pendingRequestId
+      ) {
         return;
       }
-
-      const now =
-        new Date();
-
-      const time =
-        new Intl.DateTimeFormat(
-          "en-GB",
-          {
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-          },
-        ).format(
-          now,
-        );
-
-      setMessages(
-        (
-          current,
-        ) => [
-          ...current,
-          {
-            id:
-              `local-${now.getTime()}`,
-            role: "user",
-            time,
-            text,
-          },
-        ],
-      );
 
       setDraft("");
 
@@ -1081,6 +968,10 @@ function ConversationsView({
         composerRef.current.style.height =
           "24px";
       }
+
+      await sendConversationMessage(
+        text,
+      );
     };
 
   const selectBubbleContent =
@@ -1147,6 +1038,21 @@ function ConversationsView({
         ),
       [messages],
     );
+
+  useEffect(() => {
+    if (phase !== "conversations" || !focusMessageId) return;
+    const frame = window.requestAnimationFrame(() => {
+      const element = document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focusMessageId)}"]`);
+      if (!element) return;
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+      element.classList.remove("conversation-message-source-focus");
+      void element.offsetWidth;
+      element.classList.add("conversation-message-source-focus");
+      window.setTimeout(() => element.classList.remove("conversation-message-source-focus"), 2600);
+      onFocusConsumed?.();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusMessageId, onFocusConsumed, phase]);
 
   useEffect(() => {
     if (
@@ -1273,6 +1179,20 @@ function ConversationsView({
         ref={streamRef}
         className="conversations-stream"
       >
+        {messages.length === 0 && (
+          <div className="conversations-empty-state">
+            <span>
+              TEXT CHANNEL READY
+            </span>
+            <strong>
+              گفت‌وگوی متنی آماده است
+            </strong>
+            <p>
+              پیام خود را بنویس؛ Qronos آن را از مسیر واقعی Fast یا Heavy پردازش می‌کند.
+            </p>
+          </div>
+        )}
+
         {messages.map(
           (
             message,
@@ -1297,9 +1217,18 @@ function ConversationsView({
                 key={
                   message.id
                 }
+                data-message-id={message.id}
                 className={`conversation-message-bubble conversation-message-${message.role} ${
                   roleShift
                     ? "conversation-message-role-shift"
+                    : ""
+                } ${
+                  message.pending
+                    ? "conversation-message-pending"
+                    : ""
+                } ${
+                  message.error
+                    ? "conversation-message-error"
                     : ""
                 }`}
                 tabIndex={0}
@@ -1351,6 +1280,37 @@ function ConversationsView({
                     message.text
                   }
                 </p>
+
+                {message.queueTaskId && (
+                  <div className="conversation-queue-actions">
+                    {(message.queuePhase === "paused" ||
+                      message.queuePhase === "interrupted") && (
+                      <button
+                        type="button"
+                        className="conversation-queue-cancel"
+                        onClick={() => {
+                          void resumeQueuedConversation(
+                            message.queueTaskId ?? "",
+                          );
+                        }}
+                      >
+                        ادامه
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      className="conversation-queue-cancel"
+                      onClick={() => {
+                        void cancelQueuedConversation(
+                          message.queueTaskId ?? "",
+                        );
+                      }}
+                    >
+                      لغو درخواست در صف
+                    </button>
+                  </div>
+                )}
 
                 {message.attachments &&
                   message.attachments.length >
@@ -1465,7 +1425,7 @@ function ConversationsView({
         ) => {
           event.preventDefault();
 
-          sendMessage();
+          void sendMessage();
         }}
       >
         <div className="conversations-composer-shell">
@@ -1474,7 +1434,11 @@ function ConversationsView({
             aria-hidden="true"
           >
             <i />
-            CHAT
+            {
+              pendingRequestId
+                ? "THINKING"
+                : "CHAT"
+            }
           </span>
 
           <textarea
@@ -1482,8 +1446,17 @@ function ConversationsView({
             value={draft}
             rows={1}
             className="conversations-composer-input"
-            placeholder="پیام به Qronos..."
+            placeholder={
+              pendingRequestId
+                ? "Qronos در حال پردازش است..."
+                : "پیام به Qronos..."
+            }
             aria-label="پیام جدید"
+            maxLength={16000}
+            disabled={
+              pendingRequestId !==
+              null
+            }
             onChange={(
               event,
             ) => {
@@ -1519,7 +1492,7 @@ function ConversationsView({
               ) {
                 event.preventDefault();
 
-                sendMessage();
+                void sendMessage();
               }
             }}
           />
@@ -1529,7 +1502,9 @@ function ConversationsView({
             className="conversations-composer-send"
             aria-label="ارسال پیام"
             disabled={
-              !draft.trim()
+              !draft.trim() ||
+              pendingRequestId !==
+                null
             }
           >
             <svg
@@ -1556,7 +1531,7 @@ function ConversationsView({
           <i />
 
           <span>
-            UI LOCAL PROTOTYPE
+            RUNTIME TEXT CHANNEL
           </span>
         </div>
       </form>

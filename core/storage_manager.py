@@ -451,6 +451,12 @@ class StorageManager:
 
 def main() -> None:
     """Print a full storage report."""
+    from core import startup_admission  # before the first store opens (core/startup_admission.py)
+
+    refused = startup_admission.enter_cli("storage-manager")
+    if refused is not None:
+        raise SystemExit(refused)
+
     import time
 
     manager = StorageManager()

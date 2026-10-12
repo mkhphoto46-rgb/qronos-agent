@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "release-exclude.txt"
 
-PRODUCT_PACKAGES = ("core", "security")
+PRODUCT_PACKAGES = ("core", "security", "qronos_media")
 DEBUG_MARKER = "QRONOS_DEBUG_TOOL"
 DEBUG_DIRECTORY = "tools/debug/"
 
@@ -94,6 +94,11 @@ class TestManifestMatchesTheRepository(unittest.TestCase):
 
     def test_the_test_suite_is_excluded(self) -> None:
         self.assertTrue(is_excluded("tests/test_release_hygiene.py", manifest_entries()))
+
+    def test_owned_rust_process_fixture_is_excluded(self) -> None:
+        self.assertTrue(is_excluded(
+            "desktop/src-tauri/tests/fixtures/service_ipc_child.py", manifest_entries()
+        ))
 
     def test_the_debug_directory_is_excluded(self) -> None:
         self.assertTrue(is_excluded(DEBUG_DIRECTORY, manifest_entries()))
@@ -191,6 +196,18 @@ PRIVATE_PATTERN_EXCEPTIONS: dict[str, str] = {
     ),
 }
 
+#: Exact lines (path, stripped text) that hold synthetic, non-personal path shapes. Every other line of these
+#: files is still scanned, and an entry whose line no longer exists fails the stale-entry test.
+SYNTHETIC_PATH_LINES: dict[tuple[str, str], str] = {
+    ("tests/test_action_broker.py", 'return "C:/Users/someone/Downloads/not-qronos.exe"'):
+        "A fabricated foreign executable path for a fake process; 'someone' is a placeholder, nobody's home.",
+    ("tests/test_installer_template.py",
+     '_winapi.CreateJunction(str(local), str(apps / "alias"))  # apps-target\\alias -> ...\\AppData\\Local'):
+        "A comment describing a junction to the private test known-folder fixture, not a real profile.",
+    ("tests/test_supervisor_relay.py", "LOCALAPPDATA/APPDATA/USERPROFILE, plus the settings, history and queue"):
+        "Environment variable names in a docstring, not a path.",
+}
+
 TEXT_SUFFIXES = {
     ".py", ".md", ".txt", ".json", ".toml", ".yml", ".yaml",
     ".rs", ".ts", ".tsx", ".js", ".css", ".html", ".ps1", ".sh",
@@ -219,6 +236,11 @@ def text_files() -> tuple[Path, ...]:
 
 
 class TestNothingPersonalIsCommitted(unittest.TestCase):
+    def test_every_accounted_synthetic_path_line_still_exists_exactly(self) -> None:
+        for (relative, text), reason in SYNTHETIC_PATH_LINES.items():
+            lines = [line.strip() for line in (ROOT / relative).read_text(encoding="utf-8").splitlines()]
+            self.assertIn(text, lines, f"stale synthetic-path entry for {relative} ({reason})")
+
     def test_no_tracked_file_names_somebodys_home_directory(self) -> None:
         offences: list[str] = []
         for path in text_files():
@@ -230,9 +252,12 @@ class TestNothingPersonalIsCommitted(unittest.TestCase):
             for pattern, description in PRIVATE_PATTERNS:
                 if pattern in lowered:
                     line = next(
-                        (number for number, text in enumerate(content.splitlines(), start=1) if pattern in text.lower()),
+                        (number for number, text in enumerate(content.splitlines(), start=1)
+                         if pattern in text.lower() and (relative, text.strip()) not in SYNTHETIC_PATH_LINES),
                         0,
                     )
+                    if line == 0:
+                        continue  # every occurrence is an exact, accounted synthetic line
                     offences.append(f"{relative}:{line} contains {description} ({pattern!r})")
                     break
         self.assertEqual(

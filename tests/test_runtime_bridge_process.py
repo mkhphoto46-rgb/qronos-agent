@@ -17,14 +17,34 @@ file stays on the paths that touch nothing.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def private_profile_has_local_appdata(isolate_qronos_storage_profile, tmp_path: Path) -> None:
+    """
+    tests/conftest.py points USERPROFILE at a private folder of this test that does not exist yet. A
+    source-mode child bridge with store overrides resolves Windows' known <Local AppData> for its own token
+    (core/startup_admission._known_local_appdata, SHGetKnownFolderPath), which expands that redirected
+    profile and fails while that profile has no Local application-data folder; start-up then refuses
+    "store", as it must. Create exactly that private folder (below, under the redirected profile).
+    Production admission, the known-folder binding and every
+    assertion here are unchanged.
+    """
+    profile = Path(os.environ["USERPROFILE"])
+    assert profile.is_relative_to(tmp_path), profile
+    (profile / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
 
 # Generous: the child has to start an interpreter and import the whole of core,
 # which on a cold filesystem is not instant. Short enough that a hang fails the
@@ -36,9 +56,35 @@ REPLY_TIMEOUT = 30.0
 class BridgeProcess:
     """A running bridge, with the plumbing to talk to it."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        module: str = "core.runtime_bridge",
+        state_dir: Path | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        # Queued requests are real conversation work now: submitting one
+        # records the request in conversation history and the queue's own
+        # saved state. The child gets throwaway copies of both, so the suite
+        # never writes into the user's, and it may not start a local model
+        # server on its own. ``state_dir`` lets two bridges in a row share
+        # them, which is what a restart is.
+        # Windows can hold a killed child's SQLite handle for a moment after
+        # it exits; a leftover temp file is not a test failure.
+        self._scratch = tempfile.TemporaryDirectory(
+            ignore_cleanup_errors=True,
+        )
+        state = state_dir if state_dir is not None else Path(self._scratch.name)
+        env = dict(os.environ)
+        env["QRONOS_CONVERSATION_HISTORY_PATH"] = str(
+            state / "conversation_history.sqlite3"
+        )
+        env["QRONOS_QUEUE_STATE_PATH"] = str(state / "queue_state.json")
+        env["QRONOS_SETTINGS_PATH"] = str(state / "settings.json")
+        env["QRONOS_OLLAMA_AUTO_START"] = "0"
+        env.update(env_overrides or {})
+
         self.process = subprocess.Popen(
-            [sys.executable, "-u", "-m", "core.runtime_bridge"],
+            [sys.executable, "-u", "-m", module],
             cwd=str(ROOT),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -46,6 +92,7 @@ class BridgeProcess:
             text=True,
             encoding="utf-8",
             bufsize=1,
+            env=env,
         )
 
     def send(self, payload: dict) -> None:
@@ -111,6 +158,8 @@ class BridgeProcess:
                 except OSError:
                     pass
 
+        self._scratch.cleanup()
+
 
 class BridgeProcessTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -136,9 +185,11 @@ class TestLookingAtTheScreenThroughTheProcess(BridgeProcessTestCase):
     """
 
     def look(self, **fields) -> dict:
+        """An explicit direct screen request (not an answer to a prompt)."""
         payload = {
             "command": "action",
             "actionId": "qronos.look_at_screen",
+            "direct": True,
         }
         payload.update(fields)
 
@@ -186,6 +237,15 @@ class TestLookingAtTheScreenThroughTheProcess(BridgeProcessTestCase):
 
         self.assertIsNotNone(failed)
         self.assertIn("what to look for", failed["message"])
+
+    def test_an_answer_without_its_prompt_identity_is_refused(self) -> None:
+        """A stale or forged "yes" never turns into a direct screen read."""
+        self.look(approved=True, question="What is on my screen?", direct=False)
+
+        stale = self.bridge.read_until("screen_approval_stale")
+
+        self.assertIsNotNone(stale)
+        self.assertEqual(json.loads(stale["message"])["reason"], "approval_id_required")
 
     def test_declining_starts_nothing(self) -> None:
         """
@@ -319,12 +379,44 @@ class QueueBridgeTestCase(BridgeProcessTestCase):
             "the bridge never sent a queue",
         )
 
+        # Held, so nothing submitted below can start. A queued request is
+        # answered by the local brain, and a protocol test must never load
+        # one — there is no fake brain in a child process.
+        self.bridge.send({"command": "queue_set_paused", "paused": True})
+        self.bridge.send({"command": "queue_list"})
+
+        deadline = time.time() + REPLY_TIMEOUT
+
+        while time.time() < deadline:
+            if self.queue()["paused"]:
+                break
+        else:
+            self.fail("the queue never reported itself held")
+
     def queue(self, timeout: float = REPLY_TIMEOUT) -> dict:
         event = self.bridge.read_until("queue_changed", timeout=timeout)
 
         self.assertIsNotNone(event, "no queue arrived")
 
         return json.loads(event["message"])
+
+    def submitted_tasks(self) -> list[dict]:
+        """
+        The tasks once a submission has reached the queue.
+
+        The pump's first pass announces the queue on its own schedule, so a
+        snapshot taken before the submission can still be in the pipe ahead
+        of the one that includes it.
+        """
+        deadline = time.time() + REPLY_TIMEOUT
+
+        while time.time() < deadline:
+            tasks = self.queue()["tasks"]
+
+            if tasks:
+                return tasks
+
+        self.fail("the submitted task never appeared")
 
 
 class TestTheQueueSurvivesShutdown(QueueBridgeTestCase):
@@ -380,7 +472,7 @@ class TestTheQueueProtocol(QueueBridgeTestCase):
             }
         )
 
-        tasks = self.queue()["tasks"]
+        tasks = self.submitted_tasks()
 
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0]["summary"], "analyse the quarterly numbers")
@@ -417,17 +509,76 @@ class TestTheQueueProtocol(QueueBridgeTestCase):
                 "weight": "heavy",
             }
         )
-        task_id = self.queue()["tasks"][0]["taskId"]
+        task_id = self.submitted_tasks()[0]["taskId"]
 
         self.bridge.send({"command": "queue_cancel", "taskId": task_id})
-        states = {task["state"] for task in self.queue()["tasks"]}
+        # Submission and scheduler snapshots may still be buffered. Wait for
+        # this task's cancellation acknowledgement before consuming a view.
+        deadline = time.monotonic() + REPLY_TIMEOUT
+        while True:
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "cancellation was not acknowledged")
+            event = self.bridge.read_until("queue_task_finished", timeout=remaining)
+            self.assertIsNotNone(event, "cancellation was not acknowledged")
+            if json.loads(event["message"]).get("taskId") == task_id:
+                break
+
+        self.bridge.send({"command": "queue_list"})
+        # A concurrent scheduler callback can have captured an older view
+        # before the acknowledgement and publish it afterward.
+        deadline = time.monotonic() + REPLY_TIMEOUT
+        states = {"queued"}
+        while "queued" in states:
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "cancelled queue view never arrived")
+            states = {
+                task["state"] for task in self.queue(timeout=remaining)["tasks"]
+            }
 
         self.assertNotIn("queued", states)
 
     def test_pausing_is_reflected_in_the_queue(self) -> None:
         self.bridge.send({"command": "queue_set_paused", "paused": True})
+        self.bridge.send({"command": "queue_list"})
 
         self.assertTrue(self.queue()["paused"])
+
+    def test_a_submitted_request_is_announced_to_its_conversation(
+        self,
+    ) -> None:
+        self.bridge.send(
+            {
+                "command": "queue_submit",
+                "text": "explain the difference between a list and a tuple",
+                "requestId": "req-process-1",
+            }
+        )
+
+        update = self.bridge.read_until("queue_conversation_update")
+
+        self.assertIsNotNone(update)
+        payload = json.loads(update["message"])
+        self.assertEqual(payload["requestId"], "req-process-1")
+        self.assertEqual(payload["phase"], "queued")
+
+        task = self.submitted_tasks()[0]
+        self.assertEqual(task["kind"], "conversation")
+        self.assertEqual(task["requestId"], "req-process-1")
+
+    def test_an_action_request_is_refused_before_it_is_queued(self) -> None:
+        # Background work never takes an approval-gated path.
+        self.bridge.send(
+            {
+                "command": "queue_submit",
+                "text": "open notepad",
+                "requestId": "req-process-action",
+            }
+        )
+
+        refused = self.bridge.read_until("runtime_error")
+
+        self.assertIsNotNone(refused)
+        self.assertIn("cannot be queued", refused["message"])
 
 
 class TestBadQueueInput(QueueBridgeTestCase):

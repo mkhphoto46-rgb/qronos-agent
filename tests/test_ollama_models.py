@@ -288,42 +288,15 @@ class TestMutations(CatalogTestCase):
             self.catalog.delete_model("qwen3:14b")
 
     @patch("core.ollama_models.requests.post")
-    def test_pull_requests_a_non_streaming_transfer(
-        self,
-        mock_post: Mock,
-    ) -> None:
-        mock_post.return_value = self.make_response({"status": "success"})
-
-        self.catalog.pull_model("qwen3:14b")
-
-        _, kwargs = mock_post.call_args
-        self.assertEqual(
-            kwargs["json"],
-            {"name": "qwen3:14b", "stream": False},
-        )
-
-    @patch("core.ollama_models.requests.post")
-    def test_pull_uses_a_bounded_but_generous_timeout(
-        self,
-        mock_post: Mock,
-    ) -> None:
-        # Unbounded would hang for ever if the daemon stopped responding
-        # mid-transfer; too short would fail on a slow link.
-        mock_post.return_value = self.make_response({"status": "success"})
-
-        self.catalog.pull_model("qwen3:14b")
-
-        _, kwargs = mock_post.call_args
-        self.assertGreaterEqual(kwargs["timeout"], 600)
-
-    @patch("core.ollama_models.requests.post")
-    def test_pull_failure_raises(self, mock_post: Mock) -> None:
-        from requests import Timeout
-
-        mock_post.side_effect = Timeout("slow")
-
-        with self.assertRaises(RuntimeError):
-            self.catalog.pull_model("qwen3:14b")
+    def test_pull_is_terminal_policy_refusal_before_network(self, mock_post: Mock) -> None:
+        for name in ("qwen3:14b", "https://example.com/private", "registry.example/model"):
+            with self.subTest(name=name):
+                with self.assertRaises(PermissionError) as caught:
+                    self.catalog.pull_model(name)
+                self.assertIn("visible browser workflow", str(caught.exception))
+                self.assertIn("import them locally", str(caught.exception))
+                self.assertNotIn(name, str(caught.exception))
+        mock_post.assert_not_called()
 
 
 class TestInstalledModel(unittest.TestCase):

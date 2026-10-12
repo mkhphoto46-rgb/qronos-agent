@@ -1,0 +1,5 @@
+/* Screen/Paint approval reuses the file-approval dialog look; only the
+   multi-line prompt text needs its own rule. */
+.screen-approval-copy {
+  white-space: pre-line;
+}

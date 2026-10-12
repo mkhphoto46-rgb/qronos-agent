@@ -230,6 +230,44 @@ class TestLeases(unittest.TestCase):
         self.assertFalse(self.governor.release("never-existed"))
 
 
+class TestManagedReservations(unittest.TestCase):
+    """A reservation held for a live owned child never expires into a double admission."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.governor = governor(clock=self.clock)
+
+    def test_a_managed_heavy_reservation_survives_any_lease_period(self) -> None:
+        self.assertTrue(self.governor.request("model", Weight.HEAVY, managed=True).granted)
+
+        self.clock.advance(DEFAULT_LEASE_SECONDS * 50)
+
+        self.assertEqual(self.governor.heavy_owner(), "model")
+        refused = self.governor.request("second", Weight.HEAVY)
+        self.assertFalse(refused.granted)
+        self.assertIs(refused.refusal, Refusal.HEAVY_TASK_IN_PROGRESS)
+
+    def test_renewing_keeps_it_managed_and_only_release_frees_it(self) -> None:
+        self.governor.request("model", Weight.HEAVY, managed=True)
+        renewed = self.governor.renew("model")
+        self.assertTrue(renewed is not None and renewed.managed)
+
+        self.clock.advance(DEFAULT_LEASE_SECONDS * 3)
+        self.assertEqual(self.governor.heavy_owner(), "model")
+
+        self.assertTrue(self.governor.release("model"))
+        self.assertIsNone(self.governor.heavy_owner())
+        self.assertTrue(self.governor.request("next", Weight.HEAVY).granted)
+
+    def test_an_unmanaged_reservation_still_expires_beside_it(self) -> None:
+        self.governor.request("model", Weight.HEAVY, managed=True)
+        self.governor.request("light", Weight.LIGHT)
+
+        self.clock.advance(DEFAULT_LEASE_SECONDS + 1)
+
+        self.assertEqual([r.task_id for r in self.governor.active()], ["model"])
+
+
 class TestWarningsDoNotBlock(unittest.TestCase):
     def test_a_warn_decision_still_grants(self) -> None:
         # WARN means "this is getting tight", not "stop". Refusing on a warning

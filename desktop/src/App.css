@@ -1,3 +1,4 @@
+
 :root {
   font-family:
     "Bahnschrift",
@@ -4102,4 +4103,510 @@ button {
 .app-view-library
   .bottom-nav {
   pointer-events: auto;
+}
+
+
+/* =========================================================
+   SETTINGS STAGE 2B — ORACLE ANCHOR + BILINGUAL NAV
+   The Oracle rings and core canvas now share one local anchor.
+   No numeric visual offset is used.
+   ========================================================= */
+
+.qronos-orb-anchor {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.nav-item > .nav-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: inherit;
+  line-height: 1;
+}
+
+.nav-item > .nav-label strong {
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.nav-item > .nav-label small {
+  color: currentColor;
+  opacity: 0.56;
+  font-size: 7px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+
+/* =========================================
+   FILE CONTROL APPROVAL
+   ========================================= */
+
+.file-approval-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  padding:
+    clamp(
+      18px,
+      3vw,
+      42px
+    );
+
+  background:
+    rgba(
+      1,
+      6,
+      10,
+      0.74
+    );
+
+  backdrop-filter:
+    blur(14px)
+    saturate(112%);
+
+  -webkit-backdrop-filter:
+    blur(14px)
+    saturate(112%);
+}
+
+.file-approval-dialog {
+  position: relative;
+
+  width:
+    min(
+      560px,
+      92vw
+    );
+
+  max-height:
+    min(
+      720px,
+      88vh
+    );
+
+  overflow-y: auto;
+  overflow-x: hidden;
+
+  padding:
+    clamp(
+      22px,
+      3vw,
+      34px
+    );
+
+  border:
+    1px solid
+    rgba(
+      95,
+      211,
+      248,
+      0.24
+    );
+
+  border-radius:
+    18px
+    10px
+    18px
+    10px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(
+        8,
+        28,
+        39,
+        0.97
+      ),
+      rgba(
+        3,
+        14,
+        22,
+        0.98
+      )
+    );
+
+  box-shadow:
+    0
+    34px
+    90px
+    rgba(
+      0,
+      0,
+      0,
+      0.56
+    ),
+    inset
+    0
+    1px
+    0
+    rgba(
+      255,
+      255,
+      255,
+      0.045
+    );
+
+  color:
+    rgba(
+      236,
+      247,
+      252,
+      0.96
+    );
+}
+
+.file-approval-dialog::before {
+  content: "";
+
+  position: absolute;
+  left: 13%;
+  right: 13%;
+  top: 0;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        109,
+        224,
+        255,
+        0.72
+      ),
+      transparent
+    );
+}
+
+.file-approval-kicker {
+  direction: ltr;
+
+  color:
+    rgba(
+      91,
+      210,
+      249,
+      0.68
+    );
+
+  font-size:
+    9px;
+
+  letter-spacing:
+    0.18em;
+}
+
+.file-approval-dialog h2 {
+  margin:
+    10px
+    0
+    0;
+
+  font-size:
+    clamp(
+      20px,
+      2.3vw,
+      28px
+    );
+
+  font-weight: 500;
+}
+
+.file-approval-copy {
+  margin:
+    8px
+    0
+    18px;
+
+  color:
+    rgba(
+      171,
+      205,
+      220,
+      0.7
+    );
+
+  font-size:
+    12px;
+
+  line-height: 1.8;
+}
+
+.file-approval-operation,
+.file-approval-path {
+  margin-top: 10px;
+
+  padding:
+    10px
+    12px;
+
+  border:
+    1px solid
+    rgba(
+      83,
+      191,
+      231,
+      0.12
+    );
+
+  border-radius:
+    10px;
+
+  background:
+    rgba(
+      9,
+      31,
+      42,
+      0.44
+    );
+}
+
+.file-approval-operation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 14px;
+}
+
+.file-approval-operation span,
+.file-approval-path span {
+  display: block;
+
+  color:
+    rgba(
+      115,
+      194,
+      221,
+      0.6
+    );
+
+  font-size:
+    9px;
+}
+
+.file-approval-operation strong {
+  color:
+    rgba(
+      229,
+      246,
+      252,
+      0.95
+    );
+
+  font-size:
+    12px;
+
+  font-weight: 500;
+}
+
+.file-approval-path code {
+  display: block;
+
+  margin-top: 6px;
+
+  overflow-wrap: anywhere;
+  word-break: break-word;
+
+  color:
+    rgba(
+      207,
+      237,
+      247,
+      0.9
+    );
+
+  font-family:
+    "Cascadia Mono",
+    "Consolas",
+    monospace;
+
+  font-size:
+    10px;
+
+  line-height: 1.55;
+
+  text-align: left;
+}
+
+.file-approval-warning {
+  margin-top: 14px;
+
+  padding:
+    9px
+    11px;
+
+  border-right:
+    1px solid
+    rgba(
+      244,
+      188,
+      87,
+      0.42
+    );
+
+  color:
+    rgba(
+      214,
+      198,
+      166,
+      0.76
+    );
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        116,
+        81,
+        24,
+        0.12
+      )
+    );
+
+  font-size:
+    9px;
+
+  line-height: 1.75;
+}
+
+.file-approval-actions {
+  display: grid;
+
+  grid-template-columns:
+    repeat(
+      2,
+      minmax(
+        0,
+        1fr
+      )
+    );
+
+  gap: 10px;
+
+  margin-top: 20px;
+}
+
+.file-approval-button {
+  min-height: 42px;
+
+  border:
+    1px solid
+    rgba(
+      91,
+      195,
+      231,
+      0.18
+    );
+
+  border-radius: 10px;
+
+  cursor: pointer;
+
+  transition:
+    transform
+    150ms
+    ease,
+    border-color
+    150ms
+    ease,
+    background
+    150ms
+    ease,
+    opacity
+    150ms
+    ease;
+}
+
+.file-approval-button:hover:not(:disabled) {
+  transform:
+    translateY(
+      -1px
+    );
+}
+
+.file-approval-button:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.file-approval-deny {
+  color:
+    rgba(
+      207,
+      222,
+      230,
+      0.78
+    );
+
+  background:
+    rgba(
+      26,
+      44,
+      52,
+      0.52
+    );
+}
+
+.file-approval-allow {
+  color:
+    rgba(
+      238,
+      251,
+      255,
+      0.98
+    );
+
+  border-color:
+    rgba(
+      88,
+      216,
+      255,
+      0.34
+    );
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(
+        28,
+        116,
+        146,
+        0.56
+      ),
+      rgba(
+        18,
+        71,
+        96,
+        0.62
+      )
+    );
+}
+
+@media (max-width: 620px) {
+  .file-approval-actions {
+    grid-template-columns:
+      1fr;
+  }
 }

@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import threading
 import time
-import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import BinaryIO
 
 from core.config import CONFIG
+from core.local_ipc import (
+    local_host, local_port, local_timeout, process_owns_listener, request_bytes,
+)
 from core.speech_runtime import SpeechRuntime
+from core.windows_sidecar_guard import (
+    SidecarAlreadyRunning,
+    WindowsSidecarGuard,
+)
 
 
 DEFAULT_WHISPER_SERVER_EXE = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "bin"
     / "Release"
@@ -25,8 +31,7 @@ DEFAULT_WHISPER_SERVER_EXE = (
 )
 
 DEFAULT_WHISPER_MODEL = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "models"
     / "ggml-large-v3-turbo-q5_0.bin"
@@ -38,6 +43,7 @@ DEFAULT_STARTUP_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_BEST_OF = 5
 DEFAULT_BEAM_SIZE = 5
+WHISPER_SIDECAR_MUTEX = r"Local\Qronos.Whisper.Sidecar.v1"
 
 
 class WhisperServerRuntime(SpeechRuntime):
@@ -70,26 +76,12 @@ class WhisperServerRuntime(SpeechRuntime):
         best_of: int = DEFAULT_BEST_OF,
         beam_size: int = DEFAULT_BEAM_SIZE,
         log_dir: str | Path = CONFIG.paths.temp,
+        sidecar_guard_factory=None,
     ) -> None:
-        if host != "127.0.0.1":
-            raise ValueError(
-                "WhisperServerRuntime must bind to 127.0.0.1."
-            )
-
-        if not 1 <= port <= 65535:
-            raise ValueError(
-                "port must be between 1 and 65535."
-            )
-
-        if startup_timeout_seconds <= 0:
-            raise ValueError(
-                "startup_timeout_seconds must be greater than zero."
-            )
-
-        if request_timeout_seconds <= 0:
-            raise ValueError(
-                "request_timeout_seconds must be greater than zero."
-            )
+        host = local_host(host)
+        port = local_port(port)
+        startup_timeout_seconds = local_timeout(startup_timeout_seconds)
+        request_timeout_seconds = local_timeout(request_timeout_seconds)
 
         if best_of <= 0:
             raise ValueError(
@@ -132,7 +124,16 @@ class WhisperServerRuntime(SpeechRuntime):
             log_dir
         )
 
+        self._sidecar_guard_factory = (
+            sidecar_guard_factory
+            if sidecar_guard_factory is not None
+            else lambda: WindowsSidecarGuard.acquire(
+                WHISPER_SIDECAR_MUTEX
+            )
+        )
+
         self._process: subprocess.Popen[bytes] | None = None
+        self._sidecar_guard: WindowsSidecarGuard | None = None
         self._stdout_file: BinaryIO | None = None
         self._stderr_file: BinaryIO | None = None
 
@@ -146,10 +147,9 @@ class WhisperServerRuntime(SpeechRuntime):
 
     @property
     def inference_url(self) -> str:
-        return (
-            f"http://{self.host}:"
-            f"{self.port}/inference"
-        )
+        host = local_host(self.host)
+        port = local_port(self.port)
+        return f"http://{host}:{port}/inference"
 
     @property
     def is_running(self) -> bool:
@@ -170,11 +170,13 @@ class WhisperServerRuntime(SpeechRuntime):
         if not self.is_running:
             return False
 
+        if not process_owns_listener(self._process, self.port):
+            return False
         try:
             with socket.create_connection(
                 (
-                    self.host,
-                    self.port,
+                    local_host(self.host),
+                    local_port(self.port),
                 ),
                 timeout=0.25,
             ):
@@ -197,9 +199,9 @@ class WhisperServerRuntime(SpeechRuntime):
             "-bs",
             str(self.beam_size),
             "--host",
-            self.host,
+            local_host(self.host),
             "--port",
-            str(self.port),
+            str(local_port(self.port)),
         ]
 
     def prepare(self) -> None:
@@ -244,20 +246,64 @@ class WhisperServerRuntime(SpeechRuntime):
                 "wb"
             )
 
+            guard: WindowsSidecarGuard | None = None
+            process = None
+
             try:
-                self._process = subprocess.Popen(
+                guard = self._sidecar_guard_factory()
+                process = subprocess.Popen(
                     self._build_command(),
                     stdout=self._stdout_file,
                     stderr=self._stderr_file,
                     stdin=subprocess.DEVNULL,
                 )
 
+                pid = int(
+                    getattr(process, "pid", 0)
+                    or 0
+                )
+                if pid <= 0:
+                    raise RuntimeError(
+                        "whisper-server.exe did not return a valid PID."
+                    )
+
+                guard.bind_process(pid, process_handle=getattr(process, "_handle", None))
+                self._process = process
+                self._sidecar_guard = guard
+
+            except SidecarAlreadyRunning as exc:
+                if guard is not None:
+                    guard.close()
+                self._close_logs()
+                raise RuntimeError(
+                    "Another Qronos process already owns the "
+                    "persistent Whisper sidecar."
+                ) from exc
+
             except OSError as exc:
+                if guard is not None:
+                    guard.close()
                 self._close_logs()
 
                 raise RuntimeError(
                     "Could not start whisper-server.exe."
                 ) from exc
+
+            except Exception:
+                if process is not None and process.poll() is None:
+                    try:
+                        process.kill()
+                        process.wait(timeout=3.0)
+                    except Exception:
+                        pass
+
+                if guard is not None:
+                    guard.close()
+
+                self._process = None
+                self._sidecar_guard = None
+                self._close_logs()
+                raise
 
             deadline = (
                 time.monotonic()
@@ -411,21 +457,16 @@ class WhisperServerRuntime(SpeechRuntime):
         )
 
         with self._request_lock:
+            with self._lifecycle_lock:
+                process = self._process
+            if not process_owns_listener(process, self.port):
+                raise RuntimeError("Whisper sidecar no longer owns its local endpoint.")
             try:
-                with urllib.request.urlopen(
-                    request,
-                    timeout=self.request_timeout_seconds,
-                ) as response:
-                    raw = response.read()
-
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                OSError,
-            ) as exc:
-                raise RuntimeError(
-                    "Whisper server transcription request failed."
-                ) from exc
+                raw = request_bytes(
+                    request, timeout=self.request_timeout_seconds, owner=process,
+                )
+            except Exception:
+                raise RuntimeError("Whisper server transcription request failed.") from None
 
         try:
             payload = json.loads(
@@ -437,11 +478,13 @@ class WhisperServerRuntime(SpeechRuntime):
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,
-        ) as exc:
+        ):
             raise RuntimeError(
                 "Whisper server returned invalid UTF-8 JSON."
-            ) from exc
+            ) from None
 
+        if not isinstance(payload, dict):
+            raise RuntimeError("Whisper server response must be a JSON object.")
         transcript = payload.get(
             "text"
         )
@@ -485,8 +528,10 @@ class WhisperServerRuntime(SpeechRuntime):
     def shutdown(self) -> None:
         with self._lifecycle_lock:
             process = self._process
+            guard = self._sidecar_guard
 
             self._process = None
+            self._sidecar_guard = None
 
             if process is not None:
                 if process.poll() is None:
@@ -509,6 +554,9 @@ class WhisperServerRuntime(SpeechRuntime):
 
                     except OSError:
                         pass
+
+            if guard is not None:
+                guard.close()
 
             self._close_logs()
 

@@ -195,3 +195,36 @@ class TestVersioning(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_concurrent_saves_from_two_processes_never_fail_or_corrupt(tmp_path):
+    """A fixed '<name>.tmp' made concurrent writers collide (WinError 32)."""
+    import subprocess
+    import sys
+    import textwrap
+
+    root = Path(__file__).resolve().parents[1]
+    target = tmp_path / "store.json"
+    go = tmp_path / "go"
+    child = textwrap.dedent("""
+        import os, sys, time
+        sys.path.insert(0, sys.argv[1])
+        from core.json_store import JsonStore
+        store = JsonStore(sys.argv[2], 1)
+        while not os.path.exists(sys.argv[3]):
+            time.sleep(0.001)
+        for index in range(60):
+            store.save({"writer": sys.argv[4], "index": index})
+        print("OK")
+    """)
+    writers = [
+        subprocess.Popen([sys.executable, "-B", "-I", "-c", child, str(root), str(target), str(go), name],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for name in ("a", "b")
+    ]
+    go.write_text("go", encoding="utf-8")
+    results = [writer.communicate(timeout=120) for writer in writers]
+    assert [out.strip() for out, _ in results] == ["OK", "OK"], [err[-300:] for _, err in results]
+    payload = JsonStore(target, 1).load_payload()
+    assert payload["index"] == 59 and payload["writer"] in {"a", "b"}
+    assert not list(tmp_path.glob("*.tmp")), "temporary files are always removed"

@@ -98,9 +98,13 @@ class Reservation:
     weight: Weight
     granted_at: float
     expires_at: float
+    # Held for a live owned child (a model process): the lease clock never
+    # frees it. Only an explicit release does, after the owner has proved the
+    # child exited. See ``ResourceGovernor.request(managed=...)``.
+    managed: bool = False
 
     def expired_at(self, now: float) -> bool:
-        return now >= self.expires_at
+        return not self.managed and now >= self.expires_at
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,7 @@ class ResourceGovernor:
         activity_mode: ActivityMode = ActivityMode.NORMAL,
         resource_pressure: ResourcePressure = ResourcePressure.NORMAL,
         decision: ResourceDecision | None = None,
+        managed: bool = False,
     ) -> Grant:
         """
         Check and reserve in one step.
@@ -198,6 +203,13 @@ class ResourceGovernor:
 
         The single-heavy-owner rule and the lease still apply either way. Those
         are correctness, and no caller may waive them.
+
+        ``managed`` is for an owner that holds a contained child process (a
+        model): the expiry exists so a task that crashed does not hold the
+        slot forever, but a child that is still running still occupies the
+        memory it was admitted for. A managed reservation therefore never
+        expires; its owner releases it only once the child's exit is proven,
+        and keeps it held when it cannot prove that.
         """
         if not task_id.strip():
             raise ValueError("A reservation must name a task.")
@@ -241,6 +253,7 @@ class ResourceGovernor:
                 weight=weight,
                 granted_at=now,
                 expires_at=now + self.lease_seconds,
+                managed=bool(managed),
             )
 
             self._reservations[task_id] = reservation
@@ -277,6 +290,7 @@ class ResourceGovernor:
                 weight=existing.weight,
                 granted_at=existing.granted_at,
                 expires_at=now + self.lease_seconds,
+                managed=existing.managed,
             )
 
             self._reservations[task_id] = renewed

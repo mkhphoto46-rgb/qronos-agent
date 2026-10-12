@@ -40,6 +40,26 @@ cannot grow it without bound.
 It does not report internal errors to the phone. A traceback or an exception
 message can carry a file path or a fragment of the user's data, so a handler
 that fails returns a fixed code and the detail stays in the log on the machine.
+
+Layer 2 sessions arrive through ``serve_relayed`` rather than the listener: the
+relay dialler in ``core/link_tunnel.py`` hands over an outbound connection the
+relay has joined to a phone, and the same handshake runs inside it, end to end.
+Such a session is REMOTE_TUNNEL by construction — the scope comes from the path
+the connection took, never from an address — and four rules apply to it on top
+of everything above:
+
+    It cannot pair. A pending device is refused over the relay whatever
+    address the relay happens to have, so a hostile relay cannot enrol a phone.
+    The device must be inside a remote opt-in, checked at the handshake and
+    again before every request.
+    It lives for a bounded time and has a request budget.
+    Every request but ``ping`` carries a command id, so a retry after a dropped
+    connection is answered rather than run twice (``core/link_commands.py``).
+
+Revocation reaches open sessions as well as new handshakes, in both layers:
+``revoke`` closes a device's live sessions at once, and every request re-reads
+the device's record first, so a revocation made behind the server's back takes
+effect at the next request at the latest.
 """
 
 from __future__ import annotations
@@ -56,6 +76,19 @@ from enum import Enum
 from typing import Any, Callable, Protocol
 
 from core.link_audit import AuditEvent, AuditLog
+from core.security_monitor import (
+    Admission,
+    Principal,
+    Response as Verdict,
+    SecurityMonitor,
+    SignalKind,
+)
+from core.link_commands import (
+    CommandLedger,
+    CommandState,
+    RequestBudget,
+    command_fingerprint,
+)
 from core.link_capability import (
     AuthReason,
     Capability,
@@ -68,6 +101,8 @@ from core.link_devices import (
     DeviceRecord,
     DeviceRegistry,
     DeviceStatus,
+    DeviceStoreBusy,
+    DeviceStoreCorrupt,
     is_valid_device_id,
 )
 from core.link_pairing import DEFAULT_PORT, PairingRefusal, PairingService
@@ -83,6 +118,7 @@ from core.link_protocol import (
 from core.link_transport import (
     HANDSHAKE_TIMEOUT_SECONDS,
     IDLE_TIMEOUT_SECONDS,
+    TlsStream,
     reader_for,
     require_psk_support,
     server_context,
@@ -98,6 +134,12 @@ DEFAULT_BIND_HOST = "0.0.0.0"
 # A phone, a tablet, and headroom.
 MAX_CONNECTIONS = 4
 
+# Connections arriving through the relay have slots of their own. A relay is
+# untrusted and can open connections as fast as the PC will take them; if the
+# two paths shared one budget, a hostile relay could keep the phone on the
+# sofa from connecting at all.
+MAX_RELAY_CONNECTIONS = 4
+
 # How long a failed handshake makes the next one from that peer wait.
 FAILURE_PAUSE_SECONDS = 1.0
 
@@ -110,6 +152,16 @@ MAX_PAUSED_PEERS = 256
 # expired pairing window that nothing ever connected to. Stopping does not wait
 # for this: ``stop`` writes to a wake socket that interrupts the wait at once.
 HOUSEKEEPING_SECONDS = 1.0
+
+# A remote session is short-lived: after this long it is closed and the phone
+# reconnects, which runs a fresh handshake with fresh ephemeral keys and
+# re-checks the device against the registry from scratch.
+REMOTE_SESSION_LIFETIME_SECONDS = 30 * 60.0
+
+# The request budget of one remote session: a burst, then one request every
+# two seconds. Generous for a person; small for a stolen phone in a loop.
+REMOTE_BURST = 10.0
+REMOTE_REFILL_PER_SECOND = 0.5
 
 
 class Clock(Protocol):
@@ -127,6 +179,30 @@ class RejectReason(Enum):
     BAD_IDENTITY = "bad_identity"
     REMOTE_NOT_ENABLED = "remote_not_enabled"
     UNEXPECTED_FRAME = "unexpected_frame"
+    PAIRING_OVER_RELAY = "pairing_over_relay"
+
+    # Security Monitor verdicts, enforced here.
+    THROTTLED = "throttled"
+    REMOTE_NOT_ADMITTED = "remote_not_admitted"
+    LINK_QUARANTINED = "link_quarantined"
+
+
+class SessionRule(Enum):
+    """Why the PC ended a session or refused a request on session grounds."""
+
+    REVOKED = "revoked"
+    REMOTE_WITHDRAWN = "remote_withdrawn"
+    LIFETIME_REACHED = "lifetime_reached"
+    SERVER_STOPPING = "server_stopping"
+    RATE_LIMITED = "rate_limited"
+    COMMAND_ID_REQUIRED = "command_id_required"
+    COMMAND_CONFLICT = "command_conflict"
+    COMMAND_IN_PROGRESS = "command_in_progress"
+    COMMAND_ALREADY_DONE = "command_already_done"
+    DUPLICATE_ANSWERED = "duplicate_answered"
+    THROTTLED = "throttled"
+    CONTAINED = "contained"
+    QUARANTINED = "quarantined"
 
 
 class LinkOperationError(Exception):
@@ -157,9 +233,14 @@ class LinkSettings:
     )
 
     max_connections: int = MAX_CONNECTIONS
+    max_relay_connections: int = MAX_RELAY_CONNECTIONS
     handshake_timeout: float = HANDSHAKE_TIMEOUT_SECONDS
     idle_timeout: float = IDLE_TIMEOUT_SECONDS
     failure_pause: float = FAILURE_PAUSE_SECONDS
+
+    remote_session_lifetime: float = REMOTE_SESSION_LIFETIME_SECONDS
+    remote_burst: float = REMOTE_BURST
+    remote_refill_per_second: float = REMOTE_REFILL_PER_SECOND
 
 
 @dataclass
@@ -169,13 +250,53 @@ class LinkSession:
     device: DeviceRecord
     scope: LinkScope
     peer: str
-    connection: ssl.SSLSocket
+    # A TLS socket for a direct connection, a ``TlsStream`` for a relayed one.
+    # The session uses only the methods the two have in common.
+    connection: ssl.SSLSocket | TlsStream
     started_at: float
+    budget: RequestBudget | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    ended: SessionRule | None = None
 
     @property
     def grants(self) -> frozenset[Capability] | None:
         return self.device.grants
+
+    @property
+    def relayed(self) -> bool:
+        return isinstance(self.connection, TlsStream)
+
+    def end(self, rule: SessionRule) -> None:
+        """
+        Close the session from outside its own thread.
+
+        The transport is closed, not only shut down, because only closing wakes
+        the session thread out of its read. Measured on Windows 11 with Python
+        3.13: ``shutdown(SHUT_RDWR)`` from another thread leaves a blocked
+        ``recv`` waiting, with or without a timeout, until the peer reacts;
+        ``close`` wakes it at once. A revoked phone that never reacts must not
+        keep its session thread until the idle timeout. CPython's ``_ssl``
+        reports a socket closed under a pending read as an error rather than
+        reading a stale descriptor, so this is safe for the TLS socket too.
+        """
+
+        if self.ended is None:
+            self.ended = rule
+
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError):
+            pass
+
+        abort = getattr(self.connection, "abort", None)
+
+        try:
+            if abort is not None:
+                abort()
+            else:
+                self.connection.close()
+        except (OSError, ValueError):
+            pass
 
     def send(self, frame: Request | Response | Event) -> None:
         """
@@ -226,6 +347,8 @@ class LinkServer:
         settings: LinkSettings | None = None,
         clock: Clock | None = None,
         scope_resolver: Callable[[str], LinkScope | None] | None = None,
+        ledger: CommandLedger | None = None,
+        monitor: SecurityMonitor | None = None,
     ) -> None:
         self.registry = registry
         self.pairing = pairing
@@ -251,6 +374,7 @@ class LinkServer:
 
         self._state_lock = threading.Lock()
         self._active = 0
+        self._active_relayed = 0
 
         # peer address -> the time it may try again. Ordered, so the oldest
         # entry is the one evicted when the map is full.
@@ -258,11 +382,174 @@ class LinkServer:
 
         self._sessions_served = 0
 
+        # Shared by every session, so a retry that arrives on a new connection
+        # meets the record its first attempt left on the old one.
+        self.ledger = ledger if ledger is not None else CommandLedger()
+
+        # device id -> its open sessions, so revocation can reach them.
+        self._live: dict[str, set[int]] = {}
+        self._sessions: dict[int, LinkSession] = {}
+
+        # The Security Monitor (core/security_monitor.py). Remote access does
+        # not run without one; see start(). The server enforces its own part
+        # of every verdict, so no caller can forget to.
+        self.monitor = monitor
+
+        if monitor is not None:
+            monitor.on_contain(self._contain)
+            monitor.on_quarantine(self._quarantine)
+
     # ---------------------------------------------------------------- registry
 
     def handle(self, op: LinkOp, handler: Handler) -> None:
         """Register a handler for one operation."""
         self.handlers[op] = handler
+
+    # ------------------------------------------------------------ revocation
+
+    def revoke(self, device_id: str) -> DeviceRecord:
+        """
+        Revoke a device and end its open sessions now.
+
+        The registry change stops future handshakes; ending the sessions stops
+        the present ones, so a phone reported lost loses the PC immediately
+        rather than at its next request. Its command ledger goes too.
+        """
+
+        record = self.registry.revoke(device_id)
+
+        self.audit.record(AuditEvent.DEVICE_REVOKED, device_id=device_id)
+        self.end_sessions(device_id, SessionRule.REVOKED)
+        self.ledger.forget_device(device_id)
+
+        return record
+
+    def set_remote_access(
+        self,
+        device_id: str,
+        enabled: bool,
+        expires_at: float | None = None,
+    ) -> DeviceRecord:
+        """
+        Change one device's remote opt-in, ending its remote sessions if off.
+
+        Local sessions are left alone: withdrawing remote access is not a
+        statement about the phone on the sofa.
+        """
+
+        record = self.registry.set_remote_enabled(device_id, enabled, expires_at)
+
+        if not enabled:
+            self.end_sessions(
+                device_id, SessionRule.REMOTE_WITHDRAWN, remote_only=True
+            )
+
+        return record
+
+    def end_sessions(
+        self,
+        device_id: str,
+        rule: SessionRule,
+        remote_only: bool = False,
+    ) -> int:
+        """End a device's open sessions. Returns how many were ended."""
+
+        with self._state_lock:
+            sessions = [
+                self._sessions[key]
+                for key in self._live.get(device_id, ())
+                if key in self._sessions
+            ]
+
+        ended = 0
+
+        for session in sessions:
+            if remote_only and session.scope is not LinkScope.REMOTE_TUNNEL:
+                continue
+
+            session.end(rule)
+            ended += 1
+
+        return ended
+
+    # ------------------------------------------------------- security monitor
+
+    def remote_admission(self) -> Admission:
+        """Remote access runs only with a monitor that admits it."""
+
+        if self.monitor is None:
+            return Admission(False, "security_monitor_missing")
+
+        return self.monitor.remote_admission()
+
+    def _signal(self, kind: SignalKind, principal: Principal) -> Verdict:
+        """Report one signal; enforce a device throttle on the spot."""
+
+        if self.monitor is None:
+            return Verdict.ALLOW
+
+        decision = self.monitor.observe(kind, principal)
+
+        if decision.response is Verdict.THROTTLE and principal.ident and principal.scope:
+            self._end_device_sessions(principal.ident, principal.scope, SessionRule.THROTTLED)
+
+        return decision.response
+
+    def _admitted(self, principal: Principal) -> bool:
+        return self.monitor is None or self.monitor.admit(principal)
+
+    def _end_device_sessions(self, device_id: str, scope: str, rule: SessionRule) -> None:
+        with self._state_lock:
+            sessions = [
+                self._sessions[key]
+                for key in self._live.get(device_id, ())
+                if key in self._sessions
+            ]
+
+        for session in sessions:
+            if session.scope.value == scope:
+                session.end(rule)
+
+    def _contain(self, reason: str) -> None:
+        """Containment: every remote session ends now; LAN sessions carry on."""
+
+        with self._state_lock:
+            sessions = list(self._sessions.values())
+
+        for session in sessions:
+            if session.scope is LinkScope.REMOTE_TUNNEL:
+                session.end(SessionRule.CONTAINED)
+
+    def _quarantine(self, reason: str) -> None:
+        """Quarantine: every session ends; new connections are refused."""
+
+        with self._state_lock:
+            sessions = list(self._sessions.values())
+
+        for session in sessions:
+            session.end(SessionRule.QUARANTINED)
+
+    def live_sessions(self, device_id: str) -> int:
+        with self._state_lock:
+            return len(self._live.get(device_id, ()))
+
+    def _register(self, session: LinkSession) -> None:
+        with self._state_lock:
+            key = id(session)
+            self._sessions[key] = session
+            self._live.setdefault(session.device.device_id, set()).add(key)
+
+    def _unregister(self, session: LinkSession) -> None:
+        with self._state_lock:
+            key = id(session)
+            self._sessions.pop(key, None)
+            keys = self._live.get(session.device.device_id)
+
+            if keys is not None:
+                keys.discard(key)
+
+                if not keys:
+                    del self._live[session.device.device_id]
 
     # --------------------------------------------------------------- lifecycle
 
@@ -294,6 +581,16 @@ class LinkServer:
 
         if self._listener is not None:
             raise RuntimeError("the link server is already running")
+
+        if LinkScope.REMOTE_TUNNEL in self.settings.allowed_scopes and self.monitor is None:
+            # Not bypassable: without a monitor there is no remote access,
+            # whoever constructs the server.
+            raise RuntimeError(
+                "remote access needs a Security Monitor; this server has none"
+            )
+
+        if self.monitor is not None and not self.monitor.link_admission().allowed:
+            raise RuntimeError("the device link is quarantined; reset it at the computer")
 
         self._stopping.clear()
 
@@ -351,6 +648,14 @@ class LinkServer:
                 listener.close()
             except OSError:
                 pass
+
+        # Open sessions are woken rather than waited out: one sitting in its
+        # idle read would otherwise hold ``stop`` for the whole idle timeout.
+        with self._state_lock:
+            open_sessions = list(self._sessions.values())
+
+        for session in open_sessions:
+            session.end(SessionRule.SERVER_STOPPING)
 
         for worker in tuple(self._workers):
             worker.join(timeout=timeout)
@@ -450,13 +755,79 @@ class LinkServer:
             self._workers.append(worker)
             worker.start()
 
+    # ----------------------------------------------------------- relayed client
+
+    def serve_relayed(
+        self,
+        carrier: socket.socket,
+        peer: str,
+        on_outcome: Callable[[bool], None] | None = None,
+    ) -> None:
+        """
+        Serve one connection the relay has joined to a phone. Returns at once.
+
+        ``carrier`` is the PC's outer connection to the relay, already spliced;
+        the inner handshake runs inside it. ``peer`` is the relay's address,
+        which is all the PC can know: the phone's own address is the relay's
+        business, and that is part of what the relay is trusted not to need.
+
+        ``on_outcome`` is told, exactly once, whether the splice became an
+        authenticated session. The dialler needs that: a relay can say
+        "joined" whenever it likes, so a splice is only a success once the
+        phone on the other end has proved it holds a key.
+        """
+
+        outcome = _Outcome(on_outcome)
+
+        if self._stopping.is_set() or self._listener is None:
+            self._shutdown(carrier)
+            outcome.report(False)
+
+            return
+
+        worker = threading.Thread(
+            target=self._serve,
+            args=(carrier, peer, True, outcome),
+            name="qronos-link-relayed",
+            daemon=True,
+        )
+
+        with self._state_lock:
+            self._workers = [t for t in self._workers if t.is_alive()]
+            self._workers.append(worker)
+
+        worker.start()
+
     # -------------------------------------------------------------- one client
 
-    def _serve(self, raw: socket.socket, peer: str) -> None:
-        if not self._claim_slot():
+    def _serve(
+        self,
+        raw: socket.socket,
+        peer: str,
+        relayed: bool = False,
+        outcome: _Outcome | None = None,
+    ) -> None:
+        outcome = outcome if outcome is not None else _Outcome(None)
+
+        try:
+            self._serve_counted(raw, peer, relayed, outcome)
+        finally:
+            # Anything that did not reach an authenticated session is a
+            # failure, whichever way it ended.
+            outcome.report(False)
+
+    def _serve_counted(
+        self,
+        raw: socket.socket,
+        peer: str,
+        relayed: bool,
+        outcome: _Outcome,
+    ) -> None:
+        if not self._claim_slot(relayed):
             self.audit.record(
                 AuditEvent.CONNECTION_REJECTED,
                 peer=peer,
+                scope=LinkScope.REMOTE_TUNNEL if relayed else None,
                 reason=RejectReason.TOO_MANY_CONNECTIONS,
             )
             self._shutdown(raw)
@@ -464,13 +835,23 @@ class LinkServer:
             return
 
         try:
-            self._serve_claimed(raw, peer)
+            self._serve_claimed(raw, peer, relayed, outcome)
         finally:
-            self._release_slot()
+            self._release_slot(relayed)
             self._shutdown(raw)
 
-    def _serve_claimed(self, raw: socket.socket, peer: str) -> None:
-        scope = self.scope_resolver(peer)
+    def _serve_claimed(
+        self,
+        raw: socket.socket,
+        peer: str,
+        relayed: bool = False,
+        outcome: _Outcome | None = None,
+    ) -> None:
+        # A relayed connection is remote because of the path it took, not
+        # because of any address. The default resolver, ``scope_for_peer``,
+        # never returns the remote scope for any address, so in production
+        # only the relay path produces it and the listener stays Layer 1.
+        scope = LinkScope.REMOTE_TUNNEL if relayed else self.scope_resolver(peer)
 
         if scope is None or scope not in self.settings.allowed_scopes:
             # Refused before any TLS work. In Layer 1 this is every connection
@@ -484,7 +865,48 @@ class LinkServer:
 
             return
 
-        if not self._handshake_permitted(peer):
+        if self.monitor is not None and not self.monitor.link_admission().allowed:
+            self.audit.record(
+                AuditEvent.CONNECTION_REJECTED,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.LINK_QUARANTINED,
+            )
+
+            return
+
+        # Who this connection answers to before it has proved a key. Anything
+        # the relay delivers is the relay's, never a LAN address's - the relay
+        # shares one address with every phone it carries.
+        principal = Principal.relay() if relayed else Principal.lan(peer)
+
+        # Every remote-scoped connection passes the WAN gate, whatever path
+        # produced the scope - not only those the dialler hands over.
+        if (relayed or scope is LinkScope.REMOTE_TUNNEL) and not self.remote_admission().allowed:
+            self.audit.record(
+                AuditEvent.SCOPE_REFUSED,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.REMOTE_NOT_ADMITTED,
+            )
+
+            return
+
+        if not self._admitted(principal):
+            self.audit.record(
+                AuditEvent.CONNECTION_REJECTED,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.THROTTLED,
+            )
+
+            return
+
+        # The relay's address is kept apart from LAN addresses here too, so a
+        # failure through the relay never pauses a phone on the sofa.
+        pause_key = f"relay {peer}" if relayed else peer
+
+        if not self._handshake_permitted(pause_key):
             self.audit.record(
                 AuditEvent.CONNECTION_REJECTED,
                 peer=peer,
@@ -498,9 +920,12 @@ class LinkServer:
         context, seen = server_context(self.registry.secret_for)
 
         try:
-            tls = context.wrap_socket(raw, server_side=True)
+            if relayed:
+                tls: ssl.SSLSocket | TlsStream = TlsStream.server(context, raw)
+            else:
+                tls = context.wrap_socket(raw, server_side=True)
         except (ssl.SSLError, OSError, TimeoutError):
-            self._penalise_failure(peer)
+            self._penalise_failure(pause_key)
             self.audit.record(
                 AuditEvent.HANDSHAKE_REFUSED,
                 device_id=seen.identity or "",
@@ -508,6 +933,10 @@ class LinkServer:
                 scope=scope,
                 reason=RejectReason.BAD_KEY_OR_UNKNOWN_DEVICE,
             )
+            # Held against the source, never the identity it claimed: that
+            # identity was not proved, and holding it against the device would
+            # let anyone get a real phone refused by failing in its name.
+            self._signal(SignalKind.HANDSHAKE_FAILED, principal)
 
             return
 
@@ -516,6 +945,9 @@ class LinkServer:
 
             if session is None:
                 return
+
+            if outcome is not None:
+                outcome.report(True)
 
             self.audit.record(
                 AuditEvent.HANDSHAKE_OK,
@@ -531,10 +963,28 @@ class LinkServer:
             )
 
             self._sessions_served += 1
+            self._register(session)
 
             try:
                 self._session_loop(session)
             finally:
+                self._unregister(session)
+
+                if relayed and getattr(tls, "integrity_failed", False):
+                    # The inner TLS rejected a record inside an authenticated
+                    # relayed session. TCP and the outer TLS guard the wire up
+                    # to the relay, so the bytes were altered past it.
+                    self._signal(SignalKind.TAMPERING, Principal.relay())
+
+                if session.ended is not None:
+                    self.audit.record(
+                        AuditEvent.SESSION_ENDED,
+                        device_id=session.device.device_id,
+                        peer=peer,
+                        scope=scope,
+                        reason=session.ended,
+                    )
+
                 self.audit.record(
                     AuditEvent.SESSION_CLOSED,
                     device_id=session.device.device_id,
@@ -544,7 +994,7 @@ class LinkServer:
 
     def _authorise_session(
         self,
-        tls: ssl.SSLSocket,
+        tls: ssl.SSLSocket | TlsStream,
         identity: str,
         peer: str,
         scope: LinkScope,
@@ -572,7 +1022,13 @@ class LinkServer:
 
             return None
 
-        record = self.registry.get(identity)
+        try:
+            record = self.registry.get(identity)
+        except DeviceStoreCorrupt:
+            record = None
+            self._signal(SignalKind.REGISTRY_UNREADABLE, Principal.system())
+        except DeviceStoreBusy:
+            record = None
 
         if record is None or not record.can_authenticate:
             self.audit.record(
@@ -586,18 +1042,35 @@ class LinkServer:
             return None
 
         if record.status is DeviceStatus.PENDING:
-            record = self._complete_pairing(record, peer, scope)
+            if scope is not LinkScope.LOCAL_NETWORK:
+                # Pairing is local-only, and over the relay that is decided by
+                # the path, not by the relay's address — a relay on the same
+                # network would otherwise look local. This is the rule that
+                # makes an untrusted relay acceptable: it cannot enrol a phone.
+                self.audit.record(
+                    AuditEvent.PAIRING_REFUSED,
+                    device_id=record.device_id,
+                    peer=peer,
+                    scope=scope,
+                    reason=RejectReason.PAIRING_OVER_RELAY,
+                )
+                self._signal(SignalKind.PAIRING_OVER_RELAY, Principal.relay())
+
+                return None
+
+            try:
+                record = self._complete_pairing(record, peer, scope)
+            except (DeviceStoreCorrupt, DeviceStoreBusy):
+                record = None
 
             if record is None:
                 return None
-        else:
-            record = self.registry.touch(record.device_id)
-
-        if scope is LinkScope.REMOTE_TUNNEL and not record.remote_enabled:
-            # Layer 2 is opt-in for one named device at a time, never a global
-            # switch. Unreachable in Layer 1 because the scope is refused
-            # earlier; present so turning the scope on does not also turn every
-            # paired device on.
+        elif scope is LinkScope.REMOTE_TUNNEL and not record.remote_allowed(
+            self.clock()
+        ):
+            # Layer 2 is opt-in for one named device at a time, for a period,
+            # never a global switch. Checked before the record is touched, so a
+            # refused remote attempt does not show up as "last seen".
             self.audit.record(
                 AuditEvent.SCOPE_REFUSED,
                 device_id=record.device_id,
@@ -605,8 +1078,45 @@ class LinkServer:
                 scope=scope,
                 reason=RejectReason.REMOTE_NOT_ENABLED,
             )
+            self._signal(SignalKind.REQUEST_REFUSED, Principal.device(record.device_id, scope.value))
 
             return None
+        else:
+            try:
+                record = self.registry.touch(record.device_id)
+            except (DeviceStoreCorrupt, DeviceStoreBusy):
+                # The record was read a moment ago but cannot be written now.
+                # Not a state to start a session in.
+                self.audit.record(
+                    AuditEvent.HANDSHAKE_REFUSED,
+                    device_id=identity,
+                    peer=peer,
+                    scope=scope,
+                    reason=RejectReason.BAD_KEY_OR_UNKNOWN_DEVICE,
+                )
+
+                return None
+
+        if not self._admitted(Principal.device(record.device_id, scope.value)):
+            self.audit.record(
+                AuditEvent.CONNECTION_REJECTED,
+                device_id=record.device_id,
+                peer=peer,
+                scope=scope,
+                reason=RejectReason.THROTTLED,
+            )
+
+            return None
+
+        budget = (
+            RequestBudget(
+                self.settings.remote_burst,
+                self.settings.remote_refill_per_second,
+                clock=self.clock,
+            )
+            if scope is LinkScope.REMOTE_TUNNEL
+            else None
+        )
 
         return LinkSession(
             device=record,
@@ -614,6 +1124,7 @@ class LinkServer:
             peer=peer,
             connection=tls,
             started_at=self.clock(),
+            budget=budget,
         )
 
     def _complete_pairing(
@@ -655,11 +1166,76 @@ class LinkServer:
 
     # ------------------------------------------------------------ the session
 
+    def _session_timeout(self, session: LinkSession) -> float:
+        """The read timeout now: the idle limit, or less if lifetime is near."""
+
+        if session.scope is not LinkScope.REMOTE_TUNNEL:
+            return self.settings.idle_timeout
+
+        remaining = (
+            session.started_at
+            + self.settings.remote_session_lifetime
+            - self.clock()
+        )
+
+        return max(0.001, min(self.settings.idle_timeout, remaining))
+
+    def _still_valid(self, session: LinkSession) -> SessionRule | None:
+        """
+        Re-read the device before acting for it. ``None`` means carry on.
+
+        This is what makes revocation, a withdrawn opt-in, an expired opt-in
+        and a narrowed grant take effect inside an open session, including when
+        the change was made by something that did not go through ``revoke``.
+        The fresh record replaces the session's copy, so grants narrowed a
+        moment ago apply to the very next request.
+        """
+
+        try:
+            record = self.registry.get(session.device.device_id)
+        except DeviceStoreCorrupt:
+            # The registry is shared with other processes. If it cannot be
+            # read now, nobody can say this device is still trusted, so the
+            # session ends rather than carrying on from a stale copy - and
+            # the monitor contains remote access until the user looks.
+            self._signal(SignalKind.REGISTRY_UNREADABLE, Principal.system())
+
+            return SessionRule.REVOKED
+        except DeviceStoreBusy:
+            return SessionRule.REVOKED
+
+        if record is None or record.status is not DeviceStatus.ACTIVE:
+            return SessionRule.REVOKED
+
+        if self.monitor is not None:
+            if not self.monitor.link_admission().allowed:
+                return SessionRule.QUARANTINED
+
+            if session.scope is LinkScope.REMOTE_TUNNEL and not self.monitor.remote_admission().allowed:
+                return SessionRule.CONTAINED
+
+            if self.monitor.throttled(Principal.device(record.device_id, session.scope.value)):
+                return SessionRule.THROTTLED
+
+        if session.scope is LinkScope.REMOTE_TUNNEL:
+            now = self.clock()
+
+            if not record.remote_allowed(now):
+                return SessionRule.REMOTE_WITHDRAWN
+
+            if now - session.started_at >= self.settings.remote_session_lifetime:
+                return SessionRule.LIFETIME_REACHED
+
+        session.device = record
+
+        return None
+
     def _session_loop(self, session: LinkSession) -> None:
-        session.connection.settimeout(self.settings.idle_timeout)
         read = reader_for(session.connection)
 
-        while not self._stopping.is_set():
+        while not self._stopping.is_set() and session.ended is None:
+            session.connection.settimeout(self._session_timeout(session))
+
             try:
                 payload = read_frame(read)
             except ProtocolError as exc:
@@ -669,10 +1245,21 @@ class LinkServer:
                     peer=session.peer,
                     reason=exc.fault,
                 )
+                self._signal(SignalKind.PROTOCOL_FAULT, _device_principal(session))
 
                 return
 
             if payload is None:
+                # A remote session that read nothing because its lifetime ran
+                # out is ended by the PC, and is recorded as such.
+                if (
+                    session.ended is None
+                    and session.scope is LinkScope.REMOTE_TUNNEL
+                    and self.clock() - session.started_at
+                    >= self.settings.remote_session_lifetime
+                ):
+                    session.ended = SessionRule.LIFETIME_REACHED
+
                 return
 
             try:
@@ -684,6 +1271,7 @@ class LinkServer:
                     peer=session.peer,
                     reason=exc.fault,
                 )
+                self._signal(SignalKind.PROTOCOL_FAULT, _device_principal(session))
 
                 return
 
@@ -700,12 +1288,129 @@ class LinkServer:
 
                 return
 
-            response = self._dispatch(session, frame)
+            rule = self._still_valid(session)
+
+            if rule is not None:
+                # Ended without an answer. The phone learns it from the closed
+                # connection; a revoked phone is owed no explanation, and one
+                # whose session merely aged out reconnects and retries.
+                session.ended = rule
+
+                return
+
+            response = self._respond(session, frame)
 
             try:
                 session.send(response)
             except (OSError, ssl.SSLError, ProtocolError):
                 return
+
+    def _respond(self, session: LinkSession, request: Request) -> Response:
+        """
+        The session-level rules, then the request itself.
+
+        In order: the remote request budget, then the command id. Both come
+        before authorisation, and neither can widen what authorisation allows:
+        they only ever refuse, or answer from what an earlier, authorised run
+        of the same command already produced.
+        """
+
+        remote = session.scope is LinkScope.REMOTE_TUNNEL
+        is_ping = request.op == LinkOp.PING.value
+
+        if session.budget is not None and not session.budget.take():
+            return self._session_refusal(
+                session, request, SessionRule.RATE_LIMITED,
+                "Too many requests. Wait a moment and try again.",
+            )
+
+        if request.command_id is None:
+            if remote and not is_ping:
+                return self._session_refusal(
+                    session, request, SessionRule.COMMAND_ID_REQUIRED,
+                    "Requests over the internet must carry a command id.",
+                )
+
+            return self._dispatch(session, request)
+
+        device_id = session.device.device_id
+        decision = self.ledger.begin(
+            device_id,
+            request.command_id,
+            command_fingerprint(request.op, request.params),
+        )
+
+        if decision.state is CommandState.CONFLICT:
+            return self._session_refusal(
+                session, request, SessionRule.COMMAND_CONFLICT,
+                "That command id was already used for a different request.",
+            )
+
+        if decision.state is CommandState.IN_PROGRESS:
+            return self._session_refusal(
+                session, request, SessionRule.COMMAND_IN_PROGRESS,
+                "That command is still running. Ask again shortly.",
+            )
+
+        if decision.state is CommandState.DONE:
+            op = _known_op(request.op)
+
+            if decision.outcome is None:
+                return self._session_refusal(
+                    session, request, SessionRule.COMMAND_ALREADY_DONE,
+                    "That command was already done; its answer is no longer kept.",
+                )
+
+            self.audit.record(
+                AuditEvent.REQUEST_DUPLICATE,
+                device_id=device_id,
+                peer=session.peer,
+                scope=session.scope,
+                op=op,
+                reason=SessionRule.DUPLICATE_ANSWERED,
+            )
+
+            return _response_from_outcome(request.id, decision.outcome)
+
+        response: Response | None = None
+
+        try:
+            response = self._dispatch(session, request)
+
+            return response
+        finally:
+            if response is None:
+                response = Response.failure(
+                    request.id,
+                    "internal_error",
+                    "Something went wrong on the computer.",
+                )
+
+            self.ledger.finish(
+                device_id, request.command_id, _outcome_of(response)
+            )
+
+    def _session_refusal(
+        self,
+        session: LinkSession,
+        request: Request,
+        rule: SessionRule,
+        message: str,
+    ) -> Response:
+        self.audit.record(
+            AuditEvent.REQUEST_REFUSED,
+            device_id=session.device.device_id,
+            peer=session.peer,
+            scope=session.scope,
+            op=_known_op(request.op),
+            reason=rule,
+        )
+        signal = _SIGNAL_FOR_RULE.get(rule)
+
+        if signal is not None:
+            self._signal(signal, _device_principal(session))
+
+        return Response.failure(request.id, rule.value, message)
 
     def _dispatch(self, session: LinkSession, request: Request) -> Response:
         """Authorise one request, then run it."""
@@ -737,6 +1442,7 @@ class LinkServer:
                 op=decision.op,
                 reason=decision.reason,
             )
+            self._signal(SignalKind.REQUEST_REFUSED, _device_principal(session))
 
             return Response.failure(
                 request.id,
@@ -788,18 +1494,29 @@ class LinkServer:
 
     # ---------------------------------------------------------------- limits
 
-    def _claim_slot(self) -> bool:
-        with self._state_lock:
-            if self._active >= self.settings.max_connections:
-                return False
+    def _claim_slot(self, relayed: bool = False) -> bool:
+        """Take a slot from the budget of the path the connection came by."""
 
-            self._active += 1
+        with self._state_lock:
+            if relayed:
+                if self._active_relayed >= self.settings.max_relay_connections:
+                    return False
+
+                self._active_relayed += 1
+            else:
+                if self._active >= self.settings.max_connections:
+                    return False
+
+                self._active += 1
 
             return True
 
-    def _release_slot(self) -> None:
+    def _release_slot(self, relayed: bool = False) -> None:
         with self._state_lock:
-            self._active = max(0, self._active - 1)
+            if relayed:
+                self._active_relayed = max(0, self._active_relayed - 1)
+            else:
+                self._active = max(0, self._active - 1)
 
     def _handshake_permitted(self, peer: str) -> bool:
         """Whether this peer may attempt a handshake yet."""
@@ -849,6 +1566,28 @@ class LinkServer:
             pass
 
 
+class _Outcome:
+    """Tells a relayed connection's dialler once whether it authenticated."""
+
+    def __init__(self, callback: Callable[[bool], None] | None) -> None:
+        self._callback = callback
+        self._lock = threading.Lock()
+        self._reported = False
+
+    def report(self, authenticated: bool) -> None:
+        with self._lock:
+            if self._reported:
+                return
+
+            self._reported = True
+
+        if self._callback is not None:
+            try:
+                self._callback(authenticated)
+            except Exception:
+                pass
+
+
 _REFUSAL_MESSAGES = {
     AuthReason.UNKNOWN_OP: "Qronos does not know that request.",
     AuthReason.CONSOLE_ONLY: "That can only be done at the computer.",
@@ -860,6 +1599,52 @@ _REFUSAL_MESSAGES = {
 
 def _refusal_message(reason: AuthReason) -> str:
     return _REFUSAL_MESSAGES.get(reason, "Refused.")
+
+
+# Which session-rule refusals count against a device. A command still running
+# or already answered is a phone waiting or retrying correctly, never abuse.
+_SIGNAL_FOR_RULE = {
+    SessionRule.RATE_LIMITED: SignalKind.RATE_LIMITED,
+    SessionRule.COMMAND_CONFLICT: SignalKind.COMMAND_CONFLICT,
+    SessionRule.COMMAND_ID_REQUIRED: SignalKind.REQUEST_REFUSED,
+}
+
+
+def _device_principal(session: LinkSession) -> Principal:
+    """An authenticated session's device, in the scope it is connected in."""
+    return Principal.device(session.device.device_id, session.scope.value)
+
+
+def _known_op(name: str) -> LinkOp | None:
+    """The operation, if it is one; the audit log takes no free text."""
+
+    try:
+        return LinkOp(name)
+    except ValueError:
+        return None
+
+
+def _outcome_of(response: Response) -> dict[str, Any]:
+    """A response without its request id, as the ledger keeps it."""
+
+    outcome = response.to_payload()
+    outcome.pop("id", None)
+    outcome.pop("kind", None)
+
+    return outcome
+
+
+def _response_from_outcome(request_id: int, outcome: dict[str, Any]) -> Response:
+    """The kept answer, re-addressed to the request that asked again."""
+
+    if outcome.get("ok"):
+        return Response.success(request_id, outcome.get("result"))
+
+    return Response.failure(
+        request_id,
+        str(outcome.get("code", "")),
+        str(outcome.get("error", "")),
+    )
 
 
 def main() -> None:

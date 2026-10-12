@@ -1,5 +1,17 @@
 use serde::Serialize;
 use std::sync::Mutex;
+use tauri::Manager;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{
+    MouseButton,
+    MouseButtonState,
+    TrayIconBuilder,
+    TrayIconEvent,
+};
+use tauri_plugin_autostart::{
+    MacosLauncher,
+    ManagerExt as AutostartManagerExt,
+};
 use std::time::{Duration, Instant};
 use sysinfo::{Components, DiskKind, Disks, MemoryRefreshKind, RefreshKind, System};
 
@@ -56,6 +68,113 @@ struct TelemetrySnapshot {
 
     disks: Vec<DiskSnapshot>,
     devices: Vec<DeviceSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemIntegrationSnapshot {
+    launch_at_startup: bool,
+    keep_in_tray: bool,
+}
+
+struct SystemIntegrationState {
+    keep_in_tray: Mutex<bool>,
+}
+
+impl SystemIntegrationState {
+    fn new() -> Self {
+        Self {
+            keep_in_tray: Mutex::new(false),
+        }
+    }
+
+    fn keep_in_tray(&self) -> Result<bool, String> {
+        self.keep_in_tray
+            .lock()
+            .map(|value| *value)
+            .map_err(|_| "System tray state lock failed.".to_string())
+    }
+
+    fn set_keep_in_tray(&self, enabled: bool) -> Result<(), String> {
+        let mut value = self
+            .keep_in_tray
+            .lock()
+            .map_err(|_| "System tray state lock failed.".to_string())?;
+
+        *value = enabled;
+        Ok(())
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn system_integration_snapshot(
+    app: &tauri::AppHandle,
+    state: &SystemIntegrationState,
+) -> Result<SystemIntegrationSnapshot, String> {
+    let launch_at_startup = app
+        .autolaunch()
+        .is_enabled()
+        .map_err(|error| format!("Could not read Windows autostart state: {error}"))?;
+
+    Ok(SystemIntegrationSnapshot {
+        launch_at_startup,
+        keep_in_tray: state.keep_in_tray()?,
+    })
+}
+
+#[tauri::command]
+fn get_system_integration_state(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SystemIntegrationState>,
+) -> Result<SystemIntegrationSnapshot, String> {
+    system_integration_snapshot(&app, &state)
+}
+
+#[tauri::command]
+fn set_launch_at_startup(
+    enabled: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SystemIntegrationState>,
+) -> Result<SystemIntegrationSnapshot, String> {
+    let manager = app.autolaunch();
+
+    if enabled {
+        manager
+            .enable()
+            .map_err(|error| format!("Could not enable Windows autostart: {error}"))?;
+    } else {
+        manager
+            .disable()
+            .map_err(|error| format!("Could not disable Windows autostart: {error}"))?;
+    }
+
+    system_integration_snapshot(&app, &state)
+}
+
+#[tauri::command]
+fn set_keep_in_tray(
+    enabled: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SystemIntegrationState>,
+) -> Result<SystemIntegrationSnapshot, String> {
+    let tray = app
+        .tray_by_id("qronos-main-tray")
+        .ok_or_else(|| "Qronos tray icon is not initialized.".to_string())?;
+
+    tray
+        .set_visible(enabled)
+        .map_err(|error| format!("Could not change tray visibility: {error}"))?;
+
+    state.set_keep_in_tray(enabled)?;
+
+    system_integration_snapshot(&app, &state)
 }
 
 struct TelemetryState {
@@ -379,7 +498,7 @@ fn get_devices_cached(state: &TelemetryState) -> Vec<DeviceSnapshot> {
     let should_refresh = match cache.last_refresh {
         None => true,
 
-        Some(last) => last.elapsed() >= Duration::from_secs(8),
+        Some(last) => last.elapsed() >= Duration::from_secs(30),
     };
 
     if should_refresh {
@@ -529,6 +648,13 @@ fn open_device_properties(_instance_id: String) -> Result<(), String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(
+            tauri_plugin_single_instance::init(
+                |app, _args, _cwd| {
+                    show_main_window(app);
+                },
+            ),
+        )
+        .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     hotkeys::handle_global_shortcut(app, shortcut, event);
@@ -536,30 +662,125 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(TelemetryState::new())
+        .manage(SystemIntegrationState::new())
         .setup(|app| {
             hotkeys::initialize(app)?;
             runtime::initialize(app)?;
+
+            let show_item = MenuItem::with_id(
+                app,
+                "qronos-tray-show",
+                "Show Qronos",
+                true,
+                None::<&str>,
+            )?;
+
+            let quit_item = MenuItem::with_id(
+                app,
+                "qronos-tray-quit",
+                "Quit Qronos",
+                true,
+                None::<&str>,
+            )?;
+
+            let menu = Menu::with_items(
+                app,
+                &[&show_item, &quit_item],
+            )?;
+
+            let mut tray_builder = TrayIconBuilder::with_id(
+                "qronos-main-tray"
+            )
+            .tooltip("Qronos")
+            .menu(&menu)
+            .show_menu_on_left_click(false)
+            .on_menu_event(|app, event| {
+                match event.id().as_ref() {
+                    "qronos-tray-show" => {
+                        show_main_window(app);
+                    }
+                    "qronos-tray-quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                }
+            })
+            .on_tray_icon_event(|tray, event| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    show_main_window(
+                        tray.app_handle()
+                    );
+                }
+            });
+
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+
+            let tray = tray_builder.build(app)?;
+            tray.set_visible(false)?;
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<SystemIntegrationState>();
+
+                if state.keep_in_tray().unwrap_or(false) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_system_snapshot,
             open_storage_path,
             open_device_properties,
+            get_system_integration_state,
+            set_launch_at_startup,
+            set_keep_in_tray,
             hotkeys::get_hotkey_settings,
             hotkeys::validate_hotkey,
             hotkeys::update_hotkey,
             hotkeys::set_hotkey_enabled,
             hotkeys::reset_hotkeys,
             runtime::get_runtime_status,
+            runtime::runtime_setup_snapshot,
             runtime::start_runtime,
             runtime::ping_runtime,
             runtime::send_runtime_action,
+            runtime::look_at_screen,
+            runtime::link_pair_open,
+            runtime::library_command,
+            runtime::memory_command,
+            runtime::settings_command,
+            runtime::native_audio_output_play,
+            runtime::native_audio_output_stop,
+            runtime::permissions_command,
+            runtime::update_command,
+            runtime::send_text_message,
             runtime::queue_list,
             runtime::queue_submit,
             runtime::queue_cancel,
             runtime::queue_override,
+            runtime::queue_pause_task,
+            runtime::queue_resume_task,
             runtime::queue_set_paused,
+            runtime::runtime_set_paused,
             runtime::stop_runtime
         ])
         .build(tauri::generate_context!())

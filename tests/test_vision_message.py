@@ -304,10 +304,17 @@ class TestWhenTheModelIsNotThere(unittest.TestCase):
 
         import requests
 
+        from core.ollama_controller import OLLAMA_AUTO_START_ENV
+
+        # Unreachable means unreachable everywhere: the readiness probe must
+        # not reach a real local server, and nothing may start one.
         with patch(
             "core.ollama_controller.requests.post",
             side_effect=requests.ConnectionError("refused"),
-        ):
+        ), patch(
+            "core.ollama_controller.requests.get",
+            side_effect=requests.ConnectionError("refused"),
+        ), patch.dict("os.environ", {OLLAMA_AUTO_START_ENV: "0"}):
             message = self.ask()
 
         self.assertNotIn("not installed", message)
@@ -352,11 +359,12 @@ class RecordingHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
 
-        RecordingHandler.received.append(json.loads(body))
-
-        reply = json.dumps(
-            {"message": {"content": "A blue rectangle."}, "done": True}
-        ).encode("utf-8")
+        if self.path == "/api/show":
+            payload = {"model_info": {"general.architecture": "fixture"}}
+        else:
+            RecordingHandler.received.append(json.loads(body))
+            payload = {"message": {"content": "A blue rectangle."}, "done": True}
+        reply = json.dumps(payload).encode("utf-8")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

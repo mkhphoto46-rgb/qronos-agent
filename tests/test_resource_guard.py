@@ -9,6 +9,7 @@ from core.resource_guard import (
     read_gpu_status,
     read_system_status,
 )
+from tests.live_device import requires_live_device
 
 
 class TestResourceGuard(unittest.TestCase):
@@ -38,6 +39,7 @@ class TestResourceGuard(unittest.TestCase):
         self.assertGreater(status.ram_total_gb, 0.0)
         self.assertGreaterEqual(status.ram_used_gb, 0.0)
 
+    @requires_live_device
     def test_gpu_status(self) -> None:
         status = read_gpu_status()
 

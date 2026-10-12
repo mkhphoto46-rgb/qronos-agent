@@ -1,0 +1,86 @@
+/*
+ * The Smart Queue's place in the app. The panel keeps its own styling
+ * (SmartQueuePanel.css); this only positions it and draws the toggle, in the
+ * same glass family as the telemetry panel.
+ */
+
+.queue-drawer {
+  position: fixed;
+  left: 22px;
+  bottom: 22px;
+  z-index: 40;
+
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.queue-drawer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 6px 11px;
+
+  border: 1px solid rgba(88, 177, 224, 0.22);
+  border-radius: 9px 5px 9px 5px;
+  background: rgba(6, 22, 32, 0.72);
+  color: rgba(198, 230, 246, 0.86);
+
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: calc(9.5px * var(--qronos-ui-scale, 1));
+  letter-spacing: 0.08em;
+
+  cursor: pointer;
+
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
+}
+
+.queue-drawer-toggle:hover,
+.queue-drawer-toggle:focus-visible,
+.queue-drawer-toggle-open {
+  border-color: rgba(88, 177, 224, 0.5);
+  background: rgba(10, 34, 48, 0.85);
+}
+
+.queue-drawer-toggle-attention {
+  border-color: rgba(232, 176, 92, 0.6);
+  color: rgba(246, 222, 186, 0.95);
+}
+
+.queue-drawer-toggle-count {
+  min-width: 18px;
+  padding: 1px 5px;
+
+  border-radius: 6px;
+  background: rgba(88, 177, 224, 0.16);
+
+  text-align: center;
+}
+
+.queue-drawer-panel {
+  width: min(380px, calc(100vw - 44px));
+  max-height: min(68vh, 620px);
+  overflow-y: auto;
+
+  padding: 14px 14px 4px;
+
+  border: 1px solid rgba(75, 142, 187, 0.18);
+  border-radius: 14px 8px 14px 8px;
+  background:
+    linear-gradient(
+      145deg,
+      rgba(6, 20, 30, 0.94),
+      rgba(4, 12, 20, 0.94)
+    );
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-drawer-toggle {
+    transition: none;
+  }
+}

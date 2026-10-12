@@ -186,8 +186,8 @@
 }
 
 .permissions-security-core {
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
 
   background:
     radial-gradient(
@@ -876,14 +876,14 @@
   display: grid;
 
   grid-template-columns:
+    300px
     minmax(
-      0,
+      420px,
       1fr
     )
-    360px
-    238px;
+    260px;
 
-  gap: 14px;
+  gap: 12px;
 
   opacity: 0;
 }
@@ -1030,32 +1030,32 @@
 
   flex-direction: column;
 
-  gap: 6px;
+  gap: 5px;
 }
 
 .permissions-item {
   position: relative;
 
-  min-height: 62px;
+  min-height: 54px;
 
   display: grid;
 
   grid-template-columns:
-    44px
+    36px
     minmax(
       0,
       1fr
     )
     auto
-    8px;
+    6px;
 
   align-items: center;
 
-  gap: 10px;
+  gap: 7px;
 
   padding:
-    8px
-    10px;
+    6px
+    8px;
 
   border:
     1px solid
@@ -1183,7 +1183,7 @@
     );
 
   border-radius:
-    11px;
+    9px;
 
   background:
     radial-gradient(
@@ -1212,8 +1212,8 @@
 }
 
 .permissions-item-icon svg {
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
 
   fill: none;
 
@@ -4186,6 +4186,7 @@
 /* Keep the header fixed and make its main title more readable. */
 .permissions-security-activity-head {
   flex: 0 0 auto !important;
+  justify-content: flex-start !important;
   position: relative !important;
   z-index: 3 !important;
   padding-bottom: 10px !important;
@@ -5008,4 +5009,739 @@
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* =========================================================
+   PERMISSIONS V19 — SECURITY TRUTH CLOSEOUT
+   Read-only backend policy + real append-only audit.
+   ========================================================= */
+
+.permissions-baseline-bar {
+  border-color: rgba(84, 196, 232, 0.13);
+  background:
+    radial-gradient(circle at 12% 50%, rgba(58, 177, 218, 0.08), transparent 30%),
+    linear-gradient(135deg, rgba(8, 29, 40, 0.46), rgba(6, 18, 27, 0.25));
+}
+
+.permissions-baseline-chip {
+  min-width: 118px;
+  height: 36px;
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center !important;
+  justify-content: center;
+  gap: 8px !important;
+  padding: 0 13px;
+  border: 1px solid rgba(81, 207, 242, 0.19);
+  border-radius: 999px;
+  background: rgba(31, 91, 111, 0.15);
+  color: rgba(124, 226, 252, 0.86);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  direction: ltr;
+}
+
+.permissions-emergency-bar > .permissions-baseline-chip > span {
+  grid-column: auto !important;
+  width: 6px;
+  height: 6px;
+  margin: 0;
+  border-radius: 50%;
+  background: rgba(78, 225, 255, 0.94);
+  box-shadow: 0 0 10px rgba(78, 225, 255, 0.42);
+}
+
+.permissions-policy-auto-allow {
+  color: rgba(103, 229, 184, 0.9);
+  background: rgba(44, 112, 82, 0.14);
+}
+
+.permissions-policy-voice-confirmation {
+  color: rgba(111, 220, 255, 0.9);
+  background: rgba(39, 92, 120, 0.16);
+}
+
+.permissions-policy-ui-confirmation {
+  color: rgba(255, 190, 100, 0.9);
+  background: rgba(123, 80, 31, 0.15);
+}
+
+.permissions-policy-typed-secret {
+  color: rgba(255, 151, 105, 0.92);
+  background: rgba(120, 58, 30, 0.18);
+}
+
+.permissions-policy-forbidden {
+  color: rgba(255, 123, 136, 0.92);
+  background: rgba(128, 41, 51, 0.16);
+}
+
+.permissions-policy-selector-readonly .permissions-policy-option {
+  display: grid;
+  place-items: center;
+  cursor: default;
+  pointer-events: none;
+  opacity: 0.44;
+  border: 1px solid transparent;
+  padding: 4px;
+  text-align: center;
+  line-height: 1.15;
+}
+
+.permissions-policy-selector-readonly .permissions-policy-option-active {
+  opacity: 1;
+  border-color: currentColor;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.permissions-backend-note {
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px solid rgba(78, 183, 227, 0.11);
+  border-radius: 8px;
+  background: rgba(13, 49, 63, 0.16);
+}
+
+.permissions-backend-note span {
+  display: block;
+  color: rgba(99, 200, 239, 0.62);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+
+.permissions-backend-note strong {
+  display: block;
+  margin-top: 6px;
+  direction: ltr;
+  color: rgba(188, 226, 239, 0.82);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.permissions-backend-note p {
+  margin: 7px 0 0;
+  color: rgba(164, 197, 211, 0.66);
+  font-size: 10.5px;
+  line-height: 1.7;
+}
+
+.permissions-protected-note-warning {
+  border-color: rgba(242, 158, 81, 0.14);
+  background: rgba(105, 59, 23, 0.11);
+}
+
+.permissions-protected-note-warning span {
+  color: rgba(255, 188, 100, 0.78);
+}
+
+.permissions-truth-state {
+  display: grid;
+  gap: 8px;
+  margin: 8px 4px;
+  padding: 18px 14px;
+  border: 1px solid rgba(83, 173, 210, 0.1);
+  border-radius: 10px;
+  background: rgba(7, 27, 37, 0.28);
+  color: rgba(199, 229, 239, 0.78);
+  text-align: center;
+}
+
+.permissions-truth-state strong {
+  font-size: 12px;
+}
+
+.permissions-truth-state span {
+  color: rgba(127, 166, 183, 0.62);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.permissions-truth-state button {
+  justify-self: center;
+  height: 29px;
+  padding: 0 12px;
+  border: 1px solid rgba(80, 207, 242, 0.17);
+  border-radius: 7px;
+  background: rgba(20, 61, 77, 0.42);
+  color: rgba(190, 234, 247, 0.84);
+  font-size: 8.5px;
+  font-weight: 780;
+  cursor: pointer;
+}
+
+.permissions-truth-state-error {
+  border-color: rgba(255, 101, 118, 0.13);
+  background: rgba(77, 18, 26, 0.13);
+}
+
+.permissions-audit-refresh {
+  height: 27px;
+  padding: 0 9px;
+  border: 1px solid rgba(78, 188, 225, 0.13);
+  border-radius: 7px;
+  background: rgba(11, 39, 51, 0.38);
+  color: rgba(133, 211, 235, 0.68);
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.permissions-audit-refresh:hover:not(:disabled) {
+  color: rgba(226, 248, 255, 0.94);
+  border-color: rgba(88, 213, 250, 0.25);
+}
+
+.permissions-audit-refresh:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.permissions-security-activity-warning {
+  padding-top: 10px;
+  padding-bottom: 10px;
+  color: rgba(255, 190, 113, 0.78);
+}
+
+.permissions-action-row strong {
+  max-width: 64%;
+  overflow-wrap: anywhere;
+  text-align: left;
+  direction: ltr;
+  font-size: 9.5px;
+}
+
+.permissions-policy-chip {
+  max-width: 104px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .permissions-security-ring-a,
+  .permissions-security-ring-b {
+    animation: none !important;
+  }
+}
+
+/* =========================================================
+   PERMISSIONS V2 STAGE 2 — REAL 9-ITEM USER CONTROL
+   ========================================================= */
+
+.permissions-ltr {
+  direction: ltr !important;
+  text-align: left !important;
+}
+
+.permissions-heading-en {
+  direction: ltr !important;
+  text-align: left !important;
+}
+
+.permissions-heading-en h1,
+.permissions-heading-en p {
+  direction: ltr !important;
+  text-align: left !important;
+}
+
+.permissions-detail-copy {
+  min-width: 0;
+  direction: ltr;
+  text-align: left;
+}
+
+.permissions-detail-copy > span,
+.permissions-detail-copy > h2 {
+  direction: ltr;
+  text-align: left;
+}
+
+.permissions-detail-subtitle-fa {
+  direction: rtl !important;
+  text-align: right !important;
+}
+
+.permissions-detail-description {
+  direction: rtl !important;
+  text-align: right !important;
+}
+
+.permissions-user-policy-chip {
+  min-width: 54px;
+  direction: ltr;
+  text-align: center;
+}
+
+.permissions-user-policy-deny {
+  color: rgba(255, 127, 140, 0.92) !important;
+}
+
+.permissions-user-policy-always-ask {
+  color: rgba(255, 205, 121, 0.9) !important;
+}
+
+.permissions-user-policy-session {
+  color: rgba(109, 211, 255, 0.92) !important;
+}
+
+.permissions-user-policy-allow {
+  color: rgba(113, 229, 182, 0.92) !important;
+}
+
+.permissions-user-policy-custom {
+  color: rgba(173, 151, 255, 0.94) !important;
+}
+
+.permissions-policy-selector {
+  direction: ltr !important;
+}
+
+.permissions-user-policy-option {
+  text-align: center !important;
+}
+
+.permissions-capability-state {
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px solid rgba(90, 160, 196, 0.12);
+  border-radius: 8px;
+  background: rgba(8, 27, 38, 0.34);
+}
+
+.permissions-capability-state > span {
+  display: block;
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.13em;
+}
+
+.permissions-capability-state > p {
+  margin: 5px 0 0;
+  direction: rtl;
+  text-align: right;
+  color: rgba(175, 208, 222, 0.68);
+  font-size: 10px;
+  line-height: 1.75;
+}
+
+.permissions-capability-ready {
+  border-color: rgba(88, 219, 171, 0.18);
+}
+
+.permissions-capability-ready > span {
+  color: rgba(109, 232, 183, 0.9);
+}
+
+.permissions-capability-partial {
+  border-color: rgba(255, 195, 99, 0.15);
+}
+
+.permissions-capability-partial > span {
+  color: rgba(255, 202, 112, 0.88);
+}
+
+.permissions-capability-unavailable {
+  border-color: rgba(255, 110, 126, 0.14);
+}
+
+.permissions-capability-unavailable > span {
+  color: rgba(255, 130, 144, 0.86);
+}
+
+.permissions-policy-truth {
+  direction: ltr !important;
+}
+
+.permissions-policy-truth > header {
+  direction: ltr !important;
+  text-align: left !important;
+}
+
+.permissions-policy-truth .permissions-action-row {
+  display: grid !important;
+  grid-template-columns:
+    minmax(118px, 0.72fr)
+    minmax(0, 1.28fr)
+    6px !important;
+  align-items: center !important;
+  direction: ltr !important;
+  text-align: left !important;
+  column-gap: 10px !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
+
+.permissions-policy-truth .permissions-action-row > span,
+.permissions-policy-truth .permissions-action-row > strong {
+  justify-self: start !important;
+  direction: ltr !important;
+  text-align: left !important;
+  min-width: 0;
+}
+
+.permissions-policy-truth .permissions-action-row > strong {
+  overflow-wrap: anywhere;
+}
+
+.permissions-custom-editor-v2 {
+  margin-top: 15px;
+}
+
+.permissions-custom-editor-v2 > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.permissions-custom-editor-v2 > header small {
+  direction: rtl;
+  text-align: right;
+}
+
+.permissions-custom-rule-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 7px;
+}
+
+.permissions-custom-rule-row {
+  padding: 9px;
+  border: 1px solid rgba(80, 145, 181, 0.1);
+  border-radius: 8px;
+  background: rgba(7, 24, 34, 0.34);
+}
+
+.permissions-custom-rule-copy {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  direction: ltr;
+  text-align: left;
+}
+
+.permissions-custom-rule-copy strong {
+  color: rgba(221, 241, 249, 0.88);
+  font-size: 10px;
+}
+
+.permissions-custom-rule-copy span {
+  color: rgba(106, 156, 181, 0.56);
+  font-size: 7.5px;
+  letter-spacing: 0.05em;
+}
+
+.permissions-custom-rule-options {
+  margin-top: 7px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  direction: ltr;
+}
+
+.permissions-custom-rule-option {
+  min-height: 26px;
+  border: 1px solid rgba(94, 152, 186, 0.11);
+  border-radius: 6px;
+  background: rgba(12, 35, 47, 0.42);
+  font-size: 7.5px;
+  font-weight: 780;
+  cursor: pointer;
+}
+
+.permissions-custom-rule-option:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.permissions-custom-rule-option-active {
+  border-color: rgba(93, 196, 240, 0.28);
+  background: rgba(33, 86, 113, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(103, 206, 247, 0.06);
+}
+
+.permissions-hard-floor-label {
+  display: block;
+  margin-top: 6px;
+  color: rgba(255, 119, 134, 0.72);
+  font-size: 7px;
+  font-weight: 820;
+  letter-spacing: 0.1em;
+}
+
+.permissions-custom-empty {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px dashed rgba(110, 156, 180, 0.14);
+  border-radius: 8px;
+}
+
+.permissions-custom-empty strong {
+  display: block;
+  direction: ltr;
+  text-align: left;
+  color: rgba(150, 187, 205, 0.66);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+
+.permissions-custom-empty span {
+  display: block;
+  margin-top: 5px;
+  direction: rtl;
+  text-align: right;
+  color: rgba(157, 189, 203, 0.6);
+  font-size: 9px;
+}
+
+.permissions-reset-button {
+  margin-top: 10px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(103, 156, 183, 0.13);
+  border-radius: 7px;
+  background: rgba(11, 31, 42, 0.38);
+  color: rgba(150, 188, 205, 0.68);
+  direction: ltr;
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.permissions-reset-button:hover:not(:disabled) {
+  color: rgba(222, 241, 248, 0.9);
+  border-color: rgba(91, 190, 230, 0.22);
+}
+
+.permissions-reset-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.permissions-security-activity-head,
+.permissions-security-activity-main,
+.permissions-security-activity-meta,
+.permissions-audit-integrity {
+  direction: ltr !important;
+  text-align: left !important;
+}
+
+.permissions-security-activity-meta dt,
+.permissions-security-activity-meta dd {
+  text-align: left !important;
+}
+
+.permissions-emergency-bar {
+  direction: rtl;
+}
+
+.permissions-emergency-bar > div > span,
+.permissions-emergency-bar > div > strong {
+  direction: ltr;
+  text-align: left;
+}
+
+.permissions-emergency-bar > div > small {
+  direction: rtl;
+  text-align: right;
+}
+
+/* =========================================================
+   PERMISSIONS V2 STAGE 2 — PERSIAN LEGIBILITY PASS
+   ========================================================= */
+
+.permissions-item-copy {
+  justify-content: center;
+  gap: 1px;
+}
+
+.permissions-item-copy strong,
+.permissions-item-copy small {
+  color: rgba(238, 248, 252, 0.94) !important;
+  font-size: 13.5px !important;
+  font-weight: 680 !important;
+  line-height: 1.25 !important;
+}
+
+.permissions-item-copy small {
+  transform: translateY(-1px);
+}
+
+.permissions-heading > p {
+  color: rgba(210, 232, 241, 0.84) !important;
+  font-size: 12.5px !important;
+  line-height: 1.35 !important;
+}
+
+.permissions-detail-subtitle-fa {
+  color: rgba(238, 248, 252, 0.92) !important;
+  font-size: 14px !important;
+  font-weight: 650 !important;
+  line-height: 1.55 !important;
+}
+
+.permissions-detail-description {
+  color: rgba(215, 235, 243, 0.88) !important;
+  font-size: 14.5px !important;
+  line-height: 1.9 !important;
+}
+
+.permissions-capability-state > p {
+  color: rgba(207, 229, 238, 0.84) !important;
+  font-size: 12px !important;
+  line-height: 1.85 !important;
+}
+
+.permissions-backend-note p {
+  color: rgba(205, 226, 235, 0.82) !important;
+  font-size: 12px !important;
+  line-height: 1.85 !important;
+}
+
+.permissions-emergency-bar small {
+  color: rgba(201, 226, 236, 0.78) !important;
+  font-size: 12px !important;
+  line-height: 1.65 !important;
+}
+
+.permissions-custom-editor-v2 > header small {
+  color: rgba(208, 229, 237, 0.8) !important;
+  font-size: 11.5px !important;
+  line-height: 1.6 !important;
+}
+
+.permissions-custom-empty span {
+  color: rgba(203, 225, 234, 0.8) !important;
+  font-size: 11px !important;
+  line-height: 1.75 !important;
+}
+
+.permissions-truth-state strong {
+  font-size: 13.5px !important;
+}
+
+.permissions-security-activity-empty {
+  color: rgba(211, 231, 239, 0.8) !important;
+  font-size: 13px !important;
+  line-height: 1.8 !important;
+}
+
+/* =========================================================
+   PERMISSIONS V2 — LIVE TYPOGRAPHY / SPACING PASS
+   ========================================================= */
+
+.permissions-layout {
+  grid-template-columns:
+    276px
+    minmax(470px, 1fr)
+    248px !important;
+  gap: 14px !important;
+}
+
+.permissions-group-items {
+  gap: 7px !important;
+}
+
+.permissions-item {
+  min-height: 50px !important;
+  grid-template-columns:
+    34px
+    minmax(0, 1fr)
+    auto
+    6px !important;
+  gap: 10px !important;
+  padding: 6px 8px !important;
+}
+
+.permissions-item-icon {
+  width: 34px !important;
+  height: 34px !important;
+  border-radius: 9px !important;
+}
+
+.permissions-item-icon svg {
+  width: 18px !important;
+  height: 18px !important;
+}
+
+.permissions-item-copy {
+  min-width: 0 !important;
+  align-items: stretch !important;
+  justify-content: center !important;
+  gap: 4px !important;
+  padding-right: 2px !important;
+  text-align: right !important;
+}
+
+.permissions-item-copy strong.permissions-ltr {
+  direction: ltr !important;
+  text-align: right !important;
+  color: rgba(241, 248, 252, 0.96) !important;
+  font-size: 12.5px !important;
+  font-weight: 720 !important;
+  line-height: 1.18 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.permissions-item-copy small {
+  direction: rtl !important;
+  text-align: right !important;
+  color: rgba(224, 238, 245, 0.84) !important;
+  font-size: 11.25px !important;
+  font-weight: 600 !important;
+  line-height: 1.35 !important;
+  transform: none !important;
+}
+
+.permissions-heading {
+  top: -5px !important;
+}
+
+.permissions-heading h1 {
+  margin: 0 0 8px !important;
+}
+
+.permissions-heading p {
+  margin: 0 !important;
+}
+
+.permissions-pause-toggle,
+.permissions-pause-toggle-active {
+  pointer-events: auto !important;
+  position: relative !important;
+  z-index: 3 !important;
+}
+
+.permissions-approval-secret-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.permissions-approval-secret-form input {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(78, 183, 227, 0.16);
+  border-radius: 6px;
+  background: rgba(3, 16, 22, 0.6);
+  color: rgba(222, 241, 248, 0.92);
+  font-size: 10.5px;
+}
+
+.permissions-approval-secret-form small {
+  color: rgba(255, 168, 120, 0.8);
+  font-size: 9.5px;
+}
+
+.permissions-approval-secret-actions {
+  display: flex;
+  gap: 6px;
 }

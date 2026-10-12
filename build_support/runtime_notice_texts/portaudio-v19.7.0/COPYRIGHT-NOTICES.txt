@@ -1,0 +1,129 @@
+PortAudio copyright notices for libportaudio64bit.dll
+
+Source: https://github.com/PortAudio/portaudio at tag v19.7.0, commit 147dd722548358763a8b649b3e4b41dfffbcfbb6.
+These lines are copied verbatim from the source files that the pinned sounddevice
+portaudio-binaries workflow compiles into the Windows x64 DLL without ASIO (MSVC,
+PA_USE_ASIO=OFF, default DirectSound, MME, WASAPI and WDM-KS options in CMakeLists.txt).
+Each file listed with notices carries the permission notice reproduced in LICENSE.txt.
+Git blob identifiers allow each file to be checked at that commit.
+
+Compiled source files:
+  src/common/pa_allocation.c (git blob 7e3298a539031b98129cf2a2af65431e39bfeda7)
+    * Copyright (c) 1999-2002 Ross Bencina, Phil Burk
+  src/common/pa_converters.c (git blob 93e44a36492923d66de7fcb94fc08524a9c31b6d)
+    * Copyright (c) 1999-2002 Phil Burk, Ross Bencina
+  src/common/pa_cpuload.c (git blob de57db26ab281e5af9f5d0370cc5dc24bc247ba6)
+    * Copyright (c) 2002 Ross Bencina
+  src/common/pa_debugprint.c (git blob 3e4024c48fd26883a1ddcbfb9c3a1f4718f001e1)
+    * Copyright (c) 1999-2006 Ross Bencina, Phil Burk
+  src/common/pa_dither.c (git blob 0d1666a774137169fdca6cc8705e773a27d3c3d1)
+    * Copyright (c) 1999-2002 Phil Burk, Ross Bencina
+  src/common/pa_front.c (git blob 65a656fef1ac7e31c23376766379227a73a893e0)
+    * Copyright (c) 1999-2008 Ross Bencina, Phil Burk
+  src/common/pa_process.c (git blob 084cabbdd1453e6e7be98d9526b934c935501e64)
+    * Copyright (c) 1999-2002 Ross Bencina, Phil Burk
+  src/common/pa_ringbuffer.c (git blob b978d54f195c3a898b5fab79159072b28d6a1a1b)
+    * Copyright (c) 1999-2000 Ross Bencina and Phil Burk
+  src/common/pa_stream.c (git blob ffbf5303237322a2ab45f23ba502c659af787c42)
+    * Copyright (c) 2008 Ross Bencina
+  src/common/pa_trace.c (git blob 6763dfacff401e5b4543725728cb30eab41d03b9)
+    * Copyright (c) 1999-2000 Phil Burk
+  src/hostapi/skeleton/pa_hostapi_skeleton.c (git blob 46808d2f26f97527e78c8e3df48c7381bcf34e1a)
+    * Copyright (c) 1999-2002 Ross Bencina, Phil Burk
+  src/os/win/pa_win_hostapis.c (git blob f8a46514f0e1a3a5d40b385cf7290875c9e162c2)
+    * Copyright (c) 1999-2008 Ross Bencina, Phil Burk
+  src/os/win/pa_win_util.c (git blob b86f7afab5a85bafa1d3c67a24f8f46e1a0a046b)
+    * Copyright (c) 1999-2008 Ross Bencina
+  src/os/win/pa_win_waveformat.c (git blob 0436a399ba564993204afd9bef29c11864cc8488)
+    * Copyright (c) 2007 Ross Bencina
+  src/os/win/pa_win_wdmks_utils.c (git blob 33731469389fbcdcefca9692195eef0e9a2a23c4)
+    * Copyright (c) 1999 - 2007 Andrew Baldwin, Ross Bencina
+  src/os/win/pa_win_coinitialize.c (git blob cdb1fb970a3fb4ee6e8e0b936fe90af6ed2ed799)
+    * Copyright (c) 1999-2011 Ross Bencina, Dmitry Kostjuchenko
+    * Copyright (c) 1999-2011 Ross Bencina, Phil Burk
+  src/os/win/pa_x86_plain_converters.c (git blob 109699427237c58b0b13dc31050aca605276a153)
+    * Copyright (c) 1999-2002 Ross Bencina, Phil Burk
+  src/hostapi/dsound/pa_win_ds.c (git blob 2ccb4f8489e1399ca9b73a71d115b4f04f94932a)
+    * Copyright (c) 1999-2007 Ross Bencina, Phil Burk, Robert Marsanyi
+  src/hostapi/dsound/pa_win_ds_dynlink.c (git blob e54df99720a726fe7c99039b2e4947de80625bd7)
+    * Copyright (c) 1999-2006 Phil Burk, Robert Marsanyi and Ross Bencina
+  src/hostapi/wmme/pa_win_wmme.c (git blob f8b1d7e4ec958210551020bd09630521c7027259)
+    * Copyright (c) 1999-2000 Ross Bencina and Phil Burk
+  src/hostapi/wasapi/pa_win_wasapi.c (git blob c76f302e68c8b35c5f3fa598a438e4c5a28497f1)
+    * Copyright (c) 2006-2010 David Viens
+    * Copyright (c) 2010-2019 Dmitry Kostjuchenko
+    * Copyright (c) 1999-2019 Ross Bencina, Phil Burk
+  src/hostapi/wdmks/pa_win_wdmks.c (git blob 161c2646cff549b3a1514e8ece3505b108b15738)
+    * Copyright (c) 1999-2004 Andrew Baldwin, Ross Bencina, Phil Burk
+
+Header files they can include:
+  include/pa_win_ds.h (git blob 8081abd30363553b0825d8aa078f51d661290b17)
+    * Copyright (c) 1999-2007 Ross Bencina and Phil Burk
+  include/pa_win_wasapi.h (git blob c046afd709e26429540ab3a23aa5c4a37382c9db)
+    * Copyright (c) 1999-2018 Ross Bencina and Phil Burk
+    * Copyright (c) 2006-2010 David Viens
+    * Copyright (c) 2010-2018 Dmitry Kostjuchenko
+  include/pa_win_waveformat.h (git blob 251562d0fb68d4ca7668e90578122e9a9f234ce9)
+    * Copyright (c) 2007 Ross Bencina
+  include/pa_win_wdmks.h (git blob bc2f6897c5712be184813ffcfa06244810e66090)
+    * Copyright (c) 1999-2007 Ross Bencina and Phil Burk
+  include/pa_win_wmme.h (git blob 814022b1eacd27053184ef7c2d4d898f2ceaca13)
+    * Copyright (c) 1999-2000 Ross Bencina and Phil Burk
+  include/portaudio.h (git blob 5d847314ae9ba0e57468cccf4cfd52f9e100cf45)
+    * Copyright (c) 1999-2002 Ross Bencina and Phil Burk
+  src/common/pa_allocation.h (git blob 5c3cf5309cd9f367d948a4003e8f111a7f304063)
+    * Copyright (c) 1999-2008 Ross Bencina, Phil Burk
+  src/common/pa_converters.h (git blob 96edf1c92cf4cb4e61b50a9d3cbf4a0577ffbeba)
+    * Copyright (c) 1999-2002 Phil Burk, Ross Bencina
+  src/common/pa_cpuload.h (git blob 8d3f618701a72f518ace613bad09810b575e638f)
+    * Copyright (c) 2002 Ross Bencina
+  src/common/pa_debugprint.h (git blob ca81724005319c60005cd6dd1a8cbcb046b3ddcb)
+    * Copyright (c) 1999-2006 Ross Bencina, Phil Burk
+  src/common/pa_dither.h (git blob 4f81123016891886e6bcd53151835e29d2046200)
+    * Copyright (c) 1999-2002 Phil Burk, Ross Bencina
+  src/common/pa_endianness.h (git blob e0748369242683f5311d0b894c291a870eff167a)
+    * Copyright (c) 1999-2002 Phil Burk, Ross Bencina
+  src/common/pa_gitrevision.h (git blob 7d47425c71d156affa7d6adc1d2694a30c175fc1)
+    (no copyright line in this file)
+  src/common/pa_hostapi.h (git blob 4ac3ab60e9299f32e5ec78912fc199d6cfdfbdf3)
+    * Copyright (c) 1999-2008 Ross Bencina, Phil Burk
+  src/common/pa_memorybarrier.h (git blob 0dca6aa42fae6937dc31fed7c29d641e5db5845d)
+    * Copyright (c) 1999-2000 Ross Bencina and Phil Burk
+  src/common/pa_process.h (git blob 444bdf54513758e849cbda67f6c2e3e190438dc4)
+    * Copyright (c) 1999-2002 Phil Burk, Ross Bencina
+  src/common/pa_ringbuffer.h (git blob 400aaac659b33134378a316288979f27d25b929f)
+    * Copyright (c) 1999-2000 Ross Bencina and Phil Burk
+  src/common/pa_stream.h (git blob 4afda399b1e1a52c1e9f52184e3cc75c237b298b)
+    * Copyright (c) 1999-2008 Ross Bencina, Phil Burk
+  src/common/pa_trace.h (git blob 7827766bc7fec66220f876f9a374dd7ea81e9b3a)
+    * Copyright (c) 1999-2000 Phil Burk
+  src/common/pa_types.h (git blob f628783adf8333122fbdf08b3572e1959e49b78f)
+    * Copyright (c) 1999-2006 Ross Bencina, Phil Burk
+  src/common/pa_util.h (git blob 08dc0ec64859f0c5467b53cdc7948e0d233f53f3)
+    * Copyright (c) 1999-2008 Ross Bencina, Phil Burk
+  src/hostapi/dsound/pa_win_ds_dynlink.h (git blob 2cdf6f032d7e03498734a0b2acc12610c0896126)
+    * Copyright (c) 1999-2006 Phil Burk, Robert Marsanyi and Ross Bencina
+  src/os/win/pa_win_coinitialize.h (git blob deb60c326a08c62527103337a578efc8c7cca0f7)
+    * Copyright (c) 1999-2011 Ross Bencina, Phil Burk
+  src/os/win/pa_win_wdmks_utils.h (git blob f524cf7f3c7c0fb23318f0813c9f5345e0e9957c)
+    * Copyright (c) 1999 - 2007 Ross Bencina, Andrew Baldwin
+  src/os/win/pa_x86_plain_converters.h (git blob 8914ed1382d0c1cf163c58c27557fdaea2073824)
+    * Copyright (c) 1999-2002 Ross Bencina, Phil Burk
+
+src/hostapi/dsound/pa_win_ds.c also contains this note (lines 1091-1106):
+    /*  constants from a WINE patch by Francois Gouget, see:
+        http://www.winehq.com/hypermail/wine-patches/2003/01/0290.html
+
+        ---
+        Date: Fri, 14 May 2004 10:38:12 +0200 (CEST)
+        From: Francois Gouget <fgouget@ ... .fr>
+        To: Ross Bencina <rbencina@ ... .au>
+        Subject: Re: Permission to use wine 48/96 wave patch in BSD licensed library
+
+        [snip]
+
+        I give you permission to use the patch below under the BSD license.
+        http://www.winehq.com/hypermail/wine-patches/2003/01/0290.html
+
+        [snip]
+    */

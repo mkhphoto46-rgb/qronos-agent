@@ -1,40 +1,25 @@
 """
 Which kind of task a request is, decided before any model runs.
 
-Two things about this module are easy to get wrong, and both were wrong here.
+Qronos is Persian-first, so routing markers exist in both Persian and English.
+Input and markers are normalised through ``core.persian_text`` before matching.
 
-The first is language. Qronos is a Persian-first assistant, and speech
-recognition is asked for Persian explicitly, so almost everything this router
-sees is Persian. It matched English substrings only, which meant every Persian
-request missed every keyword list and fell through to FAST. Persian markers sit
-alongside the English ones now, and the text is normalised before matching so
-that Arabic letter variants, Persian digits and the zero-width non-joiner do
-not decide the answer.
+ASCII markers use word-aware matching while Persian markers use the project's
+Persian marker semantics. This prevents unrelated substring collisions such as
+``profile`` -> ``file`` or ``prototype`` -> ``type``.
 
-The second is substring matching. ``profile`` contains ``file``, ``prototype``
-contains ``type`` and ``cobweb`` contains ``web``, so a plain ``in`` test
-misroutes ordinary English. :func:`core.persian_text.contains_marker` matches
-ASCII markers on word boundaries and Persian markers as substrings — the right
-rule for each, because Persian is written without the spacing that makes a
-boundary meaningful. The web layer already routes queries this way; this module
-now does the same.
+Precedence is deliberate:
+- browser navigation first;
+- compound vision before computer actions;
+- computer actions before loose vision markers;
+- heavy reasoning after action/vision routing;
+- otherwise fast.
 
-The third is precedence, and it made VISION unreachable for most of the
-requests that need it. COMPUTER is checked before VISION and its keywords
-include ``file``, ``app``, ``windows`` and ``فایل`` — so "read the file name in
-this screenshot" and "what is on my screen" both went to COMPUTER or fell
-through to FAST, and never once reached the model that can actually look.
-
-Reordering is not the fix: "open the photo app" contains ``photo`` and is
-genuinely a COMPUTER request. What separates the two is that a real vision
-request names both an **act of looking** and a **thing to look at** — read *the
-screen*, describe *this picture*, what is on *my display*. "Open the photo app"
-names a thing to look at and no act of looking, so it stays COMPUTER. That
-compound rule is checked ahead of COMPUTER; the looser single keywords stay
-where they were, behind it.
-
-It is checked *after* BROWSER, deliberately. "Go to the site and look at the
-chart" has to navigate before there is anything to look at.
+Heavy routing intentionally uses high-signal phrases for code review, stress
+testing, edge-case analysis, debugging, optimization and project planning.
+Generic words such as ``بررسی``, ``review``, ``داستان`` and ambiguous
+``برنامه`` are not enough by themselves because they would over-route ordinary
+requests to Heavy or Computer.
 """
 
 from __future__ import annotations
@@ -60,20 +45,67 @@ class RouteDecision:
 
 
 def _markers(*values: str) -> tuple[str, ...]:
-    """
-    Normalise the markers the same way the request will be normalised.
-
-    Persian is commonly written with a zero-width non-joiner inside a single
-    word — ``وب‌سایت``, ``برنامه‌ریزی`` — and normalisation turns that into a
-    space. A marker written the natural way would never match a normalised
-    request unless it went through the same transformation, so it does, here,
-    once, at import.
-    """
+    """Normalise markers exactly as incoming requests are normalised."""
     return tuple(normalise(value).lower() for value in values)
 
 
 class TaskRouter:
     """Route a user request to the first appropriate Qronos task type."""
+
+    PAINT_NAMES = _markers(
+        "paint",
+        "microsoft paint",
+        "mspaint",
+        "پینت",
+        "پاینت",
+    )
+
+    DRAW_MARKERS = _markers(
+        "draw",
+        "sketch",
+        "بکش",
+        "بکشید",
+        "رسم کن",
+        "نقاشی کن",
+    )
+
+    UNDO_MARKERS = _markers(
+        "undo",
+        "revert",
+        "برگردون",
+        "برگردان",
+        "بازگردان",
+        "بازگردون",
+        "آندو",
+    )
+
+    # Mirrors core/calculator_semantic.py, which decides what actually runs.
+    CALCULATOR_NAMES = _markers(
+        "calculator",
+        "calc",
+        "ماشین حساب",
+        "ماشین‌حساب",
+        "ماشینحساب",
+    )
+
+    CALCULATOR_ACTION_MARKERS = _markers(
+        "به علاوه",
+        "بعلاوه",
+        "جمع",
+        "plus",
+        "منهای",
+        "منها",
+        "تفریق",
+        "minus",
+        "ضربدر",
+        "ضرب",
+        "multiply",
+        "times",
+        "تقسیم",
+        "divide",
+        "مساوی",
+        "equals",
+    )
 
     COMPUTER_KEYWORDS = _markers(
         "open",
@@ -100,12 +132,16 @@ class TaskRouter:
         "تایپ",
         "فایل",
         "پوشه",
-        "برنامه",
         "نرم‌افزار",
         "ویندوز",
         "کامپیوتر",
         "رایانه",
         "نصب کن",
+        "در پینت",
+        "توی پینت",
+        "داخل پینت",
+        "in paint",
+        "draw in paint",
     )
 
     BROWSER_KEYWORDS = _markers(
@@ -136,8 +172,6 @@ class TaskRouter:
         "پیام بفرست",
     )
 
-    #: An act of looking. Half of the compound rule; on its own it means
-    #: nothing, because "read the third chapter" is not a vision request.
     VISION_VERBS = _markers(
         "look at",
         "look on",
@@ -164,9 +198,6 @@ class TaskRouter:
         "چی هست",
     )
 
-    #: A thing to look at. The other half. On its own it means nothing either,
-    #: because "the photo app" is a thing to look at inside a request to open
-    #: an application.
     VISION_SUBJECTS = _markers(
         "screen",
         "screenshot",
@@ -233,7 +264,6 @@ class TaskRouter:
         "solve",
         "logic",
         "architecture",
-        "story",
         "chapter",
         "novel",
         "rewrite",
@@ -241,6 +271,31 @@ class TaskRouter:
         "worldbuilding",
         "consistency",
         "detailed",
+        # High-signal technical reasoning
+        "stress test",
+        "stress-test",
+        "code review",
+        "review this code",
+        "review the code",
+        "edge case",
+        "edge cases",
+        "find bugs",
+        "find the bug",
+        "race condition",
+        "race conditions",
+        "performance bottleneck",
+        "algorithm bottleneck",
+        "crash",
+        "crashes",
+        "debug",
+        "debugging",
+        "optimize",
+        "optimization",
+        "root cause",
+        "step-by-step plan",
+        "step by step plan",
+        "project plan",
+        "roadmap",
         # Persian
         "تحلیل",
         "بررسی عمیق",
@@ -254,13 +309,43 @@ class TaskRouter:
         "حل کن",
         "منطق",
         "معماری",
-        "داستان",
         "فصل",
         "رمان",
         "بازنویسی",
         "بهبود",
         "جزئیات",
         "مفصل",
+        # High-signal Persian technical reasoning
+        "استرس تست",
+        "تست استرس",
+        "بررسی کد",
+        "کد را بررسی",
+        "کد رو بررسی",
+        "ایج کیس",
+        "حالت مرزی",
+        "حالت‌های مرزی",
+        "حالت های مرزی",
+        "باگ پیدا کن",
+        "باگ‌ها را پیدا کن",
+        "باگ ها را پیدا کن",
+        "شرایط رقابتی",
+        "گلوگاه عملکرد",
+        "گلوگاه الگوریتم",
+        "کرش",
+        "دیباگ",
+        "عیب یابی",
+        "عیب‌یابی",
+        "بهینه کن",
+        "بهینه سازی",
+        "بهینه‌سازی",
+        "علت اصلی",
+        "ریشه خطا",
+        "نقشه راه",
+        "برای این پروژه یک برنامه",
+        "برنامه برای این پروژه",
+        "برنامه مرحله به مرحله",
+        "بررسی کن چرا",
+        "بررسی کن که چرا",
     )
 
     def route(self, user_input: str) -> RouteDecision:
@@ -279,9 +364,6 @@ class TaskRouter:
                 reason="The request appears to require browser interaction.",
             )
 
-        # Ahead of COMPUTER, because COMPUTER's keywords otherwise swallow
-        # every request that mentions a file, an application or a window while
-        # asking Qronos to look at it. See the module docstring.
         if self._looks_like_vision(text):
             return RouteDecision(
                 task_type=TaskType.VISION,
@@ -289,6 +371,26 @@ class TaskRouter:
                     "The request asks Qronos to look at something and says "
                     "what."
                 ),
+            )
+
+        if self._looks_like_paint_undo(text):
+            # Never let "undo my Paint drawing" fall through to a chat model
+            # that could answer as if it had reversed something.
+            return RouteDecision(
+                task_type=TaskType.COMPUTER,
+                reason="The request explicitly asks to undo a Paint drawing.",
+            )
+
+        if self._looks_like_paint_draw(text):
+            return RouteDecision(
+                task_type=TaskType.COMPUTER,
+                reason="The request explicitly asks to draw in Microsoft Paint.",
+            )
+
+        if self._looks_like_calculator_action(text):
+            return RouteDecision(
+                task_type=TaskType.COMPUTER,
+                reason="The request explicitly asks Calculator to perform an operation.",
             )
 
         if self._contains_any(text, self.COMPUTER_KEYWORDS):
@@ -314,15 +416,32 @@ class TaskRouter:
             reason="The request appears suitable for fast handling.",
         )
 
-    def _looks_like_vision(self, text: str) -> bool:
-        """
-        True when the request names both an act of looking and a thing to
-        look at.
+    def _looks_like_calculator_action(
+        self,
+        text: str,
+    ) -> bool:
+        return (
+            self._contains_any(
+                text,
+                self.CALCULATOR_NAMES,
+            )
+            and self._contains_any(
+                text,
+                self.CALCULATOR_ACTION_MARKERS,
+            )
+        )
 
-        Both halves, never one. A single half is what the looser
-        ``VISION_KEYWORDS`` list is for, and that one is checked last precisely
-        because it is easy to trip by accident.
-        """
+    def _looks_like_paint_undo(self, text: str) -> bool:
+        return self._contains_any(
+            text, self.PAINT_NAMES
+        ) and self._contains_any(text, self.UNDO_MARKERS)
+
+    def _looks_like_paint_draw(self, text: str) -> bool:
+        return self._contains_any(
+            text, self.PAINT_NAMES
+        ) and self._contains_any(text, self.DRAW_MARKERS)
+
+    def _looks_like_vision(self, text: str) -> bool:
         return self._contains_any(
             text, self.VISION_VERBS
         ) and self._contains_any(text, self.VISION_SUBJECTS)
@@ -338,11 +457,14 @@ if __name__ == "__main__":
     examples = [
         "Hello Qronos",
         "Analyze this chapter deeply",
+        "stress test this code and find edge cases",
+        "review this code for bugs",
         "Look at this screenshot",
         "Open Premiere",
         "Go to ChatGPT and send this message",
         "سلام کرونوس",
         "این فصل را عمیق تحلیل کن",
+        "کد را بررسی و استرس تست کن",
         "به این عکس نگاه کن",
         "پریمیر را باز کن",
         "برو به گوگل",
@@ -350,5 +472,4 @@ if __name__ == "__main__":
 
     for example in examples:
         decision = router.route(example)
-
         print(f"{example} -> {decision.task_type.value}")

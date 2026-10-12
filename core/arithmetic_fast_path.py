@@ -79,7 +79,7 @@ _SCALES = {
 _OPERATOR_PATTERNS = (
     ("divide", re.compile(r"\s+(?:تقسیم\s+بر|تقسیمبر)\s+")),
     ("multiply", re.compile(r"\s+(?:ضرب\s+در|ضربدر)\s+")),
-    ("plus", re.compile(r"\s+(?:به\s+علاوه|بعلاوه)\s+")),
+    ("plus", re.compile(r"\s+(?:به\s+(?:علاوه|اضافه)|بعلاوه|باضافه)\s+")),
     ("minus", re.compile(r"\s+(?:منهای|منها)\s+")),
     ("plus", re.compile(r"\s*\+\s*")),
     ("minus", re.compile(r"\s*-\s*")),

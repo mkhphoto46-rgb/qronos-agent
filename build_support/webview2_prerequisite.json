@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "comment": "The exact Microsoft Edge WebView2 Runtime Evergreen Standalone Installer embedded in the Qronos NSIS installer. The build does not download it: a developer fetches the pinned URL into .cache/wv2/ once, and build_support.build_desktop verifies these bytes offline before every build. Re-pinning is a reviewed change. Redistribution terms and installer signing are owner gates, not approvals recorded here.",
+  "component": "Microsoft Edge WebView2 Runtime Evergreen Standalone Installer",
+  "target": "x86_64-pc-windows-msvc",
+  "architecture": "x64",
+  "fileName": "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+  "bytes": 212358352,
+  "sha256": "ac22ecdc19c5b88b87f3fa752c00da9541653a8f5c0c5fc4a3b2b6ebe6591f69",
+  "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/18c66e75-0385-4019-be3f-3f4a2bb867d5/MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+  "resolvedFrom": "https://go.microsoft.com/fwlink/?linkid=2124701",
+  "resolvedOn": "2026-10-08",
+  "runtime": {
+    "appId": "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    "version": "154.0.4258.62",
+    "evidence": "Declared for this appId by OfflineManifest.gup inside the installer's embedded payload (package MicrosoftEdgeWebview_X64_154.0.4258.62.exe, action needsadmin=prefers)."
+  },
+  "setupStub": {
+    "productName": "Microsoft Edge Update",
+    "fileVersion": "1.3.275.13",
+    "companyName": "Microsoft Corporation"
+  },
+  "authenticode": {
+    "signer": "Microsoft Corporation",
+    "issuer": "Microsoft Code Signing PCA 2024",
+    "signerCertificateSha1": "4028CAD637509D4744B17EC5B42AED8D7A31E6AF",
+    "timestamp": "Mon Oct 05 09:24:18 2026 (signtool local time)",
+    "verifiedWith": "signtool verify /pa /v, Windows SDK 10.0.26100.0, 2026-10-08: Successfully verified"
+  },
+  "installArguments": "/silent /install",
+  "ownerGates": [
+    "Microsoft's redistribution terms for the WebView2 Runtime and its Evergreen Standalone Installer have not been reviewed or accepted by the owner; embedding it is a technical packaging choice, not redistribution clearance.",
+    "The Qronos installer that embeds it is unsigned; Authenticode signing of the Qronos installer is a separate owner gate.",
+    "This pinned runtime version ages. Once installed, the Evergreen runtime is updated by Microsoft when the machine is online; fresh offline installs receive this version until the pin is reviewed and replaced."
+  ],
+  "references": [
+    "https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution",
+    "https://v2.tauri.app/distribute/windows-installer/"
+  ]
+}

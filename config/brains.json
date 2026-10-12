@@ -1,0 +1,99 @@
+{
+    "active_roles":  {
+                         "fast":  "gemma3n_e4b_q5",
+                         "heavy":  "gpt_oss_20b",
+                         "vision":  "qwen3vl_4b"
+                     },
+    "profiles":  {
+                     "gemma3n_e4b_q5":  {
+                                            "name":  "hf.co/unsloth/gemma-3n-E4B-it-GGUF:Q5_K_M",
+                                            "role":  "fast_brain",
+                                            "runtime":  "ollama",
+                                            "estimated_vram_gb":  3.6,
+                                            "priority":  1,
+                                            "context_tokens":  4096,
+                                            "generation":  {
+                                                               "default":  {
+                                                                               "think":  false,
+                                                                               "num_predict":  256,
+                                                                               "keep_alive":  "60s"
+                                                                           }
+                                                           }
+                                        },
+                     "gpt_oss_20b":  {
+                                         "name":  "gpt-oss:20b",
+                                         "role":  "heavy_brain",
+                                         "runtime":  "ollama",
+                                         "estimated_vram_gb":  6.4,
+                                         "priority":  2,
+                                         "context_tokens":  16384,
+                                         "generation":  {
+                                                            "default":  {
+                                                                            "think":  "low",
+                                                                            "num_predict":  512,
+                                                                            "keep_alive":  "120s"
+                                                                        },
+                                                            "eco":  {
+                                                                        "think":  "low",
+                                                                        "num_predict":  512,
+                                                                        "keep_alive":  "120s"
+                                                                    },
+                                                            "normal":  {
+                                                                           "think":  "medium",
+                                                                           "num_predict":  1024,
+                                                                           "keep_alive":  "120s"
+                                                                       },
+                                                            "deep":  {
+                                                                         "think":  "high",
+                                                                         "num_predict":  1280,
+                                                                         "keep_alive":  "120s"
+                                                                     }
+                                                        }
+                                     },
+                     "qwen3_14b_legacy":  {
+                                              "name":  "qwen3:14b",
+                                              "role":  "heavy_brain",
+                                              "runtime":  "ollama",
+                                              "estimated_vram_gb":  10.0,
+                                              "priority":  2,
+                                              "context_tokens":  16384,
+                                              "generation":  {
+                                                                 "default":  {
+                                                                                 "think":  true,
+                                                                                 "num_predict":  512,
+                                                                                 "keep_alive":  "0"
+                                                                             },
+                                                                 "eco":  {
+                                                                             "think":  true,
+                                                                             "num_predict":  384,
+                                                                             "keep_alive":  "0"
+                                                                         },
+                                                                 "normal":  {
+                                                                                "think":  true,
+                                                                                "num_predict":  512,
+                                                                                "keep_alive":  "0"
+                                                                            },
+                                                                 "deep":  {
+                                                                              "think":  true,
+                                                                              "num_predict":  768,
+                                                                              "keep_alive":  "0"
+                                                                          }
+                                                             }
+                                          },
+                     "qwen3vl_4b":  {
+                                        "name":  "qwen3-vl:4b-instruct",
+                                        "role":  "vision",
+                                        "runtime":  "ollama",
+                                        "estimated_vram_gb":  4.6,
+                                        "priority":  3,
+                                        "context_tokens":  4096,
+                                        "generation":  {
+                                                           "default":  {
+                                                                           "think":  false,
+                                                                           "num_predict":  512,
+                                                                           "keep_alive":  "0"
+                                                                       }
+                                                       }
+                                    }
+                 }
+}

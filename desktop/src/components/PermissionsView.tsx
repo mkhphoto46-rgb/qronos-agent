@@ -1,9 +1,25 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 
+import {
+  refreshPermissions,
+  resetPermission,
+  setPermissionCustomRule,
+  setPermissionPolicy,
+  usePermissionStore,
+} from "../permissionStore";
+import type {
+  PermissionAuditRecord,
+  PermissionPolicyRecord,
+  UserPermissionPolicy,
+  UserPermissionRecord,
+} from "../permissionStore";
+
+import ApprovalSecretPanel from "./ApprovalSecretPanel";
 import "./PermissionsView.css";
 
 type ViewPhase =
@@ -17,13 +33,6 @@ type ViewPhase =
   | "entering-permissions"
   | "permissions"
   | "leaving-permissions";
-
-type PermissionPolicy =
-  | "DENY"
-  | "SESSION"
-  | "ALLOW"
-  | "CUSTOM"
-  | "ALWAYS ASK";
 
 type RiskLevel =
   | "LOW"
@@ -39,59 +48,11 @@ type PermissionGroup =
   | "automation"
   | "system";
 
-type PermissionItem = {
-  id: string;
-  group: PermissionGroup;
-  title: string;
-  subtitle: string;
-  policy: PermissionPolicy;
-  risk: RiskLevel;
-  description: string;
-  actions: string[];
-  protectedNote?: string;
-};
-
-type SecurityActivityTone =
-  | "allowed"
-  | "session"
-  | "ask"
-  | "denied"
-  | "policy";
-
-type SecurityActivity = {
-  id: string;
-  time: string;
-  event: string;
-  target: string;
-  policy: string;
-  decision: string;
-  source: string;
-  tone: SecurityActivityTone;
-};
-
-type CustomRuleValue =
-  | "ALLOW"
-  | "SESSION"
-  | "DENY"
-  | "ALWAYS ASK";
-
-type DeviceScopeMode =
-  | "system-default"
-  | "selected-device"
-  | "any-device";
-
 type PermissionsViewProps = {
   phase: ViewPhase;
   onClose: () => void;
-
-  /**
-   * Rendered above the security activity list.
-   *
-   * A slot rather than a set of queue props: this component is long enough
-   * already, and the queue's state, its event subscription and its commands
-   * all live in App.tsx with everything else of that kind.
-   */
-  smartQueue?: React.ReactNode;
+  runtimePaused: boolean;
+  onToggleRuntimePaused: (paused: boolean) => void;
 };
 
 type SecurityParticle = {
@@ -111,211 +72,374 @@ type SecurityParticle = {
     | "white";
 };
 
-const MAX_DPR = 1;
-const TRANSITION_MS = 980;
-const PARTICLE_COUNT = 3200;
+type CategoryMeta = {
+  group: PermissionGroup;
+  title: string;
+  subtitle: string;
+};
 
-const permissionItems: PermissionItem[] = [
-  {
-    id: "files",
+
+type UserPermissionMeta = {
+  group: PermissionGroup;
+  subtitle: string;
+  description: string;
+  risk: RiskLevel;
+  availability: "READY" | "PARTIAL" | "UNAVAILABLE";
+  availabilityText: string;
+};
+
+const USER_PERMISSION_META: Record<string, UserPermissionMeta> = {
+  files: {
     group: "files",
-    title: "Files & Storage",
     subtitle: "فایل‌ها و فضای ذخیره‌سازی",
-    policy: "CUSTOM",
-    risk: "MEDIUM",
     description:
-      "کنترل خواندن، ساخت، تغییر نام، جابه‌جایی، حذف و دسترسی Qronos به مسیرهای مجاز.",
-    actions: [
-      "Read — Allow",
-      "Create — Allow",
-      "Modify / Rename — Always Ask",
-      "Delete to Recycle Bin — Always Ask",
-      "Delete Forever — Always Ask",
-    ],
-    protectedNote:
-      "Protected: Windows, System32, Credentials و مسیرهای امنیتی سیستم.",
+      "کنترل دسترسی Qronos به خواندن، ساخت، ویرایش و حذف قابل‌بازیابی فایل‌ها.",
+    risk: "HIGH",
+    availability: "PARTIAL",
+    availabilityText:
+      "Policy backend فعال است؛ Agent file executors در Stage بعد کامل می‌شوند.",
   },
-  {
-    id: "apps",
+  apps: {
     group: "apps",
-    title: "Applications",
-    subtitle: "کنترل اپلیکیشن‌ها",
-    policy: "ALWAYS ASK",
-    risk: "MEDIUM",
+    subtitle: "برنامه‌ها",
     description:
-      "باز کردن، بستن و کنترل اپلیکیشن‌های دسکتاپ از طریق Actionهای مشخص و Typed.",
-    actions: [
-      "Open App — Always Ask",
-      "Close App — Always Ask",
-      "Window Control — Always Ask",
-      "Sensitive Input — Always Ask",
-    ],
+      "کنترل اجرای برنامه، نصب، حذف و Device Control از مسیر Permission Gate.",
+    risk: "HIGH",
+    availability: "PARTIAL",
+    availabilityText:
+      "Policy backend فعال است؛ Application executors هنوز کامل نشده‌اند.",
   },
-  {
-    id: "browser",
+  browser: {
     group: "web",
-    title: "Browser & Web",
     subtitle: "مرورگر و وب",
-    policy: "CUSTOM",
-    risk: "HIGH",
     description:
-      "مرور وب با تفکیک Navigate، Click، Type، Download، Upload و Submit.",
-    actions: [
-      "Navigate — Allow",
-      "Click — Always Ask",
-      "Type — Always Ask",
-      "Download — Always Ask",
-      "Upload — Always Ask",
-      "Submit Forms — Always Ask",
-    ],
-    protectedNote:
-      "Browser access به معنی اجازه‌ی ارسال Credential یا فایل حساس نیست.",
+      "کنترل Navigation، ارسال داده و Upload از طریق Policyهای مستقل و قابل Audit.",
+    risk: "HIGH",
+    availability: "PARTIAL",
+    availabilityText:
+      "Policy backend فعال است؛ Interactive Browser executor هنوز کامل نشده است.",
   },
-  {
-    id: "microphone",
+  microphone: {
     group: "sensors",
-    title: "Microphone",
     subtitle: "میکروفون و ورودی صوتی",
-    policy: "SESSION",
-    risk: "LOW",
     description:
-      "Wake Word و Voice Input فقط در زمان فعال بودن Qronos یا Session مجاز.",
-    actions: [
-      "Wake Word — Session",
-      "Voice Input — Session",
-      "Background Capture — Deny",
-    ],
+      "Policy کاربر برای Microphone؛ اتصال مستقیم آن به Wake/Voice در Stage بعد انجام می‌شود.",
+    risk: "HIGH",
+    availability: "PARTIAL",
+    availabilityText:
+      "Policy ذخیره می‌شود؛ Wake/Voice enforcement هنوز به این Permission متصل نشده است.",
   },
-  {
-    id: "camera",
+  camera: {
     group: "sensors",
-    title: "Camera / Webcam",
     subtitle: "دوربین و وب‌کم",
-    policy: "ALWAYS ASK",
-    risk: "HIGH",
     description:
-      "اجازه‌ی استفاده از Camera به Scope دستگاه وابسته است. Permission می‌تواند چند دوربین را پوشش دهد، اما هر Capture فقط یک Camera فعال دارد.",
-    actions: [
-      "Start Watching — Always Ask",
-      "Switch Camera — Always Ask",
-      "Background Capture — Deny",
-    ],
-    protectedNote:
-      "واحد اجازه، Session است نه Frame: کاربر آن را شروع می‌کند، تا وقتی فعال است Indicator دیده می‌شود، حداکثر ۱۰ دقیقه ادامه دارد و هر لحظه با یک عمل متوقف می‌شود. Capture بدون Indicator یا بدون شروع توسط کاربر، Hidden Surveillance است و رد می‌شود.",
-  },
-  {
-    id: "screen",
-    group: "sensors",
-    title: "Screen Vision",
-    subtitle: "دیدن صفحه و Screenshot",
-    policy: "ALWAYS ASK",
+      "Policy دوربین با Security Hard Floor؛ Device source فعلی هنوز ساخته نشده است.",
     risk: "HIGH",
-    description:
-      "مشاهده یا Capture صفحه می‌تواند اطلاعات حساس را دربر بگیرد؛ بنابراین Session-scoped یا Always Ask.",
-    actions: [
-      "Single Screenshot — Always Ask",
-      "Live Screen Context — Session",
-      "Background Capture — Deny",
-    ],
-    protectedNote:
-      "«Always Ask» یعنی UI Confirmation، نه تأیید صوتی: کسی که از Qronos می‌خواهد به صفحه نگاه کند، اول باید ببیند چه چیزی قرار است دیده شود. هیچ Capture‌ای روی دیسک نوشته نمی‌شود؛ در حافظه می‌ماند، ارسال می‌شود و دور ریخته می‌شود.",
+    availability: "UNAVAILABLE",
+    availabilityText:
+      "Camera device backend فعلاً موجود نیست؛ UI آن را به‌عنوان فعال وانمود نمی‌کند.",
   },
-  {
-    id: "clipboard",
+  screen: {
     group: "sensors",
-    title: "Clipboard",
+    subtitle: "نمایش صفحه و اسکرین‌شات",
+    description:
+      "کنترل واقعی READ_SCREEN که مستقیماً توسط Security Gate و ScreenCapture enforce می‌شود.",
+    risk: "HIGH",
+    availability: "READY",
+    availabilityText:
+      "End-to-end فعال: User Policy → Effective Resolver → Gate → ScreenCapture.",
+  },
+  clipboard: {
+    group: "sensors",
     subtitle: "کلیپ‌بورد",
-    policy: "CUSTOM",
-    risk: "HIGH",
     description:
-      "خواندن Clipboard از نوشتن در Clipboard جدا است؛ چون ممکن است شامل Password یا Token باشد.",
-    actions: [
-      "Write Clipboard — Allow",
-      "Read Clipboard — Always Ask",
-      "Background Read — Deny",
-    ],
+      "Policy کاربر برای Clipboard؛ Agent Clipboard executor هنوز ساخته نشده است.",
+    risk: "HIGH",
+    availability: "UNAVAILABLE",
+    availabilityText:
+      "Clipboard Agent executor فعلاً موجود نیست.",
   },
-  {
-    id: "automation",
+  automation: {
     group: "automation",
-    title: "Automation",
-    subtitle: "اجرای خودکار Taskها",
-    policy: "CUSTOM",
+    subtitle: "اجرای خودکار وظایف",
+    description:
+      "کنترل اجرای خودکار وظایف و توقف موقت Runtime از مسیر Runtime Control.",
     risk: "HIGH",
-    description:
-      "Taskهای زمان‌بندی‌شده باید Scope و Permission مستقل داشته باشند و مجوز تعاملی را به ارث نبرند.",
-    actions: [
-      "Scheduled Task — Custom",
-      "Background Actions — Always Ask",
-      "Destructive Automation — Deny",
-    ],
+    availability: "PARTIAL",
+    availabilityText:
+      "Runtime-wide Pause فعال است؛ Scheduled Automation کامل در Stage بعد اضافه می‌شود.",
   },
-  {
-    id: "system",
+  system: {
     group: "system",
-    title: "System Settings",
     subtitle: "تنظیمات سیستم",
-    policy: "ALWAYS ASK",
-    risk: "CRITICAL",
     description:
-      "تغییر تنظیمات Windows، Startup و رفتارهای سطح سیستم باید همیشه با تأیید صریح انجام شوند.",
-    actions: [
-      "Windows Settings — Always Ask",
-      "Startup / Persistence — Always Ask",
-      "Security Controls — Deny",
-      "Privilege Escalation — Deny",
-    ],
-    protectedNote:
-      "Qronos نباید Permission Engine، Windows Security یا محدودیت‌های خودش را دور بزند.",
+      "کنترل System Configuration با حفظ Hard Floor برای Registry، Security و Privilege Escalation.",
+    risk: "CRITICAL",
+    availability: "PARTIAL",
+    availabilityText:
+      "Policy backend فعال است؛ فقط executorهای whitelisted آینده اجازه اجرا خواهند داشت.",
   },
-];
+};
 
-// Empty until the action audit trail feeds it.
-//
-// This list used to hold five invented entries — a file deletion, a
-// microphone session on a device this machine does not have, a denied
-// upload — rendered under the heading "Permission & sensitive action
-// history" with timestamps, policies and decisions. None of it had
-// happened. On a Library shelf that is placeholder content; on the screen
-// whose whole job is to answer "what has Qronos done on my computer, and
-// what did I permit?", it is an answer that is confidently wrong.
-//
-// core/action_audit.py records every permission decision, allows and
-// denials alike, and ActionAuditLog.for_action can rebuild a timeline.
-// When a Tauri command exposes it, this becomes that list. Until then an
-// empty state is the truthful thing to show.
-const securityActivities: SecurityActivity[] = [];
-
-
-const groupLabels: Array<{
+const USER_GROUP_LABELS: Array<{
   id: PermissionGroup;
   label: string;
 }> = [
-  {
-    id: "files",
-    label: "FILES & STORAGE",
-  },
-  {
-    id: "apps",
-    label: "APPLICATIONS",
-  },
-  {
-    id: "web",
-    label: "WEB",
-  },
-  {
-    id: "sensors",
-    label: "SENSORS",
-  },
-  {
-    id: "automation",
-    label: "AUTOMATION",
-  },
-  {
-    id: "system",
-    label: "SYSTEM",
-  },
+  { id: "files", label: "FILES & STORAGE" },
+  { id: "apps", label: "APPLICATIONS" },
+  { id: "web", label: "WEB" },
+  { id: "sensors", label: "SENSORS" },
+  { id: "automation", label: "AUTOMATION" },
+  { id: "system", label: "SYSTEM" },
 ];
+
+const USER_POLICY_OPTIONS: UserPermissionPolicy[] = [
+  "DENY",
+  "ALWAYS_ASK",
+  "SESSION",
+  "ALLOW",
+  "CUSTOM",
+];
+
+const CUSTOM_RULE_OPTIONS: Array<Exclude<UserPermissionPolicy, "CUSTOM">> = [
+  "DENY",
+  "ALWAYS_ASK",
+  "SESSION",
+  "ALLOW",
+];
+
+function userMeta(permissionId: string): UserPermissionMeta {
+  return (
+    USER_PERMISSION_META[permissionId] ?? {
+      group: "system",
+      subtitle: "مجوز کاربر",
+      description: "User permission.",
+      risk: "HIGH",
+      availability: "UNAVAILABLE",
+      availabilityText: "Capability metadata is unavailable.",
+    }
+  );
+}
+
+function userPolicyClass(policy: UserPermissionPolicy) {
+  return policy.toLowerCase().replaceAll("_", "-");
+}
+
+function effectiveRulePolicy(
+  category: string,
+  policies: PermissionPolicyRecord[],
+): Exclude<UserPermissionPolicy, "CUSTOM"> {
+  const record = policies.find((item) => item.category === category);
+
+  if (!record) return "ALWAYS_ASK";
+  if (record.level === "FORBIDDEN") return "DENY";
+  if (record.level === "AUTO_ALLOW") return "ALLOW";
+
+  return "ALWAYS_ASK";
+}
+
+const MAX_DPR = 1;
+const TRANSITION_MS = 980;
+const PARTICLE_COUNT = 1600;
+
+const CATEGORY_META: Record<string, CategoryMeta> = {
+  "conversation": {
+    group: "files",
+    title: "Conversation",
+    subtitle: "گفتگوی محلی",
+  },
+  "system_status": {
+    group: "files",
+    title: "System Status",
+    subtitle: "خواندن وضعیت منابع سیستم",
+  },
+  "read_non_sensitive": {
+    group: "files",
+    title: "Read Non-Sensitive",
+    subtitle: "خواندن دادهٔ غیرحساس انتخاب‌شده",
+  },
+  "create_or_edit_file": {
+    group: "files",
+    title: "Create / Edit File",
+    subtitle: "ساخت یا ویرایش فایل",
+  },
+  "delete_recoverable": {
+    group: "files",
+    title: "Recoverable Delete",
+    subtitle: "حذف قابل‌بازیابی",
+  },
+  "open_application": {
+    group: "apps",
+    title: "Open Application",
+    subtitle: "باز کردن اپلیکیشن",
+  },
+  "install_software": {
+    group: "apps",
+    title: "Install Software",
+    subtitle: "نصب نرم‌افزار",
+  },
+  "uninstall_software": {
+    group: "apps",
+    title: "Uninstall Software",
+    subtitle: "حذف نرم‌افزار",
+  },
+  "remote_control": {
+    group: "apps",
+    title: "Remote Control",
+    subtitle: "کنترل از راه دور",
+  },
+  "device_control": {
+    group: "apps",
+    title: "Device Control",
+    subtitle: "کنترل دستگاه جانبی",
+  },
+  "browser_navigation": {
+    group: "web",
+    title: "Browser Navigation",
+    subtitle: "ناوبری مرورگر",
+  },
+  "external_communication": {
+    group: "web",
+    title: "External Communication",
+    subtitle: "ارسال پیام یا داده به بیرون",
+  },
+  "upload_data": {
+    group: "web",
+    title: "Upload Data",
+    subtitle: "آپلود دادهٔ محلی",
+  },
+  "read_screen": {
+    group: "sensors",
+    title: "Read Screen",
+    subtitle: "مشاهدهٔ صفحه",
+  },
+  "watch_camera": {
+    group: "sensors",
+    title: "Watch Camera",
+    subtitle: "شروع Session دوربین",
+  },
+  "hidden_surveillance": {
+    group: "sensors",
+    title: "Hidden Surveillance",
+    subtitle: "Capture پنهانی صدا، تصویر یا صفحه",
+  },
+  "credential_access": {
+    group: "sensors",
+    title: "Credential Access",
+    subtitle: "دسترسی به رمز، Token یا کلید خصوصی",
+  },
+  "code_generation": {
+    group: "automation",
+    title: "Code Generation",
+    subtitle: "تولید کد یا Script اجرایی",
+  },
+  "code_analysis": {
+    group: "automation",
+    title: "Code Analysis",
+    subtitle: "تحلیل کد بدون تغییر یا اجرا",
+  },
+  "code_modification": {
+    group: "automation",
+    title: "Code Modification",
+    subtitle: "تغییر کد یا Script",
+  },
+  "script_execution": {
+    group: "automation",
+    title: "Script Execution",
+    subtitle: "اجرای Shell / PowerShell / Python",
+  },
+  "system_configuration": {
+    group: "system",
+    title: "System Configuration",
+    subtitle: "تغییر تنظیمات سیستم",
+  },
+  "registry_modification": {
+    group: "system",
+    title: "Registry Modification",
+    subtitle: "تغییر Windows Registry",
+  },
+  "boot_configuration": {
+    group: "system",
+    title: "Boot Configuration",
+    subtitle: "تغییر Boot و Recovery",
+  },
+  "raw_disk_access": {
+    group: "system",
+    title: "Raw Disk Access",
+    subtitle: "دسترسی مستقیم به Disk / Partition",
+  },
+  "security_configuration": {
+    group: "system",
+    title: "Security Configuration",
+    subtitle: "تغییر UAC / Firewall / Security",
+  },
+  "backup_destruction": {
+    group: "system",
+    title: "Backup Destruction",
+    subtitle: "حذف یا تخریب Backup",
+  },
+  "privilege_escalation": {
+    group: "system",
+    title: "Privilege Escalation",
+    subtitle: "افزایش سطح دسترسی",
+  },
+  "cyber_attack": {
+    group: "system",
+    title: "Cyber Attack",
+    subtitle: "اقدام تهاجمی یا نفوذ",
+  },
+  "unauthorized_persistence": {
+    group: "system",
+    title: "Unauthorized Persistence",
+    subtitle: "Persistence پنهانی یا بدون مجوز",
+  },
+  "security_bypass": {
+    group: "system",
+    title: "Security Bypass",
+    subtitle: "دور زدن کنترل‌های امنیتی",
+  },
+  "irreversible_destruction": {
+    group: "system",
+    title: "Irreversible Destruction",
+    subtitle: "تخریب غیرقابل‌بازیابی",
+  },
+  "modify_security_policy": {
+    group: "system",
+    title: "Modify Security Policy",
+    subtitle: "تضعیف یا بازنویسی Policy امنیتی",
+  },
+};
+
+function metaFor(category: string): CategoryMeta {
+  return (
+    CATEGORY_META[category] ?? {
+      group: "system",
+      title: category
+        .split("_")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" "),
+      subtitle: "Policy category",
+    }
+  );
+}
+
+function auditTone(record: PermissionAuditRecord) {
+  if (record.decision === "deny" || record.outcome === "refused") return "denied";
+  if (record.decision?.startsWith("require_")) return "ask";
+  if (record.outcome === "succeeded" || record.decision === "allow") return "allowed";
+  if (record.outcome === "awaiting_approval") return "ask";
+  return "policy";
+}
+
+function auditTime(at: number) {
+  if (!Number.isFinite(at) || at <= 0) return "--:--";
+  return new Date(at * 1000).toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
 
 function clamp01(
   value: number,
@@ -1113,280 +1237,136 @@ function PermissionIcon({
 }
 
 function PermissionsView({
-  smartQueue,
+  runtimePaused,
+  onToggleRuntimePaused,
   phase,
   onClose,
 }: PermissionsViewProps) {
-  const [
-    selectedId,
-    setSelectedId,
-  ] =
-    useState(
-      "files",
-    );
-
-  const [
+  const {
+    approvalSecret,
     policies,
-    setPolicies,
-  ] =
-    useState<
-      Record<
-        string,
-        PermissionPolicy
-      >
-    >(
-      () =>
-        Object.fromEntries(
-          permissionItems.map(
-            (
-              item,
-            ) => [
-              item.id,
-              item.policy,
-            ],
-          ),
-        ),
-    );
+    userPermissions,
+    audit,
+    mutable,
+    policySource,
+    policyStoreSource,
+    auditSource,
+    loading,
+    error,
+  } = usePermissionStore();
 
-  const [
-    actionsPaused,
-    setActionsPaused,
-  ] =
-    useState(false);
-
-  const [
-    customRules,
-    setCustomRules,
-  ] =
-    useState<
-      Record<
-        string,
-        Record<
-          string,
-          CustomRuleValue
-        >
-      >
-    >(() => {
-      const initial:
-        Record<
-          string,
-          Record<
-            string,
-            CustomRuleValue
-          >
-        > = {};
-
-      for (
-        const item of
-        permissionItems
-      ) {
-        initial[
-          item.id
-        ] = {};
-
-        for (
-          const action of
-          item.actions
-        ) {
-          const [
-            label,
-            rawValue,
-          ] =
-            action.split(
-              " — ",
-            );
-
-          const normalized =
-            (
-              rawValue ??
-              "Always Ask"
-            ).toUpperCase();
-
-          let value:
-            CustomRuleValue =
-              "ALWAYS ASK";
-
-          if (
-            normalized ===
-            "ALLOW"
-          ) {
-            value =
-              "ALLOW";
-          } else if (
-            normalized ===
-            "SESSION"
-          ) {
-            value =
-              "SESSION";
-          } else if (
-            normalized ===
-              "DENY" ||
-            normalized ===
-              "DENIED"
-          ) {
-            value =
-              "DENY";
-          } else {
-            value =
-              "ALWAYS ASK";
-          }
-
-          initial[
-            item.id
-          ][
-            label
-          ] =
-            value;
-        }
-      }
-
-      return initial;
-    });
-
-  const [
-    deviceScope,
-    setDeviceScope,
-  ] =
-    useState<
-      Record<
-        "microphone" | "camera",
-        DeviceScopeMode
-      >
-    >({
-      microphone:
-        "system-default",
-      camera:
-        "system-default",
-    });
-
-  const selected =
-    permissionItems.find(
-      (
-        item,
-      ) =>
-        item.id ===
-        selectedId,
-    ) ??
-    permissionItems[0];
+  const [selectedPermissionId, setSelectedPermissionId] = useState("files");
+  const [auditExpanded, setAuditExpanded] = useState(false);
+  const [mutationBusy, setMutationBusy] = useState<string | null>(null);
 
   const visible =
-    phase ===
-      "entering-permissions" ||
-    phase ===
-      "permissions" ||
-    phase ===
-      "leaving-permissions";
+    phase === "entering-permissions" ||
+    phase === "permissions" ||
+    phase === "leaving-permissions";
 
   const phaseClass =
-    phase ===
-    "entering-permissions"
+    phase === "entering-permissions"
       ? "permissions-view-entering"
-      : phase ===
-          "leaving-permissions"
+      : phase === "leaving-permissions"
         ? "permissions-view-leaving"
-        : phase ===
-            "permissions"
+        : phase === "permissions"
           ? "permissions-view-visible"
           : "";
 
-  const isLockedCustomRule =
-    (
-      item:
-        PermissionItem,
-      actionLabel:
-        string,
-    ) => {
-      const original =
-        item.actions.find(
-          (
-            action,
-          ) =>
-            action.startsWith(
-              `${actionLabel} —`,
-            ),
-        );
+  useEffect(() => {
+    if (phase === "permissions") {
+      void refreshPermissions();
+    }
+  }, [phase]);
 
-      if (!original) {
-        return false;
-      }
+  useEffect(() => {
+    if (phase !== "permissions") {
+      return;
+    }
 
-      return (
-        original.endsWith(
-          "Always Ask",
-        ) ||
-        original.endsWith(
-          "Deny",
-        )
+    const auditSyncTimer = window.setInterval(
+      () => {
+        void refreshPermissions();
+      },
+      6000,
+    );
+
+    return () => {
+      window.clearInterval(
+        auditSyncTimer,
       );
     };
+  }, [phase]);
 
-  const changeCustomRule =
-    (
-      itemId:
-        string,
-      actionLabel:
-        string,
-      value:
-        CustomRuleValue,
-    ) => {
-      setCustomRules(
-        (
-          current,
-        ) => ({
-          ...current,
-          [itemId]: {
-            ...current[
-              itemId
-            ],
-            [actionLabel]:
-              value,
-          },
-        }),
-      );
-    };
+  useEffect(() => {
+    if (!userPermissions.length) return;
 
-  const changePolicy =
-    (
-      policy:
-        PermissionPolicy,
-    ) => {
-      if (
-        selected.id ===
-          "system" &&
-        (
-          policy ===
-            "ALLOW" ||
-          policy ===
-            "SESSION"
-        )
-      ) {
-        return;
-      }
+    if (!userPermissions.some((item) => item.id === selectedPermissionId)) {
+      setSelectedPermissionId(userPermissions[0].id);
+    }
+  }, [selectedPermissionId, userPermissions]);
 
-      setPolicies(
-        (
-          current,
-        ) => ({
-          ...current,
-          [selected.id]:
-            policy,
-        }),
-      );
-    };
+  const selected: UserPermissionRecord | null =
+    userPermissions.find((item) => item.id === selectedPermissionId) ??
+    userPermissions[0] ??
+    null;
+
+  const grouped = useMemo(
+    () =>
+      USER_GROUP_LABELS.map((group) => ({
+        ...group,
+        items: userPermissions.filter(
+          (item) => userMeta(item.id).group === group.id,
+        ),
+      })),
+    [userPermissions],
+  );
+
+  const visibleAudit = auditExpanded ? audit : audit.slice(0, 8);
+
+  const runMutation = async (
+    key: string,
+    mutation: () => Promise<void>,
+  ) => {
+    if (mutationBusy) return;
+
+    setMutationBusy(key);
+
+    try {
+      await mutation();
+    } finally {
+      setMutationBusy(null);
+    }
+  };
+
+  const changePolicy = (policy: UserPermissionPolicy) => {
+    if (!selected || !mutable) return;
+
+    void runMutation(
+      `policy:${selected.id}:${policy}`,
+      () => setPermissionPolicy(selected.id, policy),
+    );
+  };
+
+  const changeCustomRule = (
+    category: string,
+    policy: Exclude<UserPermissionPolicy, "CUSTOM">,
+  ) => {
+    if (!selected || !mutable) return;
+
+    void runMutation(
+      `rule:${selected.id}:${category}:${policy}`,
+      () => setPermissionCustomRule(selected.id, category, policy),
+    );
+  };
 
   return (
     <section
       className={`permissions-view ${phaseClass}`}
-      aria-hidden={
-        !visible
-      }
+      aria-hidden={!visible}
       dir="rtl"
     >
-      <PermissionParticleCanvas
-        phase={
-          phase
-        }
-      />
+      <PermissionParticleCanvas phase={phase} />
 
       <div
         className="permissions-security-field"
@@ -1400,40 +1380,22 @@ function PermissionsView({
       <div className="permissions-responsive-shell">
         <header className="permissions-header">
           <div className="permissions-heading">
-            <h1>
-              مجوزها
-            </h1>
-
-            <p>
-              کنترل دسترسی، ریسک و اجرای Actionهای Qronos
-            </p>
+            <h1>مجوزها</h1>
+            <p>کنترل واقعی دسترسی و اجرای Actionهای Qronos</p>
           </div>
 
-          <div className="permissions-heading-en">
-            <h1>
-              PERMISSIONS
-            </h1>
-
-            <p>
-              Access control, risk, and Qronos action execution
-            </p>
+          <div className="permissions-heading-en permissions-ltr">
+            <h1>PERMISSIONS</h1>
+            <p>User-controlled policy with enforced security floor</p>
           </div>
 
           <button
             type="button"
             className="permissions-back"
-            onClick={
-              onClose
-            }
+            onClick={onClose}
           >
-            <span>
-              بازگشت
-            </span>
-
-            <svg
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-            >
+            <span>بازگشت</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M15 5 8 12l7 7" />
             </svg>
           </button>
@@ -1441,734 +1403,450 @@ function PermissionsView({
 
         <div className="permissions-emergency-bar">
           <div>
-            <span>
-              EMERGENCY CONTROL
-            </span>
-
-            <strong>
-              Pause Actions
-            </strong>
-
+            <span>RUNTIME CONTROL</span>
+            <strong>Pause Actions</strong>
             <small>
-              Chat و Voice فعال می‌مانند؛ اجرای Action متوقف می‌شود.
+              Voice، Chat، Screen actions و Queue execution موقتاً متوقف می‌شوند.
+              این حالت ذخیره نمی‌شود و با restart شدن Qronos خودکار به Active برمی‌گردد.
             </small>
           </div>
 
           <button
             type="button"
             className={
-              actionsPaused
+              runtimePaused
                 ? "permissions-pause-toggle permissions-pause-toggle-active"
                 : "permissions-pause-toggle"
             }
-            onClick={() =>
-              setActionsPaused(
-                (
-                  current,
-                ) =>
-                  !current,
-              )
+            onClick={() => onToggleRuntimePaused(!runtimePaused)}
+            aria-pressed={runtimePaused}
+            aria-label={
+              runtimePaused
+                ? "Resume Qronos runtime"
+                : "Pause Qronos runtime"
+            }
+            title={
+              runtimePaused
+                ? "Click to resume all Qronos runtime channels"
+                : "Click to temporarily pause Qronos runtime channels"
             }
           >
             <span />
-
-            {
-              actionsPaused
-                ? "PAUSED"
-                : "ACTIVE"
-            }
+            {runtimePaused ? "PAUSED" : "ACTIVE"}
           </button>
         </div>
 
         <div className="permissions-layout">
           <div className="permissions-catalog">
-            {groupLabels.map(
-              (
-                group,
-              ) => {
-                const items =
-                  permissionItems.filter(
-                    (
-                      item,
-                    ) =>
-                      item.group ===
-                      group.id,
-                  );
-
-                return (
-                  <section
-                    key={
-                      group.id
-                    }
-                    className="permissions-group"
-                  >
-                    <header>
-                      <span>
-                        {
-                          group.label
-                        }
-                      </span>
-
-                      <i />
-                    </header>
-
-                    <div className="permissions-group-items">
-                      {items.map(
-                        (
-                          item,
-                        ) => {
-                          const policy =
-                            policies[
-                              item.id
-                            ];
-
-                          return (
-                            <button
-                              key={
-                                item.id
-                              }
-                              type="button"
-                              className={
-                                selectedId ===
-                                item.id
-                                  ? "permissions-item permissions-item-selected"
-                                  : "permissions-item"
-                              }
-                              onClick={() =>
-                                setSelectedId(
-                                  item.id,
-                                )
-                              }
-                            >
-                              <span className="permissions-item-icon">
-                                <PermissionIcon
-                                  group={
-                                    item.group
-                                  }
-                                />
-                              </span>
-
-                              <span className="permissions-item-copy">
-                                <strong>
-                                  {
-                                    item.title
-                                  }
-                                </strong>
-
-                                <small>
-                                  {
-                                    item.subtitle
-                                  }
-                                </small>
-                              </span>
-
-                              <span
-                                className={`permissions-policy-chip permissions-policy-${policy
-                                  .toLowerCase()
-                                  .split(
-                                    " ",
-                                  )
-                                  .join(
-                                    "-",
-                                  )}`}
-                              >
-                                {
-                                  policy
-                                }
-                              </span>
-
-                              <span
-                                className={`permissions-risk-dot permissions-risk-${item.risk.toLowerCase()}`}
-                                title={`Risk: ${item.risk}`}
-                              />
-                            </button>
-                          );
-                        },
-                      )}
-                    </div>
-                  </section>
-                );
-              },
+            {loading && userPermissions.length === 0 && (
+              <div className="permissions-truth-state">
+                <strong>در حال بارگذاری User Permissions...</strong>
+                <span>{policyStoreSource || policySource}</span>
+              </div>
             )}
+
+            {error && userPermissions.length === 0 && (
+              <div className="permissions-truth-state permissions-truth-state-error">
+                <strong>Permission backend در دسترس نیست</strong>
+                <span>{error}</span>
+                <button
+                  type="button"
+                  onClick={() => void refreshPermissions()}
+                >
+                  RETRY
+                </button>
+              </div>
+            )}
+
+            {grouped.map((group) => {
+              if (!group.items.length) return null;
+
+              return (
+                <section
+                  key={group.id}
+                  className="permissions-group"
+                >
+                  <header className="permissions-ltr">
+                    <span>{group.label}</span>
+                    <i />
+                  </header>
+
+                  <div className="permissions-group-items">
+                    {group.items.map((item) => {
+                      const meta = userMeta(item.id);
+
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={
+                            selectedPermissionId === item.id
+                              ? "permissions-item permissions-item-selected"
+                              : "permissions-item"
+                          }
+                          onClick={() => setSelectedPermissionId(item.id)}
+                        >
+                          <span className="permissions-item-icon">
+                            <PermissionIcon group={meta.group} />
+                          </span>
+
+                          <span className="permissions-item-copy">
+                            <strong className="permissions-ltr">
+                              {item.title}
+                            </strong>
+                            <small>{meta.subtitle}</small>
+                          </span>
+
+                          <span
+                            className={`permissions-policy-chip permissions-user-policy-chip permissions-user-policy-${userPolicyClass(item.policy)}`}
+                          >
+                            {item.policy.replaceAll("_", " ")}
+                          </span>
+
+                          <span
+                            className={`permissions-risk-dot permissions-risk-${meta.risk.toLowerCase()}`}
+                            title={`Risk: ${meta.risk}`}
+                          />
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              );
+            })}
           </div>
 
           <aside className="permissions-detail-panel">
-            <div className="permissions-detail-head">
-              <div className="permissions-detail-icon">
-                <PermissionIcon
-                  group={
-                    selected.group
-                  }
-                />
+            {!selected ? (
+              <div className="permissions-truth-state">
+                <strong>Permission انتخاب‌شده‌ای وجود ندارد</strong>
+                <span>{error ?? "User permission snapshot is empty."}</span>
               </div>
+            ) : (
+              <>
+                <div className="permissions-detail-head">
+                  <div className="permissions-detail-icon">
+                    <PermissionIcon
+                      group={userMeta(selected.id).group}
+                    />
+                  </div>
 
-              <div>
-                <span>
-                  SELECTED POLICY
-                </span>
+                  <div className="permissions-detail-copy">
+                    <span className="permissions-ltr">SELECTED PERMISSION</span>
+                    <h2 className="permissions-ltr">{selected.title}</h2>
+                    <p className="permissions-detail-subtitle-fa">
+                      {userMeta(selected.id).subtitle}
+                    </p>
+                  </div>
 
-                <h2>
-                  {
-                    selected.title
-                  }
-                </h2>
+                  <span
+                    className={`permissions-risk-badge permissions-risk-${userMeta(selected.id).risk.toLowerCase()}`}
+                  >
+                    {userMeta(selected.id).risk}
+                  </span>
+                </div>
 
-                <p>
-                  {
-                    selected.subtitle
-                  }
+                <p className="permissions-detail-description">
+                  {userMeta(selected.id).description}
                 </p>
-              </div>
 
-              <span
-                className={`permissions-risk-badge permissions-risk-${selected.risk.toLowerCase()}`}
-              >
-                {
-                  selected.risk
-                }
-              </span>
-            </div>
+                <div
+                  className={`permissions-capability-state permissions-capability-${userMeta(selected.id).availability.toLowerCase()}`}
+                >
+                  <span className="permissions-ltr">
+                    {userMeta(selected.id).availability}
+                  </span>
+                  <p>{userMeta(selected.id).availabilityText}</p>
+                </div>
 
-            <p className="permissions-detail-description">
-              {
-                selected.description
-              }
-            </p>
-
-            <div className="permissions-policy-selector">
-              {(
-                [
-                  "DENY",
-                  "ALWAYS ASK",
-                  "SESSION",
-                  "ALLOW",
-                  "CUSTOM",
-                ] as PermissionPolicy[]
-              ).map(
-                (
-                  policy,
-                ) => {
-                  const disabled =
-                    selected.id ===
-                      "system" &&
-                    (
-                      policy ===
-                        "ALLOW" ||
-                      policy ===
-                        "SESSION"
-                    );
-
-                  return (
+                <div className="permissions-policy-selector">
+                  {USER_POLICY_OPTIONS.map((policy) => (
                     <button
-                      key={
-                        policy
-                      }
+                      key={policy}
                       type="button"
-                      disabled={
-                        disabled
-                      }
-                      className={`permissions-policy-option permissions-policy-option-${policy
-                        .toLowerCase()
-                        .split(
-                          " ",
-                        )
-                        .join(
-                          "-",
-                        )} ${
-                        policies[
-                          selected.id
-                        ] ===
-                        policy
+                      disabled={!mutable || Boolean(mutationBusy)}
+                      className={`permissions-policy-option permissions-user-policy-option permissions-user-policy-${userPolicyClass(policy)} ${
+                        selected.policy === policy
                           ? "permissions-policy-option-active"
                           : ""
                       }`}
-                      onClick={() =>
-                        changePolicy(
-                          policy,
-                        )
-                      }
+                      onClick={() => changePolicy(policy)}
                     >
-                      {
-                        policy
-                      }
+                      {mutationBusy === `policy:${selected.id}:${policy}`
+                        ? "SAVING"
+                        : policy.replaceAll("_", " ")}
                     </button>
-                  );
-                },
-              )}
-            </div>
-
-            <div className="permissions-action-matrix">
-              <header>
-                <span>
-                  ACTION MATRIX
-                </span>
-
-                <i />
-              </header>
-
-              {selected.actions.map(
-                (
-                  action,
-                ) => {
-                  const [
-                    actionLabel,
-                    fallbackValue,
-                  ] =
-                    action.split(
-                      " — ",
-                    );
-
-                  const currentValue =
-                    customRules[
-                      selected.id
-                    ]?.[
-                      actionLabel
-                    ] ??
-                    fallbackValue ??
-                    "ALWAYS ASK";
-
-                  return (
-                    <div
-                      key={
-                        action
-                      }
-                      className={`permissions-action-row permissions-action-row-${(
-                        policies[
-                          selected.id
-                        ] ===
-                        "CUSTOM"
-                          ? currentValue
-                          : fallbackValue
-                      )
-                        .toLowerCase()
-                        .split(
-                          " ",
-                        )
-                        .join(
-                          "-",
-                        )}`}
-                    >
-                      <span>
-                        {
-                          actionLabel
-                        }
-                      </span>
-
-                      <strong>
-                        {(
-                          policies[
-                            selected.id
-                          ] ===
-                          "CUSTOM"
-                            ? currentValue
-                            : fallbackValue
-                        ).toUpperCase()}
-                      </strong>
-
-                      <i />
-                    </div>
-                  );
-                },
-              )}
-            </div>
-
-            {policies[
-              selected.id
-            ] ===
-              "CUSTOM" && (
-              <div className="permissions-custom-editor">
-                <header>
-                  <span>
-                    CUSTOM RULES
-                  </span>
-
-                  <small>
-                    هر Action را جداگانه تنظیم کن
-                  </small>
-                </header>
-
-                <div className="permissions-custom-rule-list">
-                  {selected.actions.map(
-                    (
-                      action,
-                    ) => {
-                      const [
-                        actionLabel,
-                      ] =
-                        action.split(
-                          " — ",
-                        );
-
-                      const locked =
-                        isLockedCustomRule(
-                          selected,
-                          actionLabel,
-                        );
-
-                      const value =
-                        customRules[
-                          selected.id
-                        ]?.[
-                          actionLabel
-                        ] ??
-                        "ALWAYS ASK";
-
-                      return (
-                        <label
-                          key={
-                            actionLabel
-                          }
-                          className="permissions-custom-rule"
-                        >
-                          <span>
-                            {
-                              actionLabel
-                            }
-                          </span>
-
-                          <select
-                            value={
-                              value
-                            }
-                            disabled={
-                              locked
-                            }
-                            onChange={(
-                              event,
-                            ) =>
-                              changeCustomRule(
-                                selected.id,
-                                actionLabel,
-                                event.target.value as
-                                  CustomRuleValue,
-                              )
-                            }
-                          >
-                            <option value="ALLOW">
-                              ALLOW
-                            </option>
-
-                            <option value="SESSION">
-                              SESSION
-                            </option>
-
-                            <option value="DENY">
-                              DENY
-                            </option>
-
-                            <option value="ALWAYS ASK">
-                              ALWAYS ASK
-                            </option>
-                          </select>
-
-                          {locked && (
-                            <strong>
-                              LOCKED
-                            </strong>
-                          )}
-                        </label>
-                      );
-                    },
-                  )}
-                </div>
-              </div>
-            )}
-
-            {(selected.id ===
-                "microphone" ||
-              selected.id ===
-                "camera") && (
-              <div className="permissions-device-scope">
-                <header>
-                  <span>
-                    DEVICE SCOPE
-                  </span>
-
-                  <small>
-                    {
-                      selected.id ===
-                      "microphone"
-                        ? "فقط یک ورودی صوتی هم‌زمان فعال می‌شود"
-                        : "هر Capture فقط یک Camera فعال دارد"
-                    }
-                  </small>
-                </header>
-
-                <div className="permissions-device-scope-options">
-                  <button
-                    type="button"
-                    className={
-                      deviceScope[
-                        selected.id
-                      ] ===
-                      "system-default"
-                        ? "active"
-                        : ""
-                    }
-                    onClick={() =>
-                      setDeviceScope(
-                        (
-                          current,
-                        ) => ({
-                          ...current,
-                          [selected.id]:
-                            "system-default",
-                        }),
-                      )
-                    }
-                  >
-                    SYSTEM DEFAULT
-                  </button>
-
-                  <button
-                    type="button"
-                    className={
-                      deviceScope[
-                        selected.id
-                      ] ===
-                      "selected-device"
-                        ? "active"
-                        : ""
-                    }
-                    onClick={() =>
-                      setDeviceScope(
-                        (
-                          current,
-                        ) => ({
-                          ...current,
-                          [selected.id]:
-                            "selected-device",
-                        }),
-                      )
-                    }
-                  >
-                    SELECTED DEVICE
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={
-                      selected.id ===
-                      "microphone"
-                    }
-                    className={
-                      deviceScope[
-                        selected.id
-                      ] ===
-                      "any-device"
-                        ? "active"
-                        : ""
-                    }
-                    onClick={() =>
-                      setDeviceScope(
-                        (
-                          current,
-                        ) => ({
-                          ...current,
-                          [selected.id]:
-                            "any-device",
-                        }),
-                      )
-                    }
-                  >
-                    ANY CONNECTED DEVICE
-                  </button>
+                  ))}
                 </div>
 
-                <div className="permissions-device-runtime-note">
-                  <i />
+                <div className="permissions-action-matrix permissions-policy-truth">
+                  <header className="permissions-ltr">
+                    <span>POLICY TRUTH</span>
+                    <i />
+                  </header>
 
-                  <span>
-                    {
-                      deviceScope[
-                        selected.id
-                      ] ===
-                      "selected-device"
-                        ? "لیست واقعی Deviceها بعد از اتصال Windows Runtime اینجا نمایش داده می‌شود."
-                        : selected.id ===
-                            "microphone"
-                          ? "Qronos به یک Microphone فعال متصل می‌شود؛ چند Microphone هم‌زمان مجاز نیست."
-                          : "Permission می‌تواند Cameraهای متصل را پوشش دهد، ولی Capture هم‌زمان تک‌دستگاهی است."
-                    }
-                  </span>
+                  <div className="permissions-action-row permissions-ltr">
+                    <span>USER PERMISSION</span>
+                    <strong>{selected.id.toUpperCase()}</strong>
+                    <i />
+                  </div>
+
+                  <div className="permissions-action-row permissions-ltr">
+                    <span>USER POLICY</span>
+                    <strong>{selected.policy.replaceAll("_", " ")}</strong>
+                    <i />
+                  </div>
+
+                  <div className="permissions-action-row permissions-ltr">
+                    <span>PERSISTED</span>
+                    <strong>{selected.configured ? "YES" : "DEFAULT"}</strong>
+                    <i />
+                  </div>
+
+                  <div className="permissions-action-row permissions-ltr">
+                    <span>ACTION CATEGORIES</span>
+                    <strong>{selected.categories.length}</strong>
+                    <i />
+                  </div>
                 </div>
-              </div>
-            )}
 
-            {selected.id ===
-              "files" && (
-              <div className="permissions-scope-panel">
-                <span>
-                  ALLOWED LOCATIONS
-                </span>
+                {selected.policy === "CUSTOM" && (
+                  <div className="permissions-custom-editor permissions-custom-editor-v2">
+                    <header>
+                      <span className="permissions-ltr">CUSTOM RULES</span>
+                      <small>هر Action Category را جداگانه تنظیم کن</small>
+                    </header>
 
-                <strong>
-                  E:\Project Qronos Agent
-                </strong>
+                    {selected.categories.length === 0 ? (
+                      <div className="permissions-custom-empty">
+                        <strong>NO CONNECTED ACTION CATEGORY</strong>
+                        <span>
+                          این Permission هنوز executor/category متصل ندارد.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="permissions-custom-rule-list">
+                        {selected.categories.map((category) => {
+                          const locked =
+                            selected.lockedCategories.includes(category);
 
-                <strong>
-                  E:\Qronos Library
-                </strong>
+                          const current =
+                            selected.customRules[category] ??
+                            effectiveRulePolicy(category, policies);
 
-                <strong>
-                  Downloads
-                </strong>
-              </div>
-            )}
+                          return (
+                            <div
+                              key={category}
+                              className="permissions-custom-rule-row"
+                            >
+                              <div className="permissions-custom-rule-copy">
+                                <strong className="permissions-ltr">
+                                  {metaFor(category).title}
+                                </strong>
+                                <span className="permissions-ltr">
+                                  {category}
+                                </span>
+                              </div>
 
-            {selected.protectedNote && (
-              <div className="permissions-protected-note">
-                <span>
-                  PROTECTED
-                </span>
+                              <div className="permissions-custom-rule-options">
+                                {CUSTOM_RULE_OPTIONS.map((policy) => {
+                                  const blocked =
+                                    locked && policy !== "DENY";
 
-                <p>
-                  {
-                    selected.protectedNote
+                                  return (
+                                    <button
+                                      key={policy}
+                                      type="button"
+                                      disabled={
+                                        !mutable ||
+                                        Boolean(mutationBusy) ||
+                                        blocked
+                                      }
+                                      className={`permissions-custom-rule-option permissions-user-policy-${userPolicyClass(policy)} ${
+                                        current === policy
+                                          ? "permissions-custom-rule-option-active"
+                                          : ""
+                                      }`}
+                                      onClick={() =>
+                                        changeCustomRule(category, policy)
+                                      }
+                                    >
+                                      {mutationBusy ===
+                                      `rule:${selected.id}:${category}:${policy}`
+                                        ? "..."
+                                        : policy.replaceAll("_", " ")}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+
+                              {locked && (
+                                <span className="permissions-hard-floor-label permissions-ltr">
+                                  HARD FLOOR · DENY ONLY
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="permissions-backend-note">
+                  <span className="permissions-ltr">POLICY STORE</span>
+                  <strong className="permissions-ltr">
+                    {policyStoreSource || "permissions_v2.json"}
+                  </strong>
+                  <p>
+                    تغییر Policy از UI به backend نوشته می‌شود، snapshot دوباره
+                    خوانده می‌شود و Security Gate Effective Policy را enforce می‌کند.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  className="permissions-reset-button"
+                  disabled={!mutable || Boolean(mutationBusy)}
+                  onClick={() =>
+                    void runMutation(
+                      `reset:${selected.id}`,
+                      () => resetPermission(selected.id),
+                    )
                   }
-                </p>
-              </div>
+                >
+                  {mutationBusy === `reset:${selected.id}`
+                    ? "RESETTING..."
+                    : "RESET TO DEFAULT"}
+                </button>
+
+                <ApprovalSecretPanel
+                  status={approvalSecret}
+                  visible={phase === "permissions"}
+                  disabled={!mutable}
+                />
+              </>
             )}
           </aside>
 
           <aside className="permissions-activity-panel">
-            {smartQueue}
-
             <header className="permissions-security-activity-head">
-              <div>
-                <span>
-                  SECURITY ACTIVITY
-                </span>
-
-                <strong>
-                  Permission & sensitive action history
-                </strong>
+              <div className="permissions-ltr">
+                <span>SECURITY ACTIVITY</span>
+                <strong>Permission & sensitive action history</strong>
               </div>
 
             </header>
 
+            {error && audit.length > 0 && (
+              <p className="permissions-security-activity-empty permissions-security-activity-warning">
+                آخرین Audit نمایش داده می‌شود؛ همگام‌سازی خودکار جدید ناموفق بود.
+                <span className="permissions-ltr">{error}</span>
+              </p>
+            )}
+
             <div className="permissions-security-activity-list">
-              {securityActivities.length === 0 && (
+              {!loading && audit.length === 0 && !error && (
                 <p className="permissions-security-activity-empty">
-                  هنوز هیچ اقدامی ثبت نشده است.
-                  <span>No actions have been recorded yet.</span>
+                  هنوز هیچ Action ثبت‌شده‌ای در Audit وجود ندارد.
+                  <span className="permissions-ltr">
+                    No recorded permission decisions yet.
+                  </span>
                 </p>
               )}
 
-              {securityActivities.map(
-                (
-                  activity,
-                ) => (
-                  <article
-                    key={
-                      activity.id
-                    }
-                    className={`permissions-security-activity-row permissions-security-activity-${activity.tone}`}
-                  >
-                    <div className="permissions-security-activity-time">
-                      <time>
-                        {
-                          activity.time
-                        }
-                      </time>
-
-                      <i />
-                    </div>
-
-                    <div className="permissions-security-activity-main">
-                      <strong>
-                        {
-                          activity.event
-                        }
-                      </strong>
-
-                      <span
-                        title={
-                          activity.target
-                        }
-                      >
-                        {
-                          activity.target
-                        }
-                      </span>
-                    </div>
-
-                    <dl className="permissions-security-activity-meta">
-                      <div>
-                        <dt>
-                          POLICY
-                        </dt>
-
-                        <dd>
-                          {
-                            activity.policy
-                          }
-                        </dd>
-                      </div>
-
-                      <div>
-                        <dt>
-                          DECISION
-                        </dt>
-
-                        <dd>
-                          {
-                            activity.decision
-                          }
-                        </dd>
-                      </div>
-
-                      <div className="wide">
-                        <dt>
-                          SOURCE
-                        </dt>
-
-                        <dd>
-                          {
-                            activity.source
-                          }
-                        </dd>
-                      </div>
-                    </dl>
-                  </article>
-                ),
+              {loading && audit.length === 0 && (
+                <p className="permissions-security-activity-empty">
+                  در حال خواندن Audit واقعی...
+                  <span className="permissions-ltr">{auditSource}</span>
+                </p>
               )}
+
+              {error && audit.length === 0 && (
+                <p className="permissions-security-activity-empty">
+                  Audit در دسترس نیست.
+                  <span className="permissions-ltr">{error}</span>
+                </p>
+              )}
+
+              {visibleAudit.map((activity) => (
+                <article
+                  key={`${activity.actionId}-${activity.at}-${activity.event}`}
+                  className={`permissions-security-activity-row permissions-security-activity-${auditTone(activity)}`}
+                >
+                  <div className="permissions-security-activity-time permissions-ltr">
+                    <time>{auditTime(activity.at)}</time>
+                    <i />
+                  </div>
+
+                  <div className="permissions-security-activity-main permissions-ltr">
+                    <strong>
+                      {(activity.event || "event").toUpperCase()}
+                      {activity.summary ? ` · ${activity.summary}` : ""}
+                    </strong>
+                    <span title={activity.target || activity.category || ""}>
+                      {activity.target || activity.category || "Qronos action"}
+                    </span>
+                  </div>
+
+                  <dl className="permissions-security-activity-meta permissions-ltr">
+                    <div>
+                      <dt>CATEGORY</dt>
+                      <dd>{(activity.category || "unknown").toUpperCase()}</dd>
+                    </div>
+
+                    <div>
+                      <dt>DECISION</dt>
+                      <dd>
+                        {(activity.decision || activity.outcome || "—").toUpperCase()}
+                      </dd>
+                    </div>
+
+                    <div className="wide">
+                      <dt>SOURCE</dt>
+                      <dd>{auditSource}</dd>
+                    </div>
+                  </dl>
+                </article>
+              ))}
             </div>
 
-            <button
-              type="button"
-              className="permissions-security-activity-footer"
-            >
-              <span>
-                VIEW FULL AUDIT
-              </span>
-
-              <svg
-                viewBox="0 0 24 24"
-                aria-hidden="true"
+            {audit.length > 8 && (
+              <button
+                type="button"
+                className="permissions-security-activity-footer"
+                onClick={() =>
+                  setAuditExpanded(
+                    (current) => !current,
+                  )
+                }
               >
-                <path d="M8 5l7 7-7 7" />
-              </svg>
-            </button>
+                <span>
+                  {auditExpanded
+                    ? "COLLAPSE AUDIT"
+                    : `VIEW ALL ${audit.length} EVENTS`}
+                </span>
 
-            <div className="permissions-audit-integrity">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d={auditExpanded ? "M8 15l7-7" : "M8 5l7 7-7 7"} />
+                </svg>
+              </button>
+            )}
+
+            <div className="permissions-audit-integrity permissions-ltr">
               <i />
-
               <span>
-                Audit log is append-only in the final runtime architecture
+                {auditSource} · persisted policy events · no fabricated activity
               </span>
             </div>
           </aside>
         </div>
       </div>
 
-      {actionsPaused && (
+      {runtimePaused && (
         <div className="permissions-paused-banner">
           <i />
-
-          <span>
-            ACTION EXECUTION PAUSED
-          </span>
+          <span>QRONOS RUNTIME PAUSED · TEMPORARY</span>
         </div>
       )}
     </section>

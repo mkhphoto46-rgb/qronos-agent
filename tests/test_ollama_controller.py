@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import requests
+
 import unittest
 from unittest.mock import Mock, patch
 
@@ -21,12 +24,17 @@ class TestOllamaController(unittest.TestCase):
         response = Mock()
         response.status_code = status_code
         response.json.return_value = json_data
+        response.text = json.dumps(
+            json_data,
+            ensure_ascii=False,
+        )
 
         if status_code >= 400:
             from requests import HTTPError
 
             response.raise_for_status.side_effect = HTTPError(
-                f"HTTP {status_code}"
+                f"HTTP {status_code}",
+                response=response,
             )
         else:
             response.raise_for_status.return_value = None
@@ -51,6 +59,8 @@ class TestOllamaController(unittest.TestCase):
         mock_get.assert_called_once_with(
             "http://127.0.0.1:11434/api/version",
             timeout=3,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.get")
@@ -86,6 +96,8 @@ class TestOllamaController(unittest.TestCase):
         mock_get.assert_called_once_with(
             "http://127.0.0.1:11434/api/ps",
             timeout=3,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.get")
@@ -183,6 +195,8 @@ class TestOllamaController(unittest.TestCase):
                 "stream": False,
             },
             timeout=10,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.post")
@@ -297,7 +311,9 @@ class TestOllamaController(unittest.TestCase):
                     "num_predict": 20,
                 },
             },
-            timeout=600,
+            timeout=90,
+            allow_redirects=False,
+            proxies={"http": "", "https": ""},
         )
 
     @patch("core.ollama_controller.requests.post")
@@ -349,7 +365,59 @@ class TestOllamaController(unittest.TestCase):
 
         self.assertEqual(
             str(context.exception),
-            "Could not send request to model: qwen3:4b",
+            "Could not send request to Qronos local Brain "
+            "(model=qwen3:4b; endpoint=/api/chat; timeout=90s; messages=1; images=0).",
+        )
+
+    @patch("core.ollama_controller.requests.post")
+    def test_chat_http_error_preserves_safe_request_metadata(
+        self,
+        mock_post: Mock,
+    ) -> None:
+        mock_post.return_value = self.make_response(
+            {
+                "error": "model runner process has terminated",
+            },
+            status_code=500,
+        )
+
+        with self.assertRaises(RuntimeError) as context:
+            self.controller.chat(
+                model_name="qwen3:4b",
+                prompt="test",
+            )
+
+        self.assertEqual(
+            str(context.exception),
+            "Could not send request to Qronos local Brain "
+            "(model=qwen3:4b; endpoint=/api/chat; timeout=90s; messages=1; images=0; HTTP 500).",
+        )
+
+
+    @patch(
+        "core.ollama_controller.requests.post"
+    )
+    def test_chat_timeout_surfaces_as_timeout_error(
+        self,
+        mock_post,
+    ) -> None:
+        mock_post.side_effect = (
+            requests.Timeout(
+                "simulated timeout"
+            )
+        )
+
+        with self.assertRaises(
+            TimeoutError
+        ) as context:
+            self.controller.chat(
+                model_name="qwen3:4b",
+                prompt="test",
+            )
+
+        self.assertIn(
+            "90-second",
+            str(context.exception),
         )
 
 

@@ -1,9 +1,11 @@
+
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import type {
@@ -18,12 +20,34 @@ import { listen } from "@tauri-apps/api/event";
 import {
   QronosVoicePlayer,
 } from "./audio/QronosVoicePlayer";
+import {
+  sendConversationMessage,
+  useConversationStore,
+} from "./conversationStore";
+import { useLibraryStore } from "./libraryStore";
+import {
+  WorkflowApprovalController,
+  applyWorkflowEvent,
+  createWorkflowApprovalController,
+} from "./appWorkflowApproval";
+import {
+  ScreenApprovalController,
+  applyScreenApprovalEvent,
+  createScreenApprovalController,
+  startScreenApprovalRuntimeWatch,
+} from "./screenApproval";
+import {
+  refreshSettings,
+  setSetting,
+  useSettingsStore,
+} from "./settingsStore";
+import {
+  DeviceLinkController,
+  applyDeviceLinkEvent,
+  bindPairingDelivery,
+  createDeviceLinkController,
+} from "./deviceLink";
 
-import SmartQueuePanel from "./components/SmartQueuePanel";
-import type {
-  QueueRefusal,
-  QueueSnapshot,
-} from "./components/SmartQueuePanel";
 import "./App.css";
 
 import ConversationSpine from "./components/ConversationSpine";
@@ -31,8 +55,15 @@ import ConversationsView from "./components/ConversationsView";
 import LibraryView from "./components/LibraryView";
 import PermissionsView from "./components/PermissionsView";
 import SettingsView from "./components/SettingsView";
+import SetupStatus from "./components/SetupStatus";
+import { setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
+import QueueDrawer from "./components/QueueDrawer";
+import HistoryDrawer from "./components/HistoryDrawer";
+import MediaDrawer from "./components/MediaDrawer";
+import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
+import AppWorkflowDialog from "./components/AppWorkflowDialog";
 import QronosOrb from "./components/QronosOrb";
 import OrbTaskRenderer from "./components/OrbTaskRenderer";
 import type { OrbState } from "./components/OrbState";
@@ -74,6 +105,36 @@ type HotkeyBinding = {
 type HotkeySettings = {
   bindings: HotkeyBinding[];
 };
+
+type FileActionApproval = {
+  actionToken: string;
+  actionId: string;
+  requestId: string;
+  permission: "require_ui_confirmation";
+  operation:
+    | "copy_file"
+    | "move_file"
+    | "rename_file"
+    | "create_folder";
+  source: string;
+  destination: string;
+  newName: string;
+};
+
+function fileActionLabel(
+  operation: FileActionApproval["operation"],
+) {
+  switch (operation) {
+    case "copy_file":
+      return "کپی فایل";
+    case "move_file":
+      return "انتقال فایل";
+    case "rename_file":
+      return "تغییر نام فایل";
+    case "create_folder":
+      return "ساخت پوشه";
+  }
+}
 
 function eventMatchesShortcut(event: KeyboardEvent, accelerator: string) {
   const parts = accelerator.toLowerCase().split("+").map((part) => part.trim());
@@ -133,33 +194,26 @@ const subtitleByScenario: Record<
 };
 
 function App() {
-  // The queue. Whole state each time rather than a delta, with a revision to
-  // drop anything that arrives out of order — the bridge sends it that way
-  // because a delta stream cannot recover from one mangled line.
-  const [
-    queueSnapshot,
-    setQueueSnapshot,
-  ] = useState<QueueSnapshot | null>(
-    null,
-  );
+  const {
+    pendingRequestId,
+  } =
+    useConversationStore();
+
+  const { unreadCount: libraryUnreadCount } = useLibraryStore();
+  const settingsState = useSettingsStore();
+  const setupState = useSetupStore();
+  const [conversationFocusMessageId, setConversationFocusMessageId] = useState<string | null>(null);
 
   const [
-    queueRefusal,
-    setQueueRefusal,
-  ] = useState<QueueRefusal | null>(
-    null,
-  );
+    homeDraft,
+    setHomeDraft,
+  ] =
+    useState("");
 
-  // The status line's text comes from a scenario lookup and has no free-text
-  // channel. This is the only way in, and it is temporary by design: the
-  // queue is a thing that happened, not a mode Qronos is in.
-  const [
-    statusOverride,
-    setStatusOverride,
-  ] = useState<{
-    label: string;
-    subtitle: string;
-  } | null>(null);
+  const homeComposerRef =
+    useRef<HTMLTextAreaElement | null>(
+      null,
+    );
 
   const [
     scenario,
@@ -168,6 +222,154 @@ function App() {
     useState<DebugScenario>(
       "idle",
     );
+
+  const [
+    runtimePaused,
+    setRuntimePaused,
+  ] = useState(false);
+
+  const [
+    pendingFileApproval,
+    setPendingFileApproval,
+  ] = useState<FileActionApproval | null>(
+    null,
+  );
+
+  // Screen/Paint approvals: one nonblocking app-native dialog at a time,
+  // answered only with each prompt's single-use backend approvalId. Runtime
+  // events keep flowing while it is shown, so a revocation dismisses the
+  // matching prompt immediately and sends nothing.
+  const screenApprovalRef =
+    useRef<ScreenApprovalController | null>(null);
+
+  if (screenApprovalRef.current === null) {
+    screenApprovalRef.current = createScreenApprovalController(
+      invoke,
+      (error) => {
+        console.error(
+          "[Qronos Screen Approval] decision not confirmed:",
+          error,
+        );
+      },
+    );
+  }
+
+  const screenApproval = screenApprovalRef.current;
+
+  const screenApprovalView = useSyncExternalStore(
+    screenApproval.subscribe,
+    screenApproval.getSnapshot,
+  );
+
+  useEffect(() => {
+    // While a prompt is visible, notice a runtime that ended without an
+    // event (read-only status checks; never starts the runtime).
+    const watch = startScreenApprovalRuntimeWatch(
+      screenApproval,
+      invoke,
+    );
+
+    return () => {
+      // Unmount: stop checking, ignore late results, and drop every
+      // displayed/waiting prompt without answering.
+      watch.dispose();
+      screenApproval.clear();
+    };
+  }, [screenApproval]);
+
+  const answerScreenApproval = useCallback(
+    (approvalId: string, approved: boolean) => {
+      void screenApproval.answer(approvalId, approved);
+    },
+    [screenApproval],
+  );
+
+  // Telegram / print / browser workflow steps: one app-native prompt at a
+  // time, answered only with the step's single-use backend actionToken.
+  const workflowApprovalRef =
+    useRef<WorkflowApprovalController | null>(null);
+
+  if (workflowApprovalRef.current === null) {
+    workflowApprovalRef.current = createWorkflowApprovalController(
+      invoke,
+      (error) => {
+        console.error(
+          "[Qronos Workflow Approval] decision not confirmed:",
+          error,
+        );
+      },
+    );
+  }
+
+  const workflowApproval = workflowApprovalRef.current;
+
+  // The Device Link page: one controller, fed by link_* runtime events.
+  const deviceLinkRef = useRef<DeviceLinkController | null>(null);
+
+  if (deviceLinkRef.current === null) {
+    deviceLinkRef.current = createDeviceLinkController(
+      invoke,
+      async (enabled) => {
+        await setSetting("link.enabled", enabled);
+        const status = await invoke<{ running: boolean }>("get_runtime_status");
+        if (status.running) {
+          await invoke("send_runtime_action", { actionId: "qronos.settings_reload" });
+        }
+      },
+      (error) => {
+        console.error("[Qronos Device Link] request not confirmed:", error);
+      },
+    );
+  }
+
+  const deviceLink = deviceLinkRef.current;
+
+  useEffect(() => {
+    // Pairing replies come only to this window, on their own event.
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void bindPairingDelivery(listen, deviceLink).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [deviceLink]);
+
+  const workflowApprovalView = useSyncExternalStore(
+    workflowApproval.subscribe,
+    workflowApproval.getSnapshot,
+  );
+
+  useEffect(() => {
+    // Unmount drops every prompt without answering.
+    return () => workflowApproval.clear();
+  }, [workflowApproval]);
+
+  const answerWorkflowApproval = useCallback(
+    (actionToken: string, approved: boolean, secret?: string) => {
+      void workflowApproval.answer(actionToken, approved, secret);
+    },
+    [workflowApproval],
+  );
+
+  const openWorkflowRecovery = useCallback(() => {
+    void workflowApproval.openRecovery();
+  }, [workflowApproval]);
+
+  const acknowledgeWorkflowAttempt = useCallback(
+    (operationKey: string) => {
+      void workflowApproval.acknowledge(operationKey);
+    },
+    [workflowApproval],
+  );
+
+  const [
+    fileApprovalSubmitting,
+    setFileApprovalSubmitting,
+  ] = useState(false);
 
   const [
     audioFrame,
@@ -183,11 +385,35 @@ function App() {
     ),
   });
 
+  const audioFrameLastCommitRef =
+    useRef(0);
+
   const [
     uiScale,
     setUiScale,
   ] =
     useState(1);
+
+  const userScalePercent =
+    typeof settingsState.values["appearance.ui_scale_percent"] === "number"
+      ? Math.max(
+          90,
+          Math.min(
+            110,
+            Math.round(
+              settingsState.values["appearance.ui_scale_percent"] as number,
+            ),
+          ),
+        )
+      : 100;
+
+  const keepInTray =
+    settingsState.values["system.keep_in_tray"] === true;
+
+  const outputDeviceId =
+    typeof settingsState.values["voice.output_device_id"] === "string"
+      ? (settingsState.values["voice.output_device_id"] as string)
+      : "";
 
   const [
     viewPhase,
@@ -854,9 +1080,87 @@ function App() {
     };
   }, [viewPhase]);
 
+  const voicePlaybackIdRef =
+    useRef<number | null>(
+      null,
+    );
+
+  // A response may contain several TTS WAV chunks. "ended" from the player
+  // only means its queue is empty *right now*; it is not proof that the TTS
+  // producer has finished emitting chunks. Runtime sends a separate
+  // voice_audio_stream_complete event when the producer is genuinely closed.
+  const voiceAudioStreamClosedRef =
+    useRef(false);
+
+  const voicePlayerDrainedRef =
+    useRef(false);
+
+  const voicePlaybackCompletionSentRef =
+    useRef(false);
+
   const voicePlayerRef =
     useRef<QronosVoicePlayer | null>(
       null,
+    );
+
+  const acknowledgeVoicePlaybackIfComplete =
+    useCallback(
+      () => {
+        const playbackId =
+          voicePlaybackIdRef.current;
+
+        if (
+          playbackId === null ||
+          !voiceAudioStreamClosedRef.current ||
+          !voicePlayerDrainedRef.current ||
+          voicePlaybackCompletionSentRef.current
+        ) {
+          return false;
+        }
+
+        voicePlaybackCompletionSentRef.current =
+          true;
+
+        void invoke(
+          "send_runtime_action",
+          {
+            actionId:
+              "qronos.voice_playback_complete",
+            playbackId,
+          },
+        )
+          .then(
+            () => {
+              if (
+                voicePlaybackIdRef.current ===
+                playbackId
+              ) {
+                voicePlaybackIdRef.current =
+                  null;
+                voiceAudioStreamClosedRef.current =
+                  false;
+                voicePlayerDrainedRef.current =
+                  false;
+                voicePlaybackCompletionSentRef.current =
+                  false;
+              }
+            },
+          )
+          .catch(
+            (error) => {
+              voicePlaybackCompletionSentRef.current =
+                false;
+
+              console.error(
+                "[Qronos Voice Playback] completion acknowledgement failed:",
+                error,
+              );
+            },
+          );
+
+        return true;
+      },
+      [],
     );
 
   useEffect(() => {
@@ -864,6 +1168,9 @@ function App() {
       new QronosVoicePlayer({
         onStateChange: (state) => {
           if (state === "playing") {
+            voicePlayerDrainedRef.current =
+              false;
+
             setScenario(
               "qronosVoice",
             );
@@ -872,9 +1179,17 @@ function App() {
 
           if (
             state === "ended" ||
-            state === "stopped" ||
             state === "error"
           ) {
+            // Temporary queue starvation between TTS chunks is allowed.
+            // Do not tell Runtime that the whole response finished until the
+            // producer has also emitted voice_audio_stream_complete.
+            voicePlayerDrainedRef.current =
+              true;
+
+            const acknowledged =
+              acknowledgeVoicePlaybackIfComplete();
+
             setAudioFrame({
               level: 0,
               bands: Array.from(
@@ -882,6 +1197,33 @@ function App() {
                 () => 0,
               ),
             });
+
+            setScenario(
+              acknowledged
+                ? "idle"
+                : "responding",
+            );
+            return;
+          }
+
+          if (state === "stopped") {
+            voicePlaybackIdRef.current =
+              null;
+            voiceAudioStreamClosedRef.current =
+              false;
+            voicePlayerDrainedRef.current =
+              false;
+            voicePlaybackCompletionSentRef.current =
+              false;
+
+            setAudioFrame({
+              level: 0,
+              bands: Array.from(
+                { length: 32 },
+                () => 0,
+              ),
+            });
+
             setScenario(
               "idle",
             );
@@ -894,6 +1236,9 @@ function App() {
           });
         },
         onPlaybackStarted: (startedAtMs) => {
+          const playbackId =
+            voicePlaybackIdRef.current;
+
           console.info(
             "[Qronos Voice Diagnostics] playback_started",
             {
@@ -901,8 +1246,27 @@ function App() {
                 Number(
                   startedAtMs.toFixed(3),
                 ),
+              playbackId,
             },
           );
+
+          if (playbackId !== null) {
+            void invoke(
+              "send_runtime_action",
+              {
+                actionId:
+                  "qronos.voice_playback_started",
+                playbackId,
+              },
+            ).catch(
+              (error) => {
+                console.error(
+                  "[Qronos Voice Playback] start acknowledgement failed:",
+                  error,
+                );
+              },
+            );
+          }
         },
         onError: (error) => {
           console.error(
@@ -926,7 +1290,68 @@ function App() {
           null;
       }
     };
-  }, []);
+  }, [
+    acknowledgeVoicePlaybackIfComplete,
+  ]);
+
+  const stopCurrentResponse =
+    useCallback(
+      async () => {
+        // Audio must stop before any backend bookkeeping. For native WASAPI
+        // output, QronosVoicePlayer.stop() also sends native_audio_output_stop.
+        voicePlayerRef.current?.stop();
+
+        voicePlaybackIdRef.current =
+          null;
+        voiceAudioStreamClosedRef.current =
+          false;
+        voicePlayerDrainedRef.current =
+          false;
+        voicePlaybackCompletionSentRef.current =
+          false;
+
+        setAudioFrame({
+          level: 0,
+          bands: Array.from(
+            { length: 32 },
+            () => 0,
+          ),
+        });
+
+        setScenario(
+          "idle",
+        );
+
+        try {
+          const status =
+            await invoke<{
+              running: boolean;
+              status: string;
+              message: string;
+            }>(
+              "get_runtime_status",
+            );
+
+          if (!status.running) {
+            return;
+          }
+
+          await invoke(
+            "send_runtime_action",
+            {
+              actionId:
+                "qronos.stop_response",
+            },
+          );
+        } catch (error) {
+          console.error(
+            "[Qronos Stop Response] runtime acknowledgement failed:",
+            error,
+          );
+        }
+      },
+      [],
+    );
 
   useEffect(() => {
     let disposed = false;
@@ -951,10 +1376,48 @@ function App() {
         await listen<RuntimeEvent>(
           "qronos://runtime-event",
           (event) => {
-            console.info(
-              "[Qronos Runtime]",
-              event.payload,
-            );
+            if (
+              event.payload.eventType !==
+                "voice_audio_spectrum" &&
+              event.payload.eventType !==
+                "microphone_input_level" &&
+              // Holds a new phone's key: never logged.
+              event.payload.eventType !==
+                "link_pairing"
+            ) {
+              console.info(
+                "[Qronos Runtime]",
+                event.payload,
+              );
+            }
+
+            // Screen/Paint prompts, their revocation and the end of the
+            // runtime that asked them. Never blocks this handler.
+            if (screenApprovalRef.current !== null) {
+              applyScreenApprovalEvent(
+                screenApprovalRef.current,
+                event.payload.eventType,
+                event.payload.message,
+              );
+            }
+
+            // Device Link status, devices, pairing code and refusals.
+            if (deviceLinkRef.current !== null) {
+              applyDeviceLinkEvent(
+                deviceLinkRef.current,
+                event.payload.eventType,
+                event.payload.message,
+              );
+            }
+
+            // Telegram / print / browser workflow prompts and results.
+            if (workflowApprovalRef.current !== null) {
+              applyWorkflowEvent(
+                workflowApprovalRef.current,
+                event.payload.eventType,
+                event.payload.message,
+              );
+            }
 
             switch (
               event.payload.eventType
@@ -1000,6 +1463,21 @@ function App() {
                     bands.push(0);
                   }
 
+                  const now =
+                    performance.now();
+
+                  if (
+                    level > 0.001 &&
+                    now -
+                      audioFrameLastCommitRef.current <
+                      120
+                  ) {
+                    break;
+                  }
+
+                  audioFrameLastCommitRef.current =
+                    now;
+
                   setAudioFrame({
                     level,
                     bands,
@@ -1029,10 +1507,18 @@ function App() {
                 break;
 
               case "voice_listening":
-                voicePlayerRef.current?.stop();
-                setScenario(
-                  "listening",
-                );
+                // Explicit Push-to-Talk already stops active speech before
+                // asking Runtime to listen. A generic listening event must
+                // never kill healthy playback on its own; doing that turns a
+                // later TTS-chunk failure into an apparently random cutoff.
+                if (
+                  !voicePlayerRef.current
+                    ?.isActive()
+                ) {
+                  setScenario(
+                    "listening",
+                  );
+                }
                 break;
 
               case "voice_transcribing":
@@ -1067,6 +1553,7 @@ function App() {
                     event.payload.message,
                   ) as {
                     path?: unknown;
+                    playbackId?: unknown;
                   };
 
                   if (
@@ -1078,6 +1565,30 @@ function App() {
                     throw new Error(
                       "voice_audio_ready did not contain a valid path.",
                     );
+                  }
+
+                  if (
+                    typeof parsed.playbackId ===
+                      "number" &&
+                    Number.isInteger(
+                      parsed.playbackId,
+                    ) &&
+                    parsed.playbackId > 0
+                  ) {
+                    if (
+                      voicePlaybackIdRef.current !==
+                        parsed.playbackId
+                    ) {
+                      voiceAudioStreamClosedRef.current =
+                        false;
+                      voicePlaybackCompletionSentRef.current =
+                        false;
+                    }
+
+                    voicePlaybackIdRef.current =
+                      parsed.playbackId;
+                    voicePlayerDrainedRef.current =
+                      false;
                   }
 
                   const player =
@@ -1116,80 +1627,309 @@ function App() {
                 break;
               }
 
-              case "runtime_error":
-                voicePlayerRef.current?.stop();
-                setAudioFrame({
-                  level: 0,
-                  bands: Array.from(
-                    { length: 32 },
-                    () => 0,
-                  ),
-                });
-                setScenario(
-                  "idle",
+              case "voice_audio_stream_complete": {
+                try {
+                  const parsed = JSON.parse(
+                    event.payload.message,
+                  ) as {
+                    playbackId?: unknown;
+                    generatedChunkCount?: unknown;
+                    plannedChunkCount?: unknown;
+                    stoppedByUser?: unknown;
+                    partialTtsError?: unknown;
+                  };
+
+                  if (
+                    typeof parsed.playbackId !==
+                      "number" ||
+                    !Number.isInteger(
+                      parsed.playbackId,
+                    ) ||
+                    parsed.playbackId <= 0
+                  ) {
+                    throw new Error(
+                      "voice_audio_stream_complete did not contain a valid playbackId.",
+                    );
+                  }
+
+                  if (
+                    voicePlaybackIdRef.current !==
+                      parsed.playbackId
+                  ) {
+                    // Explicit Stop may have already cleared this playback.
+                    break;
+                  }
+
+                  voiceAudioStreamClosedRef.current =
+                    true;
+
+                  const player =
+                    voicePlayerRef.current;
+
+                  if (
+                    !player ||
+                    !player.isActive()
+                  ) {
+                    voicePlayerDrainedRef.current =
+                      true;
+                  }
+
+                  console.info(
+                    "[Qronos Voice Diagnostics] audio_stream_complete",
+                    {
+                      playbackId:
+                        parsed.playbackId,
+                      generatedChunkCount:
+                        parsed.generatedChunkCount,
+                      plannedChunkCount:
+                        parsed.plannedChunkCount,
+                      stoppedByUser:
+                        parsed.stoppedByUser,
+                      partialTtsError:
+                        parsed.partialTtsError,
+                      playerDrained:
+                        voicePlayerDrainedRef.current,
+                    },
+                  );
+
+                  acknowledgeVoicePlaybackIfComplete();
+                } catch (error) {
+                  console.error(
+                    "[Qronos Voice Playback] invalid stream-complete event:",
+                    error,
+                  );
+                }
+                break;
+              }
+
+              case "voice_needs_screen":
+                // The prompt itself was routed to the approval dialog above.
+                setScenario("thinking");
+                break;
+
+              case "screen_approval_stale": {
+                console.info(
+                  "[Qronos Screen Approval] answer refused as stale:",
+                  event.payload.message,
                 );
+                if (
+                  !voicePlayerRef.current
+                    ?.isActive()
+                ) {
+                  setScenario("idle");
+                }
+                break;
+              }
+
+              case "file_action_approval_required": {
+                try {
+                  const parsed = JSON.parse(
+                    event.payload.message,
+                  ) as {
+                    actionToken?: unknown;
+                    actionId?: unknown;
+                    requestId?: unknown;
+                    permission?: unknown;
+                    operation?: unknown;
+                    source?: unknown;
+                    destination?: unknown;
+                    newName?: unknown;
+                  };
+
+                  const actionToken =
+                    typeof parsed.actionToken ===
+                    "string"
+                      ? parsed.actionToken.trim()
+                      : "";
+                  const actionId =
+                    typeof parsed.actionId ===
+                    "string"
+                      ? parsed.actionId.trim()
+                      : "";
+                  const requestId =
+                    typeof parsed.requestId ===
+                    "string"
+                      ? parsed.requestId.trim()
+                      : "";
+                  const permission =
+                    parsed.permission;
+                  const operation:
+                    | FileActionApproval["operation"]
+                    | null =
+                    parsed.operation ===
+                      "copy_file" ||
+                    parsed.operation ===
+                      "move_file" ||
+                    parsed.operation ===
+                      "rename_file" ||
+                    parsed.operation ===
+                      "create_folder"
+                      ? parsed.operation
+                      : null;
+
+                  if (
+                    !actionToken ||
+                    !actionId ||
+                    !requestId ||
+                    permission !==
+                      "require_ui_confirmation" ||
+                    operation === null
+                  ) {
+                    throw new Error(
+                      "Invalid file-action approval payload.",
+                    );
+                  }
+
+                  setPendingFileApproval({
+                    actionToken,
+                    actionId,
+                    requestId,
+                    permission:
+                      "require_ui_confirmation",
+                    operation,
+                    source:
+                      typeof parsed.source ===
+                      "string"
+                        ? parsed.source
+                        : "",
+                    destination:
+                      typeof parsed.destination ===
+                      "string"
+                        ? parsed.destination
+                        : "",
+                    newName:
+                      typeof parsed.newName ===
+                      "string"
+                        ? parsed.newName
+                        : "",
+                  });
+                  setFileApprovalSubmitting(
+                    false,
+                  );
+                  setScenario(
+                    "thinking",
+                  );
+                } catch (error) {
+                  console.error(
+                    "[Qronos File Approval] invalid event:",
+                    error,
+                  );
+                }
+                break;
+              }
+
+              case "file_action_completed":
+              case "file_action_declined":
+              case "file_action_refused":
+              case "file_action_failed":
+              // Stop/Pause/shutdown revoked the pending approval, or an
+              // answer named one that is no longer usable: close the
+              // dialog; the runtime will not write.
+              case "file_action_cancelled":
+              case "file_action_stale":
+                setPendingFileApproval(
+                  null,
+                );
+                setFileApprovalSubmitting(
+                  false,
+                );
+                if (
+                  !voicePlayerRef.current
+                    ?.isActive()
+                ) {
+                  setScenario(
+                    "idle",
+                  );
+                }
+                break;
+
+              case "runtime_error":
+                // Runtime errors are diagnostics, not user Stop commands.
+                // If valid audio is already playing, preserve it. Explicit
+                // Stop, Push-to-Talk interruption, Pause, and disposal remain
+                // the only paths allowed to terminate user-visible playback.
+                console.error(
+                  "[Qronos Runtime]",
+                  event.payload.message,
+                );
+
+                if (
+                  !voicePlayerRef.current
+                    ?.isActive()
+                ) {
+                  setAudioFrame({
+                    level: 0,
+                    bands: Array.from(
+                      { length: 32 },
+                      () => 0,
+                    ),
+                  });
+                  setScenario(
+                    "idle",
+                  );
+                }
                 break;
 
               case "runtime_ready":
-                // Asking for the queue is also what starts it. Nothing is
-                // sampled or scheduled until somebody wants it.
+                // A new Python runtime always starts unpaused. Global pause is
+                // deliberately temporary and never survives runtime restart.
+                setRuntimePaused(false);
+
+                // start_runtime() only means that the Python process was
+                // spawned. runtime_ready is the authoritative signal that
+                // the bridge is ready to accept startup actions.
                 void invoke(
-                  "queue_list",
+                  "send_runtime_action",
+                  {
+                    actionId:
+                      "qronos.wake_listener_start",
+                  },
                 ).catch(
-                  () => undefined,
-                );
-                break;
-
-              case "queue_changed":
-                try {
-                  const next = JSON.parse(
-                    event.payload.message,
-                  ) as QueueSnapshot;
-
-                  setQueueSnapshot(
-                    (current) =>
-                      current &&
-                      current.revision >
-                        next.revision
-                        ? current
-                        : next,
-                  );
-                } catch {
-                  // A queue we cannot read is better ignored than shown
-                  // wrongly; the next event carries the whole state again.
-                }
-                break;
-
-              case "queue_task_queued":
-                setStatusOverride({
-                  label:
-                    "کار سنگین نگه داشته شد",
-                  subtitle:
-                    "WORK QUEUED — MACHINE BUSY",
-                });
-
-                window.setTimeout(
-                  () => {
-                    setStatusOverride(
-                      null,
+                  (error) => {
+                    console.error(
+                      "[Qronos Wake Word] ready-start failed:",
+                      error,
                     );
                   },
-                  6000,
                 );
                 break;
 
-              case "queue_override_refused":
+              case "runtime_pause_changed": {
                 try {
-                  setQueueRefusal(
-                    JSON.parse(
-                      event.payload
-                        .message,
-                    ) as QueueRefusal,
+                  const parsed = JSON.parse(
+                    event.payload.message,
+                  ) as {
+                    paused?: unknown;
+                  };
+
+                  const paused =
+                    parsed.paused === true;
+
+                  setRuntimePaused(
+                    paused,
                   );
+
+                  if (paused) {
+                    voicePlayerRef.current?.stop();
+
+                    setAudioFrame({
+                      level: 0,
+                      bands: Array.from(
+                        { length: 32 },
+                        () => 0,
+                      ),
+                    });
+
+                    setScenario(
+                      "idle",
+                    );
+                  }
                 } catch {
-                  // Same reasoning as above.
+                  // Ignore malformed pause telemetry; the control remains
+                  // authoritative only when the runtime sends valid state.
                 }
                 break;
+              }
 
               case "voice_turn_complete":
                 if (
@@ -1229,8 +1969,15 @@ function App() {
             await invoke<RuntimeStatus>(
               "start_runtime",
             );
+
+            // The newly spawned runtime will start Wake when it emits
+            // runtime_ready. Do not race startup by sending the action here.
+            return;
           }
 
+          // A runtime that was already alive may have emitted runtime_ready
+          // before this React effect subscribed. Start Wake directly in that
+          // case. The backend start operation is idempotent.
           await invoke(
             "send_runtime_action",
             {
@@ -1264,6 +2011,14 @@ function App() {
         }
 
         if (
+          actionId ===
+          "qronos.stop_response"
+        ) {
+          await stopCurrentResponse();
+          return;
+        }
+
+        if (
           actionId !==
           "qronos.push_to_talk"
         ) {
@@ -1271,6 +2026,13 @@ function App() {
         }
 
         try {
+          if (
+            voicePlayerRef.current
+              ?.isActive()
+          ) {
+            await stopCurrentResponse();
+          }
+
           const status =
             await invoke<RuntimeStatus>(
               "get_runtime_status",
@@ -1329,7 +2091,54 @@ function App() {
       removeWindowListener?.();
       unlistenRuntime?.();
     };
-  }, []);
+  }, [
+    stopCurrentResponse,
+  ]);
+
+  const answerFileActionApproval =
+    useCallback(
+      async (
+        approved: boolean,
+      ) => {
+        if (
+          !pendingFileApproval ||
+          fileApprovalSubmitting
+        ) {
+          return;
+        }
+
+        setFileApprovalSubmitting(
+          true,
+        );
+
+        try {
+          await invoke(
+            "send_runtime_action",
+            {
+              actionId:
+                "qronos.file_action_decision",
+              data: {
+                actionToken:
+                  pendingFileApproval.actionToken,
+                approved,
+              },
+            },
+          );
+        } catch (error) {
+          console.error(
+            "[Qronos File Approval] decision failed:",
+            error,
+          );
+          setFileApprovalSubmitting(
+            false,
+          );
+        }
+      },
+      [
+        pendingFileApproval,
+        fileApprovalSubmitting,
+      ],
+    );
 
   const toggleFullscreen =
     async () => {
@@ -1363,71 +2172,159 @@ function App() {
   const statusLabel =
     useMemo(
       () =>
-        statusOverride?.label ??
+        scenario === "idle" && (setupState.loading || setupState.error || !setupState.snapshot || setupNeedsAttention(setupState.snapshot))
+          ? (setupState.loading ? "بررسی راه‌اندازی" : "راه‌اندازی را بررسی کنید")
+          :
         statusByScenario[
           scenario
         ],
-      [
-        scenario,
-        statusOverride,
-      ],
+      [scenario, setupState],
     );
 
   const statusSubtitle =
     useMemo(
       () =>
-        statusOverride?.subtitle ??
+        scenario === "idle" && (setupState.loading || setupState.error || !setupState.snapshot || setupNeedsAttention(setupState.snapshot))
+          ? "LOCAL SETUP"
+          :
         subtitleByScenario[
           scenario
         ],
-      [
-        scenario,
-        statusOverride,
-      ],
+      [scenario, setupState],
     );
 
-  // Work waiting for the machine to free up. Drives the badge, so a queued
-  // task is visible without having to be on the permissions screen.
-  const waitingCount =
-    useMemo(
-      () =>
-        (
-          queueSnapshot?.tasks ?? []
-        ).filter(
-          (task) =>
-            task.state ===
-              "queued" ||
-            task.state === "paused",
-        ).length,
-      [queueSnapshot],
-    );
-
-  const sendQueueCommand =
+  const setRuntimePause =
     useCallback(
-      (
-        command: string,
-        args: Record<
-          string,
-          unknown
-        > = {},
+      async (
+        paused: boolean,
       ) => {
-        void invoke(
-          command,
-          args,
-        ).catch(
-          () => undefined,
-        );
+        try {
+          await invoke(
+            "runtime_set_paused",
+            { paused },
+          );
+
+          /*
+           * IPC accepted and flushed the command. Reflect the requested state
+           * immediately so the same control can always Pause -> Active.
+           * runtime_pause_changed remains authoritative and reconciles the
+           * state after Python processes the command.
+           *
+           * Wake resume is intentionally not a second frontend command:
+           * Python owns the full Pause/Resume lifecycle atomically.
+           */
+          setRuntimePaused(
+            paused,
+          );
+        } catch (error) {
+          console.error(
+            "[Qronos Runtime Pause]",
+            error,
+          );
+        }
       },
       [],
     );
+
+  const sendHomeMessage =
+    useCallback(
+      async () => {
+        const text =
+          homeDraft.trim();
+
+        if (
+          !text ||
+          pendingRequestId
+        ) {
+          return;
+        }
+
+        setHomeDraft("");
+
+        if (
+          homeComposerRef.current
+        ) {
+          homeComposerRef.current.style.height =
+            "24px";
+        }
+
+        await sendConversationMessage(
+          text,
+        );
+      },
+      [
+        homeDraft,
+        pendingRequestId,
+      ],
+    );
+
+  useEffect(() => {
+    void refreshSettings().catch((error) => {
+      console.error(
+        "[Qronos Settings] startup refresh failed:",
+        error,
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    if (settingsState.loading) {
+      return;
+    }
+
+    const player =
+      voicePlayerRef.current;
+
+    if (!player) {
+      return;
+    }
+
+    void player
+      .setOutputDeviceId(
+        outputDeviceId,
+      )
+      .catch((error) => {
+        console.error(
+          "[Qronos Voice Output] selected device could not be applied; system default is active:",
+          error,
+        );
+      });
+  }, [
+    outputDeviceId,
+    settingsState.loading,
+  ]);
+
+  useEffect(() => {
+    if (settingsState.loading) {
+      return;
+    }
+
+    void invoke(
+      "set_keep_in_tray",
+      {
+        enabled: keepInTray,
+      },
+    ).catch((error) => {
+      console.error(
+        "[Qronos System Tray] startup apply failed:",
+        error,
+      );
+    });
+  }, [
+    keepInTray,
+    settingsState.loading,
+  ]);
 
   useEffect(() => {
     const updateScale =
       () => {
         /*
-         * Single shared desktop scale.
-         * 1600 × 900 is the reference composition.
-         * Every major UI region consumes this same value.
+         * One shared desktop scale remains authoritative for every major
+         * Qronos region. 1600 × 900 is still the approved 100% reference.
+         *
+         * The old implementation hard-capped at 1, which made 4K displays
+         * physically tiny. Default 100% stays at 1 on ordinary 1080p-class
+         * windows, then grows smoothly on genuinely high-resolution windows.
          */
         const widthScale =
           window.innerWidth /
@@ -1437,13 +2334,42 @@ function App() {
           window.innerHeight /
           900;
 
+        const fitScale =
+          Math.min(
+            widthScale,
+            heightScale,
+          );
+
+        const automaticScale =
+          fitScale <= 1.25
+            ? Math.min(
+                1,
+                fitScale,
+              )
+            : Math.min(
+                2.15,
+                1 +
+                  (
+                    fitScale -
+                    1.25
+                  ) *
+                    0.9,
+              );
+
+        const preferredScale =
+          automaticScale *
+          (
+            userScalePercent /
+            100
+          );
+
         const next =
           Math.max(
             0.62,
             Math.min(
-              1,
-              widthScale,
-              heightScale,
+              2.4,
+              fitScale,
+              preferredScale,
             ),
           );
 
@@ -1467,7 +2393,7 @@ function App() {
         updateScale,
       );
     };
-  }, []);
+  }, [userScalePercent]);
 
   useEffect(() => {
     return () => {
@@ -1555,12 +2481,41 @@ function App() {
 
 
       <RightTelemetryPanel />
+      <SetupStatus />
+
+      {/* The Smart Queue: queued requests, their progress and outcomes,
+          with hold/pause/resume/cancel. Its hold is the queue's own and is
+          separate from the runtime-wide Pause owned by PermissionsView. */}
+      <QueueDrawer
+        hidden={
+          viewPhase !== "home" &&
+          viewPhase !== "conversations"
+        }
+        onShowConversation={(messageId) => {
+          setConversationFocusMessageId(messageId);
+          openConversations();
+        }}
+      />
+
+      {/* What Qronos did, what was allowed, what failed, and what can actually be undone. */}
+      <HistoryDrawer
+        hidden={
+          viewPhase !== "home" &&
+          viewPhase !== "conversations"
+        }
+      />
+
+      {/* The media library: chosen folders, background indexing, search with evidence cards, open at a time
+          and reports, all through the runtime's one media host (qronos.media actions). */}
+      <MediaDrawer
+        hidden={
+          viewPhase !== "home" &&
+          viewPhase !== "conversations"
+        }
+      />
 
       <section className="core-zone">
         <div className="orb-shell">
-          <div className="orb-ring orb-ring-1" />
-          <div className="orb-ring orb-ring-2" />
-
           <QronosOrb
             size={460}
             state={orbState}
@@ -1631,10 +2586,19 @@ function App() {
           </button>
 
           <textarea
+            ref={homeComposerRef}
             className="command-input"
             rows={1}
             placeholder="از کرونوس بپرس..."
             aria-label="دستور کرونوس"
+            value={homeDraft}
+            onChange={(
+              event,
+            ) => {
+              setHomeDraft(
+                event.currentTarget.value,
+              );
+            }}
             onInput={(
               event,
             ) => {
@@ -1656,34 +2620,82 @@ function App() {
                   nextHeight,
                 )}px`;
             }}
+            onKeyDown={(
+              event,
+            ) => {
+              if (
+                event.key ===
+                  "Enter" &&
+                !event.shiftKey
+              ) {
+                event.preventDefault();
+                void sendHomeMessage();
+              }
+            }}
           />
 
-          <button
-            type="button"
-            className="command-action command-action-send"
-            aria-label="ارسال"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              aria-hidden="true"
+          {scenario ===
+          "qronosVoice" ? (
+            <button
+              type="button"
+              className="command-action command-action-send"
+              aria-label="توقف پاسخ"
+              title="توقف پاسخ · Ctrl+Alt+X"
+              onClick={() => {
+                void stopCurrentResponse();
+              }}
             >
-              <path
-                d="m5 12.1 13.2-6.3-4.8 12.7-2.2-4.4L5 12.1Z"
-                fill="none"
-                stroke="currentColor"
-                strokeLinejoin="round"
-                strokeWidth="1.35"
-              />
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <rect
+                  x="7.2"
+                  y="7.2"
+                  width="9.6"
+                  height="9.6"
+                  rx="1.2"
+                  fill="currentColor"
+                />
+              </svg>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="command-action command-action-send"
+              aria-label="ارسال"
+              onClick={() => {
+                void sendHomeMessage();
+              }}
+              disabled={
+                !homeDraft.trim() ||
+                Boolean(
+                  pendingRequestId,
+                )
+              }
+            >
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path
+                  d="m5 12.1 13.2-6.3-4.8 12.7-2.2-4.4L5 12.1Z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinejoin="round"
+                  strokeWidth="1.35"
+                />
 
-              <path
-                d="m11.2 14.1 7-8.3"
-                fill="none"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeWidth="1.35"
-              />
-            </svg>
-          </button>
+                <path
+                  d="m11.2 14.1 7-8.3"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeWidth="1.35"
+                />
+              </svg>
+            </button>
+          )}
         </div>
 
         <div className="command-hint">
@@ -1700,10 +2712,161 @@ function App() {
           <i />
 
           <span>
-            اجرای امن
+            {scenario ===
+            "qronosVoice"
+              ? "Ctrl+Alt+X توقف"
+              : "اجرای امن"}
           </span>
         </div>
       </section>
+
+      <ScreenApprovalDialog
+        view={screenApprovalView}
+        onAnswer={answerScreenApproval}
+      />
+
+      <AppWorkflowDialog
+        view={workflowApprovalView}
+        onAnswer={answerWorkflowApproval}
+        onDismissResult={workflowApproval.dismissResult}
+        onOpenRecovery={openWorkflowRecovery}
+        onAcknowledge={acknowledgeWorkflowAttempt}
+        onCloseRecovery={workflowApproval.closeRecovery}
+      />
+
+      {pendingFileApproval && (
+        <div
+          className="file-approval-backdrop"
+          role="presentation"
+        >
+          <section
+            className="file-approval-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="file-approval-title"
+          >
+            <div
+              className="file-approval-kicker"
+            >
+              FILE CONTROL · PERMISSION REQUIRED
+            </div>
+
+            <h2
+              id="file-approval-title"
+            >
+              اجازه اجرای عملیات فایل؟
+            </h2>
+
+            <p
+              className="file-approval-copy"
+            >
+              این تأیید، عملیات امن Copy / Move / Rename / Create Folder
+              را برای ۱۰ دقیقه فعال می‌کند. بعد از ۱۰ دقیقه دوباره اجازه می‌پرسد.
+            </p>
+
+            <div
+              className="file-approval-operation"
+            >
+              <span>
+                عملیات
+              </span>
+              <strong>
+                {fileActionLabel(
+                  pendingFileApproval.operation,
+                )}
+              </strong>
+            </div>
+
+            {pendingFileApproval.source && (
+              <div
+                className="file-approval-path"
+              >
+                <span>
+                  مبدأ
+                </span>
+                <code dir="ltr">
+                  {
+                    pendingFileApproval.source
+                  }
+                </code>
+              </div>
+            )}
+
+            {pendingFileApproval.destination && (
+              <div
+                className="file-approval-path"
+              >
+                <span>
+                  مقصد
+                </span>
+                <code dir="ltr">
+                  {
+                    pendingFileApproval.destination
+                  }
+                </code>
+              </div>
+            )}
+
+            {pendingFileApproval.newName && (
+              <div
+                className="file-approval-path"
+              >
+                <span>
+                  نام جدید
+                </span>
+                <code dir="ltr">
+                  {
+                    pendingFileApproval.newName
+                  }
+                </code>
+              </div>
+            )}
+
+            <div
+              className="file-approval-warning"
+            >
+              این مجوز فقط در همین اجرای Qronos و برای ۱۰ دقیقه است؛
+              با Pause یا Restart باطل می‌شود. Delete شامل این مجوز نیست.
+            </div>
+
+            <div
+              className="file-approval-actions"
+            >
+              <button
+                type="button"
+                className="file-approval-button file-approval-deny"
+                disabled={
+                  fileApprovalSubmitting
+                }
+                onClick={() => {
+                  void answerFileActionApproval(
+                    false,
+                  );
+                }}
+              >
+                رد کردن
+              </button>
+
+              <button
+                type="button"
+                className="file-approval-button file-approval-allow"
+                disabled={
+                  fileApprovalSubmitting
+                }
+                onClick={() => {
+                  void answerFileActionApproval(
+                    true,
+                  );
+                }}
+              >
+                {fileApprovalSubmitting
+                  ? "در حال ارسال..."
+                  : "تأیید برای ۱۰ دقیقه"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       <CrossViewParticleTransition
         target={
@@ -1745,6 +2908,8 @@ function App() {
         onClose={
           returnHome
         }
+        focusMessageId={conversationFocusMessageId}
+        onFocusConsumed={() => setConversationFocusMessageId(null)}
       />
 
       <LibraryView
@@ -1775,43 +2940,18 @@ function App() {
         onClose={
           returnHome
         }
+        onShowConversation={(messageId) => {
+          setConversationFocusMessageId(messageId);
+          openConversations();
+        }}
       />
 
       <PermissionsView
-        smartQueue={
-          <SmartQueuePanel
-            snapshot={
-              queueSnapshot
-            }
-            refusal={
-              queueRefusal
-            }
-            onOverride={(
-              taskId,
-            ) =>
-              sendQueueCommand(
-                "queue_override",
-                { taskId },
-              )
-            }
-            onCancel={(taskId) =>
-              sendQueueCommand(
-                "queue_cancel",
-                { taskId },
-              )
-            }
-            onTogglePaused={(
-              paused,
-            ) =>
-              sendQueueCommand(
-                "queue_set_paused",
-                { paused },
-              )
-            }
-            onDismissRefusal={() =>
-              setQueueRefusal(null)
-            }
-          />
+        runtimePaused={
+          runtimePaused
+        }
+        onToggleRuntimePaused={
+          setRuntimePause
         }
         phase={
           settingsEntrySource === "permissions" &&
@@ -1833,6 +2973,7 @@ function App() {
         }
       />
 
+
       <SettingsView
         phase={
           settingsExitTarget
@@ -1852,6 +2993,7 @@ function App() {
         onOpenPermissions={
           openPermissions
         }
+        deviceLink={deviceLink}
       />
 
       <nav
@@ -1903,8 +3045,9 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            خانه
+          <span className="nav-label">
+            <strong>خانه</strong>
+            <small>Home</small>
           </span>
         </button>
 
@@ -1938,8 +3081,9 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            گفتگوها
+          <span className="nav-label">
+            <strong>گفتگوها</strong>
+            <small>Chat</small>
           </span>
         </button>
 
@@ -1980,8 +3124,18 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            کتابخانه
+          {libraryUnreadCount > 0 && (
+            <span
+              className="nav-notification-badge"
+              aria-label={`${libraryUnreadCount} مورد جدید در کتابخانه`}
+            >
+              {libraryUnreadCount > 99 ? "99+" : libraryUnreadCount}
+            </span>
+          )}
+
+          <span className="nav-label">
+            <strong>کتابخانه</strong>
+            <small>Library</small>
           </span>
         </button>
 
@@ -2016,17 +3170,9 @@ function App() {
             </svg>
           </span>
 
-          {waitingCount > 0 && (
-            <span
-              className="nav-notification-badge"
-              aria-label={`${waitingCount} کار در انتظار`}
-            >
-              {waitingCount}
-            </span>
-          )}
-
-          <span>
-            مجوزها
+          <span className="nav-label">
+            <strong>مجوزها</strong>
+            <small>Permissions</small>
           </span>
         </button>
 
@@ -2074,8 +3220,9 @@ function App() {
             </svg>
           </span>
 
-          <span>
-            تنظیمات
+          <span className="nav-label">
+            <strong>تنظیمات</strong>
+            <small>Settings</small>
           </span>
         </button>
       </nav>

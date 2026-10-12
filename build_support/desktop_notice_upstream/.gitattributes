@@ -1,0 +1,2 @@
+# Vendored upstream notices are byte-exact (SHA-256 pinned): no EOL or whitespace rewriting.
+texts/** -text -whitespace

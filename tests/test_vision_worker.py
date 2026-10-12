@@ -22,14 +22,19 @@ from tempfile import TemporaryDirectory
 from PIL import Image
 
 from core.model_registry import get_model
+from core.screen_capture import Capture, DisplayGeometry
 from core.task_plan import PlanStep, TaskPlan
 from core.task_router import TaskType
+from core.vision_grounding import GroundingUnavailable
+from core.vision_image import PreparedImage
 from core.vision_worker import (
     NO_MODEL_MESSAGE,
     NO_PICTURE_MESSAGE,
     SAW_NOTHING_MESSAGE,
     TEXT_ALLOWANCE_TOKENS,
+    VisionGrounder,
     VisionWorker,
+    brain_ground_fn,
     needs_reasoning,
 )
 from core.workers import UnavailableReason, WorkerRegistry
@@ -576,6 +581,87 @@ class TestTheOcrHint(VisionWorkerCase):
         _, images = self.described[0]
 
         self.assertEqual(images, (picture,))
+
+
+class TestStructuredGroundingModelSeam(unittest.TestCase):
+    def capture(self):
+        return Capture(
+            image=PreparedImage(data=b"png", width=1280, height=720, format="png"),
+            geometry=DisplayGeometry(1920, 1080, 1920, 1080),
+        )
+
+    def test_grounder_refuses_unbound_capture_before_calling_model(self):
+        capture = self.capture()
+        called = []
+
+        def locate_fn(target, image):
+            called.append((target, image))
+            return (
+                '{"status":"not_found","image_width":1280,'
+                '"image_height":720,"candidates":[]}'
+            )
+
+        worker = VisionGrounder(locate_fn=locate_fn)
+
+        with self.assertRaises(GroundingUnavailable):
+            worker.locate("Save button", capture)
+
+        self.assertEqual(called, [])
+
+    def test_brain_ground_fn_requests_schema_json_for_exact_image(self):
+        class FakeRuntime:
+            def __init__(self):
+                self.calls = []
+                self.stopped = []
+
+            def chat(self, **kwargs):
+                self.calls.append(kwargs)
+                return (
+                    '{"status":"not_found","image_width":1280,'
+                    '"image_height":720,"candidates":[]}'
+                )
+
+            def stop_model(self, name):
+                self.stopped.append(name)
+
+        runtime = FakeRuntime()
+        capture = self.capture()
+        raw = brain_ground_fn(runtime)("Save button", capture)
+
+        self.assertIn('"status":"not_found"', raw)
+        self.assertEqual(len(runtime.calls), 1)
+        call = runtime.calls[0]
+        self.assertIsNotNone(call["response_format"])
+
+        schema = call["response_format"]
+
+        self.assertEqual(
+            schema["properties"]["image_width"]["enum"],
+            [1280],
+        )
+        self.assertEqual(
+            schema["properties"]["image_height"]["enum"],
+            [720],
+        )
+
+        candidate = (
+            schema["properties"]["candidates"]["items"]["properties"]
+        )
+
+        self.assertEqual(
+            candidate["point"]["properties"]["x"]["maximum"],
+            1279,
+        )
+        self.assertEqual(
+            candidate["point"]["properties"]["y"]["maximum"],
+            719,
+        )
+
+        self.assertFalse(call["think"])
+        self.assertEqual(call["messages"][0].images, (capture.image,))
+        self.assertIn("1280x720", call["messages"][0].content)
+        self.assertIn("Save button", call["messages"][0].content)
+        self.assertEqual(runtime.stopped, [get_model("vision").name])
 
 
 if __name__ == "__main__":

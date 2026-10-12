@@ -33,9 +33,32 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+
+# Windows refuses to replace a file that another process has open for the
+# instant it takes to read it (ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION).
+# Only that condition is waited out, for a bounded time.
+_REPLACE_TIMEOUT_SECONDS = 2.0
+_REPLACE_POLL_SECONDS = 0.01
+_WINDOWS_IN_USE_ERRORS = frozenset({5, 32})
+
+
+def _replace(temporary: Path, path: Path) -> None:
+    deadline = time.monotonic() + _REPLACE_TIMEOUT_SECONDS
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as exc:
+            transient = os.name == "nt" and getattr(exc, "winerror", None) in _WINDOWS_IN_USE_ERRORS
+            if not transient or time.monotonic() >= deadline:
+                raise
+            time.sleep(_REPLACE_POLL_SECONDS)
 
 
 # One function per version bump: it receives the payload written by version N
@@ -118,14 +141,28 @@ class JsonStore:
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        # A unique temporary name per write: two writers (threads or
+        # processes) never open, truncate or delete each other's temporary
+        # file. A fixed "<name>.tmp" made concurrent saves fail with
+        # WinError 32 or replace one writer's file with another's.
+        handle_fd, temporary_name = tempfile.mkstemp(
+            dir=self.path.parent,
+            prefix=self.path.name + ".",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
 
         try:
-            temporary.write_text(
-                json.dumps(document, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(temporary, self.path)
+            # Flushed to the disk before the rename, so a power cut cannot
+            # leave the rename recorded and the contents not.
+            with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(document, ensure_ascii=False, indent=2)
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            _replace(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)
 

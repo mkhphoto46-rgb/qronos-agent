@@ -20,6 +20,8 @@
 # ---------------------------------------------------------------------------
 
 tests/
+desktop/tests/
+desktop/src-tauri/tests/
 
 # The whole tools directory, not only tools/debug. The other scripts here
 # are live harnesses a developer runs by hand: they open microphones, talk
@@ -31,6 +33,13 @@ tests/
 # effect on files Git already tracks, so all of these were still in the
 # repository and would still have shipped.
 tools/
+build_support/
+
+# The Device Link relay is a separate program deployed on its own server by
+# whoever operates it, and the phone app is built for the phone. Neither is
+# part of the PC application.
+relay/
+mobile/
 
 
 # ---------------------------------------------------------------------------

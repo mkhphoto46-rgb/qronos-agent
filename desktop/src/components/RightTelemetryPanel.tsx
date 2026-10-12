@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useMemo,
   useRef,
@@ -66,6 +67,22 @@ type TelemetrySnapshot = {
   disks: DiskSnapshot[];
 
   devices: DeviceSnapshot[];
+};
+
+
+type LibraryTelemetryArtifact = {
+  sizeBytes: number;
+  pathOrUrl: string;
+  availabilityStatus: string;
+};
+
+type LibraryStorageSnapshot = {
+  ok: boolean;
+  artifacts: LibraryTelemetryArtifact[];
+  locations: {
+    artifactRoot: string;
+  };
+  error?: string;
 };
 
 type LiveMetric = {
@@ -312,6 +329,165 @@ function formatBytes(
       ? 0
       : 1,
   )} GB`;
+}
+
+function formatArtifactBytes(
+  bytes: number,
+) {
+  const safeBytes =
+    Math.max(
+      0,
+      Number.isFinite(bytes)
+        ? bytes
+        : 0,
+    );
+
+  const kib =
+    safeBytes / 1024;
+
+  const mib =
+    kib / 1024;
+
+  const gib =
+    mib / 1024;
+
+  const tib =
+    gib / 1024;
+
+  if (tib >= 1) {
+    return `${tib.toFixed(
+      tib >= 100
+        ? 0
+        : tib >= 10
+          ? 1
+          : 2,
+    )} TB`;
+  }
+
+  if (gib >= 1) {
+    return `${gib.toFixed(
+      gib >= 100
+        ? 0
+        : gib >= 10
+          ? 1
+          : 2,
+    )} GB`;
+  }
+
+  if (mib >= 1) {
+    return `${mib.toFixed(
+      mib >= 100
+        ? 0
+        : mib >= 10
+          ? 1
+          : 2,
+    )} MB`;
+  }
+
+  if (kib >= 1) {
+    return `${kib.toFixed(
+      kib >= 100
+        ? 0
+        : kib >= 10
+          ? 1
+          : 2,
+    )} KB`;
+  }
+
+  return `${Math.round(
+    safeBytes,
+  )} B`;
+}
+
+function normalizeStoragePath(
+  value: string,
+) {
+  return value
+    .trim()
+    .replace(
+      /\//g,
+      "\\",
+    )
+    .replace(
+      /\\+$/,
+      "",
+    )
+    .toLowerCase();
+}
+
+function isPathInsideRoot(
+  value: string,
+  root: string,
+) {
+  const path =
+    normalizeStoragePath(
+      value,
+    );
+
+  const normalizedRoot =
+    normalizeStoragePath(
+      root,
+    );
+
+  if (
+    !path ||
+    !normalizedRoot
+  ) {
+    return false;
+  }
+
+  return (
+    path ===
+      normalizedRoot ||
+    path.startsWith(
+      `${normalizedRoot}\\`,
+    )
+  );
+}
+
+function hostDiskForPath(
+  value: string,
+  disks: DiskSnapshot[],
+) {
+  const path =
+    normalizeStoragePath(
+      value,
+    );
+
+  if (!path) {
+    return null;
+  }
+
+  return [...disks]
+    .sort(
+      (left, right) =>
+        normalizeStoragePath(
+          right.mountPoint,
+        ).length -
+        normalizeStoragePath(
+          left.mountPoint,
+        ).length,
+    )
+    .find(
+      (disk) => {
+        const mount =
+          normalizeStoragePath(
+            disk.mountPoint,
+          );
+
+        if (!mount) {
+          return false;
+        }
+
+        return (
+          path ===
+            mount ||
+          path.startsWith(
+            `${mount}\\`,
+          )
+        );
+      },
+    ) ?? null;
 }
 
 function diskLabel(
@@ -879,6 +1055,27 @@ async function openStorage(
   ) {
     console.error(
       "Qronos storage open error:",
+      error,
+    );
+  }
+}
+
+async function openQronosExplorer() {
+  try {
+    await invoke(
+      "library_command",
+      {
+        operation:
+          "open_folder",
+
+        payload: {},
+      },
+    );
+  } catch (
+    error
+  ) {
+    console.error(
+      "Qronos Explorer open error:",
       error,
     );
   }
@@ -1516,6 +1713,14 @@ function RightTelemetryPanel() {
   ] =
     useState(false);
 
+  const [
+    libraryStorage,
+    setLibraryStorage,
+  ] =
+    useState<
+      LibraryStorageSnapshot | null
+    >(null);
+
   const deviceScrollRef =
     useRef<HTMLDivElement | null>(
       null,
@@ -1529,6 +1734,10 @@ function RightTelemetryPanel() {
 
     const refresh =
       async () => {
+        if (document.hidden) {
+          return;
+        }
+
         if (busy) {
           return;
         }
@@ -1611,7 +1820,73 @@ function RightTelemetryPanel() {
         () => {
           void refresh();
         },
-        1000,
+        3000,
+      );
+
+    return () => {
+      disposed = true;
+
+      window.clearInterval(
+        timer,
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed =
+      false;
+
+    let busy =
+      false;
+
+    const refreshLibraryStorage =
+      async () => {
+        if (busy) {
+          return;
+        }
+
+        busy = true;
+
+        try {
+          const next =
+            await invoke<LibraryStorageSnapshot>(
+              "library_command",
+              {
+                operation:
+                  "snapshot",
+
+                payload: {},
+              },
+            );
+
+          if (
+            !disposed &&
+            next.ok
+          ) {
+            setLibraryStorage(
+              next,
+            );
+          }
+        } catch (
+          error
+        ) {
+          console.error(
+            "Qronos storage summary error:",
+            error,
+          );
+        } finally {
+          busy = false;
+        }
+      };
+
+    void refreshLibraryStorage();
+
+    const timer =
+      window.setInterval(
+        () => {
+          void refreshLibraryStorage();
+        },
+        60000,
       );
 
     return () => {
@@ -1838,6 +2113,59 @@ function RightTelemetryPanel() {
     snapshot?.disks ??
     [];
 
+  const artifactRoot =
+    libraryStorage
+      ?.locations
+      .artifactRoot ??
+    "";
+
+  const qronosArtifactBytes =
+    libraryStorage
+      ?.artifacts
+      .filter(
+        (artifact) =>
+          artifact.availabilityStatus ===
+            "AVAILABLE" &&
+          isPathInsideRoot(
+            artifact.pathOrUrl,
+            artifactRoot,
+          ),
+      )
+      .reduce(
+        (total, artifact) =>
+          total +
+          Math.max(
+            0,
+            artifact.sizeBytes ||
+              0,
+          ),
+        0,
+      ) ??
+    0;
+
+  const artifactHostDisk =
+    hostDiskForPath(
+      artifactRoot,
+      realDisks,
+    );
+
+  const artifactDriveFreePercent =
+    artifactHostDisk &&
+    artifactHostDisk.totalBytes >
+      0
+      ? Math.max(
+          0,
+          Math.min(
+            100,
+            (
+              artifactHostDisk.availableBytes /
+              artifactHostDisk.totalBytes
+            ) *
+              100,
+          ),
+        )
+      : null;
+
   const devices =
     snapshot?.devices ??
     [];
@@ -1935,7 +2263,37 @@ function RightTelemetryPanel() {
         </header>
 
         <div className="qrt-qronos-fixed">
-          <article className="qrt-storage-row qrt-storage-row-pinned">
+          <article
+            className="qrt-storage-row qrt-storage-row-pinned"
+            role="button"
+            tabIndex={0}
+            title={
+              artifactRoot ||
+              "Open Qronos artifact storage"
+            }
+            aria-label="Open Qronos Explorer"
+            style={{
+              cursor:
+                "pointer",
+            }}
+            onClick={() => {
+              void openQronosExplorer();
+            }}
+            onKeyDown={(
+              event,
+            ) => {
+              if (
+                event.key ===
+                  "Enter" ||
+                event.key ===
+                  " "
+              ) {
+                event.preventDefault();
+
+                void openQronosExplorer();
+              }
+            }}
+          >
             <div className="qrt-storage-icon qrt-qronos-storage-icon">
               <QronosStorageIcon />
 
@@ -1948,25 +2306,30 @@ function RightTelemetryPanel() {
 
             <div className="qrt-storage-copy">
               <span className="qrt-storage-name">
-                QRONOS STORAGE
+                QRONOS EXPLORER
               </span>
 
               <span className="qrt-storage-meta">
-                LOCAL SYSTEM
+                {libraryStorage
+                  ? `ARTIFACTS • ${formatArtifactBytes(
+                      qronosArtifactBytes,
+                    )}`
+                  : "ARTIFACT STORAGE"}
               </span>
             </div>
 
             <div className="qrt-storage-meter">
               <span className="qrt-storage-detail">
-                LIVE INDEX
+                DRIVE FREE
               </span>
 
               <div className="qrt-storage-track">
                 <i
                   style={{
                     width:
-                      snapshot
-                        ? "100%"
+                      artifactDriveFreePercent !==
+                      null
+                        ? `${artifactDriveFreePercent}%`
                         : "0%",
                   }}
                 />
@@ -1974,8 +2337,11 @@ function RightTelemetryPanel() {
             </div>
 
             <span className="qrt-storage-percent">
-              {snapshot
-                ? "LIVE"
+              {artifactDriveFreePercent !==
+              null
+                ? `${Math.round(
+                    artifactDriveFreePercent,
+                  )}%`
                 : "--"}
             </span>
           </article>
@@ -2039,4 +2405,4 @@ function RightTelemetryPanel() {
   );
 }
 
-export default RightTelemetryPanel;
+export default memo(RightTelemetryPanel);

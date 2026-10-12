@@ -55,6 +55,7 @@ from core.hard_floor import (
     HardFloorConfig,
 )
 from core.hard_floor import check as check_floor
+from core.hard_floor import check_running
 from core.load_signal import (
     LoadLevel,
     LoadSample,
@@ -77,12 +78,23 @@ class Runnable(Protocol):
     A protocol rather than a bare callable because a closure cannot be shown to
     the user, listed in the queue, or written to an audit record — and being
     visible is half of what was asked for.
+
+    Two optional methods are looked up with ``getattr`` rather than required,
+    so the simplest work stays a two-method object:
+
+        ``cancel() -> bool`` is asked before a *running* task is cancelled.
+        False means the work has already committed its result and cancelling
+        now would misreport what happened, so the cancel is refused.
+
+        ``public_fields() -> dict`` adds work-specific fields — which
+        conversation request it answers, say — to the task as the interface
+        sees it.
     """
 
     def describe(self) -> str:  # pragma: no cover - protocol
         ...
 
-    def run(self) -> bool:  # pragma: no cover - protocol
+    def run(self) -> "bool | WorkResult":  # pragma: no cover - protocol
         ...
 
 
@@ -104,6 +116,47 @@ class HoldReason(Enum):
     PAUSED = "paused"
     SAFETY_FLOOR = "safety_floor"
     ACTIVITY_MODE = "activity_mode"
+
+    #: The user is talking to Qronos right now. Their turn owns the model
+    #: phase and the GPU; queued work waits for it rather than competing.
+    FOREGROUND_ACTIVE = "foreground_active"
+
+    #: The saved queue cannot record that work started, so starting it would
+    #: risk a silent replay after a crash. Waits until the save succeeds.
+    STORAGE_UNAVAILABLE = "storage_unavailable"
+
+
+class WorkOutcome(Enum):
+    """How a piece of queued work ended, as the work itself reports it."""
+
+    DONE = "done"
+    FAILED = "failed"
+
+    #: The work found, at the moment it ran, that it should not run yet — the
+    #: machine was under pressure, the user's own turn took priority, Qronos
+    #: was paused. It goes back in line rather than failing, because nothing
+    #: is wrong with it.
+    DEFERRED = "deferred"
+
+    #: The work noticed it had been cancelled and produced nothing.
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class WorkResult:
+    """What a piece of work says about how it went."""
+
+    outcome: WorkOutcome
+    detail: str = ""
+
+    #: For a deferral: why it is waiting again. Defaults to the machine being
+    #: busy, which is the usual reason.
+    hold: Optional[HoldReason] = None
+
+    #: For a deferral: whether this attempt counts towards the limit that
+    #: pauses a task which keeps not completing. An interruption caused by the
+    #: user's own turn is not the task's fault and does not count.
+    count_attempt: bool = True
 
 
 #: What the governor's refusals mean to somebody looking at the queue.
@@ -139,6 +192,7 @@ class QueueEventType(Enum):
     FINISHED = "finished"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    DEFERRED = "deferred"
     OVERRIDE_REFUSED = "override_refused"
     HOLD_STATE = "hold_state"
 
@@ -171,6 +225,15 @@ class _Entry:
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
 
+    #: After a deferral, the task is not offered again before this moment, so
+    #: a machine the work keeps finding too busy is not asked every tick.
+    not_before: Optional[float] = None
+
+    #: The safety floor stopped this while it ran. Its own ``pause`` closed
+    #: the model request; when the work reports back, it is requeued under
+    #: this verdict rather than under whatever its pause path says.
+    preempted: Optional[FloorVerdict] = None
+
 
 @dataclass(frozen=True)
 class SchedulerConfig:
@@ -186,6 +249,18 @@ class SchedulerConfig:
     #: this: "a task that has been pulled back and requeued repeatedly is a
     #: task something is wrong with".
     max_attempts: int = 3
+
+    #: How long a task that deferred itself waits before it is offered again.
+    retry_after_deferral_seconds: float = 30.0
+
+    #: Consecutive readings that must breach the safety floor before running
+    #: Qronos work is stopped. One reading is a spike; two, a tick apart, is a
+    #: state. The floor's own resume lines then keep it from flapping back.
+    preempt_after_samples: int = 2
+
+    def __post_init__(self) -> None:
+        if self.preempt_after_samples < 1:
+            raise ValueError("preempt_after_samples must be at least 1.")
 
 
 DEFAULT_SCHEDULER_CONFIG = SchedulerConfig()
@@ -219,6 +294,12 @@ class QueueView:
     holding_since: Optional[float]
     tasks: tuple[dict, ...]
 
+    #: Qronos as a whole is paused. Separate from ``paused``, which is the
+    #: user's hold on the queue itself: resuming Qronos must not quietly lift
+    #: a hold the user put on the queue, and only that hold is remembered
+    #: across restarts.
+    runtime_paused: bool = False
+
 
 class QueueScheduler:
     """
@@ -239,6 +320,7 @@ class QueueScheduler:
         config: SchedulerConfig = DEFAULT_SCHEDULER_CONFIG,
         floor: HardFloorConfig = DEFAULT_HARD_FLOOR,
         activity_mode: Callable[[], ActivityMode] | None = None,
+        foreground_busy: Callable[[], bool] | None = None,
     ) -> None:
         self.queue = queue
         self.governor = governor
@@ -250,9 +332,17 @@ class QueueScheduler:
         self._runner = runner or _run_in_this_thread
         self._notify = notify
         self._activity_mode = activity_mode or (lambda: ActivityMode.NORMAL)
+        self._foreground_busy = foreground_busy or (lambda: False)
 
         self._entries: dict[str, _Entry] = {}
+
+        # Work that has been handed out and has not yet reported back. Wider
+        # than "tasks in the RUNNING state": a task cancelled mid-run leaves
+        # RUNNING at once, but its model call is still on the GPU until it
+        # returns, and nothing else may start until it has.
+        self._inflight: set[str] = set()
         self._paused = False
+        self._runtime_paused = False
         self._revision = itertools.count(1)
         self._current_revision = 0
 
@@ -263,6 +353,17 @@ class QueueScheduler:
         self._lifecycle = threading.Lock()
 
         self._last_level: LoadLevel | None = None
+
+        # Protective preemption: how many readings in a row have breached the
+        # floor while work ran, and whether the floor is currently refusing
+        # running work (which moves its lines to their resume values).
+        self._running_breaches = 0
+        self._running_refused = False
+
+        # Running work that has no pause and has already been told why it is
+        # left to finish, so a long breach does not repeat the notice every
+        # tick. Cleared when the breach ends.
+        self._unstoppable_notified: set[str] = set()
 
     # ------------------------------------------------------------ admission
 
@@ -304,6 +405,147 @@ class QueueScheduler:
         self._wake.set()
 
         return task
+
+    def restore(
+        self,
+        work: Runnable,
+        weight: Weight,
+        summary: str,
+        required_vram_mb: int,
+        task_id: str,
+        state: TaskState,
+        queued_at: float,
+        attempts: int = 0,
+        detail: str = "",
+    ) -> QueuedTask:
+        """
+        Put back work an earlier run of Qronos accepted.
+
+        Restored work is admitted exactly like new work - every check runs
+        again when it comes to start - except that an interrupted task waits
+        for the user's explicit resume.
+        """
+        if not summary.strip():
+            raise ValueError("A queued task must say what it is.")
+
+        with self._lock:
+            task = self.queue.restore(
+                task_id=task_id,
+                weight=weight,
+                summary=summary.strip(),
+                state=state,
+                queued_at=queued_at,
+                attempts=attempts,
+            )
+            self._entries[task_id] = _Entry(
+                task_id=task_id,
+                work=work,
+                required_vram_mb=required_vram_mb,
+                hold=(
+                    HoldReason.WARMING_UP
+                    if state is TaskState.QUEUED
+                    else HoldReason.PAUSED
+                ),
+                detail=detail
+                or "Qronos is still working out how busy the machine is.",
+            )
+            self._bump()
+
+        self._emit(QueueEventType.CHANGED)
+        self._wake.set()
+
+        return task
+
+    def pause_task(self, task_id: str) -> bool:
+        """Hold one waiting task until the user resumes it."""
+        with self._lock:
+            entry = self._entries.get(task_id)
+            task = self.queue.get(task_id)
+
+            if task.state is not TaskState.QUEUED:
+                return False
+
+            self.queue.pause(task_id)
+
+            if entry is not None:
+                entry.hold = HoldReason.PAUSED
+                entry.detail = "Paused by you. It waits until you resume it."
+                entry.override = False
+
+            self._bump()
+
+        self._emit(QueueEventType.CHANGED)
+
+        return True
+
+    def resume_task(self, task_id: str) -> bool:
+        """
+        Put a paused or interrupted task back in line, at the user's word.
+
+        Its attempt count starts again: the user has looked at it and asked
+        for another go, so the limit that paused it does not pause it again
+        before it has run once. Every admission check still applies.
+        """
+        with self._lock:
+            entry = self._entries.get(task_id)
+            task = self.queue.get(task_id)
+
+            if task.state not in (TaskState.PAUSED, TaskState.INTERRUPTED):
+                return False
+
+            self.queue.resume(task_id, reset_attempts=True)
+
+            if entry is not None:
+                entry.hold = HoldReason.WARMING_UP
+                entry.detail = "Resumed. Qronos will check the machine first."
+                entry.not_before = None
+                entry.finished_at = None
+
+            self._bump()
+
+        self._emit(QueueEventType.CHANGED)
+        self._wake.set()
+
+        return True
+
+    def interrupt_running(self) -> tuple[str, ...]:
+        """
+        Mark everything running as interrupted. For when Qronos is closing.
+
+        Returns the tasks that were interrupted. Their work is told to stop
+        first where it can be, so a model call still under way cannot attach
+        an answer after this; work that has already committed its answer is
+        left to finish, since it did finish.
+        """
+        interrupted: list[str] = []
+
+        with self._lock:
+            for task in self.queue.running():
+                entry = self._entries.get(task.task_id)
+                # Interrupt where the work can tell it apart from a user's
+                # cancel; either way its model request is closed.
+                ask = None if entry is None else (
+                    getattr(entry.work, "interrupt", None)
+                    or getattr(entry.work, "cancel", None)
+                )
+
+                if callable(ask) and ask() is False:
+                    continue
+
+                self.queue.interrupt(task.task_id)
+
+                if entry is not None:
+                    entry.detail = (
+                        "Qronos closed while this was running. It will not "
+                        "run again unless you resume it."
+                    )
+
+                interrupted.append(task.task_id)
+
+            if interrupted:
+                self._bump()
+
+        return tuple(interrupted)
 
     def override(self, task_id: str) -> OverrideResult:
         """
@@ -369,24 +611,55 @@ class QueueScheduler:
 
         return OverrideResult(accepted=True)
 
-    def cancel(self, task_id: str) -> None:
+    def cancel(self, task_id: str) -> bool:
+        """
+        Stop a task for good. False when it is too late to say so honestly.
+
+        A running task is asked first. Work that has already committed its
+        result refuses, because reporting "cancelled" for an answer the user
+        is already reading would be false. Work that accepts is marked
+        cancelled at once, but keeps its place in flight — and keeps the
+        machine — until it actually returns, so nothing else starts on a GPU
+        that is still busy with it.
+        """
         with self._lock:
-            self.queue.cancel(task_id)
             entry = self._entries.get(task_id)
+            task = self.queue.get(task_id)
+            was_running = task.state is TaskState.RUNNING
 
             if entry is not None:
+                ask = getattr(entry.work, "cancel", None)
+
+                # Told whatever its state, so cancelled work can never start
+                # another run. Only a running task can have committed its
+                # answer, and only then is the cancel refused.
+                if callable(ask) and ask() is False and was_running:
+                    return False
+
+            self.queue.cancel(task_id)
+
+            if entry is not None and task_id not in self._inflight:
                 entry.finished_at = self.clock()
 
             self._bump()
-            summary = self.queue.get(task_id).summary
+            summary = task.summary
 
         self._emit(
             QueueEventType.CANCELLED,
             task_id=task_id,
             summary=summary,
+            detail=(
+                "Cancelled while running. Any output it produces from here "
+                "on is discarded."
+                if was_running
+                else ""
+            ),
         )
 
+        return True
+
     def set_paused(self, paused: bool) -> None:
+        """The user's hold on the queue."""
         with self._lock:
             self._paused = paused
             self._bump()
@@ -394,7 +667,62 @@ class QueueScheduler:
         if not paused:
             self._wake.set()
 
+    def set_runtime_paused(self, paused: bool) -> None:
+        """
+        Qronos as a whole paused or resumed. Never lifts the user's hold.
+
+        Pausing also stops work already running, through its own ``pause``
+        where it has one: that closes the run's model request, and the work
+        goes back in line to run again after Resume. Nothing else is stopped
+        or unloaded.
+        """
+        with self._lock:
+            self._runtime_paused = paused
+            self._bump()
+            running = (
+                tuple(
+                    self._entries[task_id].work
+                    for task_id in self._inflight
+                    if task_id in self._entries
+                )
+                if paused
+                else ()
+            )
+
+        for work in running:
+            stop = getattr(work, "pause", None)
+
+            if callable(stop):
+                stop()
+
+        if not paused:
+            self._wake.set()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def wake(self) -> None:
+        """Look again now rather than at the next tick."""
+        self._wake.set()
+
     # -------------------------------------------------------------- reading
+
+    def running_work(self) -> tuple[Runnable, ...]:
+        """The work currently handed out, including work being cancelled."""
+        with self._lock:
+            return tuple(
+                self._entries[task_id].work
+                for task_id in self._inflight
+                if task_id in self._entries
+            )
+
+    def work_for(self, task_id: str) -> Optional[Runnable]:
+        """The work behind a task, if the scheduler still remembers it."""
+        with self._lock:
+            entry = self._entries.get(task_id)
+
+            return None if entry is None else entry.work
 
     def view(self) -> QueueView:
         with self._lock:
@@ -403,6 +731,7 @@ class QueueScheduler:
             return QueueView(
                 revision=self._current_revision,
                 paused=self._paused,
+                runtime_paused=self._runtime_paused,
                 level=snapshot.level,
                 holding_since=snapshot.since,
                 tasks=tuple(
@@ -412,8 +741,19 @@ class QueueScheduler:
 
     def _describe(self, task: QueuedTask) -> dict:
         entry = self._entries.get(task.task_id)
+        extra: dict = {}
+
+        if entry is not None:
+            public = getattr(entry.work, "public_fields", None)
+
+            if callable(public):
+                try:
+                    extra = dict(public())
+                except Exception:
+                    extra = {}
 
         return {
+            **extra,
             "taskId": task.task_id,
             "summary": task.summary,
             "weight": task.weight.value,
@@ -432,6 +772,13 @@ class QueueScheduler:
                 and entry.hold in _POLITENESS_HOLDS
             ),
             "override": entry is not None and entry.override,
+            "startedAt": None if entry is None else entry.started_at,
+            # Cancelled, but its work has not returned yet: the interface
+            # says "stopping" rather than pretending the GPU is already free.
+            "inFlight": task.task_id in self._inflight,
+            "cancellable": not task.finished,
+            "resumable": task.state
+            in (TaskState.PAUSED, TaskState.INTERRUPTED),
         }
 
     # ------------------------------------------------------------- the pass
@@ -451,9 +798,29 @@ class QueueScheduler:
 
         self._announce_level_changes(level)
         self._forget_old_entries()
+        self._renew_inflight_leases()
 
-        if self._paused:
-            self._hold_everything(HoldReason.PAUSED, "The queue is paused.")
+        # Safety comes before every hold below, paused included: a queue the
+        # user paused still must not keep a model running on an overheating
+        # card or a dying battery.
+        self._protect_running(sample)
+
+        if self._paused or self._runtime_paused:
+            self._hold_everything(
+                HoldReason.PAUSED,
+                "The queue is paused."
+                if self._paused
+                else "Qronos is paused.",
+            )
+        elif self._foreground_is_busy():
+            # The user's own turn owns the model phase. Not overridable: two
+            # model phases at once on one card is a correctness problem, not
+            # a matter of manners.
+            self._hold_everything(
+                HoldReason.FOREGROUND_ACTIVE,
+                "Qronos is answering you right now; queued work waits "
+                "until that turn is finished.",
+            )
         else:
             candidate = self._next_admissible(level, sample)
 
@@ -491,7 +858,7 @@ class QueueScheduler:
         that cannot possibly work and the user presses it twice.
         """
         with self._lock:
-            if self.queue.running():
+            if self.queue.running() or self._inflight:
                 # One at a time. Qronos loads a model per task and two would
                 # not fit on any card it currently targets.
                 return None
@@ -508,6 +875,13 @@ class QueueScheduler:
                 entry = self._entries.get(task.task_id)
 
             if entry is None:
+                continue
+
+            if (
+                entry.not_before is not None
+                and self.clock() < entry.not_before
+            ):
+                # Deferred itself recently. Its hold already says why.
                 continue
 
             verdict = check_floor(
@@ -596,6 +970,8 @@ class QueueScheduler:
             self.queue.start(entry.task_id)
             entry.started_at = self.clock()
             entry.override = False
+            entry.not_before = None
+            self._inflight.add(entry.task_id)
             self._bump()
 
         self._emit(
@@ -607,40 +983,255 @@ class QueueScheduler:
 
         # A runner that returns a verdict ran the work here and now, so the
         # outcome is recorded for it. One that returns None has taken the work
-        # elsewhere and will call report_finished itself when it is done.
-        outcome = self._runner(entry)
+        # elsewhere and will call report_outcome itself when it is done.
+        try:
+            outcome = self._runner(entry)
+        except Exception as exc:
+            outcome = WorkResult(WorkOutcome.FAILED, f"{exc}")
 
         if outcome is not None:
-            self.report_finished(entry.task_id, bool(outcome))
+            self.report_outcome(entry.task_id, outcome)
 
     def report_finished(self, task_id: str, success: bool) -> None:
+        """Record that work finished, well or badly."""
+        self.report_outcome(
+            task_id,
+            WorkResult(WorkOutcome.DONE if success else WorkOutcome.FAILED),
+        )
+
+    def report_outcome(
+        self,
+        task_id: str,
+        result: "WorkResult | bool",
+    ) -> None:
         """
-        Record the outcome of work that has finished.
+        Record how handed-out work ended, and give the machine back.
 
         Separate from the runner so that a runner which hands the work to
         another thread can report back later without this module needing to
         know how it did that.
+
+        Whatever the work says, a task the user cancelled while it ran stays
+        cancelled: its result is not recorded as done, and nothing it
+        produced is announced. Its claim on the machine is released only now,
+        when the work has genuinely returned.
         """
+        result = _as_work_result(result)
+        event: QueueEventType | None = None
+        hold_reason: HoldReason | None = None
+
         with self._lock:
+            self._inflight.discard(task_id)
             entry = self._entries.get(task_id)
 
-            if entry is None:
-                return
+            try:
+                task = self.queue.get(task_id)
+            except KeyError:
+                task = None
 
-            entry.finished_at = self.clock()
-            self.queue.finish(task_id, success=success)
+            # A safety stop is consumed exactly once, whatever the outcome:
+            # attributed if the work went back in line, and otherwise simply
+            # dropped (it finished, failed or was cancelled before the stop
+            # took effect, and what it did stands). Nothing stale is left for
+            # the next run to be misattributed to.
+            pending = None
+            if entry is not None:
+                pending, entry.preempted = entry.preempted, None
+
+            if entry is None or task is None:
+                summary = ""
+            elif task.state is not TaskState.RUNNING:
+                # Cancelled while it ran. The cancellation was already
+                # announced; what is new is only that the machine is free.
+                entry.finished_at = self.clock()
+                summary = task.summary
+            elif result.outcome is WorkOutcome.DEFERRED and pending is not None:
+                # Stopped by the safety floor rather than by its own choice.
+                # Not the task's fault, so the attempt does not count, and the
+                # floor's resume lines apply before it may start again.
+                verdict = pending
+                self.queue.requeue(task_id, count_attempt=False)
+                hold_reason = HoldReason.SAFETY_FLOOR
+                entry.started_at = None
+                entry.not_before = None
+                entry.floor_refusal = verdict
+                entry.override = False
+                entry.hold = hold_reason
+                entry.detail = verdict.message()
+                summary = task.summary
+                event = QueueEventType.DEFERRED
+            elif result.outcome is WorkOutcome.DEFERRED:
+                self.queue.requeue(
+                    task_id,
+                    count_attempt=result.count_attempt,
+                )
+                hold_reason = result.hold or HoldReason.SUSTAINED_LOAD
+                entry.started_at = None
+                entry.not_before = (
+                    self.clock() + self.config.retry_after_deferral_seconds
+                )
+                entry.hold = hold_reason
+                entry.detail = result.detail or (
+                    "Qronos found the machine busy when it came to run this "
+                    "and will try again."
+                )
+                summary = task.summary
+                event = QueueEventType.DEFERRED
+            elif result.outcome is WorkOutcome.CANCELLED:
+                self.queue.cancel(task_id)
+                entry.finished_at = self.clock()
+                summary = task.summary
+                event = QueueEventType.CANCELLED
+            else:
+                success = result.outcome is WorkOutcome.DONE
+                self.queue.finish(task_id, success=success)
+                entry.finished_at = self.clock()
+                entry.detail = result.detail
+                summary = task.summary
+                event = (
+                    QueueEventType.FINISHED
+                    if success
+                    else QueueEventType.FAILED
+                )
+
             self._bump()
-            summary = self.queue.get(task_id).summary
 
         self.governor.release(task_id)
-        self._emit(
-            QueueEventType.FINISHED if success else QueueEventType.FAILED,
-            task_id=task_id,
-            summary=summary,
-        )
+
+        if event is not None:
+            self._emit(
+                event,
+                task_id=task_id,
+                summary=summary,
+                reason=hold_reason,
+                detail=result.detail,
+            )
+        else:
+            self._emit(QueueEventType.CHANGED)
+
         self._wake.set()
 
     # ------------------------------------------------------------ internals
+
+    def _protect_running(self, sample: LoadSample) -> None:
+        """
+        Stop Qronos's own running work when the safety floor says it must.
+
+        Only Qronos work is touched, and only through the work's own
+        ``pause``, which closes its model request and lets it go back in line;
+        another application is never paused, closed or reprioritised. Work
+        without a ``pause`` cannot be stopped safely from here and is left to
+        finish, with the reason recorded where the user can see it. Work that
+        has already committed its answer refuses the pause and finishes.
+        """
+        with self._lock:
+            running = [
+                self._entries[task_id]
+                for task_id in sorted(self._inflight)
+                if task_id in self._entries
+            ]
+
+        if not running:
+            self._running_breaches = 0
+            self._running_refused = False
+            self._unstoppable_notified.clear()
+            return
+
+        verdict = check_running(
+            sample,
+            config=self.floor,
+            currently_refused=self._running_refused,
+        )
+
+        if verdict.passed:
+            self._running_breaches = 0
+            self._running_refused = False
+            self._unstoppable_notified.clear()
+            return
+
+        self._running_breaches += 1
+
+        if self._running_breaches < self.config.preempt_after_samples:
+            return
+
+        self._running_refused = True
+        stopped: list[_Entry] = []
+        unstoppable: list[_Entry] = []
+        cannot_stop = (
+            " This task cannot be stopped safely while it runs, so it is left "
+            "to finish."
+        )
+
+        for entry in running:
+            stop = getattr(entry.work, "pause", None)
+
+            with self._lock:
+                if entry.preempted is not None:
+                    continue  # already asked to stop; waiting for it to return
+
+                if not callable(stop):
+                    if entry.task_id not in self._unstoppable_notified:
+                        self._unstoppable_notified.add(entry.task_id)
+                        entry.detail = verdict.message() + cannot_stop
+                        unstoppable.append(entry)
+                    continue
+
+                # Attribute the stop BEFORE asking for it. A pause that reports
+                # its deferral inline, or a worker fast enough to beat this
+                # thread, must find the safety verdict already in place.
+                previous = (entry.hold, entry.detail)
+                entry.preempted = verdict
+                entry.hold = HoldReason.SAFETY_FLOOR
+                entry.detail = verdict.message()
+
+            raised = False
+            try:
+                accepted = stop()
+            except Exception:
+                raised, accepted = True, None
+
+            with self._lock:
+                still_pending = entry.preempted is verdict
+
+                if not raised and accepted is False:
+                    # Committed its answer; it finishes as it is. Withdraw the
+                    # attribution unless its outcome already consumed it.
+                    if still_pending:
+                        entry.preempted = None
+                        entry.hold, entry.detail = previous
+                    continue
+
+                if raised:
+                    # The pause itself failed. The tick goes on; the work is
+                    # left to finish and the user is told once per breach.
+                    if still_pending:
+                        entry.preempted = None
+                        entry.hold = previous[0]
+                    if entry.task_id not in self._unstoppable_notified:
+                        self._unstoppable_notified.add(entry.task_id)
+                        entry.detail = verdict.message() + cannot_stop
+                        unstoppable.append(entry)
+                    continue
+
+            stopped.append(entry)
+
+        if stopped or unstoppable:
+            with self._lock:
+                self._bump()
+
+        for entry in stopped + unstoppable:
+            try:
+                summary = self.queue.get(entry.task_id).summary
+            except KeyError:
+                continue
+            self._emit(
+                QueueEventType.HOLD_STATE,
+                task_id=entry.task_id,
+                summary=summary,
+                reason=HoldReason.SAFETY_FLOOR,
+                detail=entry.detail,
+                floor=verdict,
+            )
 
     def _hold(self, entry: _Entry, reason: HoldReason, detail: str) -> None:
         """Record why something is waiting. Called with the lock held."""
@@ -681,14 +1272,38 @@ class QueueScheduler:
                 for task_id, entry in self._entries.items()
                 if entry.finished_at is not None
                 and entry.finished_at <= cutoff
+                and task_id not in self._inflight
             ]
 
             for task_id in stale:
                 self._entries.pop(task_id, None)
 
             if stale:
-                self.queue.forget_finished()
+                self.queue.forget_finished(keep=frozenset(self._inflight))
                 self._bump()
+
+    def _renew_inflight_leases(self) -> None:
+        """
+        Keep the governor's claim alive for work that is still running.
+
+        A lease that expires under a long generation would let a second heavy
+        task be admitted while the first is still on the GPU. Renewing only
+        from the pump means a pump that dies stops renewing, and the lease
+        then frees the machine by itself, which is what it is for.
+        """
+        with self._lock:
+            inflight = tuple(self._inflight)
+
+        for task_id in inflight:
+            self.governor.renew(task_id)
+
+    def _foreground_is_busy(self) -> bool:
+        try:
+            return bool(self._foreground_busy())
+        except Exception:
+            # Unknown is treated as busy: waiting a tick is harmless, and
+            # competing with the user's turn for the GPU is not.
+            return True
 
     def _bump(self) -> None:
         """A new revision. Called with the lock held."""
@@ -769,10 +1384,22 @@ class QueueScheduler:
 
     def _idle(self) -> bool:
         with self._lock:
-            return not self.queue.waiting() and not self.queue.running()
+            return (
+                not self.queue.waiting()
+                and not self.queue.running()
+                and not self._inflight
+            )
 
 
-def _run_in_this_thread(entry: _Entry) -> bool:
+def _as_work_result(value: "WorkResult | bool | None") -> WorkResult:
+    """A plain verdict from simple work, in the shape the scheduler records."""
+    if isinstance(value, WorkResult):
+        return value
+
+    return WorkResult(WorkOutcome.DONE if value else WorkOutcome.FAILED)
+
+
+def _run_in_this_thread(entry: _Entry) -> "WorkResult | bool":
     """
     The default runner: do the work here and now, and say how it went.
 
@@ -784,6 +1411,8 @@ def _run_in_this_thread(entry: _Entry) -> bool:
     propagate would reach the pump thread and take the scheduler with it.
     """
     try:
-        return bool(entry.work.run())
-    except Exception:
-        return False
+        outcome = entry.work.run()
+    except Exception as exc:
+        return WorkResult(WorkOutcome.FAILED, f"{exc}")
+
+    return outcome if isinstance(outcome, WorkResult) else bool(outcome)

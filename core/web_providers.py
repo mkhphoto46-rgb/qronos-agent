@@ -101,23 +101,14 @@ def requests_transport(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[int, str]:
     """
-    Default transport built on :mod:`requests`.
+    Compatibility entry point for legacy providers; direct network is disabled.
 
-    The response is decoded as UTF-8 explicitly rather than trusting charset
-    detection: guessing wrong turns Persian into mojibake, and the query that
-    produced it looked fine going out.
+    Offline fixture transports remain injectable for parser tests. Production
+    internet access must use the browser adapter.
     """
-    response = requests.request(
-        method,
-        url,
-        data=data.encode("utf-8") if data is not None else None,
-        headers=headers or {},
-        timeout=timeout,
+    raise PermissionError(
+        "Direct web transport is disabled. Use the permission-gated browser adapter."
     )
-
-    response.encoding = "utf-8"
-
-    return response.status_code, response.text
 
 
 def _clean_html_text(value: str) -> str:

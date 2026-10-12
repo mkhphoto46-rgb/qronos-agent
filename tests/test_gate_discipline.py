@@ -1,4 +1,4 @@
-"""
+﻿"""
 The gate cannot be bypassed, checked structurally rather than by convention.
 
 Every other test in the security seam asks whether the gate answers correctly.
@@ -34,7 +34,16 @@ ROOT = Path(__file__).resolve().parent.parent
 # intended way: it imported ctypes, the test failed, and somebody had to
 # decide which list it belonged in.
 EXECUTOR_MODULES: tuple[str, ...] = (
+    "core.file_executor",
+    "core.computer_executor",
     "core.screen_capture",
+    "core.library_executor",
+    # Application workflows: every side effect needs a gate grant.
+    "core.telegram_workflow",
+    "core.print_workflow",
+    "core.browser_research",
+    # Performs one exact approved typed action, re-asking the gate first.
+    "core.action_broker",
 )
 
 # The one sanctioned route to performing an action.
@@ -45,21 +54,122 @@ GATE_MODULE = "security.gate"
 # not writing — or is an executor nobody declared.
 DANGEROUS_IMPORTS = frozenset({"subprocess", "shutil", "winreg", "ctypes"})
 
+# Native backends may only be imported by the reviewed permission/foreground
+# guarded callers below. They are not general exceptions available to workers.
+NATIVE_BACKENDS = {
+    "core.windows_app_activation": frozenset({"core.computer_executor"}),
+    "core.windows_input_native": frozenset({
+        "core.keyboard_control", "core.mouse_button", "core.mouse_hover", "core.mouse_wheel",
+    }),
+    "core.windows_accessibility_mutation": frozenset({"core.accessibility_action_executor"}),
+    # GDI/GDI+/Windows.Data.Pdf print renderer: only the gated print workflow.
+    "core.print_renderer": frozenset({"core.print_workflow"}),
+}
+
 # Modules that legitimately touch these without being action executors, with
 # the reason. Anything not listed has to be justified by adding it here, which
 # is the point: the list is short and someone has to look at it.
 KNOWN_SYSTEM_MODULES: dict[str, str] = {
+    "core.runtime_instance_guard": (
+        "Creates/closes only the local named Qronos runtime mutex; it does not "
+        "launch processes or manipulate user applications."
+    ),
+    "core.instance_ownership": (
+        "Creates, wait-acquires and releases only Qronos's own named singleton "
+        "mutexes (CreateMutexW/WaitForSingleObject/ReleaseMutex) on one holder "
+        "thread; it launches nothing and touches no user application."
+    ),
+    "core.startup_admission": (
+        "Calls SHGetKnownFolderPath through ctypes only to read the Local AppData "
+        "known folder of its own token; it changes nothing."
+    ),
+    "core.store_admission": (
+        "Takes and releases byte-range locks (LockFileEx/UnlockFileEx) on "
+        "Qronos's own admission lock file, and asks whether the update fence "
+        "mutex exists (OpenMutexW); it launches nothing."
+    ),
+    "core.update_service": (
+        "Starts only the verified staged Qronos installer (/S /QRONOSUPDATE) "
+        "through fenced_launcher. GateAuthorizer asks security.gate for an "
+        "INSTALL_SOFTWARE action at request, approve and launch, and the "
+        "person's typed approval secret is required as well; the launch is "
+        "refused by default (launch_unavailable). Only that child receives a "
+        "duplicate of the update fence handle. ctypes: the update fence and "
+        "runtime-singleton mutexes (CreateMutexW, WaitForSingleObject with no "
+        "wait), a share-read CreateFileW lock on the staged installer and "
+        "GetProcessTimes."
+    ),
+    "core.windows_accessibility": (
+        "Reads UI Automation focus, geometry, properties and RuntimeIds. "
+        "UIA mutations live in the separately reviewed, authorization-gated backend."
+    ),
+    "core.window_binding": (
+        "Reads HWND/process identity, foreground state and window geometry; "
+        "does not send input, activate applications or change windows."
+    ),
+    "core.artifact_registry": (
+        "Uses subprocess only to show an artifact or the Library folder in "
+        "Explorer on a direct Library UI request. It mutates no files: every "
+        "Library rename/copy/move/delete goes through core.library_executor, "
+        "which reaches the gate."
+    ),
+    "core.supervisor": (
+        "Starts, watches and stops only the bundled Qronos runtime child it "
+        "supervises, with fixed arguments; holds a per-session named mutex. "
+        "It performs no user action and owns no audio, UI or dialog."
+    ),
+    "core.supervisor_relay": (
+        "The supervisor's desktop mode: starts only the bundled runtime bridge "
+        "(fixed command, base interpreter from source), relays the desktop's "
+        "pipes to it, binds it to a kill-on-close Job Object and stops only "
+        "that exact child. It performs no user action and owns no audio, UI or dialog."
+    ),
+    "core.spooler_service": (
+        "Stops and starts the one Windows service named Spooler (a constant) "
+        "through the Service Control Manager, with query/stop/start rights "
+        "only. Called only by the broker's registered printer.spooler_restart "
+        "action, after the broker's full verification and its gate re-check."
+    ),
+    "core.pipe_peer": (
+        "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "
+        "ctypes only to read which process is on the other end of a Qronos pipe."
+    ),
+    "core.uac_launch": (
+        "Starts only the bundled Qronos executable as the Action Broker through "
+        "ShellExecuteExW 'runas', i.e. the normal UAC prompt the user can decline; "
+        "the handle is used only to read its id, wait and read its exit code."
+    ),
+    "core.windows_power_status": (
+        "Calls GetSystemPowerStatus through ctypes only to read whether Windows "
+        "battery saver is on; it fills a structure it owns and changes nothing."
+    ),
+    "core.path_safety": (
+        "Calls GetDriveTypeW through ctypes only to read whether a drive is "
+        "local or a mapped network drive; it changes nothing."
+    ),
+    "core.memory_runtime": (
+        "Starts, supervises, and stops only Qronos's dedicated local CPU-only "
+        "Memory embedding sidecar and its ownership metadata."
+    ),
     "core.link_devices": (
         "Runs icacls to restrict the device key file to its owner."
     ),
     "core.ollama_controller": (
         "Starts and stops the local model server."
     ),
+    "core.file_resolver": (
+        "Reads Windows User Shell Folders from the Registry to resolve redirected "
+        "Desktop, Documents, and Downloads paths; it never writes Registry values."
+    ),
     "core.whisper_cpp_runtime": (
         "Runs the whisper binary to transcribe an audio file."
     ),
     "core.whisper_server_runtime": (
         "Starts and stops only the bundled local whisper.cpp STT server."
+    ),
+    "core.windows_sidecar_guard": (
+        "Uses Windows named mutex and Job Object APIs only to prevent duplicate "
+        "Qronos voice sidecars and bind their lifetime to the owning Qronos process."
     ),
     "core.whisper_cpp_vad_runtime": (
         "Runs the whisper binary for voice activity detection."
@@ -87,6 +197,11 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     ),
     "core.windows_ocr": (
         "Runs PowerShell to reach Windows' text recogniser, which only reads."
+    ),
+    "core.visible_browser": (
+        "Starts the user's default browser with one URL re-validated by "
+        "core.link_policy, as an argument list without a shell; it decides no "
+        "permission itself and is used only by gated flows (Library open_link)."
     ),
 }
 
@@ -154,7 +269,7 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
         for path in product_modules():
             name = module_name(path)
 
-            if name in KNOWN_SYSTEM_MODULES or name in EXECUTOR_MODULES:
+            if name in KNOWN_SYSTEM_MODULES or name in EXECUTOR_MODULES or name in NATIVE_BACKENDS:
                 continue
 
             if imported_names(path) & DANGEROUS_IMPORTS:
@@ -168,6 +283,40 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
             "EXECUTOR_MODULES so they must reach the permission gate, or to "
             "KNOWN_SYSTEM_MODULES with the reason.",
         )
+
+    def test_native_backends_have_only_reviewed_callers(self) -> None:
+        for path in product_modules():
+            name = module_name(path)
+            imports = imported_names(path)
+            for backend, callers in NATIVE_BACKENDS.items():
+                if backend in imports:
+                    self.assertIn(name, callers, f"{name} bypasses the reviewed {backend} callers")
+                    guard = "security.gate" if name in {
+                        "core.computer_executor", "core.accessibility_action_executor", "core.print_workflow",
+                    } else "core.input_safety"
+                    self.assertIn(guard, imports, f"{name} lost its action guard")
+
+    def test_uia_readers_cannot_mutate_or_reexport_the_mutation_backend(self) -> None:
+        path = ROOT / "core" / "windows_accessibility.py"
+        source = path.read_text(encoding="utf-8")
+        self.assertNotIn("core.windows_accessibility_mutation", imported_names(path))
+        for primitive in (".SetFocus(", ".SetValue(", ".Invoke("):
+            self.assertNotIn(primitive, source, f"UIA reader acquired mutation {primitive}")
+        public_functions = {
+            node.name for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+        }
+        self.assertEqual(public_functions, {
+            "available", "focused_element", "elements_in_window", "element_at_point",
+            "actionable_elements_in_window", "actionable_element_by_runtime_id",
+        })
+
+    def test_only_the_mutation_backend_imports_the_private_uia_runner(self) -> None:
+        for path in product_modules():
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.ImportFrom) and node.module == "core.windows_accessibility":
+                    if any(alias.name == "_run_uia_script" for alias in node.names):
+                        self.assertEqual(module_name(path), "core.windows_accessibility_mutation")
 
     def test_the_exception_list_has_no_stale_entries(self) -> None:
         # An exception that no longer applies is an exception nobody will

@@ -11,8 +11,7 @@ from core.vad_runtime import VADRuntime
 
 
 DEFAULT_RUNTIME_DIR = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "bin"
     / "Release"
@@ -29,8 +28,7 @@ DEFAULT_WHISPER_DLL = (
 )
 
 DEFAULT_VAD_MODEL = (
-    CONFIG.paths.root
-    / "runtime"
+    CONFIG.paths.runtime_assets
     / "whisper"
     / "models"
     / "ggml-silero-v6.2.0.bin"
