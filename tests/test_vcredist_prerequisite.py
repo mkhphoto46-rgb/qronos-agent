@@ -148,11 +148,17 @@ def test_the_run_accepts_only_the_pinned_exit_codes_and_clears_errors_first():
     assert order == sorted(order)
     assert "/install /quiet /norestart" in run and "http" not in run.lower()
     assert "${If} $R8 <> 0" in run and "${AndIf} $R8 <> 1638" in run and "${AndIf} $R8 <> 3010" in run
-    # 3010 (installed; a restart finishes it) is reported, and is still followed by the registry check, like 0.
+    # 3010 (installed; a restart finishes it) sets the installer's real reboot state, so the finish page offers the
+    # restart; it is still followed by the registry check, like 0, and is never a failure.
     pre = _preinstall(hook)
     run_at, restart_at = pre.index("!insertmacro QRONOS_VCREDIST_RUN_INSTALLER"), pre.index("${If} $R8 = 3010")
+    branch = pre[restart_at:pre.index("${EndIf}", restart_at)]
+    statements = [line.strip() for line in branch.splitlines() if line.strip() and not line.strip().startswith(";")]
+    assert "SetRebootFlag true" in statements and "QRONOS_FAIL" not in branch
     assert run_at < restart_at < pre.rindex("!insertmacro QRONOS_VCREDIST_SATISFIED_TO_R9")
-    assert "QRONOS_FAIL" not in pre[restart_at:pre.index("${EndIf}", restart_at)]
+    assert hook.count("SetRebootFlag") == 1  # only the 3010 branch asks for a restart
+    template = (prerequisites.TEMPLATE_DIR / "installer.nsi").read_text(encoding="utf-8")
+    assert "MUI_FINISHPAGE_NOREBOOTSUPPORT" not in template and "!insertmacro MUI_PAGE_FINISH" in template
     detect = hook[hook.index("!macro QRONOS_VCREDIST_SATISFIED_TO_R9"):]
     detect = detect[:detect.index("!macroend")]
     assert "QRONOS_VCREDIST_READ_VIEW 64" in detect and "QRONOS_VCREDIST_READ_VIEW 32" in detect

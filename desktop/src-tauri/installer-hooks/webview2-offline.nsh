@@ -247,6 +247,9 @@
     DetailPrint "Installing the Microsoft Visual C++ Redistributable (x64) ${QRONOS_VCREDIST_VERSION} from this installer (no internet needed)..."
     !insertmacro QRONOS_VCREDIST_RUN_INSTALLER
     ${If} $R8 = 3010
+      ; Microsoft says a restart completes the runtime: the installer's own reboot state, so the finish page
+      ; offers the restart (MUI2 reboot support) instead of presenting Qronos as ready to use at once.
+      SetRebootFlag true
       DetailPrint "Windows needs a restart to finish the Microsoft Visual C++ Redistributable."
     ${EndIf}
     ; The exit code alone is not trusted: the pinned runtime (or newer) must now be registered.
