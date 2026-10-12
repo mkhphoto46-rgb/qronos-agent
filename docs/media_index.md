@@ -530,12 +530,44 @@ change requeues it), `MediaService.search_semantic`.
   window scripts differ. Nothing is translated and no accuracy is claimed.
 - **Topics:** deferred (above).
 
+## Product route (round 32)
+
+The desktop and the brain/voice turns reach the media index only through typed operations on the runtime's
+ONE in-process media host (`qronos_media/product.py`):
+
+- Transport: the registered `send_runtime_action("qronos.media", {op, requestId, ...})` (bridge stdin), answered by
+  `media_result` runtime events with the same `requestId`; `media_progress` events publish index passes. No Rust
+  change. The bridge routes the action before its generic pause refusal; the product refuses every non-read
+  operation while Qronos is paused (status, capabilities, roots.list, search, asset.detail and decline still answer).
+- Operations (allow-listed, every field bounded): roots.add / roots.remove / roots.list, scan (then a continuous
+  background index), index.start / stop / pause / resume, job.retry / reindex / cancel / pause / resume,
+  asset.priority, asset.detail, search (exact, fuzzy, semantic), open.prepare, report.generate (json, html, csv),
+  report.export, decide / decline.
+- Threads: product calls run on the host's one writer worker, between continuous index passes of at most 20 s each;
+  searches run on a separate bounded query thread with read-only SQLite connections (WAL), so search answers while
+  indexing. Stop drops queued calls (each is answered `stopped`); close answers everything still queued.
+- Approvals: roots, exports and opens answer `approval_required` with a single-use id and `needsSecret`. The gate
+  decision stays in the product (the request says yes/no only); unknown, answered or revoked ids are stale. The
+  typed secret is checked by the bridge's borrowed `WorkflowSecretCheck`, passed in-process only, never echoed.
+- Open at a time: the copy is re-verified now (Files read gate plus the full hash); the player comes only from the
+  trusted application catalog (mpv or VLC, `core.computer_executor.trusted_media_players`); the OPEN_APPLICATION gate
+  decides; `core.computer_executor.open_media_at_time` builds the exact argv (player, start option, the verified
+  file) with no shell and no caller arguments. Decision time re-verifies again: a replaced copy launches nothing.
+- Brain/voice: `qronos_media/intents.py` recognises quoted Persian/English library searches and index status
+  deterministically (never a guess) and runs the SAME operations; the answer is a short Persian sentence.
+- Desktop: `desktop/src/mediaStore.ts` (validated events, requestId matching, stale/late answers dropped, the secret
+  sent once and never stored) and `components/MediaPanel.tsx` / `MediaDrawer.tsx` (Persian). The App.tsx mount is
+  pending Main27's App handoff (literal patch `work/media-product-r32/app-mount.patch`), so the panel is not yet
+  reachable from the running app.
+- Honest capabilities: implemented-unverified (ASR, semantic dialogue) are shown as such; topics, vision captions,
+  OCR, subtitle/ASR fusion, speaker turns and visual embeddings are shown as not built; motion is not supported.
+
 ## Integration state
 
 Done in this chunk (leased): `qronos_media` is in `PRODUCT_PACKAGES` (offline
 policy and release hygiene), collected by `build_runtime`, a project root for
 notices; the bridge hosts the media worker (above); `core/update_stores.py`
-registers `media_index` (schema 2, reads schema 1, never snapshotted, so an
+registers `media_index` (schema 3 since the semantic tables, reads schema 1, never snapshotted, so an
 update that changes its format is refused: a release compatibility gate, not
 rollback support).
 
