@@ -434,11 +434,21 @@ Nothing about media runs, probes or opens at startup or on import.
   SHA-256, stream, language, selection rule, offsets, `verified: false`,
   `calibrated: false`, "unverified machine transcription; no accuracy claim".
 - Assets are the voice assets under `CONFIG.paths.runtime_assets/whisper`,
-  checked read-only by size and SHA-256 before any child starts
-  (`whisper-cli.exe` 489,984 B `8df01333…`, `ggml-large-v3-turbo-q5_0.bin`
-  574,041,195 B `39422170…`). Missing or different means `model_unavailable`
-  and nothing runs. They are not in the installed profile or package today:
-  shipping them with provenance and licence notices is a release gate.
+  checked read-only by size and SHA-256 before any child starts. Since round 37
+  the runtime is the official portable whisper.cpp v1.9.5 prebuilt (release
+  b5454, commit d1be6fde; archive `whisper-bin-x64.zip` `6ba69e34…`):
+  `whisper-cli.exe` 479,744 B `331dba46…` AND its 12 libraries (whisper.dll,
+  ggml.dll, ggml-base.dll and the ggml-cpu-* variants), each pinned; a missing
+  or planted library refuses. The model is unchanged:
+  `ggml-large-v3-turbo-q5_0.bin` 574,041,195 B `39422170…`. Missing or
+  different means `model_unavailable` and nothing runs. The runtime and the
+  library digest are part of the ASR provenance and of the chunk plan key, so
+  a different runtime never resumes another's chunks. The CLI argv and JSON
+  output (`transcription[].offsets.from/to`, `text`) were checked against the
+  v1.9.5 source. The build needs the Visual C++ 2015-2022 x64 runtime (an
+  installer prerequisite supplied separately). Provisioning: the verified stage
+  (`whisper/`, `ffmpeg/`) goes to `<RuntimeAssets>/runtime/`; nothing is bundled
+  in the installer.
 
 Limits, stated plainly: no real whisper, model, GPU or audio run has been done
 or accepted; the 2 GiB profile is declared, not measured; no lease period ever
@@ -452,12 +462,24 @@ Development tests used a pre-existing user-level install:
 `--enable-gpl --enable-version3`, which makes it a **GPLv3 binary**, and it
 compiles in network protocols (kept unused by the whitelist).
 
-- **Do not redistribute this build** with Qronos.
-- **Shipping target:** an LGPL build without network protocols or GPL
-  components, with its notices added through the existing notice workflow.
+- **Do not redistribute this build** with Qronos. It remains a development/test
+  fixture only (QRONOS_MEDIA_FFMPEG_DIR), reported as an unpinned override; some
+  fixtures encode test clips with its GPL libx264, which the shipping build lacks.
+- **Shipping build (round 37):** FFmpeg 9.0.2 built by Qronos from the signed
+  official source (`ffmpeg-9.0.2.tar.xz` `8c385028…`, GOODSIG by
+  FCF986EA15E6E293A5644F10B4322F04D67658D8), LGPL v2.1 or later, no GPL,
+  version3, nonfree or network code; protocols file and pipe only; reproduced
+  byte-for-byte by a second build. `ffmpeg.exe` 21,947,392 B `6c3fc768…`,
+  `ffprobe.exe` 21,726,208 B `ef43e6e3…`. Only these exact files are admitted from
+  `<runtime>/ffmpeg/bin`; anything else there means no tools. Licence texts, the
+  IJG credit, the source and the build recipe ship beside them
+  (`runtime/ffmpeg/LICENSE`, `runtime/ffmpeg/SOURCE`). This is NOT a publisher
+  binary; the registry marks it `reproducible_build_of_signed_source`.
+- **Known limit:** AV1 video does not decode (no libdav1d, no hardware
+  accelerator); probing still works. Media status reports it.
 
-`python -m qronos_media tools` prints the located build's version and licence
-flags.
+`python -m qronos_media tools` prints the located build's version, licence
+flags, identity (pinned or unpinned) and limits.
 
 ## Semantic dialogue retrieval (Level 2)
 
@@ -556,9 +578,9 @@ ONE in-process media host (`qronos_media/product.py`):
 - Brain/voice: `qronos_media/intents.py` recognises quoted Persian/English library searches and index status
   deterministically (never a guess) and runs the SAME operations; the answer is a short Persian sentence.
 - Desktop: `desktop/src/mediaStore.ts` (validated events, requestId matching, stale/late answers dropped, the secret
-  sent once and never stored) and `components/MediaPanel.tsx` / `MediaDrawer.tsx` (Persian). The App.tsx mount is
-  pending Main27's App handoff (literal patch `work/media-product-r32/app-mount.patch`), so the panel is not yet
-  reachable from the running app.
+  sent once and never stored) and `components/MediaPanel.tsx` / `MediaDrawer.tsx` (Persian), mounted in App.tsx
+  beside the queue and history drawers (509204f), with the round-30 repair (own MEDIA_ACTION approval kind
+  revoked at Pause/Stop/close; only an mpv/VLC .exe is a player).
 - Honest capabilities: implemented-unverified (ASR, semantic dialogue) are shown as such; topics, vision captions,
   OCR, subtitle/ASR fusion, speaker turns and visual embeddings are shown as not built; motion is not supported.
 
@@ -571,13 +593,20 @@ registers `media_index` (schema 3 since the semantic tables, reads schema 1, nev
 update that changes its format is refused: a release compatibility gate, not
 rollback support).
 
+Done since: the Persian desktop media panel (commands, approval prompts with
+the typed secret, evidence/result cards, open-at-timestamp through the approved
+application executor), mounted in the app; semantic (bge-m3) dialogue search
+(round 26, owner/generation-bound in round 32).
+
 Still open:
 
-1. Desktop (Persian UI): media commands, approval prompts for
-   `approval_required` results (and the typed secret), result cards,
-   open-at-timestamp through the approved application executor.
-2. Shipping whisper assets and an LGPL, protocol-free ffmpeg with notices.
-3. Semantic (bge-m3) and Vision stages: later, under the same authority.
+1. Human/live acceptance of the desktop workflow (no real archive, player or
+   model run has been accepted).
+2. Done as pins (round 37): whisper.cpp v1.9.5 and the LGPL protocol-free
+   FFmpeg 9.0.2 are pinned and admitted only when exact; provisioning them into
+   `<RuntimeAssets>/runtime/` is a separate step (nothing installed by this code).
+3. Vision/OCR, topics, subtitle/ASR fusion and the other pending capabilities
+   listed by `PENDING_CAPABILITIES`: later chunks, under the same authority.
 
 ## Tests
 

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Reviewed identity of the runtime assets provisioned separately under <Local AppData>/Qronos/RuntimeAssets (never bundled in the installer). 'verified' entries match an official publisher's own published size and SHA-256 (Hugging Face LFS oid, or the official release file re-downloaded and hashed); their licence notes are the publisher's text. 'unverified' entries have NO published identity matching the local file and therefore NO hash here (a local hash is not provenance); 'missing' entries are configured but absent. build_support/runtime_assets.py checks an asset folder against this file read-only. Changing an entry is a reviewed change; never edit a hash to match another file.",
+  "comment": "Reviewed identity of the runtime assets provisioned separately under <Local AppData>/Qronos/RuntimeAssets (never bundled in the installer). 'verified' entries match an official publisher's own published size and SHA-256 (or, only where marked \"provenance\": \"reproducible_build_of_signed_source\", the byte-reproducible Qronos build of a signed official source whose recipe ships beside it; never a publisher claim) (Hugging Face LFS oid, or the official release file re-downloaded and hashed); their licence notes are the publisher's text. 'unverified' entries have NO published identity matching the local file and therefore NO hash here (a local hash is not provenance); 'missing' entries are configured but absent. build_support/runtime_assets.py checks an asset folder against this file read-only. Changing an entry is a reviewed change; never edit a hash to match another file.",
   "checkedAt": "2026-10-12",
   "assets": [
     {
@@ -68,34 +68,6 @@
       "licence": "Silero VAD, MIT (owner to confirm the text shipped with the asset)"
     },
     {
-      "path": "runtime/whisper/bin/Release/whisper-cli.exe",
-      "feature": "speechRecognition",
-      "status": "unverified",
-      "evidence": "local CMake/MSVC build of whisper.cpp 1.9.3-dev from a deleted temp source tree (revision unknown), GGML_NATIVE=ON (tuned to the build machine's CPU, not portable). Media pins its local hash; no official published identity.",
-      "licence": "whisper.cpp MIT (text not provisioned with the binary)"
-    },
-    {
-      "path": "runtime/whisper/bin/Release/whisper.dll",
-      "feature": "speechRecognition",
-      "status": "unverified",
-      "evidence": "same local 1.9.3-dev native-CPU build as whisper-cli.exe",
-      "licence": "whisper.cpp MIT"
-    },
-    {
-      "path": "runtime/whisper/bin/Release/ggml.dll",
-      "feature": "speechRecognition",
-      "status": "unverified",
-      "evidence": "same local build (ggml 0.22.0); ggml-base.dll and ggml-cpu.dll beside it belong to it",
-      "licence": "ggml MIT"
-    },
-    {
-      "path": "runtime/whisper/bin/Release/whisper-server.exe",
-      "feature": "persistentSpeechRecognition",
-      "status": "missing",
-      "evidence": "the local build had WHISPER_BUILD_SERVER=ON but produced or kept no server; its source is gone, so the matching binary cannot be rebuilt. An official whisper.cpp release would replace whisper-cli too (Media pin): a Root/Media decision.",
-      "licence": "whisper.cpp MIT"
-    },
-    {
       "path": "runtime/chatterbox/bin/crispasr-windows-x86_64-vulkan/crispasr.exe",
       "feature": "speechSynthesis",
       "status": "unverified",
@@ -118,6 +90,222 @@
       "source": "https://huggingface.co/cstr/chatterbox-GGUF/blob/main/chatterbox-s3gen-q8_0.gguf",
       "evidence": "local file equals the Hugging Face LFS oid and size of cstr/chatterbox-GGUF (and of mazrba/Chatterbox-TTS-Persian-gguf), 2026-10-12",
       "licence": "Chatterbox (Resemble AI) MIT; owner to confirm the GGUF conversion's terms"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-base.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 693248,
+      "sha256": "bede0d6b2d387236ecd2b5dd676d51c8984b5b6e0ae461a12174e9c01345c5f0",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-alderlake.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1009664,
+      "sha256": "d8f5c56ea490394eeae8b271650f2647aecd039a542d6df9e0140726e62a4603",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-cannonlake.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1049600,
+      "sha256": "74127b40abd4f595d9db6af0fa313a02e18ff42fc228bfa05281e7c788dd4507",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-cascadelake.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1061376,
+      "sha256": "4b11c427b844eeac87529af9a8d94b35aad2024666beb2a35e59fe3077e4b81e",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-haswell.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1010688,
+      "sha256": "1306b1014c8118d27234d8ddc0e66ced1f8c8476bf85071595fd182ea9b7263b",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-icelake.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1061376,
+      "sha256": "2b4dc4c66e7d8fe2807283816e9cf3b7f7d0556f59df34069871e37eab8aed40",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-sandybridge.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1026560,
+      "sha256": "04edbdebc01a1d421062a960881a4f34d520d99693999518243f332406444c6e",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-skylakex.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1049600,
+      "sha256": "1774714cf93621406ff35344b54715619a83242ae3e331e44d98a3b35ce801be",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-sse42.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 862720,
+      "sha256": "f060318772c4c2dbac312bbfff6ea700b85dbc502bb38585a7186d06d549301a",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml-cpu-x64.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 866816,
+      "sha256": "4b4b05caba40d4309b5d710ef74c59ba190516b8489f27bdb1ba11ae33c6e9d3",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/ggml.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 62464,
+      "sha256": "31fe18616d872af9b6134b47a6dff8072ae4ecbe5df0273f4f8dc36766c9db8e",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/whisper-cli.exe",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 479744,
+      "sha256": "331dba46d6427105d2b802cdbc7eae916ea1c5abf9b0d3b5cfe460d8db8e4366",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/whisper-server.exe",
+      "feature": "persistentSpeechRecognition",
+      "status": "verified",
+      "bytes": 726016,
+      "sha256": "a97456e747f28e7bb09c1dac35f40d94404c5ecffa74aaaaa7a3753ea6543121",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/bin/Release/whisper.dll",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1370112,
+      "sha256": "034396d75bb5720c1851674ff64a96192b58f6927b68d334ebd254ce6cad9674",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "evidence": "file of the official whisper.cpp v1.9.5 prebuilt archive (release b5454, commit d1be6fde; archive SHA-256 6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb = GitHub's published digest); staged set verified by Root 26/26",
+      "licence": "whisper.cpp MIT (ggml MIT); third-party notices in runtime/whisper/LICENSE"
+    },
+    {
+      "path": "runtime/whisper/LICENSE/LICENSE",
+      "feature": "speechRecognition",
+      "status": "verified",
+      "bytes": 1099,
+      "sha256": "bcd8ec749126d45cb06737d0690295d73df4b6e7e194205bcf91190368f27285",
+      "source": "https://github.com/ggml-org/whisper.cpp/blob/v1.9.5/LICENSE",
+      "evidence": "the LICENSE file at tag v1.9.5 (commit d1be6fde), unchanged",
+      "licence": "MIT"
+    },
+    {
+      "path": "runtime/ffmpeg/bin/ffmpeg.exe",
+      "feature": "mediaDecoding",
+      "status": "verified",
+      "provenance": "reproducible_build_of_signed_source",
+      "bytes": 21947392,
+      "sha256": "6c3fc768ef1de9ee4d514ae15b789ed77dc39f95a3a379b75bec4fcf4e0c65b9",
+      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "evidence": "NOT a publisher binary: built by Qronos (MSVC, Brepro) from the signed official source with --disable-network --disable-protocols --enable-protocol=file,pipe and no GPL, version3 or nonfree; a second clean build was byte-identical; staged set (MANIFEST 011a697d594c2aaf...) verified by Root 26/26; recipe in runtime/ffmpeg/SOURCE/build",
+      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
+    },
+    {
+      "path": "runtime/ffmpeg/bin/ffprobe.exe",
+      "feature": "mediaDecoding",
+      "status": "verified",
+      "provenance": "reproducible_build_of_signed_source",
+      "bytes": 21726208,
+      "sha256": "ef43e6e32a54646d1ba38957ebba4396699a1032f9be1e6c402bcb87c2ac6406",
+      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "evidence": "NOT a publisher binary: built by Qronos (MSVC, Brepro) from the signed official source with --disable-network --disable-protocols --enable-protocol=file,pipe and no GPL, version3 or nonfree; a second clean build was byte-identical; staged set (MANIFEST 011a697d594c2aaf...) verified by Root 26/26; recipe in runtime/ffmpeg/SOURCE/build",
+      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
+    },
+    {
+      "path": "runtime/ffmpeg/SOURCE/ffmpeg-9.0.2.tar.xz",
+      "feature": "mediaDecodingSource",
+      "status": "verified",
+      "provenance": "publisher",
+      "bytes": 12040788,
+      "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "evidence": "the official source release; its .asc is a GOODSIG/VALIDSIG by FCF986EA15E6E293A5644F10B4322F04D67658D8 (fingerprint published on ffmpeg.org/download.html)",
+      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
+    },
+    {
+      "path": "runtime/ffmpeg/SOURCE/ffmpeg-9.0.2.tar.xz.asc",
+      "feature": "mediaDecodingSource",
+      "status": "verified",
+      "provenance": "publisher",
+      "bytes": 520,
+      "sha256": "d617fd94ea354dadd2a8bb16243d37c44e1e9729b06b6ad58fe30bfb0fa943f2",
+      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc",
+      "evidence": "the official detached signature published with the source release",
+      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
+    },
+    {
+      "path": "runtime/ffmpeg/LICENSE/COPYING.LGPLv2.1",
+      "feature": "mediaDecoding",
+      "status": "verified",
+      "provenance": "publisher",
+      "bytes": 26517,
+      "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "evidence": "the file of that name in the signed source",
+      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
+    },
+    {
+      "path": "runtime/ffmpeg/LICENSE/LICENSE.md",
+      "feature": "mediaDecoding",
+      "status": "verified",
+      "provenance": "publisher",
+      "bytes": 4346,
+      "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af",
+      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "evidence": "the file of that name in the signed source",
+      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
     }
   ]
 }
