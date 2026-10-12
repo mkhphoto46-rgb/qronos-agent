@@ -44,6 +44,7 @@ from security.permissions import ActionCategory, PermissionDecision
 
 ROOT_OPERATION = "media.add_root"
 EXPORT_OPERATION = "media.export_report"
+OPEN_OPERATION = "media.open_at_time"
 
 
 class MediaPermissionRefused(PermissionError):
@@ -231,3 +232,35 @@ class GatePermissions:
         request: ActionRequest = payload["request"]
         label = "allow" if grant is None else f"grant:{verdict.decision.value}"
         return payload, Approval(request.action_id, label, self.clock())
+
+    # ---------------------------------------------------------------- open
+
+    def request_open(self, path: Path, app_id: str, player: str, start_seconds: float,
+                     sha256: str) -> Approval | Pending:
+        """Opening one verified media file at a time in a trusted catalog player (OPEN_APPLICATION)."""
+        request = ActionRequest(
+            category=ActionCategory.OPEN_APPLICATION, target=str(path),
+            summary=f"Open this video in {player} at the chosen time",
+            parameters={"operation": OPEN_OPERATION, "appId": app_id, "startSeconds": round(float(start_seconds), 3),
+                        "sha256": sha256},
+        )
+        payload = {"operation": OPEN_OPERATION, "path": str(path), "appId": app_id,
+                   "startSeconds": float(start_seconds), "sha256": sha256}
+        return self._prepare(request, payload, f"Open {path.name} in {player}?",
+                             {"name": path.name, "player": player, "startSeconds": round(float(start_seconds), 3)})
+
+    def approve_open(self, approval_id: str, decision: PermissionDecision,
+                     secret: str | None = None) -> tuple[dict[str, Any], Approval]:
+        payload, grant, verdict = self._take(approval_id, OPEN_OPERATION, decision, secret)
+        request: ActionRequest = payload["request"]
+        label = "allow" if grant is None else f"grant:{verdict.decision.value}"
+        return payload, Approval(request.action_id, label, self.clock())
+
+    def decline(self, approval_id: str) -> None:
+        """The person said no: the single-use identity is spent and nothing runs (unknown or stale is refused)."""
+        if self.ledger is None:
+            raise MediaPermissionRefused("approval_required", "no approval ledger in this process")
+        try:
+            self.ledger.take(approval_id, kinds=(ApprovalKind.FILE_ACTION,))
+        except StaleApproval as exc:
+            raise MediaPermissionRefused("stale_approval", exc.reason) from None

@@ -715,6 +715,71 @@ class MediaService:
         return {"status": "written", "path": str(target), "sha256": digest, "bytes": len(content), "format": fmt,
                 "kind": kind, "approval": {"actionId": approval.action_id, "decision": approval.decision}}
 
+    def prepare_open(self, asset_id: str, start_ms: int, *, verify_seconds: float = DEFAULT_VERIFY_SECONDS,
+                     cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """Product route: open the verified copy at ``start_ms`` in a trusted catalog player (mpv or VLC).
+
+        The copy must pass :meth:`verify_asset` now (current Files read gate plus the full hash); the player comes
+        only from the trusted application catalog; then the OPEN_APPLICATION gate decides (single-use approval,
+        typed secret when the policy is that strong). An allowed open launches at once.
+        """
+        from core.computer_executor import trusted_media_players
+
+        start_ms = int(start_ms)
+        if not (0 <= start_ms <= 7 * 24 * 3600 * 1000):
+            raise MediaRequestError("startMs is out of range")
+        verification = self.verify_asset(asset_id, max_seconds=verify_seconds, cancelled=cancelled)
+        if verification["status"] != "verified":
+            return {"status": "not_verified", "assetId": asset_id, "verification": verification}
+        players = trusted_media_players()
+        if not players:
+            return {"status": "no_player", "assetId": asset_id,
+                    "detail": "no mpv or VLC is installed in the trusted application catalog"}
+        app_id = sorted(players)[0]
+        spec = players[app_id]
+        path = Path(verification["verified"][0])
+        sha256 = self.store.db.execute("SELECT sha256 FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()[0]
+        decided = self.permissions.request_open(path, app_id, spec.display_name, start_ms / 1000.0, sha256)
+        if isinstance(decided, Pending):
+            return _pending_json(decided)
+        return self._launch_open(asset_id, path, app_id, start_ms / 1000.0, decided)
+
+    def approve_open(self, approval_id: str, decision: str, *, secret: str | None = None,
+                     verify_seconds: float = DEFAULT_VERIFY_SECONDS,
+                     cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        payload, approval = self.permissions.approve_open(approval_id, _decision(decision), secret)
+        asset_id = self.store.db.execute("SELECT asset_id FROM assets WHERE sha256 = ?",
+                                         (payload["sha256"],)).fetchone()
+        if asset_id is None:
+            raise MediaRequestError("the prepared video is no longer in the index")
+        # Re-verified now: the copy may have been replaced or its root revoked while the question was open.
+        verification = self.verify_asset(asset_id[0], max_seconds=verify_seconds, cancelled=cancelled)
+        if verification["status"] != "verified" or str(payload["path"]) not in verification["verified"]:
+            return {"status": "not_verified", "assetId": asset_id[0], "verification": verification,
+                    "launched": False}
+        return self._launch_open(asset_id[0], Path(payload["path"]), payload["appId"], payload["startSeconds"],
+                                 approval)
+
+    @staticmethod
+    def _launch_open(asset_id: str, path: Path, app_id: str, start_seconds: float,
+                     approval: Approval) -> dict[str, Any]:
+        from core import computer_executor
+        from core.actions import InvalidAction
+
+        spec = computer_executor.trusted_media_players().get(app_id)
+        if spec is None:
+            return {"status": "no_player", "assetId": asset_id, "launched": False,
+                    "detail": "the approved player is no longer in the trusted catalog"}
+        try:
+            computer_executor.open_media_at_time(spec, str(path), start_seconds)
+        except InvalidAction as exc:
+            return {"status": "refused", "assetId": asset_id, "launched": False, "detail": str(exc)[:200]}
+        except OSError as exc:
+            return {"status": "failed", "assetId": asset_id, "launched": False, "detail": type(exc).__name__}
+        return {"status": "launched", "assetId": asset_id, "launched": True, "player": spec.display_name,
+                "startSeconds": round(float(start_seconds), 3), "name": path.name,
+                "approval": {"actionId": approval.action_id, "decision": approval.decision}}
+
     def open_timestamp(self, asset_id: str, start_ms: int, *, player: str | None = None,
                        verify_seconds: float = DEFAULT_VERIFY_SECONDS,
                        cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:

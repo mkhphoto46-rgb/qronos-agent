@@ -213,6 +213,10 @@ LINK_REMOTE_ACTION = "qronos.link_remote"
 LINK_RELAY_SET_ACTION = "qronos.link_relay_set"
 # Console-only: clears the Security Monitor's containment/quarantine (Link D9).
 LINK_SECURITY_RESET_ACTION = "qronos.link_security_reset"
+# The media product route (qronos_media.product): typed {op, requestId, ...} operations on the one media host.
+MEDIA_ACTION = "qronos.media"
+#: How long a brain/voice media request waits for its typed result before answering honestly that it did not.
+MEDIA_INTENT_WAIT_SECONDS = 12.0
 LINK_ACTIONS = frozenset({
     LINK_STATUS_ACTION, LINK_DEVICES_ACTION, LINK_PAIR_OPEN_ACTION, LINK_PAIR_CANCEL_ACTION,
     LINK_REVOKE_ACTION, LINK_REMOTE_ACTION, LINK_RELAY_SET_ACTION, LINK_SECURITY_RESET_ACTION,
@@ -1641,6 +1645,57 @@ class QronosRuntime:
             return owned_generation()
         except Exception:  # an unreadable generation is no generation
             return None
+
+    def media_product(self) -> Any:
+        """The typed media operations (qronos_media.product) on the one media host, built with it."""
+        with self._media_host_lock:
+            product = getattr(self, "_media_product", None)
+        if product is not None:
+            return product
+        host = self.ensure_media_host()
+        from qronos_media.product import MediaProduct
+
+        with self._media_host_lock:
+            product = getattr(self, "_media_product", None)
+            if product is None:
+                product = MediaProduct(
+                    host,
+                    emit=lambda event, status, payload: self._notify(event, status, _compact(payload)),
+                    paused=lambda: self.runtime_paused,
+                )
+                self._media_product = product
+        return product
+
+    def _run_media_intent(self, intent: Any) -> str:
+        """Run a brain/voice media request through the SAME typed product operation; a short Persian answer."""
+        from qronos_media.intents import MediaSearchIntent, spoken_answer
+
+        request_id = f"brain_{uuid.uuid4().hex[:16]}"
+        if isinstance(intent, MediaSearchIntent):
+            data = {"op": "search", "requestId": request_id, "query": intent.query, "mode": intent.mode, "limit": 10}
+        else:
+            data = {"op": "status", "requestId": request_id}
+        answered: dict[str, Any] = {}
+        done = threading.Event()
+
+        def reply(result: dict[str, Any]) -> None:
+            answered.update(result)
+            done.set()
+
+        self.media_product().handle(data, reply=reply)
+        done.wait(MEDIA_INTENT_WAIT_SECONDS)
+        return spoken_answer(intent, answered if done.is_set() else None)
+
+    def _begin_text_media_request(self, text: str, request_id: str, started_at: float) -> bool:
+        """A deterministic media search/status request goes to the media product, not to a model."""
+        from qronos_media.intents import parse_media_intent
+
+        intent = parse_media_intent(text)
+        if intent is None:
+            return False
+        response = self._run_media_intent(intent)
+        self._finish_text_file_action(request_id=request_id, response=response, started_at=started_at)
+        return True
 
     def _preempt_media(self, reason: str) -> None:
         host = self._media_host
@@ -4996,6 +5051,15 @@ class QronosRuntime:
             report["voiceComputerDeferred"] = False
             return _computer_capability_response()
 
+        from qronos_media.intents import parse_media_intent
+
+        media_intent = parse_media_intent(transcript)
+        if media_intent is not None:
+            # The same typed media product operation as the desktop (no shell, model or database call).
+            report["voiceMediaRequest"] = type(media_intent).__name__
+            report["voiceComputerDeferred"] = False
+            return self._run_media_intent(media_intent)
+
         paint_undo_response = self._prepare_voice_paint_undo_action(
             transcript,
             report,
@@ -5668,6 +5732,13 @@ class QronosRuntime:
             )
 
             if self._begin_text_calculator_semantic_action(
+                cleaned_text,
+                cleaned_request_id,
+                started,
+            ):
+                return
+
+            if self._begin_text_media_request(
                 cleaned_text,
                 cleaned_request_id,
                 started,
@@ -8444,6 +8515,13 @@ class QronosRuntime:
                     "calculatorLocalSemanticRoute"
                 ] = True
 
+            from qronos_media.intents import parse_media_intent as _parse_media_intent
+
+            if _parse_media_intent(transcript) is not None:
+                # A media search/status request runs the typed media operation (voice computer branch).
+                routed_task_type = TaskType.COMPUTER
+                selected_task_type = TaskType.COMPUTER
+
             report["route"] = (
                 routed_task_type.value
             )
@@ -9923,6 +10001,11 @@ def handle_action(
         action_id,
     )
 
+    if action_id == MEDIA_ACTION:
+        # The media product applies its own pause rule per operation (reads stay available while paused).
+        handle_media_action(runtime, payload)
+        return
+
     pause_safe_actions = {
         CONVERSATION_HISTORY_REQUEST_ACTION,
         FILE_ACTION_DECISION_ACTION,
@@ -10882,6 +10965,14 @@ def handle_media_status(
     host = runtime._media_host
     status = host.status() if host is not None else {"workerStarted": False}
     runtime._notify("media_status", "ready", _compact(status))
+
+
+def handle_media_action(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    """One typed media product operation (the data object only; validated in qronos_media.product)."""
+    runtime.media_product().handle(payload.get("data"))
 
 
 MEDIA_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {

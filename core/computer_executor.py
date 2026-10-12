@@ -1715,3 +1715,60 @@ def _default_gui_action(spec: AppSpec, operation: ComputerOperation) -> str:
     raise RuntimeError(
         "Paint drawing requires verified canvas/tool grounding; native input is not enabled yet."
     )
+
+
+# ---------------------------------------------------------------- media: open a verified file at a time
+# Round 32 (Root ROUND32 E4): the smallest typed extension of this approved executor for the media product. The
+# player comes ONLY from the trusted application catalog (mpv or VLC, by executable name); the argv is built here
+# (player, its start-time option, the one verified local file) with no shell and no caller-supplied arguments.
+# The caller (qronos_media) has already passed the OPEN_APPLICATION gate (single-use approval) and the Files read
+# gate with a fresh hash verification of exactly this file.
+
+MEDIA_PLAYER_START_OPTIONS: dict[str, str] = {"vlc": "--start-time={seconds:.3f}", "mpv": "--start={seconds:.3f}"}
+MAX_MEDIA_START_SECONDS = 7 * 24 * 3600.0
+
+
+def trusted_media_players(*, refresh: bool = False) -> dict[str, AppSpec]:
+    """Catalog applications whose executable is mpv or VLC (app_id -> spec), never a caller path."""
+    players: dict[str, AppSpec] = {}
+    for app_id, spec in application_catalog(refresh=refresh).items():
+        if not spec.executable:
+            continue
+        stem = Path(spec.executable).stem.casefold()
+        if stem in MEDIA_PLAYER_START_OPTIONS and Path(spec.executable).name.lower() not in _BLOCKED_EXECUTABLES:
+            players[app_id] = spec
+    return players
+
+
+def media_player_argv(spec: AppSpec, media_path: str, start_seconds: float) -> list[str]:
+    """Validate everything and build the exact argv (raises InvalidAction)."""
+    current = trusted_media_players().get(spec.app_id)
+    if current != spec:
+        current = trusted_media_players(refresh=True).get(spec.app_id)
+    if current != spec:
+        raise InvalidAction("That player is no longer in the trusted application catalog.")
+    executable = Path(spec.executable).resolve(strict=False)
+    stem = executable.stem.casefold()
+    if stem not in MEDIA_PLAYER_START_OPTIONS or not executable.is_file():
+        raise InvalidAction("The catalog player failed validation.")
+    target = Path(media_path)
+    if not target.is_absolute() or target.is_symlink() or not target.is_file():
+        raise InvalidAction("The media file must be an existing local file (not a link).")
+    try:
+        seconds = float(start_seconds)
+    except (TypeError, ValueError):
+        raise InvalidAction("The start time must be a number of seconds.") from None
+    if not (0.0 <= seconds <= MAX_MEDIA_START_SECONDS):
+        raise InvalidAction("The start time is out of range.")
+    return [str(executable), MEDIA_PLAYER_START_OPTIONS[stem].format(seconds=seconds), str(target)]
+
+
+def open_media_at_time(spec: AppSpec, media_path: str, start_seconds: float, *,
+                       launcher: Callable[[list[str]], object] | None = None) -> object:
+    """Launch the trusted catalog player at ``start_seconds`` on the one verified file. The player is the user's
+    application: it is not owned, waited for or killed."""
+    argv = media_player_argv(spec, media_path, start_seconds)
+    if launcher is not None:
+        return launcher(argv)
+    return subprocess.Popen(argv, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)

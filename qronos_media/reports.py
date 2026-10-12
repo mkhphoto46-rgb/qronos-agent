@@ -149,8 +149,15 @@ def to_html(report: dict[str, Any]) -> str:
     for name, stage in report["levels"]["stages"].items():
         parts.append(f"<tr><td>{e(_STAGE_FA.get(name, name))}</td><td>{e(_STATE_FA.get(stage['state'], stage['state']))}"
                      f"</td><td>{e(stage['version'])}</td></tr>")
-    parts.append("</table><h2>هنوز در دسترس نیست</h2><ul>")
-    for item in report["levels"]["pending"]:
+    # Implemented-but-unverified capabilities (ASR, semantic dialogue) are not "unavailable": whether THIS asset ran
+    # them is in the stage table above. Only the rest is listed as not yet available.
+    implemented = [item for item in report["levels"]["pending"] if item["status"] == "implemented_unverified"]
+    missing = [item for item in report["levels"]["pending"] if item["status"] != "implemented_unverified"]
+    parts.append("</table><h2>پیاده‌سازی‌شده، تأییدنشده (وضعیت این فایل در جدول بالا)</h2><ul>")
+    for item in implemented:
+        parts.append(f"<li dir=\"ltr\">{e(item['capability'])}: {e(item['status'])}</li>")
+    parts.append("</ul><h2>هنوز در دسترس نیست</h2><ul>")
+    for item in missing:
         parts.append(f"<li dir=\"ltr\">{e(item['capability'])}: {e(item['status'])}</li>")
     parts.append("</ul><h2>زیرنویس‌ها</h2><table><tr><th>منبع</th><th>زبان</th><th>وضعیت</th><th>تعداد</th></tr>")
     for track in report["subtitleTracks"]:

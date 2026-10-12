@@ -109,7 +109,8 @@ def test_exact_search_returns_hash_bound_time_ranged_evidence(tmp_path: Path, ba
     assert hit["track"]["source"] == "embedded" and hit["track"]["language"] == "fa"
     assert hit["confidence"] == "uncalibrated" and hit["available"] and len(hit["paths"]) == 2
     assert hit["scene"]["scene_index"] == 1
-    assert "semantic_dialogue" in result["pending"]
+    # Round 32 stale-claim correction (documented): semantic dialogue is implemented, only not part of this call.
+    assert "semantic_dialogue" in result["notInThisCall"] and "semantic_dialogue" not in result["pending"]
     persian = service.search_dialogue("نخواستم", mode="exact")["results"]
     assert [(r["startMs"], r["track"]["source"]) for r in persian] == [(400, "sidecar")]
     service.close()
