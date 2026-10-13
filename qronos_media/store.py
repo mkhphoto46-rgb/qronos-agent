@@ -32,6 +32,11 @@ Schema 4 adds topic retrieval. ``topic_segments`` (qronos_media.topics) holds ru
 with their centroid vector and the exact window keys they are made of; it is written only in the "topics" stage's
 result+COMPLETED transaction and references its asset and track (deleted with them). The schema-3 to 4 step only
 adds a table.
+
+Schema 5 adds generated topic labels. ``topic_labels`` (qronos_media.brain_labels) holds, per topic segment, either a
+validated label/summary from the governed Fast brain with the indexed lines it cites, or the reason it was rejected;
+every row is marked generated/unverified in its provenance. It references its segment (deleted with it) and is
+written only in the "topic_labels" stage's result+COMPLETED transaction. The schema-4 to 5 step only adds a table.
 """
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -169,6 +174,19 @@ CREATE TABLE IF NOT EXISTS topic_segments (
     PRIMARY KEY (asset_id, segment_key)
 );
 CREATE INDEX IF NOT EXISTS topic_segments_by_track ON topic_segments(track_id);
+
+CREATE TABLE IF NOT EXISTS topic_labels (
+    asset_id TEXT NOT NULL,
+    segment_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('labelled', 'rejected')),
+    label TEXT,
+    summary TEXT,
+    cites_json TEXT,
+    reason TEXT,
+    provenance_json TEXT NOT NULL,
+    PRIMARY KEY (asset_id, segment_key),
+    FOREIGN KEY (asset_id, segment_key) REFERENCES topic_segments(asset_id, segment_key) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS asr_chunks (
     asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,

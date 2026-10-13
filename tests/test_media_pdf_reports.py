@@ -53,7 +53,7 @@ def make_store(root: Path, *, asr: bool = True, sidecar: bool = True, lines: int
         db.execute("INSERT INTO streams(asset_id, idx, kind, codec, language, is_default, forced, channels, start_ms) "
                    "VALUES (?, 1, 'audio', 'aac', 'fas', 1, 0, 2, 0)", (ASSET,))
         for name, spec in STAGES.items():
-            done = name != "semantic"
+            done = name not in {"semantic", "topic_labels"}  # no runtime bge-m3 query / Fast brain in this fixture
             db.execute("INSERT INTO stages(asset_id, stage, version, state, attempts, queued_at, started_at, "
                        "finished_at) VALUES (?,?,?,?,1,?,?,?)",
                        (ASSET, name, spec.version, "COMPLETED" if done else "QUEUED", 1_760_000_000.0,

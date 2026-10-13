@@ -81,8 +81,8 @@ def build(tmp_path: Path, cues=CUES):
             tx.execute("INSERT INTO dialogue(asset_id, track_id, kind, seq, start_ms, end_ms, text, norm_text) "
                        "VALUES (?, ?, 'cue', ?, ?, ?, ?, ?)",
                        (asset_id, f"{asset_id}:e2", seq, 10_000 * seq + 500, 10_000 * seq + 4_000, text, text.lower()))
-        tx.execute("UPDATE stages SET state = 'COMPLETED' WHERE asset_id = ? AND stage NOT IN ('semantic', 'topics')",
-                   (asset_id,))
+        tx.execute("UPDATE stages SET state = 'COMPLETED' WHERE asset_id = ? "
+                   "AND stage NOT IN ('semantic', 'topics', 'topic_labels')", (asset_id,))
     return service, asset_id, sidecar
 
 

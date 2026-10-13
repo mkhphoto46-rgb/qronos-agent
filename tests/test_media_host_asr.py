@@ -692,12 +692,16 @@ def test_the_bridge_host_uses_the_queue_governor_the_shared_ledger_and_the_bridg
         def _memory_sidecar_generation(self):  # round 32: the atomic owner + generation pair replaces it
             return None
 
+        def _media_fast_brain(self):  # round 48: the governed Fast brain source (no orchestrator here: None)
+            return None
+
     bridge = Bridge()
     host = runtime_bridge.QronosRuntime.ensure_media_host(bridge)
     try:
         assert host is runtime_bridge.QronosRuntime.ensure_media_host(bridge)  # one host
         assert host.authority.governor is governor and host.authority.ledger is GLOBAL_RESOURCE_LEDGER
         assert host._permissions().ledger is bridge._approvals
+        assert host._brain().unavailable_reason() == "model_unavailable"  # wired, but no runtime brain: fails closed
         bridge.busy = True  # (read before any activity reading)
         assert host.authority.yield_reason() == "foreground"
         assert host.status()["workerStarted"] is False  # nothing runs until asked
@@ -763,8 +767,9 @@ def test_a_schema_1_store_migrates_once_and_a_newer_one_is_refused_untouched(tmp
     db.close()
     store = MediaStore(path)
     try:
-        assert store.get_meta("schema_version") == "4"  # schema 4 (topic segments) migrates a schema-1 file too
+        assert store.get_meta("schema_version") == "5"  # schema 5 (topic labels) migrates a schema-1 file too
         assert store.db.execute("SELECT count(*) FROM topic_segments").fetchone()[0] == 0
+        assert store.db.execute("SELECT count(*) FROM topic_labels").fetchone()[0] == 0
         assert store.db.execute("SELECT text FROM dialogue").fetchone()[0] == "kept line"
         assert store.db.execute("PRAGMA foreign_key_check").fetchall() == []
         with store.transaction() as tx:
@@ -773,10 +778,10 @@ def test_a_schema_1_store_migrates_once_and_a_newer_one_is_refused_untouched(tmp
         assert store.db.execute("SELECT count(*) FROM dialogue_fts WHERE dialogue_fts MATCH 'kept'").fetchone()[0] == 0
     finally:
         store.close()
-    newer = tmp_path / "v5.sqlite3"
+    newer = tmp_path / "v6.sqlite3"
     db = sqlite3.connect(newer)
     db.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
-                     "INSERT INTO meta VALUES ('schema_version', '5');")
+                     "INSERT INTO meta VALUES ('schema_version', '6');")
     db.close()
     before = newer.read_bytes()
     with pytest.raises(StoreTooNew):

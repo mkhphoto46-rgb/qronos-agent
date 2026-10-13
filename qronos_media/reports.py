@@ -160,6 +160,11 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
     if stages.get("scenes", {}).get("state") == "COMPLETED":
         items.append({"code": "shots_not_scenes",
                       "text": "برش‌ها با تغییر تصویر تشخیص داده شده‌اند، نه صحنه‌های معنایی."})
+    if stages.get("topic_labels", {}).get("state") == "COMPLETED" \
+            and not str(stages.get("topic_labels", {}).get("note") or "").startswith("skipped"):
+        items.append({"code": "generated_labels_unverified",
+                      "text": "برچسب و خلاصهٔ بخش‌های موضوعی را مغز سریع از روی همین جمله‌ها ساخته است؛ متن تولیدشده و "
+                              "تأییدنشده است، نه نقل‌قول و نه واقعیت؛ جمله‌های استنادشده کنار آن آمده‌اند."})
     if stages.get("topics", {}).get("state") == "COMPLETED":
         items.append({"code": "topic_segments_unlabelled",
                       "text": "بخش‌های موضوعی گروه‌بندی جمله‌های یک ترک بر پایهٔ معنای آن‌ها (بردارهای bge-m3) هستند؛ "
@@ -174,7 +179,7 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
 def _not_available(stages: dict[str, Any]) -> list[dict[str, Any]]:
     """Capabilities this asset does not have: never implemented, or implemented but not completed here."""
     out = []
-    stage_of = {"asr": "asr", "semantic_dialogue": "semantic", "topic_retrieval": "topics"}
+    stage_of = {"asr": "asr", "semantic_dialogue": "semantic", "topic_retrieval": "topics", "topics": "topic_labels"}
     for item in PENDING_CAPABILITIES:
         stage = stage_of.get(str(item["capability"]))
         if item["status"] == "implemented_unverified" and stage \
@@ -227,6 +232,15 @@ def gather(db: sqlite3.Connection, asset_id: str, kind: str = "full") -> dict[st
                               "topicSegmentsOmitted": segment_count - len(segments),
                               "topicSegmentsCap": REPORT_TOPIC_SEGMENTS[kind]})
     if REPORT_TOPIC_SEGMENTS[kind]:
+        from qronos_media import brain_labels
+
+        labels = brain_labels.asset_labels(db, asset_id)
+        for segment in segments:
+            record = labels.get(segment.get("segmentKey"))
+            segment["generated"] = None if not record or record["status"] != "labelled" else {
+                "label": record["label"], "summary": record["summary"], "cites": record["cites"], "verified": False,
+                "provenance": record["provenance"]}
+        report["summary"]["topicSegmentsLabelled"] = sum(1 for s in segments if s["generated"])
         report["topicSegments"] = segments
     if kind == "short":
         report["keyframes"] = [{"sceneIndex": f["scene_index"], "timeMs": f["time_ms"]} for f in db.execute(
@@ -340,6 +354,10 @@ def to_html(report: dict[str, Any]) -> str:
                      "<tr><th>بازه</th><th>منبع</th><th>جمله‌های مرکزی</th></tr>")
         for segment in report["topicSegments"]:
             lines = "<br>".join(f"<span dir=\"auto\">{e(line['text'])}</span>" for line in segment["lines"])
+            if segment.get("generated"):
+                made = segment["generated"]
+                lines = (f"<strong dir=\"auto\">{e(made['label'])}</strong> <small>(تولیدشده، تأییدنشده)</small>"
+                         f"<br><span dir=\"auto\">{e(made['summary'])}</span><br>{lines}")
             parts.append(f"<tr><td class=\"ltr\">{e(clock_text(segment['startMs']))} – {e(clock_text(segment['endMs']))}"
                          f"</td><td>{e(SOURCE_FA.get(segment['source'], segment['source']))}</td><td>{lines}</td></tr>")
         parts.append("</table>")
@@ -579,6 +597,10 @@ def to_pdf(report: dict[str, Any]) -> bytes:
         drawn = drawn_chars = 0
         for segment in segments:
             lines = " / ".join(_plain(line["text"], 300) for line in segment["lines"]) or "—"
+            if segment.get("generated"):
+                made = segment["generated"]
+                lines = (f"«{_plain(made['label'], 80)}» (تولیدشده، تأییدنشده): {_plain(made['summary'], 300)} — "
+                         + lines)
             if drawn_chars + len(lines) > MAX_PDF_TOPIC_CHARS:
                 break
             doc.row([(f"{clock_text(segment['startMs'])}\n{clock_text(segment['endMs'])}", 42, "ltr"),
@@ -684,6 +706,7 @@ def preview(report: dict[str, Any]) -> dict[str, Any]:
         out["keyframes"] = report["keyframes"]
     if report.get("topicSegments"):
         out["topicSegments"] = [{"startMs": s["startMs"], "endMs": s["endMs"], "source": s["source"],
+                                 "generatedLabel": (s.get("generated") or {}).get("label"),
                                  "lines": [_plain(line["text"], PREVIEW_TEXT_CHARS) for line in s["lines"]]}
                                 for s in report["topicSegments"][:PREVIEW_TRACKS]]
     if "scenes" in report:

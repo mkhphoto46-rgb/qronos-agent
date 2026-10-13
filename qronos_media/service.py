@@ -106,6 +106,7 @@ class MediaService:
         monotonic: Callable[[], float] = time.monotonic,
         admit_store: Callable[[Path], object] | None = None,
         embedder: object = None,
+        brain: object = None,
     ) -> None:
         self.layout = MediaLayout(local_path(data_dir))
         if admit_store is not None:
@@ -128,11 +129,14 @@ class MediaService:
         self._monotonic = monotonic
         # The runtime's bge-m3 embedder (qronos_media.semantic.MediaEmbedder) or None: semantic stays unavailable.
         self.embedder = embedder
+        # The runtime's governed Fast-brain gateway (qronos_media.brain_gateway) or None: generation stays unavailable.
+        self.brain = brain
 
     def _runner(self) -> StageRunner:
         return StageRunner(self.store, tools=self.tools, authority=self.authority, permissions=self.permissions,
                            cache_dir=self.layout.cache, cache_quota_bytes=self.cache_quota_bytes,
-                           excluded=self._excluded, monotonic=self._monotonic, embedder=self.embedder)
+                           excluded=self._excluded, monotonic=self._monotonic, embedder=self.embedder,
+                           brain=self.brain)
 
     def close(self) -> None:
         self.store.close()
@@ -410,41 +414,47 @@ class MediaService:
     def _query_vector(self, query: str) -> tuple[bytes | None, str | None]:
         """ONE bge-m3 query vector through the same authority as indexing (one declared model slot, the captured
         sidecar generation, dispatch/unresolved evidence), or (None, reason) when it cannot be had now."""
+        vectors, reason = self._embed_texts([query.strip()])
+        return (vectors[0] if vectors else None), reason
+
+    def _embed_texts(self, texts: list[str]) -> tuple[list[bytes], str | None]:
+        """At most one bge-m3 batch (EMBED_BATCH texts) under the same governed path as the query vector."""
         from qronos_media import semantic
         from qronos_media.resources import BGE_M3
 
         if self.embedder is None:
-            return None, "no bge-m3 sidecar capability in this process"
+            return [], "no bge-m3 sidecar capability in this process"
         try:
             # No owned sidecar now: refused before any reservation. Otherwise ONE generation is captured here.
             binding = self.embedder.bind()
         except ResourceRefused as exc:
-            return None, exc.reason
+            return [], exc.reason
         try:
             lease = self.authority.reserve(f"media:semantic_query:{time.monotonic_ns()}",
                                            StageNeeds("semantic_query", model=BGE_M3))
         except ResourceRefused as exc:
-            return None, exc.reason
+            return [], exc.reason
         try:
             if hasattr(lease, "bind_capability"):
                 lease.bind_capability(binding.capability)
-            vector = self.embedder.embed([query.strip()], timeout=semantic.QUERY_TIMEOUT_SECONDS,
-                                         on_dispatch=getattr(lease, "mark_dispatched", None), binding=binding)[0]
+            vectors = self.embedder.embed(texts, timeout=semantic.QUERY_TIMEOUT_SECONDS,
+                                          on_dispatch=getattr(lease, "mark_dispatched", None), binding=binding)
         except (ResourceRefused, semantic.EmbeddingInvalid) as exc:
             if getattr(exc, "reason", "") == "embedding_request_failed" and hasattr(lease, "mark_unresolved"):
                 lease.mark_unresolved()
-            return None, getattr(exc, "reason", "embedding_invalid")
+            return [], getattr(exc, "reason", "embedding_invalid")
         finally:
             self.authority.release(lease)  # the synchronous request has returned: drained
-        return vector, None
+        return vectors, None
 
     def search_topics(self, query: str, *, limit: int = 10, language: str | None = None,
-                      asset_id: str | None = None, budget_seconds: float = 3.0) -> dict[str, Any]:
+                      asset_id: str | None = None, budget_seconds: float = 3.0,
+                      brain_hints: bool = False) -> dict[str, Any]:
         """Exact dialogue first (lexical, unchanged), then evidence-backed topic segments (qronos_media.topics).
 
         One governed bge-m3 query vector; expansion and reranking use only stored vectors and indexed text, so no
         further model call is made. Every topic hit carries its actual indexed lines and its score components."""
-        from qronos_media import semantic, topics
+        from qronos_media import brain_labels, semantic, topics
         from qronos_media.search import Budget, BudgetExhausted
 
         if not isinstance(query, str) or not query.strip() or len(query) > semantic.MAX_TEXT_CHARS:
@@ -467,15 +477,66 @@ class MediaService:
             try:
                 found = topics.search_topics(db, query, vector, limit=limit, language=language, asset_id=asset_id,
                                              check=budget.check)
+                hints_block: dict[str, Any] = {"requested": bool(brain_hints), "applied": False}
+                # Selective: only when asked AND the first pass is weak or the query very short (the same trigger as
+                # the evidence-based expansion). Hints are generated search hints; results stay indexed segments.
+                if brain_hints and found["expansion"].get("applied"):
+                    hints_block.update(self._brain_hints(query))
+                    if hints_block.get("hints"):
+                        vectors, reason = self._embed_texts(hints_block["hints"])
+                        if vectors:
+                            # Its own budget (the brain's answer took time); running out keeps the first pass.
+                            hinted = Budget(budget_seconds, self._excluded)
+                            try:
+                                found = topics.search_topics(db, query, vector, limit=limit, language=language,
+                                                             asset_id=asset_id, check=hinted.check,
+                                                             hint_vectors=vectors)
+                                hints_block["applied"] = True
+                            except BudgetExhausted as exc:
+                                hints_block["reason"] = f"budget:{exc.reason}"
+                        else:
+                            hints_block["reason"] = reason
+                elif brain_hints:
+                    hints_block["reason"] = "first_pass_strong"
+                found["brainHints"] = hints_block
+                labels_by_asset: dict[str, dict] = {}
                 for hit in found["results"]:
                     row = db.execute("SELECT title FROM assets WHERE asset_id = ?", (hit["assetId"],)).fetchone()
                     hit["title"] = row["title"] if row else None
+                    if hit["assetId"] not in labels_by_asset:
+                        labels_by_asset[hit["assetId"]] = brain_labels.asset_labels(db, hit["assetId"])
+                    record = labels_by_asset[hit["assetId"]].get(hit["segmentKey"])
+                    hit["generated"] = None if not record or record["status"] != "labelled" else {
+                        "label": record["label"], "summary": record["summary"], "cites": record["cites"],
+                        "verified": False, "note": "generated by the Fast brain from the cited lines; not a quotation"}
                 block.update(found)
             except BudgetExhausted as exc:
                 block.update({"status": "partial", "stoppedBy": exc.reason})
         finally:
             db.close()
         return {"query": query, "exact": exact, "topic": block}
+
+    def _brain_hints(self, query: str) -> dict[str, Any]:
+        """At most MAX_HINTS generated search phrases for a vague topic query, from the governed Fast brain, validated;
+        or a reason. Never results, never facts."""
+        from qronos_media import brain_labels
+        from qronos_media.brain_gateway import prompt_hash
+
+        if self.brain is None:
+            return {"reason": "model_unavailable"}
+        try:
+            binding = self.brain.bind()
+            user = brain_labels.hints_prompt(query)
+            answer = self.brain.ask(binding, brain_labels.HINTS_SYSTEM, user)
+            hints = brain_labels.parse_hints(answer, query)
+        except ResourceRefused as exc:
+            return {"reason": exc.reason}
+        except brain_labels.LabelRejected as rejected:
+            return {"reason": f"rejected:{rejected.reason}"}
+        return {"hints": hints, "generated": True, "verified": False,
+                "note": "generated search hints from the Fast brain: not facts, not results",
+                "provenance": brain_labels.provenance(binding, prompt_digest=prompt_hash(brain_labels.HINTS_SYSTEM, user),
+                                                      input_digest=prompt_hash(query), kind="query_hints")}
 
     def search_dialogue(self, query: str, **options: Any) -> dict[str, Any]:
         try:

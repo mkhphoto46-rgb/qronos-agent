@@ -214,7 +214,8 @@ def hint_terms(texts: list[str], query_words: list[str], limit: int = MAX_HINTS)
 
 
 def search_topics(db: sqlite3.Connection, query_text: str, query_vector: bytes, *, limit: int,
-                  language: str | None, asset_id: str | None, check: Callable[[], None]) -> dict[str, Any]:
+                  language: str | None, asset_id: str | None, check: Callable[[], None],
+                  hint_vectors: list[bytes] | None = None) -> dict[str, Any]:
     """Evidence-backed topic hits (see the module docstring). Never returns a hit without indexed windows."""
     import numpy as np
 
@@ -250,6 +251,15 @@ def search_topics(db: sqlite3.Connection, query_text: str, query_vector: bytes, 
                          "fromWindows": [{"trackId": w["track_id"], "startMs": w["start_ms"], "endMs": w["end_ms"]}
                                          for w in chosen],
                          "hints": hint_terms([w["text"] for w in chosen], query_words), "note": HINT_NOTE}
+    for hint_vector in (hint_vectors or [])[:8]:
+        # Generated search hints (qronos_media.brain_labels): more CANDIDATES only; every hit below still needs its
+        # own indexed lines, and the hint's similarity only feeds the (fixed-weight) expansion component.
+        hinted = np.frombuffer(hint_vector, dtype="<f4").astype("float64")
+        found, _ = segment_candidates(db, hinted, limit=min(pool, MAX_RERANK), language=language,
+                                      asset_id=asset_id, check=check)
+        for candidate in found:
+            held = candidates.setdefault(candidate["segment_key"], dict(candidate, firstSimilarity=None))
+            held["expandedSimilarity"] = max(float(held.get("expandedSimilarity") or 0.0), candidate["similarity"])
     hits = []
     for candidate in list(candidates.values())[:MAX_RERANK]:
         check()
@@ -297,7 +307,8 @@ def asset_segments(db: sqlite3.Connection, asset_id: str, *, limit: int = 50, li
         centroid = np.frombuffer(row["vector"], dtype="<f4")
         matrix = np.frombuffer(b"".join(w["vector"] for w in windows), dtype="<f4").reshape(len(windows), -1)
         central = sorted(zip((matrix @ centroid).tolist(), windows), key=lambda item: -item[0])[:lines]
-        out.append({"trackId": row["track_id"], "source": row["source"], "language": row["language"],
+        out.append({"segmentKey": row["segment_key"], "trackId": row["track_id"], "source": row["source"],
+                    "language": row["language"],
                     "startMs": row["start_ms"], "endMs": row["end_ms"], "windows": len(windows), "label": None,
                     "lines": [{"startMs": w["start_ms"], "endMs": w["end_ms"], "text": w["text"]} for _, w in central]})
     return out

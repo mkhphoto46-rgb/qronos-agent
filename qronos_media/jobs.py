@@ -355,6 +355,8 @@ class Watch:
 
 #: Refusals that will not change by waiting (no authority may grant this stage here, or its assets are not
 #: provisioned as pinned): the stage stays QUEUED with the reason and the run carries on with other work.
+#: Stages that need the runtime's governed Fast brain (checked before any reservation).
+BRAIN_STAGES = frozenset({"topic_labels"})
 UNAVAILABLE_REASONS = frozenset({
     "requires_qronos_governor", "requires_trusted_model_authority", "gpu_lease_contract_pending",
     "undeclared_model", "model_lease_required", "model_unavailable",
@@ -383,7 +385,8 @@ class StageRunner:
     def __init__(self, store: MediaStore, *, tools: MediaTools | None, authority: MediaResourceAuthority,
                  permissions: MediaPermissions, cache_dir: Path, cache_quota_bytes: int,
                  excluded: tuple[Path, ...] = (), clock: Callable[[], float] = time.time,
-                 monotonic: Callable[[], float] = time.monotonic, embedder: object = None) -> None:
+                 monotonic: Callable[[], float] = time.monotonic, embedder: object = None,
+                 brain: object = None) -> None:
         self.store = store
         self.db = store.db
         self.tools = tools
@@ -400,6 +403,7 @@ class StageRunner:
         self.monotonic = monotonic
         self._watch: Watch | None = None
         self.embedder = embedder  # the runtime's bge-m3 embedder (semantic stage) or None
+        self.brain = brain  # the runtime's governed Fast-brain gateway (topic_labels stage) or None
 
     def _admit_now(self, path: Path) -> Path:
         """Admit a copy immediately before a decoder opens it: scope, and a fresh gate answer.
@@ -664,6 +668,16 @@ class StageRunner:
                                (f"unavailable:{missing}", asset_id, stage))
                 report.refused.append(f"{key}:{missing}")
                 return "unavailable"
+        if stage in BRAIN_STAGES:
+            # No governed Fast brain in this process (the standalone tool, a runtime still starting): nothing could
+            # run, so nothing is reserved and the stage is never marked complete.
+            missing = "model_unavailable" if self.brain is None else self.brain.unavailable_reason()
+            if missing is not None:
+                with self.store.transaction() as db:
+                    db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
+                               (f"unavailable:{missing}", asset_id, stage))
+                report.refused.append(f"{key}:{missing}")
+                return "unavailable"
         try:
             lease = self.authority.reserve(task, spec.needs)
         except ResourceRefused as exc:
@@ -714,6 +728,7 @@ class StageRunner:
                 lease=lambda: holder[0],
                 embedder=self.embedder,
                 sidecar_binding=sidecar_binding,
+                brain=self.brain,
             )
             try:
                 commit = RUNNERS[stage](ctx)

@@ -180,7 +180,7 @@ def test_paused_refuses_work_but_still_answers_reads(world):
     assert ask(world, "status", "p3")["ok"] is True
     caps = ask(world, "capabilities", "p4")
     statuses = {c["capability"]: c["status"] for c in caps["capabilities"]}
-    assert statuses["asr"] == "implemented_unverified" and statuses["topics"] == "deferred"
+    assert statuses["asr"] == "implemented_unverified" and statuses["topics"] == "implemented_unverified"
     assert statuses["ocr"] == "pending" and statuses["actions_motion"] == "not_supported"
 
 

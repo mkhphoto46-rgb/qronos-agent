@@ -88,6 +88,7 @@ class MediaHost:
         admit_store: Callable[[Path], Any] = media_store_admission,
         service_factory: Callable[..., Any] | None = None,
         embedder: Callable[[], Any] = lambda: None,
+        brain: Callable[[], Any] = lambda: None,
     ) -> None:
         if not is_issued(authority):
             # A DTO, a Boolean, a flag or a home-made object is never a model authority.
@@ -99,6 +100,7 @@ class MediaHost:
         self._admit_store = admit_store
         self._service_factory = service_factory
         self._embedder = embedder
+        self._brain = brain
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._requests: deque[dict[str, Any]] = deque()
@@ -306,7 +308,8 @@ class MediaHost:
         self._admit_store(root)  # StartupRefused: nothing below runs, nothing opens
         factory = self._service_factory or MediaService
         self._service = factory(root, tools=self._tools(), authority=self.authority,
-                                permissions=self._permissions(), embedder=self._embedder())
+                                permissions=self._permissions(), embedder=self._embedder(),
+                                brain=self._brain())
         return self._service
 
     def _run(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +347,7 @@ def build_bridge_media_host(
     embedding_owner: Callable[[], Any] = lambda: None,
     embedding_generation: Callable[[], Any] | None = None,
     secrets: Any = None,
+    fast_brain: Callable[[], Any] | None = None,
 ) -> MediaHost:
     """The bridge's one media host, bound to the bridge's own governor, ledger, approvals and audit.
 
@@ -373,5 +377,13 @@ def build_bridge_media_host(
         # The runtime's EXISTING bge-m3 memory sidecar (core/memory_runtime.py); media never starts a server.
         return shared_embedder
 
+    from qronos_media.brain_gateway import FastBrainGateway
+
+    # The runtime's EXISTING governed Fast brain (Orchestrator.answer_chat_only), read per call; None: unavailable.
+    shared_brain = FastBrainGateway(fast_brain) if fast_brain is not None else None
+
+    def brain() -> Any:
+        return shared_brain
+
     return MediaHost(authority, data_dir=default_data_dir, tools=tools_from_environment, permissions=permissions,
-                     embedder=embedder)
+                     embedder=embedder, brain=brain)

@@ -161,7 +161,8 @@ class MediaProduct:
                 raise MediaOpError("bad_request", "mode must be exact, fuzzy, semantic or topic")
             limit = _int(data, "limit", 1, 50, default=20)
             language = _text(data, "language", 16, required=False)
-            self._submit(host.query, op, lambda s: _search(s, query, mode, limit, language), done)
+            hints = data.get("brainHints") is True and mode == "topic"  # generated hints only when asked
+            self._submit(host.query, op, lambda s: _search(s, query, mode, limit, language, hints), done)
             return
         if op == "report.preview":
             asset, kind = _asset(data), _kind(data)
@@ -331,11 +332,12 @@ def _ok(result: dict[str, Any], family: str) -> dict[str, Any]:
     return out
 
 
-def _search(service: Any, query: str, mode: str, limit: int, language: str | None) -> dict[str, Any]:
+def _search(service: Any, query: str, mode: str, limit: int, language: str | None,
+            brain_hints: bool = False) -> dict[str, Any]:
     if mode == "semantic":
         return {"ok": True, **service.search_semantic(query, limit=limit, language=language)}
     if mode == "topic":
-        return {"ok": True, **service.search_topics(query, limit=limit, language=language)}
+        return {"ok": True, **service.search_topics(query, limit=limit, language=language, brain_hints=brain_hints)}
     return {"ok": True, "results": service.search_dialogue(query, mode=mode, limit=limit, language=language)}
 
 

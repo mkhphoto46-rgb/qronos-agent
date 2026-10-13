@@ -1635,6 +1635,8 @@ class QronosRuntime:
                 embedding_generation=self._memory_sidecar_generation,
                 # The bridge never opens the secret store itself; media borrows the narrow typed-secret check.
                 secrets=WorkflowSecretCheck(),
+                # The EXISTING governed Fast brain (Orchestrator.answer_chat_only), read per call; never a new client.
+                fast_brain=self._media_fast_brain,
             )
             return self._media_host
 
@@ -1643,6 +1645,18 @@ class QronosRuntime:
         memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
         sidecar = getattr(memory, "sidecar", None)
         return getattr(sidecar, "owned_process", None) if sidecar is not None else None
+
+    def _media_fast_brain(self) -> Any:
+        """(orchestrator, busy) of THIS runtime for media generation, or None (no orchestrator yet: unavailable).
+
+        Media calls only ``orchestrator.answer_chat_only`` (the configured Fast profile with its own admission,
+        ledger reservation and cleanup). ``busy`` is True while the person's own turn runs or Qronos is paused, so a
+        media request yields before calling. Nothing is started here.
+        """
+        orchestrator = self.orchestrator
+        if orchestrator is None or not callable(getattr(orchestrator, "answer_chat_only", None)):
+            return None
+        return orchestrator, (lambda: self._media_foreground_busy() or bool(self.runtime_paused))
 
     def _memory_sidecar_generation(self) -> Any:
         """(owner, lifecycle capability) of the owned bge-m3 sidecar's CURRENT generation, atomically, or None.

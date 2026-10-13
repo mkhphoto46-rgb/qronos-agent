@@ -101,6 +101,11 @@ def spoken_answer(intent: MediaIntent, result: dict | None) -> str:
                     if block.get("status") == "unavailable" else f"صحنهٔ هم‌موضوعی پیدا نشد؛ {len(exact)} نتیجهٔ دقیق.")
         first = items[0]
         line = (first.get("evidence") or [{}])[0].get("text") or ""
+        made = (first.get("generated") or {}).get("label")
+        if made:
+            return (f"{len(items)} بخش هم‌موضوع پیدا شد؛ اولی در «{first.get('title') or 'ویدیو'}» از دقیقهٔ "
+                    f"{clock(first.get('startMs'))} با برچسب تولیدشده و تأییدنشدهٔ «{made[:60]}»، و این جملهٔ خود فیلم: "
+                    f"«{line[:120]}». امتیاز کالیبره نیست؛ جزئیات در بخش رسانه است.")
         return (f"{len(items)} بخش هم‌موضوع پیدا شد؛ اولی در «{first.get('title') or 'ویدیو'}» از دقیقهٔ "
                 f"{clock(first.get('startMs'))}، با این جمله: «{line[:120]}». امتیاز کالیبره نیست؛ جزئیات در بخش رسانه است.")
     if intent.mode == "semantic":

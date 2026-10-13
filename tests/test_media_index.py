@@ -168,11 +168,11 @@ def test_new_sidecar_requeues_only_subtitles_and_replaces_its_text(tmp_path: Pat
     sidecar = library / "Film One.fa.vtt"
     sidecar.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nکاملاً متن تازه\n", encoding="utf-8")
     summary = service.scan()[0]
-    # subtitles and its dependents only (asr, semantic, topics); shot detection and keyframes are not touched
-    assert summary["requeued_stages"] == 4
+    # subtitles and its dependents only (asr, semantic, topics, topic_labels); shots and keyframes are not touched
+    assert summary["requeued_stages"] == 5
     assert _states(service, asset) == {"metadata": "COMPLETED", "subtitles": "QUEUED", "asr": "QUEUED",
-                                       "semantic": "QUEUED", "topics": "QUEUED", "scenes": "COMPLETED",
-                                       "keyframes": "COMPLETED"}
+                                       "semantic": "QUEUED", "topics": "QUEUED", "topic_labels": "QUEUED",
+                                       "scenes": "COMPLETED", "keyframes": "COMPLETED"}
     report = service.index(max_seconds=120)
     assert report["completed"] == [f"{asset}/subtitles", f"{asset}/asr"]  # asr: a skip (subtitles present)
     assert service.search_dialogue("نخواستم", mode="exact")["results"] == []
@@ -475,7 +475,7 @@ def test_status_lists_pending_capabilities_honestly(tmp_path: Path, base_video: 
     pending = {item["capability"]: item["status"] for item in status["pending"]}
     assert pending["visual_embeddings"] == "decision_pending"
     assert pending["actions_motion"] == "not_supported" and pending["asr"] == "implemented_unverified"
-    assert pending["semantic_dialogue"] == "implemented_unverified" and pending["topics"] == "deferred"
+    assert pending["semantic_dialogue"] == "implemented_unverified" and pending["topics"] == "implemented_unverified"
     assert status["stages"]["keyframes"] == {"COMPLETED": 1} and status["toolsAvailable"]
     service.close()
 
