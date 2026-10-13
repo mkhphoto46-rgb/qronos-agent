@@ -223,7 +223,7 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
             <form className="device-print" onSubmit={(event) => { event.preventDefault(); void print(); }}>
               <h4>چاپ یک فایل مشخص</h4>
               <input type="text" value={path} onChange={(event) => setPath(event.target.value)} dir="ltr"
-                     placeholder="C:\Users\...\file.pdf" maxLength={4096} aria-label="مسیر کامل فایل" />
+                     placeholder="D:\...\file.pdf" maxLength={4096} aria-label="مسیر کامل فایل" />
               <label>نسخه
                 <input type="number" min={1} max={device.capabilities.copiesMax ?? 99} value={copies}
                        onChange={(event) => setCopies(Number(event.target.value))} />
