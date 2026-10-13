@@ -29,6 +29,7 @@ LINK = r"\\?\usb#vid_046d&pid_0825&mi_00#7&1a2b3c&0&0000#{e5323777-f976-4f5b-9b5
 OTHER = r"\\?\usb#vid_1234&pid_5678&mi_00#7&9&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global"
 W, H = 8, 6
 ATTRIBUTE_NOT_FOUND = -1072875802  # MF_E_ATTRIBUTENOTFOUND 0xC00D36E6
+PAD = 16  # padding bytes after each row in the padded-pitch layout
 
 
 def guid_text(pointer) -> str:
@@ -84,7 +85,8 @@ class FakeMf(cam.MfApi):
     """The whole Media Foundation surface as fakes; only ole32 task memory is real (no MF DLL is loaded)."""
 
     def __init__(self, cameras=((LINK, "USB Camera"),), reads=None, layout="2d", stride=None, activate_hr=0,
-                 set_type_hr=0, frame_size=(W, H), pitch=None) -> None:
+                 set_type_hr=0, frame_size=(W, H), pitch=None, delivered_rows=H, contiguous=None) -> None:
+        self.delivered_rows, self.contiguous = delivered_rows, contiguous  # a frame smaller than the type says
         self.log: list = []
         self.objects: list[FakeCom] = []
         self.freed = 0
@@ -226,6 +228,11 @@ class FakeMf(cam.MfApi):
             if step[0] == "tick":
                 put(flags, cam.READER["MF_SOURCE_READERF_STREAMTICK"], wintypes.DWORD)
                 return 0
+            if step[0] == "changed":  # ("changed", flag, color or None): the reader reports a media type change
+                put(flags, step[1], wintypes.DWORD)
+                if step[2] is not None:
+                    put(sample, self.sample(step[2]).pointer)
+                return 0
             put(flags, 0, wintypes.DWORD)
             put(sample, self.sample(step[1]).pointer)
             return 0
@@ -253,27 +260,34 @@ class FakeMf(cam.MfApi):
         return self.make("current", {7: ((GUIDP, PVOIDP), get_uint32), 8: ((GUIDP, PVOIDP), get_uint64)})
 
     def sample(self, color):
-        rows = rows_of(color)
+        rows = rows_of(color)[:self.delivered_rows]
         top_down = b"".join(rows)
+        row = 4 * W
         if self.layout == "2d-bottom-up" or (self.layout == "plain" and (self.stride or 0) < 0):
-            memory = ctypes.create_string_buffer(b"".join(reversed(rows)))
+            memory = ctypes.create_string_buffer(b"".join(reversed(rows)), len(top_down))
+        elif self.layout == "2d-padded":  # each row followed by 16 bytes the frame must never contain
+            memory = ctypes.create_string_buffer(b"".join(r + b"\xee" * PAD for r in rows), len(rows) * (row + PAD))
         else:
-            memory = ctypes.create_string_buffer(top_down)
+            memory = ctypes.create_string_buffer(top_down, len(top_down))
         self.memory.append(memory)
         base = ctypes.addressof(memory)
-        row = 4 * W
 
         def lock2d(this, scan0, pitch):
             if self.layout == "2d-bottom-up":
-                put(scan0, base + (H - 1) * row)
+                put(scan0, base + (len(rows) - 1) * row)
                 put(pitch, -row, ctypes.c_long)
+            elif self.layout == "2d-padded":
+                put(scan0, base)
+                put(pitch, row + PAD, ctypes.c_long)
             else:
                 put(scan0, base)
                 put(pitch, self.pitch if self.pitch is not None else row, ctypes.c_long)
             return 0
 
-        two_d = self.make("2dbuffer", {3: ((PVOIDP, PVOIDP), lock2d), 4: ((), lambda this: 0)}) \
-            if self.layout.startswith("2d") else None
+        def contiguous_length(this, out):  # IMF2DBuffer::GetContiguousLength: the packed size of what it holds
+            self.log.append(("GetContiguousLength",))
+            put(out, self.contiguous if self.contiguous is not None else len(top_down), wintypes.DWORD)
+            return 0
 
         def lock(this, data, maximum, current):
             put(data, base)
@@ -281,10 +295,14 @@ class FakeMf(cam.MfApi):
             put(current, len(top_down), wintypes.DWORD)
             return 0
 
-        query = (lambda iid: two_d if iid == cam.IIDS["IMF2DBuffer"] else None) if self.layout.startswith("2d") else None
-        buffer = self.make("buffer", {3: ((PVOIDP, PVOIDP, PVOIDP), lock), 4: ((), lambda this: 0)}, query)
+        def query(iid):  # the IMF2DBuffer interface is made only when it is asked for (and then must be released)
+            if not self.layout.startswith("2d") or iid != cam.IIDS["IMF2DBuffer"]:
+                return None
+            return self.make("2dbuffer", {3: ((PVOIDP, PVOIDP), lock2d), 4: ((), lambda this: 0),
+                                          7: ((PVOIDP,), contiguous_length)})
 
-        def contiguous(this, out):
+        def contiguous(this, out):  # the buffer is made only when the code asks for it (and then must be released)
+            buffer = self.make("buffer", {3: ((PVOIDP, PVOIDP, PVOIDP), lock), 4: ((), lambda this: 0)}, query)
             put(out, buffer.pointer)
             return 0
 
@@ -394,6 +412,74 @@ def test_the_deadline_stops_a_silent_camera_and_keeps_a_frame_only_if_one_arrive
     slow = FakeMf(reads=[("frame", (5, 6, 7)), ("block",)])
     frame = cam._capture_with(slow, LINK, should_stop=lambda: False, timeout=0.3)
     assert frame.frames_read == 1 and frame.bgrx == b"".join(rows_of((5, 6, 7))) and all_released(slow)
+
+
+def bounded_reads(monkeypatch, fake):
+    """ctypes.string_at that records (and never performs) any frame-row read outside the buffers the fake delivered
+    (Media57's P1 harness, work/review_checks_media_r57_camera)."""
+    real = ctypes.string_at
+    outside: list[tuple[int, int]] = []
+
+    def checked(address, size=-1):
+        if size == 4 * W and fake.memory:  # frame-row reads only (the fake reads 16-byte GUIDs elsewhere)
+            ranges = [(ctypes.addressof(m), ctypes.addressof(m) + ctypes.sizeof(m)) for m in fake.memory]
+            if not any(lo <= address and address + size <= hi for lo, hi in ranges):
+                outside.append((address, size))
+                return b"\0" * size
+        return real(address, size)
+
+    monkeypatch.setattr(ctypes, "string_at", checked)
+    return outside
+
+
+# mfreadwrite.h (SDK 10.0.26100) MF_SOURCE_READER_FLAG; the module's READER values are checked against the header below
+CHANGED, NATIVE_CHANGED = 0x20, 0x10  # MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, ..._NATIVEMEDIATYPECHANGED
+
+
+@needs_windows
+@pytest.mark.parametrize("first", [("changed", CHANGED, (9, 9, 9)), ("changed", NATIVE_CHANGED, (9, 9, 9)),
+                                   ("changed", CHANGED | NATIVE_CHANGED, None)])
+def test_c1_a_media_type_change_is_refused_before_any_copy_and_nothing_is_read_or_kept(monkeypatch, first):
+    """C1 (Media57): the type said 8x6, the camera switched to 8x3 frames and said so; never read with the old size."""
+    fake = FakeMf(delivered_rows=3, reads=[("frame", (1, 2, 3)), first, *[("frame", (4, 5, 6))] * 8])
+    outside = bounded_reads(monkeypatch, fake)
+    fake.delivered_rows = H  # the first frame still had the reported size; the change comes with the second read
+    original = fake.sample
+
+    def sample(color):  # every frame after the first is the new, smaller one
+        made = original(color)
+        fake.delivered_rows = 3
+        return made
+
+    fake.sample = sample
+    with pytest.raises(CameraError) as refused:
+        cam._capture_with(fake, LINK, should_stop=lambda: False, timeout=5)
+    assert refused.value.code == "camera_format_unsupported" and outside == []
+    assert all_released(fake) and fake.log[-1] == ("CoUninitialize",)
+
+
+@needs_windows
+@pytest.mark.parametrize("layout", ["2d", "2d-bottom-up"])
+def test_c1_a_2d_buffer_smaller_than_the_reported_frame_is_refused_without_any_flag(monkeypatch, layout):
+    fake = FakeMf(layout=layout, delivered_rows=3)  # no type-change flag at all: only the buffer's own size tells
+    outside = bounded_reads(monkeypatch, fake)
+    with pytest.raises(CameraError) as refused:
+        cam._capture_with(fake, LINK, should_stop=lambda: False, timeout=5)
+    assert refused.value.code == "camera_bad_frame" and outside == []  # refused before ANY row was read
+    assert entries(fake, "GetContiguousLength") and all_released(fake)
+
+
+@needs_windows
+@pytest.mark.parametrize("layout, stride", [("2d", None), ("2d-bottom-up", None), ("2d-padded", None),
+                                            ("plain", -4 * W), ("plain", None)])
+def test_c1_frames_of_the_current_size_are_read_only_inside_their_buffers(monkeypatch, layout, stride):
+    fake = FakeMf(layout=layout, stride=stride)
+    outside = bounded_reads(monkeypatch, fake)
+    frame = cam._capture_with(fake, LINK, should_stop=lambda: False, timeout=5)
+    assert outside == [] and (frame.width, frame.height) == (W, H)
+    assert frame.bgrx == b"".join(rows_of((10, 20, 100 + cam.WARMUP_FRAMES)))  # top-down, no padding byte kept
+    assert b"\xee" not in frame.bgrx
+    assert bool(entries(fake, "GetContiguousLength")) == layout.startswith("2d")
 
 
 @needs_windows

@@ -54,7 +54,7 @@ SLOTS = {
     ("IMFSourceReader", "SetCurrentMediaType"): 7, ("IMFSourceReader", "ReadSample"): 9,
     ("IMFSample", "ConvertToContiguousBuffer"): 41,
     ("IMFMediaBuffer", "Lock"): 3, ("IMFMediaBuffer", "Unlock"): 4,
-    ("IMF2DBuffer", "Lock2D"): 3, ("IMF2DBuffer", "Unlock2D"): 4,
+    ("IMF2DBuffer", "Lock2D"): 3, ("IMF2DBuffer", "Unlock2D"): 4, ("IMF2DBuffer", "GetContiguousLength"): 7,
 }
 _QUERY_INTERFACE, _RELEASE = 0, 2
 GUIDS = {
@@ -74,7 +74,8 @@ GUIDS = {
 }
 IIDS = {"IMFMediaSource": "279a808d-aec7-40c8-9c6b-a6b492c78a66", "IMF2DBuffer": "7dc9d5f9-9ed9-44ec-9bbf-0600bb589fbb"}
 READER = {"MF_SOURCE_READER_FIRST_VIDEO_STREAM": 0xFFFFFFFC, "MF_SOURCE_READER_ALL_STREAMS": 0xFFFFFFFE,
-          "MF_SOURCE_READERF_ERROR": 0x1, "MF_SOURCE_READERF_ENDOFSTREAM": 0x2, "MF_SOURCE_READERF_STREAMTICK": 0x100}
+          "MF_SOURCE_READERF_ERROR": 0x1, "MF_SOURCE_READERF_ENDOFSTREAM": 0x2, "MF_SOURCE_READERF_STREAMTICK": 0x100,
+          "MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED": 0x10, "MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED": 0x20}
 HRESULTS = {"E_ACCESSDENIED": 0x80070005, "MF_E_SHUTDOWN": 0xC00D3E85, "MF_E_INVALIDMEDIATYPE": 0xC00D36B4,
             "MF_E_TOPO_CODEC_NOT_FOUND": 0xC00D5212, "MF_E_HW_MFT_FAILED_START_STREAMING": 0xC00D3704,
             "MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED": 0xC00D3EA2, "MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED": 0xC00D3EA3}
@@ -370,6 +371,13 @@ def _copy_frame(sample, width: int, height: int, default_stride: int) -> bytes:
         two_d = _query(buffer, "IMF2DBuffer")
         if two_d:
             try:
+                # The buffer must hold at least this frame (its own contiguous size) before ANY row is read: a frame
+                # smaller than the size the media type reported is refused, never read past its end.
+                contiguous = wintypes.DWORD(0)
+                hr = _call(two_d, "IMF2DBuffer", "GetContiguousLength", ctypes.byref(contiguous),
+                           argtypes=(ctypes.POINTER(wintypes.DWORD),))
+                if hr < 0 or contiguous.value < row * height:
+                    raise CameraError("camera_bad_frame", "the frame buffer is smaller than the frame it reports")
                 scan0, pitch = ctypes.c_void_p(), ctypes.c_long(0)
                 hr = _call(two_d, "IMF2DBuffer", "Lock2D", ctypes.byref(scan0), ctypes.byref(pitch),
                            argtypes=(ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_long)))
@@ -494,6 +502,11 @@ def _read_one(api: MfApi, symbolic_link: str, live: _Live, deadline: float) -> F
                     raise CameraError("camera_failed", "the camera stream reported an error")
                 if flags.value & READER["MF_SOURCE_READERF_ENDOFSTREAM"]:
                     raise CameraError("camera_gone", "the camera stream ended")
+                if flags.value & (READER["MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED"]
+                                  | READER["MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED"]):
+                    # The frame size/stride read before the loop no longer describe the frames: refused before any
+                    # copy (fail closed; nothing is kept from this capture).
+                    raise CameraError("camera_format_unsupported", "the camera changed its format during the capture")
                 if not sample:
                     continue  # a stream tick or a gap: no frame
                 delivered += 1
