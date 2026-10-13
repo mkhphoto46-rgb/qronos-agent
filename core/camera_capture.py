@@ -55,6 +55,7 @@ SLOTS = {
     ("IMFSample", "ConvertToContiguousBuffer"): 41,
     ("IMFMediaBuffer", "Lock"): 3, ("IMFMediaBuffer", "Unlock"): 4,
     ("IMF2DBuffer", "Lock2D"): 3, ("IMF2DBuffer", "Unlock2D"): 4, ("IMF2DBuffer", "GetContiguousLength"): 7,
+    ("IMF2DBuffer2", "Lock2DSize"): 10,
 }
 _QUERY_INTERFACE, _RELEASE = 0, 2
 GUIDS = {
@@ -72,7 +73,9 @@ GUIDS = {
     "MFMediaType_Video": "73646976-0000-0010-8000-00aa00389b71",
     "MFVideoFormat_RGB32": "00000016-0000-0010-8000-00aa00389b71",   # DEFINE_MEDIATYPE_GUID(.., D3DFMT_X8R8G8B8 = 22)
 }
-IIDS = {"IMFMediaSource": "279a808d-aec7-40c8-9c6b-a6b492c78a66", "IMF2DBuffer": "7dc9d5f9-9ed9-44ec-9bbf-0600bb589fbb"}
+IIDS = {"IMFMediaSource": "279a808d-aec7-40c8-9c6b-a6b492c78a66", "IMF2DBuffer": "7dc9d5f9-9ed9-44ec-9bbf-0600bb589fbb",
+        "IMF2DBuffer2": "33ae5ea6-4316-436f-8ddd-d73d22f829ec"}
+MF2DBUFFER_LOCKFLAGS_READ = 0x1  # MF2DBuffer_LockFlags_Read (mfobjects.h)
 READER = {"MF_SOURCE_READER_FIRST_VIDEO_STREAM": 0xFFFFFFFC, "MF_SOURCE_READER_ALL_STREAMS": 0xFFFFFFFE,
           "MF_SOURCE_READERF_ERROR": 0x1, "MF_SOURCE_READERF_ENDOFSTREAM": 0x2, "MF_SOURCE_READERF_STREAMTICK": 0x100,
           "MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED": 0x10, "MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED": 0x20}
@@ -360,6 +363,37 @@ class _Live:
                 _call(self.source, "IMFMediaSource", "Shutdown")  # pending reads fail with MF_E_SHUTDOWN
 
 
+def _copy_rows_within_span(buffer, row: int, height: int) -> bytes:
+    """``height`` rows of ``row`` bytes from a 2D buffer, ONLY after IMF2DBuffer2::Lock2DSize proved that every row
+    interval [scanline0 + y*pitch, + row) lies inside the buffer's own memory [bufferStart, + bufferLength), for a
+    positive or negative pitch. Without IMF2DBuffer2 there is no such proof: refused, nothing is read."""
+    two_d2 = _query(buffer, "IMF2DBuffer2")
+    if not two_d2:
+        raise CameraError("camera_format_unsupported", "the frame buffer cannot prove the memory span of its rows")
+    try:
+        scan0, pitch, start, length = ctypes.c_void_p(), ctypes.c_long(0), ctypes.c_void_p(), wintypes.DWORD(0)
+        hr = _call(two_d2, "IMF2DBuffer2", "Lock2DSize", MF2DBUFFER_LOCKFLAGS_READ, ctypes.byref(scan0),
+                   ctypes.byref(pitch), ctypes.byref(start), ctypes.byref(length),
+                   argtypes=(wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_long),
+                             ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)))
+        if hr < 0:
+            raise _hr_error(hr, "Lock2DSize")
+        try:  # locked: always unlocked below, whatever is refused
+            if not scan0 or not start:
+                raise CameraError("camera_bad_frame", "the frame buffer gave no memory to read")
+            if abs(pitch.value) < row:
+                raise CameraError("camera_bad_frame", "the frame pitch is smaller than its width")
+            last = (height - 1) * pitch.value  # offset of the last row from scanline0 (negative when bottom-up)
+            lowest, highest_end = scan0.value + min(0, last), scan0.value + max(0, last) + row
+            if lowest < start.value or highest_end > start.value + length.value:
+                raise CameraError("camera_bad_frame", "the frame rows would lie outside the buffer's own memory")
+            return b"".join(ctypes.string_at(scan0.value + y * pitch.value, row) for y in range(height))
+        finally:
+            _call(two_d2, "IMF2DBuffer", "Unlock2D")  # inherited slot 4: the unlock for Lock2DSize too
+    finally:
+        _release(two_d2)
+
+
 def _copy_frame(sample, width: int, height: int, default_stride: int) -> bytes:
     buffer = ctypes.c_void_p()
     hr = _call(sample, "IMFSample", "ConvertToContiguousBuffer", ctypes.byref(buffer),
@@ -371,24 +405,15 @@ def _copy_frame(sample, width: int, height: int, default_stride: int) -> bytes:
         two_d = _query(buffer, "IMF2DBuffer")
         if two_d:
             try:
-                # The buffer must hold at least this frame (its own contiguous size) before ANY row is read: a frame
-                # smaller than the size the media type reported is refused, never read past its end.
+                # Packed-size check only: GetContiguousLength is the PACKED size of the frame the buffer holds, so a
+                # frame of a smaller AREA is refused here. It says nothing about the memory the rows are read from at
+                # the buffer's own pitch; that is proven below from the buffer's physical span.
                 contiguous = wintypes.DWORD(0)
                 hr = _call(two_d, "IMF2DBuffer", "GetContiguousLength", ctypes.byref(contiguous),
                            argtypes=(ctypes.POINTER(wintypes.DWORD),))
                 if hr < 0 or contiguous.value < row * height:
                     raise CameraError("camera_bad_frame", "the frame buffer is smaller than the frame it reports")
-                scan0, pitch = ctypes.c_void_p(), ctypes.c_long(0)
-                hr = _call(two_d, "IMF2DBuffer", "Lock2D", ctypes.byref(scan0), ctypes.byref(pitch),
-                           argtypes=(ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_long)))
-                if hr < 0 or not scan0:
-                    raise _hr_error(hr, "Lock2D")
-                try:
-                    if abs(pitch.value) < row:
-                        raise CameraError("camera_bad_frame", "the frame pitch is smaller than its width")
-                    return b"".join(ctypes.string_at(scan0.value + y * pitch.value, row) for y in range(height))
-                finally:
-                    _call(two_d, "IMF2DBuffer", "Unlock2D")
+                return _copy_rows_within_span(buffer, row, height)
             finally:
                 _release(two_d)
         data, maximum, current = ctypes.c_void_p(), wintypes.DWORD(0), wintypes.DWORD(0)

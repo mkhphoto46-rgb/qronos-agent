@@ -85,8 +85,12 @@ class FakeMf(cam.MfApi):
     """The whole Media Foundation surface as fakes; only ole32 task memory is real (no MF DLL is loaded)."""
 
     def __init__(self, cameras=((LINK, "USB Camera"),), reads=None, layout="2d", stride=None, activate_hr=0,
-                 set_type_hr=0, frame_size=(W, H), pitch=None, delivered_rows=H, contiguous=None) -> None:
+                 set_type_hr=0, frame_size=(W, H), pitch=None, delivered_rows=H, contiguous=None, has_2d2=True,
+                 prefix=0, suffix=0, span=None) -> None:
         self.delivered_rows, self.contiguous = delivered_rows, contiguous  # a frame smaller than the type says
+        # IMF2DBuffer2 offered or not; bytes before/after the rows in the allocation; an explicit Lock2DSize span
+        # (start offset in the allocation, length) instead of the whole allocation
+        self.has_2d2, self.prefix, self.suffix, self.span = has_2d2, prefix, suffix, span
         self.log: list = []
         self.objects: list[FakeCom] = []
         self.freed = 0
@@ -264,13 +268,17 @@ class FakeMf(cam.MfApi):
         top_down = b"".join(rows)
         row = 4 * W
         if self.layout == "2d-bottom-up" or (self.layout == "plain" and (self.stride or 0) < 0):
-            memory = ctypes.create_string_buffer(b"".join(reversed(rows)), len(top_down))
+            body = b"".join(reversed(rows))
         elif self.layout == "2d-padded":  # each row followed by 16 bytes the frame must never contain
-            memory = ctypes.create_string_buffer(b"".join(r + b"\xee" * PAD for r in rows), len(rows) * (row + PAD))
+            body = b"".join(r + b"\xee" * PAD for r in rows)
         else:
-            memory = ctypes.create_string_buffer(top_down, len(top_down))
+            body = top_down
+        # the whole allocation: optional bytes before and after the rows (a header / trailing slack), never in a frame
+        raw = b"\xdd" * self.prefix + body + b"\xdd" * self.suffix
+        memory = ctypes.create_string_buffer(raw, len(raw))
         self.memory.append(memory)
-        base = ctypes.addressof(memory)
+        allocation = ctypes.addressof(memory)
+        base = allocation + self.prefix
 
         def lock2d(this, scan0, pitch):
             if self.layout == "2d-bottom-up":
@@ -295,11 +303,29 @@ class FakeMf(cam.MfApi):
             put(current, len(top_down), wintypes.DWORD)
             return 0
 
-        def query(iid):  # the IMF2DBuffer interface is made only when it is asked for (and then must be released)
-            if not self.layout.startswith("2d") or iid != cam.IIDS["IMF2DBuffer"]:
+        def lock2d_size(this, flags, scan0, pitch, start, length):  # IMF2DBuffer2::Lock2DSize (slot 10)
+            self.log.append(("Lock2DSize", flags))
+            lock2d(this, scan0, pitch)
+            begin, size = self.span if self.span is not None else (0, len(raw))  # the buffer's own memory
+            put(start, allocation + begin)
+            put(length, size, wintypes.DWORD)
+            return 0
+
+        def unlock2d(this):
+            self.log.append(("Unlock2D",))
+            return 0
+
+        def query(iid):  # the 2D interfaces are made only when asked for (and then must be released)
+            if not self.layout.startswith("2d"):
                 return None
-            return self.make("2dbuffer", {3: ((PVOIDP, PVOIDP), lock2d), 4: ((), lambda this: 0),
-                                          7: ((PVOIDP,), contiguous_length)})
+            if iid == cam.IIDS["IMF2DBuffer"]:
+                return self.make("2dbuffer", {3: ((PVOIDP, PVOIDP), lock2d), 4: ((), unlock2d),
+                                              7: ((PVOIDP,), contiguous_length)})
+            if iid == cam.IIDS["IMF2DBuffer2"] and self.has_2d2:
+                return self.make("2dbuffer2", {3: ((PVOIDP, PVOIDP), lock2d), 4: ((), unlock2d),
+                                               7: ((PVOIDP,), contiguous_length),
+                                               10: ((wintypes.DWORD, PVOIDP, PVOIDP, PVOIDP, PVOIDP), lock2d_size)})
+            return None
 
         def contiguous(this, out):  # the buffer is made only when the code asks for it (and then must be released)
             buffer = self.make("buffer", {3: ((PVOIDP, PVOIDP, PVOIDP), lock), 4: ((), lambda this: 0)}, query)
@@ -482,6 +508,72 @@ def test_c1_frames_of_the_current_size_are_read_only_inside_their_buffers(monkey
     assert bool(entries(fake, "GetContiguousLength")) == layout.startswith("2d")
 
 
+def locks_balanced(fake):
+    return len(entries(fake, "Lock2DSize")) == len(entries(fake, "Unlock2D"))
+
+
+@needs_windows
+def test_span_b2_a_same_area_frame_with_a_wider_pitch_is_refused_before_any_row_is_read(monkeypatch):
+    """Media58 B2: 8x6 type, pitch 2x the row, physical bytes only the packed size: the packed-size check passes,
+    the physical span (IMF2DBuffer2::Lock2DSize) does not."""
+    fake = FakeMf(layout="2d", pitch=8 * W)
+    outside = bounded_reads(monkeypatch, fake)
+    with pytest.raises(CameraError) as refused:
+        cam._capture_with(fake, LINK, should_stop=lambda: False, timeout=5)
+    assert refused.value.code == "camera_bad_frame" and outside == []
+    assert entries(fake, "Lock2DSize") == [("Lock2DSize", cam.MF2DBUFFER_LOCKFLAGS_READ)] and locks_balanced(fake)
+    assert all_released(fake) and fake.log[-1] == ("CoUninitialize",)
+
+
+@needs_windows
+@pytest.mark.parametrize("layout, span", [
+    ("2d", (0, 4 * W * H - 1)),          # the span ends one byte before the last row does
+    ("2d", (4, 4 * W * H)),              # the span starts after scanline0
+    ("2d-bottom-up", (4 * W, 4 * W * H)),  # negative pitch: the last row lies below the span's start
+    ("2d-padded", (0, 5 * (4 * W + PAD) + 4 * W - 1)),  # padded: one byte short of the last row's end
+])
+def test_span_any_row_outside_the_buffers_own_memory_is_refused_with_no_read(monkeypatch, layout, span):
+    fake = FakeMf(layout=layout, span=span, suffix=64)  # real bytes exist beyond: only the reported span counts
+    outside = bounded_reads(monkeypatch, fake)
+    reads = []
+    original = ctypes.string_at
+
+    def counting(address, size=-1):
+        if size == 4 * W:
+            reads.append(address)
+        return original(address, size)
+
+    monkeypatch.setattr(ctypes, "string_at", counting)
+    with pytest.raises(CameraError) as refused:
+        cam._capture_with(fake, LINK, should_stop=lambda: False, timeout=5)
+    assert refused.value.code == "camera_bad_frame" and outside == [] and reads == []  # not one row was read
+    assert locks_balanced(fake) and all_released(fake)
+
+
+@needs_windows
+def test_span_without_imf2dbuffer2_there_is_no_proof_and_nothing_is_read(monkeypatch):
+    fake = FakeMf(layout="2d", has_2d2=False)
+    outside = bounded_reads(monkeypatch, fake)
+    with pytest.raises(CameraError) as refused:
+        cam._capture_with(fake, LINK, should_stop=lambda: False, timeout=5)
+    assert refused.value.code == "camera_format_unsupported" and outside == []
+    assert not entries(fake, "Lock2DSize") and not entries(fake, "Unlock2D") and all_released(fake)
+
+
+@needs_windows
+@pytest.mark.parametrize("layout, prefix, suffix", [("2d", 24, 40), ("2d-padded", 8, 0), ("2d-bottom-up", 16, 16),
+                                                    ("2d-padded", 0, 0), ("2d-bottom-up", 0, 0)])
+def test_span_valid_frames_with_a_prefix_suffix_padding_or_negative_pitch_are_kept_exactly(monkeypatch, layout,
+                                                                                              prefix, suffix):
+    fake = FakeMf(layout=layout, prefix=prefix, suffix=suffix)
+    outside = bounded_reads(monkeypatch, fake)
+    frame = cam._capture_with(fake, LINK, should_stop=lambda: False, timeout=5)
+    assert outside == [] and (frame.width, frame.height) == (W, H)
+    assert frame.bgrx == b"".join(rows_of((10, 20, 100 + cam.WARMUP_FRAMES)))  # top-down; no padding/prefix byte
+    assert b"\xee" not in frame.bgrx and b"\xdd" not in frame.bgrx
+    assert entries(fake, "Lock2DSize") and locks_balanced(fake) and all_released(fake)
+
+
 @needs_windows
 def test_only_a_proven_local_hardware_camera_is_offered_and_anything_else_is_never_turned_on():
     virtual = r"\\?\root#image#0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global"
@@ -564,7 +656,7 @@ def test_every_slot_guid_and_constant_follows_the_sdk_headers():
             for name in ("mfobjects.h", "mfidl.h", "mfreadwrite.h", "mfapi.h", "mferror.h")}
     where = {"IMFAttributes": "mfobjects.h", "IMFActivate": "mfobjects.h", "IMFSample": "mfobjects.h",
              "IMFMediaBuffer": "mfobjects.h", "IMF2DBuffer": "mfobjects.h", "IMFMediaEventGenerator": "mfobjects.h",
-             "IMFMediaSource": "mfidl.h", "IMFSourceReader": "mfreadwrite.h"}
+             "IMFMediaSource": "mfidl.h", "IMFSourceReader": "mfreadwrite.h", "IMF2DBuffer2": "mfobjects.h"}
 
     def methods(interface):
         match = re.search(r'MIDL_INTERFACE\("([0-9A-Fa-f-]+)"\)\s*\n\s*' + interface + r"\s*:\s*public\s+(\w+)",
@@ -596,6 +688,8 @@ def test_every_slot_guid_and_constant_follows_the_sdk_headers():
                              text["mferror.h"]).group(1), 16) == value, name
     assert re.search(r"#define\s+MFSTARTUP_LITE\s+\(MFSTARTUP_NOSOCKET\)", everything) and cam.MFSTARTUP_LITE == 1
     assert cam.MF_VERSION == 0x00020070
+    assert int(re.search(r"MF2DBuffer_LockFlags_Read\s*=\s*(0x[0-9a-fA-F]+)", everything).group(1), 16) \
+        == cam.MF2DBUFFER_LOCKFLAGS_READ == 1
 
 
 def test_the_real_camera_layer_is_blocked_and_has_no_process_network_shell_or_model_route():
