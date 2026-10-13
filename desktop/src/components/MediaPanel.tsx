@@ -4,11 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  approvalOf, createMediaClient, exportDestinationProblem, isAssetId, refusalText, REPORT_FORMATS, REPORT_KIND_TEXT,
-  REPORT_KINDS, topicBlockOf, visualBlockOf,
+  approvalOf, createMediaClient, exportDestinationProblem, interpretationOf, isAssetId, multimodalBlockOf,
+  multimodalFields, multimodalRequestProblem, MULTIMODAL_MAX_CONSTRAINT_CHARS, MULTIMODAL_WINDOWS_MS, refusalText,
+  REPORT_FORMATS, REPORT_KIND_TEXT, REPORT_KINDS, topicBlockOf, visualBlockOf,
 } from "../mediaStore";
 import type {
-  MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, ReportFormat, ReportKind, RuntimeEvent, TopicHit, VisualHit,
+  MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, MultimodalFrame, MultimodalHit, MultimodalInterpretation,
+  ReportFormat, ReportKind, RuntimeEvent, TopicHit, VisualHit,
 } from "../mediaStore";
 
 import "./MediaPanel.css";
@@ -80,6 +82,7 @@ const CAPABILITY_FA: Record<string, string> = {
   semantic_dialogue: "جست‌وجوی معنایی دیالوگ (bge-m3)",
   topic_retrieval: "جست‌وجوی موضوعی (بخش‌های بدون برچسب، با جمله‌های نمایه‌شده)",
   visual_embeddings: "جست‌وجوی تصویری",
+  multimodal_search: "جست‌وجوی ترکیبی گفتگو + تصویر (هم‌زمانی در یک ویدیو)",
   vision_captions: "توصیف فریم‌ها با مدل بینایی (تولیدشده، تأییدنشده)",
   ocr: "خواندن متن روی تصویر",
   topics: "موضوع‌ها",
@@ -88,7 +91,16 @@ const CAPABILITY_FA: Record<string, string> = {
 };
 
 const MODE_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "معنایی", topic: "موضوعی",
-  visual: "تصویری (متن تولیدشدهٔ فریم‌ها)" };
+  visual: "تصویری (متن تولیدشدهٔ فریم‌ها)", multimodal: "ترکیبی (گفتگو + تصویر)" };
+
+const DIALOGUE_CHANNEL_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "هم‌معنا (bge-m3)" };
+
+/** Where a frame lies relative to the matching line, in words. */
+export function relationText(frame: Pick<MultimodalFrame, "relation" | "gapMs">): string {
+  if (frame.relation === "during") return "فریم هم‌زمان با همین جمله است";
+  const seconds = Math.round(frame.gapMs / 100) / 10;
+  return `فریم ${seconds} ثانیه ${frame.relation === "before" ? "پیش از" : "پس از"} این جمله است`;
+}
 
 export function clock(ms: unknown): string {
   const total = typeof ms === "number" && Number.isFinite(ms) && ms >= 0 ? Math.floor(ms / 1000) : 0;
@@ -124,7 +136,14 @@ function MediaPanel(props: MediaPanelProps) {
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<"exact" | "fuzzy" | "semantic" | "topic" | "visual">("exact");
+  const [mode, setMode] = useState<"exact" | "fuzzy" | "semantic" | "topic" | "visual" | "multimodal">("exact");
+  // Multimodal: two independent constraints (typed or confirmed from a proposed split), a window and semantic opt-ins.
+  const [saidText, setSaidText] = useState("");
+  const [shownText, setShownText] = useState("");
+  const [windowMs, setWindowMs] = useState<number>(15_000);
+  const [semanticSaid, setSemanticSaid] = useState(false);
+  const [semanticShown, setSemanticShown] = useState(false);
+  const [interpretation, setInterpretation] = useState<MultimodalInterpretation | null>(null);
   const [brainHints, setBrainHints] = useState(false);
   const [result, setResult] = useState<MediaResult | null>(null);
   const [approval, setApproval] = useState<MediaApproval | null>(null);
@@ -198,7 +217,36 @@ function MediaPanel(props: MediaPanelProps) {
     }
   }
 
+  async function searchMultimodal() {
+    const problem = multimodalRequestProblem(saidText, shownText);
+    if (problem) {
+      setNotice(problem);
+      return;
+    }
+    const answer = await run("search", multimodalFields(saidText, shownText, windowMs, semanticSaid, semanticShown));
+    if (answer) setResult(answer);
+  }
+
+  // A natural combined request is only SPLIT here: the proposal fills the two fields for the person to check or edit;
+  // nothing is searched until they press search.
+  async function splitRequest() {
+    const text = query.trim();
+    if (!text) return;
+    const answer = await run("search", { mode: "multimodal", query: text });
+    const proposal = interpretationOf(answer);
+    setInterpretation(proposal);
+    setResult(null);
+    if (proposal?.status === "proposed") {
+      setSaidText(proposal.dialogue);
+      setShownText(proposal.visual);
+    }
+  }
+
   async function search() {
+    if (mode === "multimodal") {
+      await searchMultimodal();
+      return;
+    }
     const text = query.trim();
     if (!text) return;
     const answer = await run("search", mode === "topic" && brainHints
@@ -249,6 +297,48 @@ function MediaPanel(props: MediaPanelProps) {
   const { exact, semantic, semanticNote } = hitsOf(result);
   const topic = topicBlockOf(result);
   const visual = visualBlockOf(result);
+  const multimodal = multimodalBlockOf(result);
+
+  function multimodalCard(hit: MultimodalHit, key: string) {
+    return (
+      <li key={key} className="media-card media-multimodal-card">
+        <div className="media-card-head">
+          <strong>{hit.title || "ویدیو"}</strong>
+          <span className="ltr">{clock(hit.startMs)} – {clock(hit.endMs)}</span>
+        </div>
+        <p className="media-multimodal-why">
+          هر دو شرط در همین ویدیو و در فاصلهٔ {Math.round(hit.windowMs / 1000)} ثانیه از هم پیدا شدند:
+          گفتگو ({hit.dialogue.channels.map((name) => DIALOGUE_CHANNEL_FA[name] ?? name).join(" + ")})
+          {" و "}تصویر ({[...new Set(hit.frames.flatMap((frame) => frame.channels))]
+            .map((name) => (name === "lexical" ? "هم‌واژه" : "هم‌معنا از روی متن تولیدشده")).join(" + ")}).
+        </p>
+        <p>
+          <small>گفتگو</small> <span className="ltr">{clock(hit.dialogue.startMs)}</span>{" "}
+          <span dir="auto">{hit.dialogue.text}</span>{" "}
+          <small>— {SOURCE_FA[hit.dialogue.source] ?? hit.dialogue.source} {hit.dialogue.language ?? ""}
+            {hit.dialogue.similarity !== null ? ` (شباهت ≈ ${hit.dialogue.similarity.toFixed(2)}، کالیبره‌نشده)` : ""}</small>
+        </p>
+        <ul className="media-topic-lines">
+          {hit.frames.map((frame, i) => (
+            <li key={i}>
+              <span className="ltr">{clock(frame.timeMs)}</span>{" "}
+              <span className="media-topic-generated" dir="auto">{frame.caption}</span>{" "}
+              <small>({relationText(frame)}؛ توصیف تولیدشده با مدل بینایی از همین فریم، تأییدنشده، نه شباهت تصویر
+                {frame.similarity !== null ? `؛ شباهت متن ≈ ${frame.similarity.toFixed(2)}، کالیبره‌نشده` : ""})</small>{" "}
+              <small className="ltr" title="SHA-256 همان فریم ذخیره‌شده">{frame.frameSha256.slice(0, 12)}</small>
+            </li>
+          ))}
+        </ul>
+        {hit.framesInWindow > hit.frames.length && <small>{hit.framesInWindow - hit.frames.length} فریم هم‌خوان دیگر هم در این پنجره بود.</small>}
+        <div className="media-card-actions">
+          <button type="button" disabled={busy}
+            onClick={() => void run("open.prepare", { assetId: hit.assetId, startMs: Math.max(0, Math.floor(hit.startMs)) })}>
+            باز کردن در همین لحظه
+          </button>
+        </div>
+      </li>
+    );
+  }
 
   function visualCard(hit: VisualHit, key: string) {
     return (
@@ -392,18 +482,64 @@ function MediaPanel(props: MediaPanelProps) {
 
       <h3>جست‌وجو</h3>
       <div className="media-row">
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="چه چیزی گفته شد؟" dir="auto" maxLength={1200} />
+        <input value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder={mode === "multimodal" ? "درخواست ترکیبی (اختیاری)، مثلاً صحنه‌ای در آشپزخانه که دربارهٔ مرگ پدرش حرف می‌زنند" : "چه چیزی گفته شد؟"}
+          dir="auto" maxLength={1200} />
         <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-          {(["exact", "fuzzy", "semantic", "topic", "visual"] as const).map((m) => <option key={m} value={m}>{MODE_FA[m]}</option>)}
+          {(["exact", "fuzzy", "semantic", "topic", "visual", "multimodal"] as const).map((m) => <option key={m} value={m}>{MODE_FA[m]}</option>)}
         </select>
+        {mode === "multimodal" && (
+          <button type="button" disabled={busy || !query.trim()} onClick={() => void splitRequest()}
+            title="فقط دو بخش را پیشنهاد می‌کند؛ جست‌وجو بعد از تأیید شما انجام می‌شود">
+            جدا کردن دو بخش
+          </button>
+        )}
         {mode === "topic" && (
           <label title="فقط وقتی جست‌وجوی اول ضعیف یا پرسش خیلی کوتاه باشد؛ عبارت‌ها راهنما هستند، نه نتیجه">
             <input type="checkbox" checked={brainHints} onChange={(e) => setBrainHints(e.target.checked)} />
             پیشنهاد عبارت با مغز سریع
           </label>
         )}
-        <button type="button" disabled={busy || !query.trim()} onClick={() => void search()}>جست‌وجو</button>
+        <button type="button" disabled={busy || (mode === "multimodal" ? !saidText.trim() || !shownText.trim() : !query.trim())}
+          onClick={() => void search()}>جست‌وجو</button>
       </div>
+      {mode === "multimodal" && (
+        <div className="media-row media-multimodal-fields">
+          <label>
+            آنچه گفته می‌شود (گفتگو)
+            <input value={saidText} onChange={(e) => setSaidText(e.target.value)} dir="auto" maxLength={MULTIMODAL_MAX_CONSTRAINT_CHARS} />
+          </label>
+          <label>
+            آنچه دیده می‌شود (تصویر)
+            <input value={shownText} onChange={(e) => setShownText(e.target.value)} dir="auto" maxLength={MULTIMODAL_MAX_CONSTRAINT_CHARS} />
+          </label>
+          <label>
+            فاصلهٔ زمانی
+            <select value={windowMs} onChange={(e) => setWindowMs(Number(e.target.value))}>
+              {MULTIMODAL_WINDOWS_MS.map((ms) => <option key={ms} value={ms}>{ms / 1000} ثانیه</option>)}
+            </select>
+          </label>
+          <label title="جمله‌های هم‌معنا با bge-m3 هم پذیرفته می‌شوند؛ شباهت کالیبره‌نشده است">
+            <input type="checkbox" checked={semanticSaid} onChange={(e) => setSemanticSaid(e.target.checked)} />
+            گفتگوی هم‌معنا
+          </label>
+          <label title="متن تولیدشدهٔ فریم‌ها با bge-m3 هم مقایسه می‌شود؛ نه شباهت تصویر">
+            <input type="checkbox" checked={semanticShown} onChange={(e) => setSemanticShown(e.target.checked)} />
+            تصویر هم‌معنا (از روی متن تولیدشده)
+          </label>
+        </div>
+      )}
+      {mode === "multimodal" && interpretation && (
+        <p className="media-topic-hints" role="status">
+          {interpretation.status === "proposed"
+            ? (interpretation.generated
+              ? "پیشنهاد مغز سریع از واژه‌های خود شما (تولیدشده، تأییدنشده): دو بخش بالا را بررسی یا ویرایش کنید و بعد جست‌وجو کنید."
+              : "از برچسب‌های خود شما جدا شد: دو بخش بالا را بررسی کنید و بعد جست‌وجو کنید.")
+            : interpretation.status === "ambiguous"
+              ? `درخواست را نشد با اطمینان به دو بخش جدا کرد (${interpretation.reason ?? "ambiguous"})؛ دو بخش را خودتان بنویسید.`
+              : `جدا کردن خودکار در دسترس نیست (${refusalText(interpretation.reason ?? "model_unavailable")})؛ دو بخش را خودتان بنویسید.`}
+        </p>
+      )}
       <div className="media-row media-report-options">
         <label>
           نوع گزارش
@@ -424,6 +560,15 @@ function MediaPanel(props: MediaPanelProps) {
       {topic.note && <p className="media-notice">{topic.note}</p>}
       {visual.note && <p className="media-notice">{visual.note}</p>}
       {visual.semanticNote && <p className="media-notice">{visual.semanticNote}</p>}
+      {multimodal.note && <p className="media-notice">{multimodal.note}</p>}
+      {multimodal.channelNotes.map((text, i) => <p key={`mn${i}`} className="media-notice">{text}</p>)}
+      {multimodal.hits.length > 0 && <>
+        <h4>نتیجه‌های ترکیبی (هر کدام با هر دو شرط در همان ویدیو و نزدیک هم در زمان؛ رتبه احتمال نیست)</h4>
+        <ul className="media-results">{multimodal.hits.map((hit, i) => multimodalCard(hit, `m${i}`))}</ul>
+      </>}
+      {multimodal.answered && (
+        <p className="media-topic-hints">گوینده، OCR و شباهت تصویر هنوز ساخته نشده‌اند و در این جست‌وجو به کار نرفته‌اند.</p>
+      )}
       {visual.hits.length > 0 && <>
         <h4>فریم‌های هم‌خوان (جست‌وجوی واژه‌ای در متن تولیدشدهٔ فریم‌ها، نه شباهت تصویر)</h4>
         <ul className="media-results">{visual.hits.map((hit, i) => visualCard(hit, `v${i}`))}</ul>

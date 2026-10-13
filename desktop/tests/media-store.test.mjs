@@ -236,7 +236,61 @@ test("visual hits are generated frame text with a frame SHA, joined to dialogue 
   assert.match(panel, /OCR نیست/);
   assert.match(panel, /نه شباهت تصویر/);
   assert.match(panel, /تأییدنشده، نه واقعیت و نه شناسایی/);
-  assert.match(panel, /"visual"\] as const/);
+  assert.match(panel, /"visual", "multimodal"\] as const/);
+});
+
+test("multimodal hits need a dialogue line AND an unverified frame; no-result outcomes and splits are explained", () => {
+  const asset = "a_" + "5".repeat(32);
+  const sha = "d".repeat(64);
+  const line = { startMs: 60000, endMs: 64000, text: "My father died last winter.", channels: ["exact", "semantic", "guess"],
+    track: { source: "embedded", language: "eng" } };
+  const frame = { timeMs: 62000, frameSha256: sha, caption: "A small kitchen.", verified: false, channels: ["lexical"],
+    relation: "during", gapMs: 0 };
+  const block = media.multimodalBlockOf({ requestId: "r1", op: "search", ok: true, multimodal: { status: "complete",
+    outcome: "matched", results: [
+      { assetId: asset, startMs: 60000, endMs: 64000, dialogue: line, frames: [frame], framesInWindow: 1,
+        alignment: { windowMs: 15000 } },
+      { assetId: asset, startMs: 1, endMs: 2, dialogue: line, frames: [] },                                  // no frame
+      { assetId: asset, startMs: 1, endMs: 2, frames: [frame] },                                            // no line
+      { assetId: asset, startMs: 1, endMs: 2, dialogue: line, frames: [{ ...frame, verified: true }] },    // "verified"
+      { assetId: asset, startMs: 1, endMs: 2, dialogue: line, frames: [{ ...frame, relation: "somewhere" }] },
+    ] } });
+  assert.equal(block.hits.length, 1);
+  assert.deepEqual(plain(block.hits[0].dialogue.channels), ["exact", "semantic"]);
+  assert.equal(block.hits[0].frames[0].relation, "during");
+  assert.equal(block.hits[0].windowMs, 15000);
+  assert.equal(block.note, null);
+  const apart = media.multimodalBlockOf({ requestId: "r2", op: "search", ok: true, multimodal: {
+    status: "complete", outcome: "same_asset_outside_window", results: [] } });
+  assert.match(apart.note, /نه در فاصلهٔ زمانی خواسته‌شده/);
+  const partial = media.multimodalBlockOf({ requestId: "r3", op: "search", ok: true, multimodal: {
+    status: "partial", stoppedBy: "time_budget", outcome: "only_dialogue", results: [],
+    dialogueChannel: { semantic: { requested: true, status: "unavailable", reason: "model_unavailable" } },
+    visualChannel: { semantic: { requested: false, status: "not_requested" } } } });
+  assert.match(partial.note, /فقط شرط گفتگو پیدا شد/);
+  assert.match(partial.note, /ناقص ماند/);
+  assert.equal(partial.channelNotes.length, 1);
+  assert.match(partial.channelNotes[0], /فقط تطبیق واژه‌ای به کار رفت/);
+  const none = media.multimodalBlockOf({ requestId: "r4", op: "search", ok: true,
+    multimodal: { status: "unavailable", reason: "no_visual_evidence", results: [] } });
+  assert.match(none.note, /جست‌وجوی ترکیبی در دسترس نیست/);
+  const proposal = media.interpretationOf({ requestId: "r5", op: "search", ok: true,
+    interpretation: { status: "proposed", dialogue: "father's death", visual: "kitchen", generated: true } });
+  assert.deepEqual(plain(proposal), { status: "proposed", dialogue: "father's death", visual: "kitchen", generated: true, reason: null });
+  assert.equal(media.interpretationOf({ requestId: "r6", op: "search", ok: true,
+    interpretation: { status: "proposed", dialogue: "", visual: "kitchen" } }), null);
+  assert.equal(media.interpretationOf({ requestId: "r7", op: "search", ok: true,
+    interpretation: { status: "ambiguous", reason: "not_from_request" } }).reason, "not_from_request");
+  assert.match(media.multimodalRequestProblem("father", " "), /هر دو بخش لازم است/);
+  assert.equal(media.multimodalRequestProblem("father", "kitchen"), null);
+  assert.deepEqual(plain(media.multimodalFields(" father ", "kitchen", 999, true, false)), {
+    mode: "multimodal", dialogue: "father", visual: "kitchen", windowMs: 15000, dialogueMatch: "semantic",
+    visualMatch: "lexical", limit: 20 });
+  const panel = source("../src/components/MediaPanel.tsx");
+  assert.match(panel, /نتیجه‌های ترکیبی \(هر کدام با هر دو شرط/);
+  assert.match(panel, /پیشنهاد مغز سریع از واژه‌های خود شما \(تولیدشده، تأییدنشده\)/);
+  assert.match(panel, /گوینده، OCR و شباهت تصویر هنوز ساخته نشده‌اند/);
+  assert.match(panel, /setResult\(null\);\s*if \(proposal\?\.status === "proposed"\)/);  // a split never searches
 });
 
 test("semantic visual hits say their channel and an uncalibrated text similarity; a missing model is a note", () => {

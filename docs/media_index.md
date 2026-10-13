@@ -9,9 +9,10 @@ time range it came from.
 This wave covers handoff Stage A (foundation), Stage B dialogue (subtitles
 first, with whisper.cpp speech recognition as the fallback for files without
 subtitles, inside the Qronos runtime only) and the start of Stage D (shot
-boundaries and keyframes). Semantic search, visual search and multimodal
-search are **not** implemented; the index reports them as pending rather than
-returning empty results that look like answers.
+boundaries and keyframes). Later rounds added semantic, topic, visual and
+multimodal (dialogue + visual, round 63) search, each described below; what is
+still not built is reported as pending rather than as empty results that look
+like answers.
 
 ## What works
 
@@ -747,6 +748,53 @@ change requeues it), `MediaService.search_semantic`.
   still decision-pending. Cross-language quality is unmeasured: fixture vectors
   prove contracts only.
 
+## Multimodal search: dialogue + visual, fused by time (round 63)
+
+`search` with `mode: "multimodal"` (`qronos_media/multimodal.py`, `MediaService.search_multimodal`) answers a request
+such as "a kitchen scene where they talk about their father's death" with results that have BOTH a matching dialogue
+line AND a matching frame in the SAME current asset, the frame time inside [line start - window, line end + window].
+It is not an OR of two channels and not "both somewhere in the same file".
+
+- **Two independent constraints:** `dialogue` and `visual` (each 1..300 characters, at most 16 search words),
+  `windowMs` 0..120000 (default 15000), `dialogueMatch` exact | fuzzy | semantic, `visualMatch` lexical | semantic,
+  `limit` 1..50. Explicit constraints need no model. Sending only `query` asks for a PROPOSED split (below); a
+  request with both forms, one constraint only or out-of-range values is refused as `bad_request`.
+- **Evidence (stored, nothing analysed at query time):** dialogue lines from subtitles/ASR through the same exact or
+  fuzzy search as the dialogue modes; the Vision model's generated frame text (`visual_fts`: every word of the visual
+  constraint must occur); and, only when asked and stored vectors exist in scope, the bge-m3 dialogue windows and the
+  bge-m3 vectors of the generated frame TEXT (never the image). A semantic match is one of the 100 (dialogue) / 50
+  (frames) most similar items in scope AND has an uncalibrated cosine of at least 0.5 (the floor the topic search
+  already uses to call a match weak), so a small library does not "match everything".
+- **Order and bounds:** the current-scope counts come first (an asset whose every copy is out of scope is never
+  counted, queried or embedded; nothing in scope means no model admission); then at most ONE governed bge-m3 batch
+  (the requested texts that have stored vectors); then at most 500 lexical frames (+50 semantic), the frames of at
+  most 20 assets, a 100-line dialogue look over the whole scope and, only when that was cut, a full per-asset look in
+  the assets with matching frames; a 4 s time budget enforced in SQLite. Hitting a cap or the budget is `partial`
+  with the reason; a partial answer has fewer results, never an unchecked one.
+- **Result:** the dialogue line (text, times, track source/language, channels exact/fuzzy/semantic, bm25 or
+  uncalibrated cosine), up to 4 nearest frames (caption, text read, observations, frame SHA-256, provenance,
+  generated/unverified, channels lexical/semantic), `alignment` (`during` / `before` / `after`, `gapMs`, the window
+  and the rule), `matched` per modality and `framesInWindow`. An exact line and the semantic window around it are ONE
+  result with both channels. Ordered by time alignment, then each list's own order: no calibrated confidence. No
+  file path is returned (open.prepare re-verifies the copy).
+- **Honest states:** `outcome` matched | same_asset_outside_window | different_assets | only_dialogue | only_visual |
+  neither; `status` complete | partial (a cap, the budget, or a requested semantic channel that could not run: its
+  reason is given and the lexical fusion still answers) | unavailable (`no_visual_evidence`, `no_visual_index`,
+  `no_dialogue`). `absent` says speaker turns, OCR and an image encoder are not built and were not used.
+- **A natural request:** `{mode: "multimodal", query}` returns `interpretation`, never results. The person's own
+  labels ("dialogue: ... ; visual: ..." / «گفتگو: ... / تصویر: ...») split without any model. Otherwise ONE call to
+  the runtime's governed Fast brain (its activity/resource admission, generation binding and foreground rule; no
+  model, tag or setting chosen here) proposes `{dialogue, visual}`; every proposed word must be a word of the request
+  (else `ambiguous: not_from_request`), a missing part is `ambiguous`, and an unavailable/busy brain is
+  `unavailable` with its reason. A proposal is labelled generated/unverified with its provenance and fills the two
+  fields in the panel; nothing is searched until the person presses search.
+- **Desktop:** the «ترکیبی (گفتگو + تصویر)» mode shows the two fields, the window, the two semantic opt-ins and the
+  split button; each card says that both constraints were found in that video within the window, which channels
+  matched, the line, and each frame with «فریم ... ثانیه پیش از/پس از این جمله است» or «هم‌زمان», as generated,
+  unverified text, never image similarity. No-result outcomes, partial answers and unavailable channels are notes.
+- **Not done:** no speaker, OCR or image-encoder evidence; no voice/brain intent for this mode (the typed desktop
+  route only); no report view of search results; quality is unmeasured (synthetic fixtures prove the contract).
+
 ## Product route (round 32)
 
 The desktop and the brain/voice turns reach the media index only through typed operations on the runtime's
@@ -758,7 +806,7 @@ ONE in-process media host (`qronos_media/product.py`):
   operation while Qronos is paused (status, capabilities, roots.list, search, asset.detail, report.preview and decline still answer).
 - Operations (allow-listed, every field bounded): roots.add / roots.remove / roots.list, scan (then a continuous
   background index), index.start / stop / pause / resume, job.retry / reindex / cancel / pause / resume,
-  asset.priority, asset.detail, search (exact, fuzzy, semantic, topic, visual), open.prepare, report.preview (a bounded view of
+  asset.priority, asset.detail, search (exact, fuzzy, semantic, topic, visual, multimodal), open.prepare, report.preview (a bounded view of
   the same report; a read, so it also answers while paused), report.generate and report.export (format json,
   html, csv or pdf; kind short, full, transcript or evidence), decide / decline. A PDF export goes through the
   same write gate, single-use MEDIA_ACTION approval and typed secret as every export, on the exact PDF bytes.
@@ -778,8 +826,8 @@ ONE in-process media host (`qronos_media/product.py`):
   sent once and never stored) and `components/MediaPanel.tsx` / `MediaDrawer.tsx` (Persian), mounted in App.tsx
   beside the queue and history drawers (509204f), with the round-30 repair (own MEDIA_ACTION approval kind
   revoked at Pause/Stop/close; only an mpv/VLC .exe is a player).
-- Honest capabilities: implemented-unverified (ASR, semantic dialogue, topics with generated labels, vision captions)
-  are shown as such; OCR, subtitle/ASR fusion, speaker turns and visual embeddings are shown as not built; motion is
+- Honest capabilities: implemented-unverified (ASR, semantic dialogue, topics with generated labels, vision captions,
+  multimodal search) are shown as such; OCR, subtitle/ASR fusion, speaker turns and visual embeddings are shown as not built; motion is
   not supported.
 
 ## Integration state
@@ -811,6 +859,9 @@ Still open:
    round 49), and the registry node checks it.
 5. No real Fast-brain or Vision run of labels, hints or visual evidence has been
    accepted; their quality is unmeasured.
+6. Multimodal search (round 63) fuses only stored dialogue and generated frame
+   text; no real archive run, split or fusion quality has been measured, and it has
+   no voice/brain intent yet.
 
 ## Tests
 

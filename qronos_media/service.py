@@ -659,6 +659,253 @@ class MediaService:
                         "added": added, "model": visual_evidence.semantic_provenance_model()})
         return channel
 
+    def search_multimodal(self, dialogue: str, visual: str, *, window_ms: int = 15_000, dialogue_match: str = "exact",
+                          visual_match: str = "lexical", limit: int = 10, budget_seconds: float = 4.0) -> dict[str, Any]:
+        """A dialogue constraint AND a visual constraint, fused by time in the same current asset (qronos_media.multimodal).
+
+        Order: the counts of the CURRENT scope first (nothing out of scope is counted, queried or embedded); then at most
+        ONE governed bge-m3 batch, only for a semantic channel that was asked for and has stored vectors in scope; then
+        the stored visual evidence (generated frame text), the stored dialogue (subtitle/ASR) of the assets that have it,
+        and the time fusion. No Vision, ASR or other model runs and nothing is decoded. Paths are never returned."""
+        from qronos_media import multimodal
+
+        try:
+            spec = multimodal.check_constraints(dialogue, visual, window_ms=window_ms, dialogue_match=dialogue_match,
+                                                visual_match=visual_match)
+        except multimodal.ConstraintRefused as exc:
+            raise MediaRequestError(str(exc)) from None
+        limit = max(1, min(50, int(limit)))
+        budget_seconds = max(0.2, min(10.0, float(budget_seconds)))
+        block: dict[str, Any] = {
+            "status": "complete", "outcome": "neither", "results": [], "constraints": spec.as_json(),
+            "fusionVersion": multimodal.FUSION_VERSION, "rankNote": multimodal.RANK_NOTE, "notes": [],
+            "dialogueChannel": {"lexical": "fuzzy" if spec.dialogue_match == "fuzzy" else "exact",
+                                "semantic": {"requested": spec.dialogue_match == "semantic", "status": "not_requested"}},
+            "visualChannel": {"lexical": "every word in the generated frame text (Vision model, unverified, not OCR)",
+                              "semantic": {"requested": spec.visual_match == "semantic", "status": "not_requested"}},
+            "absent": {"speakerTurns": "not built", "ocr": "not built", "imageEncoder": "not built (no image similarity)"},
+        }
+        try:
+            db = open_read_only(self.layout.database)
+        except FileNotFoundError:
+            raise MediaRequestError("the media index is empty") from None
+        try:
+            self._multimodal_into(db, spec, limit, budget_seconds, block)
+        finally:
+            db.set_progress_handler(None, 0)
+            db.close()
+        return {"query": spec.as_json(), "multimodal": block}
+
+    def _multimodal_into(self, db: sqlite3.Connection, spec: Any, limit: int, budget_seconds: float,
+                         block: dict[str, Any]) -> None:
+        from qronos_media import multimodal, semantic, visual_evidence
+        from qronos_media.search import Budget, BudgetExhausted, search_dialogue as dialogue_search
+
+        scope = multimodal.in_scope
+        try:
+            frames_in_scope = db.execute("SELECT COUNT(*) FROM visual_evidence v WHERE v.status = 'described' AND "
+                                         + scope("v")).fetchone()[0]
+        except sqlite3.OperationalError:  # an index from before schema 6
+            block.update({"status": "unavailable", "reason": "no_visual_index"})
+            return
+        lines_in_scope = db.execute("SELECT COUNT(*) FROM dialogue d WHERE d.kind = 'cue' AND " + scope("d")).fetchone()[0]
+        block["scope"] = {"dialogueLines": lines_in_scope, "describedFrames": frames_in_scope}
+        if not frames_in_scope or not lines_in_scope:
+            block.update({"status": "unavailable", "reason": "no_visual_evidence" if not frames_in_scope else "no_dialogue"})
+            return
+        wanted: list[tuple[str, str]] = []
+        for channel, table, alias, asked, text in (
+                ("dialogue", "semantic_windows", "w", spec.dialogue_match == "semantic", spec.dialogue),
+                ("visual", "visual_semantic", "s", spec.visual_match == "semantic", spec.visual)):
+            if not asked:
+                continue
+            try:
+                stored = db.execute(f"SELECT COUNT(*) FROM {table} {alias} WHERE " + scope(alias)).fetchone()[0]
+            except sqlite3.OperationalError:
+                stored = 0
+            if stored:
+                wanted.append((channel, text))
+            else:
+                block[f"{channel}Channel"]["semantic"].update({"status": "unavailable", "reason": f"no_{channel}_vectors"})
+        vectors: dict[str, bytes] = {}
+        if wanted:
+            got, reason = self._embed_texts([text for _, text in wanted])  # ONE governed bge-m3 batch
+            if got:
+                vectors = {channel: vector for (channel, _), vector in zip(wanted, got)}
+            else:
+                for channel, _ in wanted:
+                    block[f"{channel}Channel"]["semantic"].update({"status": "unavailable", "reason": reason})
+        budget = Budget(budget_seconds, self._excluded)
+        frames: list[dict[str, Any]] = []
+        dialogue: list[dict[str, Any]] = []
+        notes: list[str] = block["notes"]
+        try:
+            try:
+                db.set_progress_handler(budget.expired, 1_000)
+                by_row: dict[int, dict[str, Any]] = {}
+                rows = db.execute(
+                    "SELECT v.*, bm25(visual_fts) AS rank_score FROM visual_fts JOIN visual_evidence v "
+                    "ON v.row_id = visual_fts.rowid WHERE visual_fts MATCH ? AND v.status = 'described' AND "
+                    + scope("v") + f" ORDER BY rank LIMIT {multimodal.MAX_VISUAL_CANDIDATES + 1}",
+                    [multimodal.visual_match_expression(spec.visual_tokens)]).fetchall()
+                if len(rows) > multimodal.MAX_VISUAL_CANDIDATES:
+                    notes.append("visual_candidates_cut")
+                    rows = rows[:multimodal.MAX_VISUAL_CANDIDATES]
+                for rank, row in enumerate(rows, 1):
+                    hit = visual_evidence.row_json(row)
+                    hit.update({"rank": rank, "channels": ["lexical"], "lexicalScore": round(-float(row["rank_score"]), 4),
+                                "scoreKind": "bm25 over generated visual text"})
+                    by_row[int(row["row_id"])] = hit
+                    frames.append(hit)
+                if "visual" in vectors:
+                    found, scan = visual_evidence.visual_candidates(
+                        db, vectors["visual"], limit=multimodal.MAX_SEMANTIC_VISUAL, asset_id=None, check=budget.check)
+                    found = [item for item in found if item["similarity"] >= multimodal.MIN_SEMANTIC_COSINE]
+                    for position, item in enumerate(found, 1):
+                        hit = by_row.get(int(item["rowId"]))
+                        if hit is not None:
+                            hit["channels"].append("semantic")
+                            hit["similarity"] = item["similarity"]
+                            continue
+                        row = db.execute("SELECT * FROM visual_evidence WHERE row_id = ?", (item["rowId"],)).fetchone()
+                        if row is None:
+                            continue
+                        hit = visual_evidence.row_json(row)
+                        hit.update({"rank": len(rows) + position, "channels": ["semantic"], "similarity": item["similarity"],
+                                    "scoreKind": "cosine over generated visual text (uncalibrated)"})
+                        frames.append(hit)
+                    block["visualChannel"]["semantic"].update({
+                        "status": "partial" if scan["truncated"] else "complete", "scanned": scan["scanned"],
+                        "considered": multimodal.MAX_SEMANTIC_VISUAL, "minCosine": multimodal.MIN_SEMANTIC_COSINE,
+                        "matched": len(found), "note": multimodal.SEMANTIC_NOTE,
+                        "model": visual_evidence.semantic_provenance_model()})
+                assets: list[str] = []
+                for hit in sorted(frames, key=lambda h: h["rank"]):
+                    if hit["assetId"] not in assets:
+                        assets.append(hit["assetId"])
+                if len(assets) > multimodal.MAX_FUSION_ASSETS:
+                    notes.append("fusion_assets_cut")
+                    assets = assets[:multimodal.MAX_FUSION_ASSETS]
+                    frames[:] = [hit for hit in frames if hit["assetId"] in assets]
+                lexical_mode = "fuzzy" if spec.dialogue_match == "fuzzy" else "exact"
+                seen: set[tuple] = set()
+
+                def lexical(asset_id: str | None, cap: int) -> dict[str, Any]:
+                    found = dialogue_search(db, spec.dialogue, mode=lexical_mode, limit=cap, asset_id=asset_id,
+                                            excluded=self._excluded,
+                                            budget_seconds=max(0.05, min(10.0, budget.deadline - time.monotonic())))
+                    db.set_progress_handler(budget.expired, 1_000)  # search_dialogue removed its own handler
+                    for item in found["results"]:
+                        key = (item["track"]["trackId"], item["startMs"], item["endMs"])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        dialogue.append({"assetId": item["assetId"], "startMs": item["startMs"], "endMs": item["endMs"],
+                                         "text": item["dialogue"][:multimodal.MAX_DIALOGUE_CHARS], "unit": item["unit"],
+                                         "channels": [item["match"]], "lexicalScore": item["lexicalScore"],
+                                         "scoreKind": item["scoreKind"], "timing": item["timing"],
+                                         "track": {name: item["track"][name] for name in ("trackId", "source", "language")},
+                                         "rank": len(dialogue) + 1})
+                    if found["stoppedBy"]:
+                        raise BudgetExhausted(found["stoppedBy"])
+                    return found
+
+                # A bounded look over the whole current scope (it also says whether the dialogue exists elsewhere);
+                # only when it was cut are the assets that have visual evidence searched one by one, in full.
+                if lexical(None, multimodal.MAX_GLOBAL_DIALOGUE)["truncated"]:
+                    for asset_id in assets:
+                        budget.check()
+                        if lexical(asset_id, multimodal.MAX_DIALOGUE_PER_ASSET)["truncated"]:
+                            notes.append("dialogue_candidates_cut")
+                if "dialogue" in vectors:
+                    found, scan = semantic.semantic_candidates(db, vectors["dialogue"],
+                                                               limit=multimodal.MAX_SEMANTIC_DIALOGUE, language=None,
+                                                               asset_id=None, check=budget.check)
+                    found = [row for row in found if row["score"] >= multimodal.MIN_SEMANTIC_COSINE]
+                    offset = len(dialogue)
+                    for position, row in enumerate(found, 1):
+                        track = db.execute("SELECT source, language FROM subtitle_tracks WHERE track_id = ?",
+                                           (row["track_id"],)).fetchone()
+                        dialogue.append({"assetId": row["asset_id"], "startMs": row["start_ms"], "endMs": row["end_ms"],
+                                         "text": row["text"][:multimodal.MAX_DIALOGUE_CHARS], "unit": "window",
+                                         "channels": ["semantic"], "similarity": row["score"],
+                                         "scoreKind": "cosine_uncalibrated",
+                                         "track": {"trackId": row["track_id"], "source": track["source"] if track else None,
+                                                   "language": track["language"] if track else None},
+                                         "rank": offset + position})
+                    block["dialogueChannel"]["semantic"].update({
+                        "status": "partial" if scan["truncated"] else "complete", "scanned": scan["scanned"],
+                        "considered": multimodal.MAX_SEMANTIC_DIALOGUE, "minCosine": multimodal.MIN_SEMANTIC_COSINE,
+                        "matched": len(found), "note": multimodal.SEMANTIC_NOTE})
+            except BudgetExhausted as exc:
+                block.update({"status": "partial", "stoppedBy": exc.reason})
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "interrupt" in message:
+                    block.update({"status": "partial", "stoppedBy": "time_budget"})
+                elif "locked" in message or "busy" in message:
+                    block.update({"status": "partial", "stoppedBy": "busy"})
+                else:
+                    raise
+        finally:
+            db.set_progress_handler(None, 0)
+        # Every pair below is checked on the evidence gathered so far: a partial run gives fewer results, never wrong ones.
+        results, facts = multimodal.fuse(dialogue, frames, spec.window_ms, limit)
+        for result in results:
+            title = db.execute("SELECT title FROM assets WHERE asset_id = ?", (result["assetId"],)).fetchone()
+            result["title"] = title["title"] if title else None
+        block["results"] = results
+        block["outcome"] = multimodal.outcome(results, visual_found=bool(frames), dialogue_found=bool(dialogue),
+                                              same_asset_outside=bool(facts["sameAssetOutsideWindow"]))
+        block["counts"] = {"dialogueEvidence": len(dialogue), "dialogueAssets": len({d["assetId"] for d in dialogue}),
+                           "visualEvidence": len(frames), "visualAssets": len({f["assetId"] for f in frames}),
+                           "sameAssetOutsideWindow": len(facts["sameAssetOutsideWindow"]),
+                           "pairedResults": facts["pairedResults"]}
+        if facts["truncated"]:
+            notes.append("results_cut_at_limit")
+        unavailable = [name for name in ("dialogue", "visual")
+                       if block[f"{name}Channel"]["semantic"]["requested"]
+                       and block[f"{name}Channel"]["semantic"]["status"] == "unavailable"]
+        if block["status"] == "complete" and (unavailable or set(notes) - {"results_cut_at_limit"}):
+            block["status"] = "partial"
+        notes += [f"{name}_semantic_unavailable" for name in unavailable]
+
+    def interpret_multimodal(self, query: str) -> dict[str, Any]:
+        """A PROPOSED split of one natural request into the dialogue and visual constraints; nothing is searched.
+
+        The person's own labels are used without any model. Otherwise ONE call to the runtime's governed Fast brain
+        (its own admission, generation binding and foreground rules) proposes the split; it must be made of the
+        request's own words and stays generated/unverified. Unavailable or ambiguous says so; the explicit inputs stay
+        usable either way."""
+        from qronos_media import multimodal
+
+        if not isinstance(query, str) or not query.strip() or len(query) > 1200:
+            raise MediaRequestError("query must be 1..1200 characters")
+        labelled = multimodal.split_labelled(query)
+        if labelled is not None:
+            return {"query": query, "interpretation": {
+                "status": "proposed", "dialogue": labelled[0], "visual": labelled[1], "method": "labels",
+                "generated": False, "verified": False,
+                "note": "taken from your own labels; confirm or edit the two parts, then search"}}
+        if self.brain is None:
+            return {"query": query, "interpretation": {"status": "unavailable", "reason": "model_unavailable",
+                                                       "note": "type the dialogue and the visual parts yourself"}}
+        try:
+            binding = self.brain.bind()
+            answer = self.brain.ask(binding, multimodal.SPLIT_SYSTEM, multimodal.split_prompt(query))
+            dialogue, visual = multimodal.parse_split(answer, query)
+        except ResourceRefused as exc:
+            return {"query": query, "interpretation": {"status": "unavailable", "reason": exc.reason,
+                                                       "note": "type the dialogue and the visual parts yourself"}}
+        except multimodal.SplitRejected as rejected:
+            return {"query": query, "interpretation": {"status": "ambiguous", "reason": rejected.reason,
+                                                       "note": "the request could not be split safely; type both parts"}}
+        return {"query": query, "interpretation": {
+            "status": "proposed", "dialogue": dialogue, "visual": visual, "method": "fast_brain", "generated": True,
+            "verified": False, "note": "a split proposed by the Fast brain from your own words; unverified - confirm "
+                                       "or edit the two parts, then search",
+            "provenance": multimodal.split_provenance(binding, query)}}
+
     def search_dialogue(self, query: str, **options: Any) -> dict[str, Any]:
         try:
             db = open_read_only(self.layout.database)

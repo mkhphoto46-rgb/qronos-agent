@@ -33,7 +33,11 @@ MAX_QUERY_CHARS = 1200
 MAX_SECRET_CHARS = 256
 MAX_START_MS = 7 * 24 * 3600 * 1000
 MAX_PENDING_APPROVALS = 32
-SEARCH_MODES = ("exact", "fuzzy", "semantic", "topic", "visual")
+SEARCH_MODES = ("exact", "fuzzy", "semantic", "topic", "visual", "multimodal")
+#: The multimodal capability (qronos_media.multimodal), listed with the stage capabilities; never claimed verified.
+MULTIMODAL_CAPABILITY = {"capability": "multimodal_search", "level": 3, "status": "implemented_unverified",
+                         "reason": "Dialogue AND generated-visual-text constraints fused by time in one asset; "
+                                   "no speaker, OCR or image-encoder evidence."}
 
 #: Operations that only read (allowed while Qronos is paused). Everything else is refused while paused.
 READ_OPS = frozenset({"status", "roots.list", "search", "asset.detail", "capabilities", "decline", "report.preview"})
@@ -85,7 +89,7 @@ def _stage(data: dict) -> str:
 
 def capabilities() -> dict[str, Any]:
     """Honest capability levels: implemented-unverified stages, and what is not built (never claimed)."""
-    return {"capabilities": [dict(item) for item in PENDING_CAPABILITIES],
+    return {"capabilities": [dict(item) for item in PENDING_CAPABILITIES] + [dict(MULTIMODAL_CAPABILITY)],
             "stages": {name: {"level": spec.level, "version": spec.version} for name, spec in STAGES.items()},
             "reports": {"formats": list(FORMATS), "kinds": list(KINDS)}}
 
@@ -155,10 +159,13 @@ class MediaProduct:
             done({"ok": True, "stopped": True})
             return
         if op == "search":
-            query = _text(data, "query", MAX_QUERY_CHARS)
             mode = data.get("mode", "exact")
             if mode not in SEARCH_MODES:
-                raise MediaOpError("bad_request", "mode must be exact, fuzzy, semantic or topic")
+                raise MediaOpError("bad_request", f"mode must be one of {', '.join(SEARCH_MODES)}")
+            if mode == "multimodal":
+                self._submit(host.query, op, _multimodal(data), done)
+                return
+            query = _text(data, "query", MAX_QUERY_CHARS)
             limit = _int(data, "limit", 1, 50, default=20)
             language = _text(data, "language", 16, required=False)
             hints = data.get("brainHints") is True and mode == "topic"  # generated hints only when asked
@@ -341,6 +348,29 @@ def _search(service: Any, query: str, mode: str, limit: int, language: str | Non
     if mode == "visual":  # the separate visual channel; the exact dialogue answer comes first, unchanged
         return {"ok": True, **service.search_visual(query, limit=limit)}
     return {"ok": True, "results": service.search_dialogue(query, mode=mode, limit=limit, language=language)}
+
+
+def _multimodal(data: dict) -> Callable[[Any], dict[str, Any]]:
+    """Typed multimodal arguments: BOTH explicit constraints (searched, no model inference needed), or one natural
+    ``query`` only (a proposed split is returned for the person to confirm; nothing is searched)."""
+    from qronos_media import multimodal
+
+    if "dialogue" in data or "visual" in data:
+        dialogue = _text(data, "dialogue", multimodal.MAX_CONSTRAINT_CHARS)
+        visual = _text(data, "visual", multimodal.MAX_CONSTRAINT_CHARS)
+        window = _int(data, "windowMs", 0, multimodal.MAX_WINDOW_MS, default=multimodal.DEFAULT_WINDOW_MS)
+        dialogue_match = data.get("dialogueMatch", "exact")
+        visual_match = data.get("visualMatch", "lexical")
+        if dialogue_match not in multimodal.DIALOGUE_MATCHES or visual_match not in multimodal.VISUAL_MATCHES:
+            raise MediaOpError("bad_request", "dialogueMatch is exact, fuzzy or semantic; visualMatch lexical or semantic")
+        if "query" in data:
+            raise MediaOpError("bad_request", "send either the two constraints or one query to split, not both")
+        limit = _int(data, "limit", 1, 50, default=20)
+        return lambda s: {"ok": True, **s.search_multimodal(dialogue, visual, window_ms=window,
+                                                             dialogue_match=dialogue_match, visual_match=visual_match,
+                                                             limit=limit)}
+    query = _text(data, "query", MAX_QUERY_CHARS)
+    return lambda s: {"ok": True, **s.interpret_multimodal(query)}
 
 
 def _typed_failure(error: Exception) -> dict[str, Any]:

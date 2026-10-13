@@ -171,6 +171,165 @@ export function visualBlockOf(result: MediaResult | null): VisualBlock {
   return { hits, note, semanticNote };
 }
 
+/** Bounds of a multimodal request (qronos_media/multimodal.py). */
+export const MULTIMODAL_MAX_CONSTRAINT_CHARS = 300;
+export const MULTIMODAL_WINDOWS_MS = [5_000, 15_000, 30_000, 60_000, 120_000] as const;
+
+/** One frame of a multimodal hit: GENERATED text about one stored keyframe, and where it lies relative to the line. */
+export type MultimodalFrame = {
+  timeMs: number;
+  frameSha256: string;
+  caption: string;
+  visibleText: string[];
+  observations: string[];
+  channels: Array<"lexical" | "semantic">;
+  similarity: number | null;
+  relation: "before" | "during" | "after";
+  gapMs: number;
+};
+
+/** One multimodal hit: a dialogue line AND at least one frame of the SAME asset within the requested window. */
+export type MultimodalHit = {
+  assetId: string;
+  title: string | null;
+  startMs: number;
+  endMs: number;
+  dialogue: {
+    startMs: number; endMs: number; text: string; channels: Array<"exact" | "fuzzy" | "semantic">;
+    similarity: number | null; source: string; language: string | null;
+  };
+  frames: MultimodalFrame[];
+  framesInWindow: number;
+  windowMs: number;
+};
+
+export type MultimodalBlock = {
+  hits: MultimodalHit[];
+  /** Why there is no result, or why the answer is partial/unavailable (Persian); null when nothing needs saying. */
+  note: string | null;
+  /** A requested semantic channel that did not run, per constraint. */
+  channelNotes: string[];
+  answered: boolean;
+};
+
+export const MULTIMODAL_OUTCOME_TEXT: Record<string, string> = {
+  same_asset_outside_window: "هر دو شرط در یک ویدیو پیدا شدند، اما نه در فاصلهٔ زمانی خواسته‌شده؛ نتیجهٔ ترکیبی نیست. پنجرهٔ زمانی را بزرگ‌تر کنید.",
+  different_assets: "شرط گفتگو و شرط تصویر هر کدام پیدا شدند، اما در ویدیوهای جدا؛ نتیجهٔ ترکیبی نیست.",
+  only_dialogue: "فقط شرط گفتگو پیدا شد؛ هیچ فریمی با شرط تصویر جور نبود.",
+  only_visual: "فقط شرط تصویر پیدا شد؛ هیچ جمله‌ای با شرط گفتگو جور نبود.",
+  neither: "هیچ‌کدام از دو شرط پیدا نشد.",
+};
+
+const DIALOGUE_CHANNELS = new Set(["exact", "fuzzy", "semantic"]);
+const RELATIONS = new Set(["before", "during", "after"]);
+
+/** The multimodal block of a `search` answer in mode "multimodal", validated field by field: a hit without its
+ *  dialogue line or without a valid, unverified frame is dropped (never a one-modality "result"). */
+export function multimodalBlockOf(result: MediaResult | null): MultimodalBlock {
+  const empty: MultimodalBlock = { hits: [], note: null, channelNotes: [], answered: false };
+  if (!result || !result.ok || typeof result.multimodal !== "object" || result.multimodal === null) return empty;
+  const block = result.multimodal as Record<string, unknown>;
+  const hits: MultimodalHit[] = [];
+  for (const raw of Array.isArray(block.results) ? block.results.slice(0, 50) : []) {
+    if (!isRecord(raw) || !isAssetId(raw.assetId) || typeof raw.startMs !== "number" || typeof raw.endMs !== "number") continue;
+    const line = isRecord(raw.dialogue) ? raw.dialogue : null;
+    if (!line || typeof line.text !== "string" || typeof line.startMs !== "number" || typeof line.endMs !== "number") continue;
+    const channels = (Array.isArray(line.channels) ? line.channels : [])
+      .filter((name): name is "exact" | "fuzzy" | "semantic" => typeof name === "string" && DIALOGUE_CHANNELS.has(name)).slice(0, 3);
+    if (channels.length === 0) continue;
+    const track = isRecord(line.track) ? line.track : {};
+    const frames: MultimodalFrame[] = [];
+    for (const item of Array.isArray(raw.frames) ? raw.frames.slice(0, 4) : []) {
+      if (!isRecord(item) || typeof item.timeMs !== "number" || typeof item.caption !== "string"
+        || typeof item.frameSha256 !== "string" || !SHA256.test(item.frameSha256) || item.verified !== false
+        || typeof item.relation !== "string" || !RELATIONS.has(item.relation) || typeof item.gapMs !== "number") continue;
+      frames.push({
+        timeMs: item.timeMs, frameSha256: item.frameSha256, caption: item.caption.slice(0, 240),
+        visibleText: strings(item.visibleText, 8, 120), observations: strings(item.observations, 6, 120),
+        channels: (Array.isArray(item.channels) ? item.channels : [])
+          .filter((name): name is "lexical" | "semantic" => name === "lexical" || name === "semantic").slice(0, 2),
+        similarity: typeof item.similarity === "number" && Number.isFinite(item.similarity) ? item.similarity : null,
+        relation: item.relation as MultimodalFrame["relation"], gapMs: Math.max(0, item.gapMs),
+      });
+    }
+    if (frames.length === 0) continue;
+    const alignment = isRecord(raw.alignment) ? raw.alignment : {};
+    hits.push({
+      assetId: raw.assetId, title: typeof raw.title === "string" ? raw.title.slice(0, 300) : null,
+      startMs: raw.startMs, endMs: raw.endMs,
+      dialogue: {
+        startMs: line.startMs, endMs: line.endMs, text: line.text.slice(0, 600), channels,
+        similarity: typeof line.similarity === "number" && Number.isFinite(line.similarity) ? line.similarity : null,
+        source: typeof track.source === "string" ? track.source : "",
+        language: typeof track.language === "string" ? track.language : null,
+      },
+      frames, framesInWindow: finite(raw.framesInWindow) || frames.length, windowMs: finite(alignment.windowMs),
+    });
+  }
+  let note: string | null = null;
+  if (block.status === "unavailable") {
+    note = `جست‌وجوی ترکیبی در دسترس نیست: ${refusalText(typeof block.reason === "string" ? block.reason : "no_visual_evidence")}`;
+  } else if (hits.length === 0 && typeof block.outcome === "string" && block.outcome in MULTIMODAL_OUTCOME_TEXT) {
+    note = MULTIMODAL_OUTCOME_TEXT[block.outcome];
+  }
+  if (block.status === "partial") {
+    const why = typeof block.stoppedBy === "string" ? refusalText(block.stoppedBy) : "بخشی از جست‌وجو انجام نشد";
+    note = `${note ? `${note} ` : ""}جست‌وجوی ترکیبی ناقص ماند (${why})؛ هر نتیجهٔ نشان‌داده‌شده هر دو شرط را دارد، اما ممکن است همه پیدا نشده باشند.`;
+  }
+  const channelNotes: string[] = [];
+  for (const [key, label] of [["dialogueChannel", "گفتگو"], ["visualChannel", "تصویر"]] as const) {
+    const channel = isRecord(block[key]) ? block[key] as Record<string, unknown> : {};
+    const semantic = isRecord(channel.semantic) ? channel.semantic : {};
+    if (semantic.requested === true && semantic.status === "unavailable") {
+      channelNotes.push(`جست‌وجوی هم‌معنای ${label} در دسترس نبود: ${refusalText(typeof semantic.reason === "string" ? semantic.reason : "model_unavailable")}؛ فقط تطبیق واژه‌ای به کار رفت.`);
+    }
+  }
+  return { hits, note, channelNotes, answered: true };
+}
+
+/** A proposed split of one natural request (never results). `generated` marks a Fast-brain proposal (unverified). */
+export type MultimodalInterpretation = {
+  status: "proposed" | "unavailable" | "ambiguous";
+  dialogue: string;
+  visual: string;
+  generated: boolean;
+  reason: string | null;
+};
+
+export function interpretationOf(result: MediaResult | null): MultimodalInterpretation | null {
+  if (!result || !result.ok || !isRecord(result.interpretation)) return null;
+  const made = result.interpretation;
+  if (made.status === "proposed") {
+    if (typeof made.dialogue !== "string" || typeof made.visual !== "string" || !made.dialogue.trim() || !made.visual.trim()) return null;
+    return { status: "proposed", dialogue: made.dialogue.slice(0, MULTIMODAL_MAX_CONSTRAINT_CHARS),
+             visual: made.visual.slice(0, MULTIMODAL_MAX_CONSTRAINT_CHARS), generated: made.generated !== false, reason: null };
+  }
+  if (made.status === "unavailable" || made.status === "ambiguous") {
+    return { status: made.status, dialogue: "", visual: "", generated: false,
+             reason: typeof made.reason === "string" ? made.reason.slice(0, 80) : null };
+  }
+  return null;
+}
+
+/** Why a multimodal request cannot be sent yet (both constraints are required, each bounded), or null. */
+export function multimodalRequestProblem(dialogue: string, visual: string): string | null {
+  if (!dialogue.trim() || !visual.trim()) return "هر دو بخش لازم است: آنچه گفته می‌شود و آنچه دیده می‌شود.";
+  if (dialogue.length > MULTIMODAL_MAX_CONSTRAINT_CHARS || visual.length > MULTIMODAL_MAX_CONSTRAINT_CHARS) {
+    return `هر بخش حداکثر ${MULTIMODAL_MAX_CONSTRAINT_CHARS} نویسه است.`;
+  }
+  return null;
+}
+
+/** The typed fields of one explicit multimodal search (sent as the `search` op). */
+export function multimodalFields(dialogue: string, visual: string, windowMs: number, semanticDialogue: boolean,
+  semanticVisual: boolean): Record<string, unknown> {
+  return {
+    mode: "multimodal", dialogue: dialogue.trim(), visual: visual.trim(),
+    windowMs: (MULTIMODAL_WINDOWS_MS as readonly number[]).includes(windowMs) ? windowMs : 15_000,
+    dialogueMatch: semanticDialogue ? "semantic" : "exact", visualMatch: semanticVisual ? "semantic" : "lexical", limit: 20,
+  };
+}
+
 /** Report formats and kinds the media host renders from the one index schema (qronos_media/reports.py). */
 export const REPORT_FORMATS = ["pdf", "html", "json", "csv"] as const;
 export const REPORT_KINDS = ["short", "full", "transcript", "evidence"] as const;
@@ -280,6 +439,10 @@ export const MEDIA_REFUSAL_TEXT: Record<string, string> = {
   no_visual_evidence: "هنوز هیچ فریمی با مدل بینایی توصیف نشده است (مرحلهٔ شواهد تصویری انجام نشده).",
   no_visual_index: "این نمایه قدیمی‌تر از شواهد تصویری است.",
   no_visual_vectors: "هنوز برای متن فریم‌ها بردار bge-m3 ساخته نشده است.",
+  no_dialogue: "هنوز هیچ دیالوگی (زیرنویس یا رونویسی) در محدودهٔ فعلی فهرست نشده است.",
+  no_dialogue_vectors: "هنوز برای دیالوگ‌ها بردار bge-m3 ساخته نشده است.",
+  time_budget: "وقت جست‌وجو تمام شد",
+  busy: "فهرست در دست نوشتن بود",
   vision_profile_mismatch: "مدل بینایی تنظیم‌شده همان مدل اعلام‌شده نیست؛ چیزی اجرا نشد.",
   queue_full: "صف رسانه پر است؛ کمی بعد دوباره امتحان کنید.",
   stopped: "متوقف شد؛ هیچ کاری انجام نشد.",
