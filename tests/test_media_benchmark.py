@@ -196,6 +196,15 @@ def test_hostile_json_and_unsafe_paths_are_refused(tmp_path):
     assert code == 3 and "links" in out["detail"]
 
 
+def test_deeply_nested_json_is_an_input_refusal_not_a_traceback(tmp_path):
+    # a few hundred KB of nesting makes the json decoder raise RecursionError; the documented contract is exit 3 input_refused
+    for name, content in (("arrays.json", b"[" * 100_000 + b"]" * 100_000),
+                          ("objects.json", b'{"a":' * 100_000 + b"1" + b"}" * 100_000)):
+        (tmp_path / name).write_bytes(content)
+        code, out = cli("system", "--measurements", str(tmp_path / name))
+        assert code == 3 and out["error"] == "input_refused" and "nested too deeply" in out["detail"], name
+
+
 def test_a_reparse_point_or_link_is_refused_even_where_links_cannot_be_created(monkeypatch, tmp_path):
     import stat as stat_module
 

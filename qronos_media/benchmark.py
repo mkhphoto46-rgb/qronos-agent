@@ -118,6 +118,8 @@ def read_json(path_text: str) -> tuple[Any, str]:
         raise
     except (UnicodeDecodeError, ValueError) as error:
         raise Refused(f"{path.name!r} is not UTF-8 JSON ({type(error).__name__})") from None
+    except RecursionError:  # raised by the json decoder itself on hostile nesting; a small file must not crash the CLI
+        raise Refused(f"{path.name!r} is nested too deeply to read") from None
     return value, hashlib.sha256(data).hexdigest()
 
 
