@@ -161,3 +161,41 @@ test("a 3D device is driven only by its driver's proof, and success means only a
   assert.match(text, /41/);
   assert.match(text, /نیست/);  // it says that a handoff is not a printed part
 });
+
+test("wake: exact local time with its offset, bounded fields, truthful words and no claim that the PC woke", async () => {
+  assert.equal(hub.isoWithOffset("2026-10-14T06:30", 210), "2026-10-14T06:30:00+03:30");
+  assert.equal(hub.isoWithOffset("2026-10-14T06:30", -300), "2026-10-14T06:30:00-05:00");
+  assert.equal(hub.isoWithOffset("2026-10-14 06:30", 0), null);
+  assert.equal(hub.isoWithOffset("2026-10-14T06:30", 15 * 60), null);
+  const fake = fakeTransport();
+  const client = hub.createDeviceHubClient(fake.transport);
+  assert.equal((await client.wakeSchedule("2026-10-14T06:30", 10)).code, "bad_request");  // no offset: refused here
+  assert.equal((await client.wakeSchedule("2026-10-14T06:30:00+03:30", 121)).code, "bad_request");
+  assert.equal(fake.sent.length, 0);
+  const answer = client.wakeSchedule("2026-10-14T06:30:00+03:30", 15);
+  await tick();
+  const [{ data }] = fake.sent;
+  assert.deepEqual(Object.keys(data).sort(), ["at", "op", "requestId", "stayAwakeMinutes"]);
+  assert.equal(data.op, "wake.schedule");
+  fake.deliver({ requestId: data.requestId, op: "wake.schedule", ok: true, status: "approval_required",
+                 approvalId: "approval-wake-1", needsSecret: true, preview: { action: "wake_schedule" } });
+  assert.equal(hub.approvalOf(await answer).needsSecret, true);
+  const status = { requestId: "r", op: "wake.status", ok: true,
+    capability: { verdict: "blocked_by_power_plan", reason: "wake_timers_important_only", modernStandby: true,
+                  wakeTimersAc: "important_only", wakeTimersDc: "disabled", powerSource: "battery" },
+    armed: { wakeId: "wk-0123456789abcdef", dueUtc: "2026-10-14T03:00:00+00:00", stayAwakeMinutes: 15, state: "armed" } };
+  const capability = hub.wakeCapabilityOf(status);
+  assert.equal(capability.verdict, "blocked_by_power_plan");
+  assert.match(hub.WAKE_VERDICT_TEXT[capability.reason], /زمان‌سنج‌های مهم/);
+  assert.equal(hub.wakeCapabilityOf({ ...status, capability: { verdict: "always" } }), null);  // unknown verdict dropped
+  const armed = hub.wakeArmedOf(status);
+  const words = hub.wakeArmedText(armed, "۱۴۰۵/۷/۲۲");
+  assert.match(words, /پذیرفت/);
+  assert.match(words, /نه اینکه کامپیوتر حتماً بیدار می‌شود/);
+  assert.match(hub.wakeArmedText({ ...plain(armed), state: "fired" }, "x"), /نه اینکه کامپیوتر از خواب بیدار شد/);
+  assert.equal(Object.keys(hub.WAKE_LIMIT_TEXT).length, 6);
+  assert.match(hub.WAKE_LIMIT_TEXT.no_voice_or_brain_while_asleep, /صدا/);
+  for (const code of ["bad_time", "already_armed", "wake_not_supported", "wake_native_refused"]) {
+    assert.ok(hub.DEVICE_REFUSAL_TEXT[code], code);
+  }
+});

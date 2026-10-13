@@ -4,12 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  approvalOf, createDeviceHubClient, devicesOf, handoffText, jobsOf, limitText, print3dProblem, printProblem,
-  refusalText, unsupportedClassesOf,
+  approvalOf, createDeviceHubClient, devicesOf, handoffText, isoWithOffset, jobsOf, limitText, print3dProblem,
+  printProblem, refusalText, unsupportedClassesOf, wakeArmedOf, wakeArmedText, wakeCapabilityOf, WAKE_LIMIT_TEXT,
+  WAKE_VERDICT_TEXT,
 } from "../deviceHubStore";
 import type {
   Device, DeviceApproval, DeviceHubClient, DeviceHubTransport, DeviceJob, JobCommand, PrintColor, RuntimeEvent,
-  UnsupportedClass,
+  UnsupportedClass, WakeArmed, WakeCapability,
 } from "../deviceHubStore";
 
 /** The production transport: the registered send_runtime_action command and the runtime event stream. */
@@ -36,6 +37,10 @@ const JOB_STATUS_FA: Record<string, string> = {
   restarting: "شروع دوباره", complete: "کامل",
 };
 
+function isWakeApproval(approval: DeviceApproval): boolean {
+  return approval.preview.action === "wake_schedule" || approval.preview.action === "wake_cancel";
+}
+
 type DeviceHubPanelProps = { client: DeviceHubClient; visible: boolean };
 
 function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
@@ -52,6 +57,11 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
   const [color, setColor] = useState<PrintColor>("default");
   const [pages, setPages] = useState("all");
   const [path3d, setPath3d] = useState("");
+  const [wakeCap, setWakeCap] = useState<WakeCapability | null>(null);
+  const [wakeArmed, setWakeArmed] = useState<WakeArmed | null>(null);
+  const [wakeLocal, setWakeLocal] = useState("");
+  const [wakeStay, setWakeStay] = useState(10);
+  const [wakeNote, setWakeNote] = useState("");
 
   const device = devices.find((item) => item.id === selected);
 
@@ -122,8 +132,67 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
     const result = approved ? await client.decide(current, typed) : await client.decline(current);
     setMessage(!result.ok ? refusalText(result.code)
       : result.status === "handed_to_spooler" ? handoffText(result)
+      : result.status === "armed" ? wakeArmedText({ wakeId: String(result.wakeId), dueUtc: String(result.dueUtc),
+          stayAwakeMinutes: Number(result.stayAwakeMinutes), state: "armed" }, localTime(String(result.dueUtc)))
+      : result.status === "cancelled" ? "زمان بیدار شدن لغو شد."
       : approved ? "انجام شد." : "لغو شد؛ چیزی تغییر نکرد.");
+    if (isWakeApproval(current)) {
+      setWakeNote(!result.ok ? refusalText(result.code) : "");
+      await wakeStatus();
+      return;
+    }
     if (device) await loadJobs(device.id);
+  }
+
+  async function wakeStatus(): Promise<void> {
+    const result = await client.wakeStatus();
+    if (!result.ok) {
+      setWakeCap(null);
+      setWakeNote(refusalText(result.code));
+      return;
+    }
+    setWakeCap(wakeCapabilityOf(result));
+    setWakeArmed(wakeArmedOf(result));
+    setWakeNote("");
+  }
+
+  async function wakeSchedule(): Promise<void> {
+    const chosen = new Date(wakeLocal);
+    const at = Number.isNaN(chosen.getTime()) ? null : isoWithOffset(wakeLocal, -chosen.getTimezoneOffset());
+    if (!at) {
+      setWakeNote("زمان را کامل انتخاب کنید (تاریخ و ساعت).");
+      return;
+    }
+    setBusy(true);
+    const result = await client.wakeSchedule(at, wakeStay);
+    setBusy(false);
+    const asked = approvalOf(result);
+    if (asked) {
+      setApproval(asked);
+      setWakeNote("ثبت زمان بیدار شدن به تأیید شما با رمز نیاز دارد.");
+      return;
+    }
+    setWakeNote(refusalText(result.code));
+  }
+
+  async function wakeCancel(): Promise<void> {
+    setBusy(true);
+    const result = await client.wakeCancel();
+    setBusy(false);
+    const asked = approvalOf(result);
+    if (asked) {
+      setApproval(asked);
+      setWakeNote("لغو زمان بیدار شدن به تأیید شما نیاز دارد.");
+      return;
+    }
+    setWakeNote(result.ok ? (result.status === "cancelled" ? "زمان بیدار شدن لغو شد." : "زمانی ثبت نشده بود.")
+      : refusalText(result.code));
+    await wakeStatus();
+  }
+
+  function localTime(utc: string): string {
+    const when = new Date(utc);
+    return Number.isNaN(when.getTime()) ? utc : when.toLocaleString("fa-IR");
   }
 
   async function print3d(): Promise<void> {
@@ -239,7 +308,7 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
             </div>
           )}
 
-          {approval && (
+          {approval && !isWakeApproval(approval) && (
             <div className="device-approval" role="dialog" aria-label="تأیید درخواست دستگاه">
               {typeof approval.preview.jobName === "string" ? (
                 <p>
@@ -300,6 +369,60 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
           )}
         </div>
       )}
+
+      <section className="device-wake" aria-label="بیدار کردن این کامپیوتر">
+        <h3>بیدار کردن همین کامپیوتر از خواب</h3>
+        <p className="device-hub-note">
+          با زمان‌سنج سخت‌افزاری ویندوز، نه با صدا یا شبکه. کامپیوتر خواب هیچ برنامه‌ای (از جمله Qronos) را اجرا نمی‌کند.
+        </p>
+        <button type="button" onClick={() => void wakeStatus()} disabled={busy}>بررسی توانایی</button>
+        {wakeNote && <p className="device-hub-message" role="status">{wakeNote}</p>}
+        {wakeCap && (
+          <>
+            <p className={wakeCap.verdict === "supported" ? "" : "device-unsupported"}>
+              {WAKE_VERDICT_TEXT[wakeCap.reason] ?? wakeCap.reason}
+            </p>
+            <dl className="device-capabilities">
+              <dt>منبع برق</dt><dd>{wakeCap.powerSource === "battery" ? "باتری" : wakeCap.powerSource === "ac" ? "برق شهری" : "نامعلوم"}</dd>
+              <dt>زمان‌سنج بیدارباش (برق شهری / باتری)</dt><dd dir="ltr">{wakeCap.wakeTimersAc ?? "?"} / {wakeCap.wakeTimersDc ?? "?"}</dd>
+              <dt>Modern Standby</dt><dd>{wakeCap.modernStandby ? "بله (صفحه خاموش می‌ماند)" : "خیر"}</dd>
+            </dl>
+          </>
+        )}
+        {wakeArmed && wakeArmed.state !== "ended" && (
+          <p role="status">{wakeArmedText(wakeArmed, localTime(wakeArmed.dueUtc))}</p>
+        )}
+        <form className="device-print" onSubmit={(event) => { event.preventDefault(); void wakeSchedule(); }}>
+          <label>زمان بیدار شدن
+            <input type="datetime-local" value={wakeLocal} onChange={(event) => setWakeLocal(event.target.value)} />
+          </label>
+          <label>بیدار ماندن پس از آن (دقیقه)
+            <input type="number" min={0} max={120} value={wakeStay}
+                   onChange={(event) => setWakeStay(Number(event.target.value))} />
+          </label>
+          <button type="submit" disabled={busy || approval !== null || !wakeLocal}>ثبت زمان بیدار شدن</button>
+          <button type="button" disabled={busy || approval !== null} onClick={() => void wakeCancel()}>لغو زمان ثبت‌شده</button>
+        </form>
+        <ul className="device-wake-limits">
+          {Object.values(WAKE_LIMIT_TEXT).map((line) => <li key={line}>{line}</li>)}
+        </ul>
+        {approval && isWakeApproval(approval) && (
+          <div className="device-approval" role="dialog" aria-label="تأیید بیدار کردن کامپیوتر">
+            <p>
+              {approval.preview.action === "wake_cancel"
+                ? `زمان بیدار شدنِ ${localTime(String(approval.preview.dueUtc ?? ""))} لغو شود؟`
+                : `این کامپیوتر در ${localTime(String(approval.preview.dueUtc ?? ""))} از خواب بیدار شود و `
+                  + `${String(approval.preview.stayAwakeMinutes ?? 0)} دقیقه بیدار بماند؟ فقط ثبت در ویندوز گزارش می‌شود.`}
+            </p>
+            {approval.needsSecret && (
+              <input type="password" value={secret} onChange={(event) => setSecret(event.target.value)}
+                     placeholder="رمز تأیید" maxLength={256} autoComplete="off" />
+            )}
+            <button type="button" disabled={approval.needsSecret && !secret} onClick={() => void answer(true)}>تأیید</button>
+            <button type="button" onClick={() => void answer(false)}>لغو</button>
+          </div>
+        )}
+      </section>
 
       {unsupported.length > 0 && (
         <div className="device-hub-unsupported">

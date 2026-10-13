@@ -18,10 +18,12 @@
  */
 
 export type DeviceHubOp =
-  | "devices.list" | "device.jobs" | "job.control" | "print.request" | "print3d.request" | "decide" | "decline";
+  | "devices.list" | "device.jobs" | "job.control" | "print.request" | "print3d.request" | "wake.status"
+  | "wake.schedule" | "wake.cancel" | "decide" | "decline";
 
 export const DEVICE_HUB_OPS: ReadonlySet<string> = new Set<DeviceHubOp>([
-  "devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "decide", "decline",
+  "devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "wake.status", "wake.schedule",
+  "wake.cancel", "decide", "decline",
 ]);
 
 export const DEVICE_HUB_ACTION_ID = "qronos.device_hub";
@@ -197,7 +199,7 @@ export const DEVICE_REFUSAL_TEXT: Record<string, string> = {
   closed: "ارتباط با Qronos بسته شد.",
   bad_request: "درخواست نامعتبر بود.",
   internal: "خطای داخلی؛ جزئیات در گزارش‌های Qronos است.",
-  secret_unavailable: "برای چاپ سه‌بعدی، رمز تأیید Qronos باید تنظیم شده باشد.",
+  secret_unavailable: "این کار (چاپ سه‌بعدی یا بیدار کردن کامپیوتر) به رمز تأیید Qronos نیاز دارد که هنوز تنظیم نشده است.",
   file_missing: "این فایل وجود ندارد.",
   file_empty: "این فایل خالی است.",
   file_unreadable: "این فایل خوانده نشد.",
@@ -211,6 +213,16 @@ export const DEVICE_REFUSAL_TEXT: Record<string, string> = {
   not_3d_target: "صف چاپ ویندوز بستهٔ سه‌بعدی را نپذیرفت؛ چیزی فرستاده نشد.",
   native_refused: "ویندوز تحویل بستهٔ سه‌بعدی را رد کرد؛ کار نیمه‌کاره لغو شد.",
   unavailable: "چاپ سه‌بعدی فقط از راه ویندوز در دسترس است.",
+  bad_time: "زمان بیدار شدن باید دست‌کم ۲ دقیقه و حداکثر ۷ روز بعد باشد.",
+  already_armed: "یک زمان بیدار شدن از قبل ثبت شده است؛ اول آن را لغو کنید.",
+  wake_not_supported: "ویندوز اعلام کرد این کامپیوتر نمی‌تواند با زمان‌سنج از خواب بیدار شود؛ چیزی ثبت نشد.",
+  wake_timers_disabled: "زمان‌سنج‌های بیدارباش در تنظیمات برق ویندوز خاموش است؛ چیزی ثبت نشد.",
+  wake_timers_important_only: "تنظیمات برق ویندوز فقط زمان‌سنج‌های مهم را مجاز می‌داند؛ چیزی ثبت نشد.",
+  no_rtc_or_always_on_timer_wake: "سخت‌افزار این کامپیوتر بیدار شدن با زمان‌سنج را گزارش نمی‌کند؛ چیزی ثبت نشد.",
+  wake_unavailable: "بیدار کردن با زمان‌سنج فقط در ویندوز در دسترس است.",
+  wake_native_refused: "ویندوز ثبت زمان‌سنج بیدارباش را رد کرد؛ چیزی ثبت نشد.",
+  wake_timeout: "ویندوز به‌موقع به درخواست زمان‌سنج پاسخ نداد؛ چیزی ثبت نشد.",
+  wake_capability_unreadable: "توانایی‌های برق این کامپیوتر خوانده نشد.",
 };
 
 /** Persian words for a device's stated limit (Device.unsupported). */
@@ -265,6 +277,80 @@ export function handoffText(result: DeviceHubResult): string {
   return `بستهٔ 3MF به صف چاپ ویندوز سپرده شد${job}. این به معنای چاپ شدن قطعه نیست؛ وضعیت را روی خود دستگاه ببینید.`;
 }
 
+// ------------------------------------------------------------ wake THIS PC from sleep (H3): a hardware wake timer
+
+export type WakeCapability = {
+  verdict: "supported" | "blocked_by_power_plan" | "not_supported" | "unknown";
+  reason: string;
+  modernStandby: boolean;
+  wakeTimersAc: string | null;
+  wakeTimersDc: string | null;
+  powerSource: string | null;
+};
+
+export type WakeArmed = { wakeId: string; dueUtc: string; stayAwakeMinutes: number; state: string; firedAtUtc?: string };
+
+export const WAKE_VERDICT_TEXT: Record<string, string> = {
+  wake_timers_enabled: "این کامپیوتر بیدار شدن با زمان‌سنج سخت‌افزاری را گزارش می‌کند و تنظیم برق ویندوز آن را مجاز کرده است.",
+  wake_timers_disabled: "در تنظیمات برق ویندوز «اجازهٔ زمان‌سنج‌های بیدارباش» خاموش است؛ Qronos این تنظیم را تغییر نمی‌دهد.",
+  wake_timers_important_only: "در تنظیمات برق ویندوز فقط «زمان‌سنج‌های مهم» مجاز است؛ زمان‌سنج Qronos کامپیوتر را بیدار نمی‌کند.",
+  no_rtc_or_always_on_timer_wake: "سخت‌افزار یا فرم‌ور این کامپیوتر بیدار شدن با زمان‌سنج را گزارش نمی‌کند.",
+  wake_timer_setting_unreadable: "تنظیم زمان‌سنج بیدارباش خوانده نشد؛ پاسخ ویندوز هنگام ثبت تعیین می‌کند.",
+};
+
+/** What a hardware wake timer cannot do (core WAKE_LIMITS), shown with the status and every approval. */
+export const WAKE_LIMIT_TEXT: Record<string, string> = {
+  qronos_must_keep_running: "Qronos باید باز بماند؛ بستن یا توقف آن زمان‌سنج را لغو می‌کند.",
+  no_shutdown_hibernate_or_sign_out: "خاموش کردن، خروج از حساب یا خواب زمستانی بدون پشتیبانی، زمان‌سنج را از بین می‌برد.",
+  power_plan_allows_wake_timers: "بیدار شدن به اجازهٔ زمان‌سنج‌های بیدارباش در تنظیمات برق بستگی دارد (برق شهری و باتری جدا).",
+  modern_standby_keeps_display_off: "در «Modern Standby» پردازنده بیدار می‌شود ولی ویندوز صفحه‌نمایش را روشن نمی‌کند.",
+  no_voice_or_brain_while_asleep: "کامپیوتر خواب صدای شما را نمی‌شنود؛ بیدار شدن با صدا از حالت خواب پشتیبانی نمی‌شود.",
+  fired_is_not_proof_of_wake: "«زمان‌سنج رسید» یعنی زمان آن فرا رسید، نه اینکه کامپیوتر حتماً از خواب بیدار شد.",
+};
+
+const WAKE_VERDICTS = new Set(["supported", "blocked_by_power_plan", "not_supported", "unknown"]);
+
+export function wakeCapabilityOf(result: DeviceHubResult): WakeCapability | null {
+  const raw = (result as Record<string, unknown>).capability;
+  if (!isRecord(raw) || typeof raw.verdict !== "string" || !WAKE_VERDICTS.has(raw.verdict)) return null;
+  const word = (value: unknown) => (typeof value === "string" ? value.slice(0, 32) : null);
+  return { verdict: raw.verdict as WakeCapability["verdict"], reason: text(raw.reason, 64),
+           modernStandby: raw.modernStandby === true, wakeTimersAc: word(raw.wakeTimersAc),
+           wakeTimersDc: word(raw.wakeTimersDc), powerSource: word(raw.powerSource) };
+}
+
+export function wakeArmedOf(result: DeviceHubResult): WakeArmed | null {
+  const raw = (result as Record<string, unknown>).armed;
+  if (!isRecord(raw) || typeof raw.wakeId !== "string" || typeof raw.dueUtc !== "string") return null;
+  const armed: WakeArmed = { wakeId: text(raw.wakeId, 40), dueUtc: text(raw.dueUtc, 40), state: text(raw.state, 16),
+                             stayAwakeMinutes: typeof raw.stayAwakeMinutes === "number" ? raw.stayAwakeMinutes : 0 };
+  if (typeof raw.firedAtUtc === "string") armed.firedAtUtc = raw.firedAtUtc.slice(0, 40);
+  return armed;
+}
+
+const LOCAL_MINUTE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const WAKE_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?[+-]\d{2}:\d{2}$/;
+
+/** A datetime-local value ("2026-10-14T06:30") with its UTC offset in minutes EAST of UTC (+210 for +03:30). */
+export function isoWithOffset(local: string, offsetEastMinutes: number): string | null {
+  if (!LOCAL_MINUTE.test(local) || !Number.isInteger(offsetEastMinutes) || Math.abs(offsetEastMinutes) > 14 * 60) {
+    return null;
+  }
+  const sign = offsetEastMinutes < 0 ? "-" : "+";
+  const total = Math.abs(offsetEastMinutes);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${local}:00${sign}${pad(Math.floor(total / 60))}:${pad(total % 60)}`;
+}
+
+/** The truthful words for an armed or fired wake: Windows accepted the timer; nothing more is claimed. */
+export function wakeArmedText(armed: WakeArmed, localDue: string): string {
+  if (armed.state === "fired") {
+    return `زمان‌سنج بیدارباش در ${localDue} رسید. این به‌تنهایی یعنی زمانش فرا رسید، نه اینکه کامپیوتر از خواب بیدار شد.`;
+  }
+  return `ویندوز زمان‌سنج بیدارباش را برای ${localDue} پذیرفت (بیدار ماندن ${armed.stayAwakeMinutes} دقیقه پس از آن). `
+    + "این یعنی درخواست ثبت شد، نه اینکه کامپیوتر حتماً بیدار می‌شود.";
+}
+
 export type DeviceHubClient = {
   list(): Promise<DeviceHubResult>;
   jobs(deviceId: string): Promise<DeviceHubResult>;
@@ -272,6 +358,10 @@ export type DeviceHubClient = {
   print(fields: PrintFields): Promise<DeviceHubResult>;
   /** Ask to hand one exact .3mf to a proven 3D printer; the answer asks for an approval with the typed secret. */
   print3d(fields: Print3DFields): Promise<DeviceHubResult>;
+  wakeStatus(): Promise<DeviceHubResult>;
+  /** `at` is an ISO-8601 time WITH its offset (isoWithOffset); the answer asks for the typed-secret approval. */
+  wakeSchedule(at: string, stayAwakeMinutes: number): Promise<DeviceHubResult>;
+  wakeCancel(): Promise<DeviceHubResult>;
   /** The person's yes for one approval this client was shown; the secret goes to this one send only. */
   decide(approval: DeviceApproval, secret?: string): Promise<DeviceHubResult>;
   decline(approval: DeviceApproval): Promise<DeviceHubResult>;
@@ -365,6 +455,14 @@ export function createDeviceHubClient(transport: DeviceHubTransport, options: { 
       }
       return send("print3d.request", { deviceId: fields.deviceId, path });
     },
+    wakeStatus: () => send("wake.status", {}),
+    wakeSchedule(at, stayAwakeMinutes) {
+      if (!WAKE_AT.test(at) || !Number.isInteger(stayAwakeMinutes) || stayAwakeMinutes < 0 || stayAwakeMinutes > 120) {
+        return refuse("wake.schedule", "bad_request");
+      }
+      return send("wake.schedule", { at, stayAwakeMinutes });
+    },
+    wakeCancel: () => send("wake.cancel", {}),
     decide(approval, secret) {
       const fields: Record<string, unknown> = { approvalId: approval.approvalId, approved: true };
       if (approval.needsSecret && typeof secret === "string" && secret.length > 0 && secret.length <= MAX_SECRET_CHARS) {
