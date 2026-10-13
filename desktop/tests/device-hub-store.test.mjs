@@ -199,3 +199,44 @@ test("wake: exact local time with its offset, bounded fields, truthful words and
     assert.ok(hub.DEVICE_REFUSAL_TEXT[code], code);
   }
 });
+
+test("scan: only WIA scanners qualify, exact new png/jpg, typed fields, truthful saved words", async () => {
+  const listed = { requestId: "r", op: "imaging.list", ok: true, devices: [
+    { id: "img-0123456789abcdef0123", name: "Office Scanner", vendor: "Acme", kind: "scanner",
+      workflows: ["scan_to_file"], unsupported: "" },
+    { id: "img-ffffffffffffffffffff", name: "Old Camera", vendor: "Cam", kind: "camera", workflows: ["scan_to_file"],
+      unsupported: "wia_camera_not_supported" },
+    { id: "../x", name: "bad", kind: "scanner" },
+  ] };
+  const [scannerDevice, camera, ...rest] = hub.imagingDevicesOf(listed);
+  assert.equal(rest.length, 0);  // a malformed id is dropped
+  assert.deepEqual(plain(camera.workflows), []);  // a camera never gets the scan workflow, whatever is sent
+  assert.match(hub.IMAGING_UNSUPPORTED_TEXT[camera.unsupported], /WIA 2.0/);
+  assert.equal(hub.scanProblem(camera, "D:/s/a.png"), "یک اسکنر پشتیبانی‌شده انتخاب کنید.");
+  assert.notEqual(hub.scanProblem(scannerDevice, "D:/s/a.gif"), null);
+  assert.notEqual(hub.scanProblem(scannerDevice, "a.png"), null);
+  assert.equal(hub.scanProblem(scannerDevice, " D:/s/a.JPG "), null);
+  const fake = fakeTransport();
+  const client = hub.createDeviceHubClient(fake.transport);
+  assert.equal((await client.scan("img-0123456789abcdef0123", "D:/s/a.tif")).code, "bad_request");
+  assert.equal((await client.scan("../x", "D:/s/a.png")).code, "bad_request");
+  assert.equal(fake.sent.length, 0);
+  const answer = client.scan("img-0123456789abcdef0123", " D:/s/a.png ");
+  await tick();
+  const [{ data }] = fake.sent;
+  assert.deepEqual(Object.keys(data).sort(), ["destination", "deviceId", "op", "requestId"]);
+  assert.equal(data.op, "image.capture");
+  assert.equal(data.destination, "D:/s/a.png");
+  fake.deliver({ requestId: data.requestId, op: "image.capture", ok: true, status: "approval_required",
+                 approvalId: "approval-scan-1", needsSecret: true, preview: { action: "scan" } });
+  assert.equal(hub.approvalOf(await answer).needsSecret, true);
+  const saved = hub.scanSavedText({ requestId: "r", op: "decide", ok: true, status: "saved", path: "D:/s/a.png",
+                                    width: 64, height: 48, format: "PNG" });
+  assert.match(saved, /ذخیره شد/);
+  assert.match(saved, /64×48/);
+  assert.equal(Object.keys(hub.SCAN_LIMIT_TEXT).length, 6);
+  for (const code of ["scan_cancelled", "not_one_image", "not_an_image", "destination_exists", "bad_destination"]) {
+    assert.ok(hub.DEVICE_REFUSAL_TEXT[code], code);
+  }
+  assert.doesNotMatch(hub.DEVICE_REFUSAL_TEXT.too_large, /بسته/);  // neutral now that scans use it too
+});

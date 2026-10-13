@@ -19,11 +19,11 @@
 
 export type DeviceHubOp =
   | "devices.list" | "device.jobs" | "job.control" | "print.request" | "print3d.request" | "wake.status"
-  | "wake.schedule" | "wake.cancel" | "decide" | "decline";
+  | "wake.schedule" | "wake.cancel" | "imaging.list" | "image.capture" | "decide" | "decline";
 
 export const DEVICE_HUB_OPS: ReadonlySet<string> = new Set<DeviceHubOp>([
   "devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "wake.status", "wake.schedule",
-  "wake.cancel", "decide", "decline",
+  "wake.cancel", "imaging.list", "image.capture", "decide", "decline",
 ]);
 
 export const DEVICE_HUB_ACTION_ID = "qronos.device_hub";
@@ -204,7 +204,7 @@ export const DEVICE_REFUSAL_TEXT: Record<string, string> = {
   file_empty: "این فایل خالی است.",
   file_unreadable: "این فایل خوانده نشد.",
   link_refused: "فایل یا یکی از پوشه‌هایش پیوند (link) است؛ پذیرفته نشد.",
-  too_large: "بسته یا بخشی از آن بیش از حد بزرگ است.",
+  too_large: "فایل یا بخشی از آن بیش از حد بزرگ است.",
   bad_package: "این فایل یک بستهٔ 3MF سالم و خودبسنده نیست؛ چیزی فرستاده نشد.",
   incompatible_3mf_version: "نسخهٔ 3MF این مدل با نسخه‌ای که درایور چاپگر اعلام کرده یکی نیست.",
   unsupported_3mf_extension: "این مدل افزونه‌ای از 3MF لازم دارد که درایور چاپگر اعلام نکرده است.",
@@ -223,6 +223,16 @@ export const DEVICE_REFUSAL_TEXT: Record<string, string> = {
   wake_native_refused: "ویندوز ثبت زمان‌سنج بیدارباش را رد کرد؛ چیزی ثبت نشد.",
   wake_timeout: "ویندوز به‌موقع به درخواست زمان‌سنج پاسخ نداد؛ چیزی ثبت نشد.",
   wake_capability_unreadable: "توانایی‌های برق این کامپیوتر خوانده نشد.",
+  bad_destination: "مسیر باید کامل، با پسوند .png یا .jpg، در پوشه‌ای موجود و غیرپیوندی باشد.",
+  destination_exists: "این فایل از قبل وجود دارد؛ چیزی بازنویسی نمی‌شود.",
+  scan_cancelled: "اسکن در پنجرهٔ ویندوز لغو شد؛ فایلی نوشته نشد.",
+  scan_scan_failed: "ویندوز اسکن را ناموفق گزارش کرد؛ فایلی نوشته نشد.",
+  scan_wia_unavailable: "سرویس WIA ویندوز پاسخ نداد؛ فایلی نوشته نشد.",
+  scan_unavailable: "اسکن فقط در ویندوز در دسترس است.",
+  scan_native_refused: "ویندوز درخواست اسکن را نپذیرفت.",
+  not_one_image: "اسکن دقیقاً یک تصویر تحویل نداد؛ فایلی نوشته نشد.",
+  not_an_image: "آنچه درایور تحویل داد تصویر معتبری نبود؛ فایلی نوشته نشد.",
+  empty_image: "فایل اسکن‌شده خالی بود؛ فایلی نوشته نشد.",
 };
 
 /** Persian words for a device's stated limit (Device.unsupported). */
@@ -351,6 +361,69 @@ export function wakeArmedText(armed: WakeArmed, localDue: string): string {
     + "این یعنی درخواست ثبت شد، نه اینکه کامپیوتر حتماً بیدار می‌شود.";
 }
 
+// ------------------------------------------------------------ scan to ONE new image file (WIA 2.0 scanners only)
+
+export type ImagingDevice = {
+  id: string;
+  name: string;
+  vendor: string;
+  kind: "scanner" | "camera" | "video" | "other";
+  workflows: string[];
+  unsupported: string;
+};
+
+const IMAGING_ID = /^img-[0-9a-f]{20}$/;
+const IMAGING_KINDS = new Set(["scanner", "camera", "video", "other"]);
+
+/** The imaging devices of an `imaging.list` answer, validated field by field. */
+export function imagingDevicesOf(result: DeviceHubResult): ImagingDevice[] {
+  if (!result.ok || !Array.isArray(result.devices)) return [];
+  const out: ImagingDevice[] = [];
+  for (const item of result.devices.slice(0, 64)) {
+    if (!isRecord(item) || typeof item.id !== "string" || !IMAGING_ID.test(item.id) || typeof item.name !== "string") {
+      continue;
+    }
+    const kind = typeof item.kind === "string" && IMAGING_KINDS.has(item.kind) ? item.kind as ImagingDevice["kind"] : "other";
+    out.push({ id: item.id, name: text(item.name, 200), vendor: text(item.vendor, 200), kind,
+               workflows: kind === "scanner" ? strings(item.workflows, 4) : [], unsupported: text(item.unsupported, 64) });
+  }
+  return out;
+}
+
+export const IMAGING_UNSUPPORTED_TEXT: Record<string, string> = {
+  wia_camera_not_supported: "دوربین WIA 1.0: این مسیر فقط اسکنرهای WIA 2.0 را به کار می‌گیرد؛ عکس گرفته نمی‌شود.",
+  webcam_not_supported: "وب‌کم: ویندوز آن را دستگاه WIA نمی‌داند؛ Qronos از وب‌کم تصویر یا ویدیو نمی‌گیرد.",
+  not_supported: "این دستگاه تصویربرداری پشتیبانی نمی‌شود.",
+};
+
+/** What a scan here is and is not (core SCAN_LIMITS). */
+export const SCAN_LIMIT_TEXT: Record<string, string> = {
+  scanners_only_via_wia: "فقط اسکنرهایی که ویندوز با درایور WIA خودشان می‌شناسد.",
+  windows_dialog_drives_the_scan: "اسکن در پنجرهٔ خود ویندوز انجام می‌شود؛ چیزی پنهانی گرفته نمی‌شود.",
+  one_page_one_new_file: "هر بار یک صفحه، در یک فایل تازهٔ PNG یا JPEG.",
+  no_overwrite_no_links: "فایل موجود هرگز بازنویسی نمی‌شود و پوشهٔ پیوندی پذیرفته نیست.",
+  metadata_not_copied: "فراداده (مثل EXIF) در فایل نهایی کپی نمی‌شود.",
+  no_camera_webcam_or_phone_capture: "از دوربین، وب‌کم، میکروفون یا گوشی چیزی گرفته نمی‌شود.",
+};
+
+/** Why a scan form cannot be sent (Persian), or null when it is well-formed for this device. */
+export function scanProblem(device: ImagingDevice | undefined, destination: string): string | null {
+  if (!device || device.kind !== "scanner" || !device.workflows.includes("scan_to_file")) {
+    return "یک اسکنر پشتیبانی‌شده انتخاب کنید.";
+  }
+  const path = destination.trim();
+  if (!path || path.length > MAX_PATH_CHARS || !/^([A-Za-z]:[\\/]|\\\\)/.test(path) || !/\.(png|jpe?g)$/i.test(path)) {
+    return "مسیر کامل یک فایل تازهٔ .png یا .jpg را وارد کنید.";
+  }
+  return null;
+}
+
+/** The truthful words for a saved scan: exactly what was written. */
+export function scanSavedText(result: DeviceHubResult): string {
+  const size = typeof result.width === "number" && typeof result.height === "number" ? ` (${result.width}×${result.height})` : "";
+  return `تصویر اسکن‌شده در «${String(result.path ?? "")}» ذخیره شد${size}، قالب ${String(result.format ?? "")}.`;
+}
+
 export type DeviceHubClient = {
   list(): Promise<DeviceHubResult>;
   jobs(deviceId: string): Promise<DeviceHubResult>;
@@ -362,6 +435,9 @@ export type DeviceHubClient = {
   /** `at` is an ISO-8601 time WITH its offset (isoWithOffset); the answer asks for the typed-secret approval. */
   wakeSchedule(at: string, stayAwakeMinutes: number): Promise<DeviceHubResult>;
   wakeCancel(): Promise<DeviceHubResult>;
+  imagingList(): Promise<DeviceHubResult>;
+  /** One scan of a WIA scanner into one exact NEW .png/.jpg; the answer asks for the typed-secret approval. */
+  scan(deviceId: string, destination: string): Promise<DeviceHubResult>;
   /** The person's yes for one approval this client was shown; the secret goes to this one send only. */
   decide(approval: DeviceApproval, secret?: string): Promise<DeviceHubResult>;
   decline(approval: DeviceApproval): Promise<DeviceHubResult>;
@@ -463,6 +539,14 @@ export function createDeviceHubClient(transport: DeviceHubTransport, options: { 
       return send("wake.schedule", { at, stayAwakeMinutes });
     },
     wakeCancel: () => send("wake.cancel", {}),
+    imagingList: () => send("imaging.list", {}),
+    scan(deviceId, destination) {
+      const path = destination.trim();
+      if (!IMAGING_ID.test(deviceId) || !path || path.length > MAX_PATH_CHARS || !/\.(png|jpe?g)$/i.test(path)) {
+        return refuse("image.capture", "bad_request");
+      }
+      return send("image.capture", { deviceId, destination: path });
+    },
     decide(approval, secret) {
       const fields: Record<string, unknown> = { approvalId: approval.approvalId, approved: true };
       if (approval.needsSecret && typeof secret === "string" && secret.length > 0 && secret.length <= MAX_SECRET_CHARS) {

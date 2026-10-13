@@ -4,13 +4,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  approvalOf, createDeviceHubClient, devicesOf, handoffText, isoWithOffset, jobsOf, limitText, print3dProblem,
+  approvalOf, createDeviceHubClient, devicesOf, handoffText, IMAGING_UNSUPPORTED_TEXT, imagingDevicesOf,
+  isoWithOffset, jobsOf, limitText, print3dProblem, SCAN_LIMIT_TEXT, scanProblem, scanSavedText,
   printProblem, refusalText, unsupportedClassesOf, wakeArmedOf, wakeArmedText, wakeCapabilityOf, WAKE_LIMIT_TEXT,
   WAKE_VERDICT_TEXT,
 } from "../deviceHubStore";
 import type {
   Device, DeviceApproval, DeviceHubClient, DeviceHubTransport, DeviceJob, JobCommand, PrintColor, RuntimeEvent,
-  UnsupportedClass, WakeArmed, WakeCapability,
+  ImagingDevice, UnsupportedClass, WakeArmed, WakeCapability,
 } from "../deviceHubStore";
 
 /** The production transport: the registered send_runtime_action command and the runtime event stream. */
@@ -37,6 +38,10 @@ const JOB_STATUS_FA: Record<string, string> = {
   restarting: "شروع دوباره", complete: "کامل",
 };
 
+function isScanApproval(approval: DeviceApproval): boolean {
+  return approval.preview.action === "scan";
+}
+
 function isWakeApproval(approval: DeviceApproval): boolean {
   return approval.preview.action === "wake_schedule" || approval.preview.action === "wake_cancel";
 }
@@ -62,6 +67,10 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
   const [wakeLocal, setWakeLocal] = useState("");
   const [wakeStay, setWakeStay] = useState(10);
   const [wakeNote, setWakeNote] = useState("");
+  const [imaging, setImaging] = useState<ImagingDevice[]>([]);
+  const [scanner, setScanner] = useState("");
+  const [scanPath, setScanPath] = useState("");
+  const [scanNote, setScanNote] = useState("");
 
   const device = devices.find((item) => item.id === selected);
 
@@ -135,13 +144,50 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
       : result.status === "armed" ? wakeArmedText({ wakeId: String(result.wakeId), dueUtc: String(result.dueUtc),
           stayAwakeMinutes: Number(result.stayAwakeMinutes), state: "armed" }, localTime(String(result.dueUtc)))
       : result.status === "cancelled" ? "زمان بیدار شدن لغو شد."
+      : result.status === "saved" ? scanSavedText(result)
       : approved ? "انجام شد." : "لغو شد؛ چیزی تغییر نکرد.");
+    if (isScanApproval(current)) {
+      setScanNote(!result.ok ? refusalText(result.code) : scanSavedText(result));
+      return;
+    }
     if (isWakeApproval(current)) {
       setWakeNote(!result.ok ? refusalText(result.code) : "");
       await wakeStatus();
       return;
     }
     if (device) await loadJobs(device.id);
+  }
+
+  async function imagingRefresh(): Promise<void> {
+    const result = await client.imagingList();
+    if (!result.ok) {
+      setImaging([]);
+      setScanNote(refusalText(result.code));
+      return;
+    }
+    const found = imagingDevicesOf(result);
+    setImaging(found);
+    if (!found.some((item) => item.id === scanner && item.kind === "scanner")) setScanner("");
+    setScanNote(found.some((item) => item.kind === "scanner") ? "" : "ویندوز هیچ اسکنر WIA پشتیبانی‌شده‌ای گزارش نکرد.");
+  }
+
+  async function scanNow(): Promise<void> {
+    const device = imaging.find((item) => item.id === scanner);
+    const problem = scanProblem(device, scanPath);
+    if (problem || !device) {
+      setScanNote(problem ?? "یک اسکنر انتخاب کنید.");
+      return;
+    }
+    setBusy(true);
+    const result = await client.scan(device.id, scanPath);
+    setBusy(false);
+    const asked = approvalOf(result);
+    if (asked) {
+      setApproval(asked);
+      setScanNote("اسکن به تأیید شما با رمز نیاز دارد.");
+      return;
+    }
+    setScanNote(refusalText(result.code));
   }
 
   async function wakeStatus(): Promise<void> {
@@ -308,7 +354,7 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
             </div>
           )}
 
-          {approval && !isWakeApproval(approval) && (
+          {approval && !isWakeApproval(approval) && !isScanApproval(approval) && (
             <div className="device-approval" role="dialog" aria-label="تأیید درخواست دستگاه">
               {typeof approval.preview.jobName === "string" ? (
                 <p>
@@ -369,6 +415,51 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
           )}
         </div>
       )}
+
+      <section className="device-wake" aria-label="اسکن به فایل">
+        <h3>اسکن یک صفحه به یک فایل تازه</h3>
+        <p className="device-hub-note">
+          فقط اسکنرهای WIA ویندوز؛ اسکن در پنجرهٔ خود ویندوز انجام می‌شود و نتیجه در یک فایل تازهٔ PNG یا JPEG ذخیره می‌شود.
+        </p>
+        <button type="button" onClick={() => void imagingRefresh()} disabled={busy}>فهرست اسکنرها</button>
+        {scanNote && <p className="device-hub-message" role="status">{scanNote}</p>}
+        <ul className="device-hub-list">
+          {imaging.map((item) => (
+            <li key={item.id}>
+              <button type="button" className={`device-card${item.id === scanner ? " device-card-selected" : ""}`}
+                      aria-pressed={item.id === scanner} disabled={item.kind !== "scanner"}
+                      onClick={() => setScanner(item.id)}>
+                <strong>{item.name}</strong>
+                <span>{item.kind === "scanner" ? "اسکنر" : item.kind === "camera" ? "دوربین" : item.kind === "video" ? "وب‌کم" : "دستگاه تصویر"}
+                  {item.vendor ? ` · ${item.vendor}` : ""}</span>
+                {item.unsupported && <span className="device-unsupported">{IMAGING_UNSUPPORTED_TEXT[item.unsupported] ?? item.unsupported}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <form className="device-print" onSubmit={(event) => { event.preventDefault(); void scanNow(); }}>
+          <input type="text" value={scanPath} onChange={(event) => setScanPath(event.target.value)} dir="ltr"
+                 placeholder="D:\...\scan.png" maxLength={4096} aria-label="مسیر فایل تازه" />
+          <button type="submit" disabled={busy || approval !== null || !scanner}>اسکن</button>
+        </form>
+        <ul className="device-wake-limits">
+          {Object.values(SCAN_LIMIT_TEXT).map((line) => <li key={line}>{line}</li>)}
+        </ul>
+        {approval && isScanApproval(approval) && (
+          <div className="device-approval" role="dialog" aria-label="تأیید اسکن">
+            <p>
+              با «{String(approval.preview.device ?? "")}» یک صفحه اسکن و در
+              {" "}<bdi dir="ltr">{String(approval.preview.file ?? "")}</bdi> ذخیره شود؟ پنجرهٔ اسکن ویندوز باز می‌شود.
+            </p>
+            {approval.needsSecret && (
+              <input type="password" value={secret} onChange={(event) => setSecret(event.target.value)}
+                     placeholder="رمز تأیید" maxLength={256} autoComplete="off" />
+            )}
+            <button type="button" disabled={approval.needsSecret && !secret} onClick={() => void answer(true)}>تأیید</button>
+            <button type="button" onClick={() => void answer(false)}>لغو</button>
+          </div>
+        )}
+      </section>
 
       <section className="device-wake" aria-label="بیدار کردن این کامپیوتر">
         <h3>بیدار کردن همین کامپیوتر از خواب</h3>
