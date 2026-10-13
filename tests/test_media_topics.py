@@ -250,6 +250,54 @@ def test_reports_carry_topic_segments_from_actual_indexed_lines(tmp_path):
         out.write_bytes(pdf)  # evidence only: the reviewer can look at the rendered page
 
 
+def test_topic_caps_are_stated_truthfully_in_json_html_and_pdf(tmp_path, monkeypatch):
+    """Main42 R1: a report capped below the asset's segment count says so, and the PDF tells "not drawn here" (the
+    report's JSON has it) apart from "not in this report" (no export of it has it)."""
+    import pypdf
+
+    service, asset_id, _ = build(tmp_path)
+    service.index(max_seconds=60, max_stages=5)
+    total = len(segments(service, asset_id))
+    assert total >= 2
+    monkeypatch.setitem(reports.REPORT_TOPIC_SEGMENTS, "full", 1)
+    full = reports.gather(service.store.db, asset_id, "full")
+    summary = full["summary"]
+    assert (summary["topicSegments"], summary["topicSegmentsListed"], summary["topicSegmentsOmitted"],
+            summary["topicSegmentsCap"]) == (total, 1, total - 1, 1)
+    assert len(full["topicSegments"]) == 1 and json.loads(reports.render(full, "json"))["summary"] == summary
+    omitted = f"{total - 1} بخش دیگر از {total} بخش این فایل در این گزارش نیست (سقف 1 بخش برای گزارش کامل)"
+    assert omitted in reports.to_html(full)
+
+    drawn: list[str] = []
+    original = reports._Pdf.paragraph
+
+    def recording(self, text, size=10):
+        # What the PDF draws as paragraphs. pypdf cannot extract these mixed Persian/number lines reliably (neither
+        # plain nor layout mode); the rendered page shows them whole (evidence: r1-rendered-omission-page.pdf).
+        drawn.append(text)
+        return original(self, text, size)
+
+    monkeypatch.setattr(reports._Pdf, "paragraph", recording)
+
+    def pdf_text(report):
+        drawn.clear()
+        assert pypdf.PdfReader(__import__("io").BytesIO(reports.to_pdf(report))).pages  # a real PDF was produced
+        return "\n".join(drawn)
+
+    text = pdf_text(full)
+    assert omitted in text and "هیچ خروجی این گزارش آن‌ها را ندارد" in text and "JSON همه را دارد" not in text
+    monkeypatch.setitem(reports.REPORT_TOPIC_SEGMENTS, "full", 200)
+    monkeypatch.setattr(reports, "MAX_PDF_TOPIC_CHARS", 10)  # every listed segment is over the PDF text budget
+    listed = reports.gather(service.store.db, asset_id, "full")
+    assert listed["summary"]["topicSegmentsOmitted"] == 0
+    text = pdf_text(listed)
+    assert (f"{total} بخش فهرست‌شدهٔ این گزارش به‌خاطر سقف 10 نویسهٔ متن در این PDF کشیده نشده است؛ "
+            "خروجی JSON همین گزارش آن‌ها را دارد.") in text  # not drawn here, but in this report's JSON
+    assert "در این گزارش نیست" not in text and "در این گزارش نیست" not in reports.to_html(listed)
+    transcript = reports.gather(service.store.db, asset_id, "transcript")["summary"]
+    assert (transcript["topicSegmentsListed"], transcript["topicSegmentsOmitted"]) == (0, total)
+
+
 def test_the_product_route_and_the_voice_intent_reach_topic_search(tmp_path):
     from qronos_media.product import SEARCH_MODES, _search
 

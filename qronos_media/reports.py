@@ -135,6 +135,12 @@ def _topic_segments(db: sqlite3.Connection, asset_id: str, limit: int) -> tuple[
     return (topics.asset_segments(db, asset_id, limit=limit) if limit and count else []), count
 
 
+def _topic_omission_text(report: dict[str, Any]) -> str:
+    summary = report["summary"]
+    return (f"{summary['topicSegmentsOmitted']} بخش دیگر از {summary['topicSegments']} بخش این فایل در این گزارش نیست "
+            f"(سقف {summary['topicSegmentsCap']} بخش برای {KIND_FA[report['kind']]})؛ هیچ خروجی این گزارش آن‌ها را ندارد.")
+
+
 def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[dict[str, str]]:
     """What the reader must know about THIS asset's report, from what was actually indexed."""
     indexed = [s for s in sources if s["status"] == "indexed" and s["cue_count"]]
@@ -215,7 +221,11 @@ def gather(db: sqlite3.Connection, asset_id: str, kind: str = "full") -> dict[st
     }
     report["subtitleTracks"] = sources
     segments, segment_count = _topic_segments(db, asset_id, REPORT_TOPIC_SEGMENTS[kind])
-    report["summary"]["topicSegments"] = segment_count
+    # How many segments exist for the asset, how many THIS report lists, and how many it leaves out (its per-kind cap):
+    # nothing beyond topicSegmentsListed is in any export of this report.
+    report["summary"].update({"topicSegments": segment_count, "topicSegmentsListed": len(segments),
+                              "topicSegmentsOmitted": segment_count - len(segments),
+                              "topicSegmentsCap": REPORT_TOPIC_SEGMENTS[kind]})
     if REPORT_TOPIC_SEGMENTS[kind]:
         report["topicSegments"] = segments
     if kind == "short":
@@ -333,6 +343,8 @@ def to_html(report: dict[str, Any]) -> str:
             parts.append(f"<tr><td class=\"ltr\">{e(clock_text(segment['startMs']))} – {e(clock_text(segment['endMs']))}"
                          f"</td><td>{e(SOURCE_FA.get(segment['source'], segment['source']))}</td><td>{lines}</td></tr>")
         parts.append("</table>")
+        if report["summary"]["topicSegmentsOmitted"] > 0:
+            parts.append(f"<p>{e(_topic_omission_text(report))}</p>")
     if "keyframes" in report:
         parts.append("<h2>فریم‌های کلیدی (زمان)</h2><ul>")
         parts += [f"<li class=\"ltr\">{e(clock_text(f['timeMs']))}</li>" for f in report["keyframes"]]
@@ -573,9 +585,11 @@ def to_pdf(report: dict[str, Any]) -> bytes:
                      (SOURCE_FA.get(segment["source"], segment["source"]), 24, "rtl"), (lines, width - 66, "auto")])
             drawn += 1
             drawn_chars += len(lines)
-        if report["summary"]["topicSegments"] > drawn:
-            doc.paragraph(f"{report['summary']['topicSegments'] - drawn} بخش دیگر در این PDF نیامده است؛ "
-                          "خروجی JSON همه را دارد.")
+        if len(segments) > drawn:  # listed in this report, not drawn here: the report's JSON has them
+            doc.paragraph(f"{len(segments) - drawn} بخش فهرست‌شدهٔ این گزارش به‌خاطر سقف {MAX_PDF_TOPIC_CHARS} نویسهٔ "
+                          "متن در این PDF کشیده نشده است؛ خروجی JSON همین گزارش آن‌ها را دارد.")
+        if report["summary"]["topicSegmentsOmitted"] > 0:  # not in this report at all: no export of it has them
+            doc.paragraph(_topic_omission_text(report))
 
     if "streams" in report:
         doc.heading("جریان‌های فایل")
