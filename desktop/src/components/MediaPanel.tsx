@@ -5,10 +5,10 @@ import { listen } from "@tauri-apps/api/event";
 
 import {
   approvalOf, createMediaClient, exportDestinationProblem, isAssetId, refusalText, REPORT_FORMATS, REPORT_KIND_TEXT,
-  REPORT_KINDS,
+  REPORT_KINDS, topicBlockOf,
 } from "../mediaStore";
 import type {
-  MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, ReportFormat, ReportKind, RuntimeEvent,
+  MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, ReportFormat, ReportKind, RuntimeEvent, TopicHit,
 } from "../mediaStore";
 
 import "./MediaPanel.css";
@@ -78,6 +78,7 @@ const CAPABILITY_FA: Record<string, string> = {
   asr: "تبدیل گفتار به متن (Whisper)",
   subtitle_asr_fusion: "تطبیق زیرنویس و گفتار",
   semantic_dialogue: "جست‌وجوی معنایی دیالوگ (bge-m3)",
+  topic_retrieval: "جست‌وجوی موضوعی (بخش‌های بدون برچسب، با جمله‌های نمایه‌شده)",
   visual_embeddings: "جست‌وجوی تصویری",
   vision_captions: "توصیف تصویر",
   ocr: "خواندن متن روی تصویر",
@@ -86,7 +87,7 @@ const CAPABILITY_FA: Record<string, string> = {
   actions_motion: "حرکت و کنش",
 };
 
-const MODE_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "معنایی" };
+const MODE_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "معنایی", topic: "موضوعی" };
 
 export function clock(ms: unknown): string {
   const total = typeof ms === "number" && Number.isFinite(ms) && ms >= 0 ? Math.floor(ms / 1000) : 0;
@@ -122,7 +123,7 @@ function MediaPanel(props: MediaPanelProps) {
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<"exact" | "fuzzy" | "semantic">("exact");
+  const [mode, setMode] = useState<"exact" | "fuzzy" | "semantic" | "topic">("exact");
   const [result, setResult] = useState<MediaResult | null>(null);
   const [approval, setApproval] = useState<MediaApproval | null>(null);
   const [secret, setSecret] = useState("");
@@ -242,6 +243,36 @@ function MediaPanel(props: MediaPanelProps) {
   }
 
   const { exact, semantic, semanticNote } = hitsOf(result);
+  const topic = topicBlockOf(result);
+
+  function topicCard(hit: TopicHit, key: string) {
+    const parts = hit.components;
+    return (
+      <li key={key} className="media-card">
+        <div className="media-card-head">
+          <strong>{hit.title || "ویدیو"}</strong>
+          <span className="ltr">{clock(hit.startMs)} – {clock(hit.endMs)}</span>
+          <span title="امتیاز رتبه با وزن‌های ثابت؛ احتمال یا درصد نیست">≈ {hit.score.toFixed(2)}</span>
+        </div>
+        <ul className="media-topic-lines">
+          {hit.evidence.map((line, i) => (
+            <li key={i}><span className="ltr">{clock(line.startMs)}</span> <span dir="auto">{line.text}</span></li>
+          ))}
+        </ul>
+        <small>
+          چرا: هم‌معنایی بخش {parts.segment.toFixed(2)}، نزدیک‌ترین جمله {parts.evidence.toFixed(2)}، واژه‌های مشترک{" "}
+          {parts.terms.toFixed(2)}{parts.expansion > 0 ? `، جست‌وجوی گسترش‌یافته ${parts.expansion.toFixed(2)}` : ""}
+          {" — "}{SOURCE_FA[hit.source] ?? hit.source}
+        </small>
+        <div className="media-card-actions">
+          <button type="button" disabled={busy}
+            onClick={() => void run("open.prepare", { assetId: hit.assetId, startMs: Math.max(0, Math.floor(hit.startMs)) })}>
+            باز کردن در همین لحظه
+          </button>
+        </div>
+      </li>
+    );
+  }
   const store = (status?.store ?? null) as Record<string, unknown> | null;
   const running = Boolean(status?.running);
 
@@ -311,7 +342,7 @@ function MediaPanel(props: MediaPanelProps) {
       <div className="media-row">
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="چه چیزی گفته شد؟" dir="auto" maxLength={1200} />
         <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-          {(["exact", "fuzzy", "semantic"] as const).map((m) => <option key={m} value={m}>{MODE_FA[m]}</option>)}
+          {(["exact", "fuzzy", "semantic", "topic"] as const).map((m) => <option key={m} value={m}>{MODE_FA[m]}</option>)}
         </select>
         <button type="button" disabled={busy || !query.trim()} onClick={() => void search()}>جست‌وجو</button>
       </div>
@@ -332,6 +363,16 @@ function MediaPanel(props: MediaPanelProps) {
           placeholder={`مسیر فایل خروجی گزارش (.${reportFormat})`} dir="ltr" maxLength={4096} />
       </div>
       {semanticNote && <p className="media-notice">{semanticNote}</p>}
+      {topic.note && <p className="media-notice">{topic.note}</p>}
+      {topic.expanded && topic.hints.length > 0 && (
+        <p className="media-topic-hints">
+          جست‌وجو با واژه‌های جمله‌های نزدیک گسترش یافت (راهنمای جست‌وجو، نه واقعیت): <span dir="auto">{topic.hints.join("، ")}</span>
+        </p>
+      )}
+      {topic.hits.length > 0 && <>
+        <h4>بخش‌های هم‌موضوع (هر نتیجه با جمله‌های نمایه‌شدهٔ خودش)</h4>
+        <ul className="media-results">{topic.hits.map((hit, i) => topicCard(hit, `t${i}`))}</ul>
+      </>}
       <ul className="media-results">{exact.map((hit, i) => card(hit, `e${i}`))}</ul>
       {semantic.length > 0 && <>
         <h4>نتیجه‌های معنایی (شباهت تأییدنشده)</h4>

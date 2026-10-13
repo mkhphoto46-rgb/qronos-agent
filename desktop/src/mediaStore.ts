@@ -27,6 +27,65 @@ export const MEDIA_OPS: ReadonlySet<string> = new Set<MediaOp>([
   "decide", "decline",
 ]);
 
+/** One topic hit (qronos_media/topics.py): an indexed dialogue segment, its actual lines and why it ranked. */
+export type TopicHit = {
+  assetId: string;
+  title: string | null;
+  startMs: number;
+  endMs: number;
+  source: string;
+  language: string | null;
+  score: number;
+  components: { segment: number; evidence: number; terms: number; expansion: number };
+  evidence: Array<{ startMs: number; endMs: number; text: string }>;
+};
+
+export type TopicBlock = {
+  hits: TopicHit[];
+  note: string | null;
+  hints: string[];
+  expanded: boolean;
+};
+
+function finite(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** The topic block of a `search` answer in mode "topic", validated field by field; a hit without lines is dropped. */
+export function topicBlockOf(result: MediaResult | null): TopicBlock {
+  const empty: TopicBlock = { hits: [], note: null, hints: [], expanded: false };
+  if (!result || !result.ok || typeof result.topic !== "object" || result.topic === null) return empty;
+  const block = result.topic as Record<string, unknown>;
+  const hits: TopicHit[] = [];
+  for (const raw of Array.isArray(block.results) ? block.results.slice(0, 50) : []) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const item = raw as Record<string, unknown>;
+    if (!isAssetId(item.assetId) || typeof item.startMs !== "number" || typeof item.endMs !== "number") continue;
+    const evidence = (Array.isArray(item.evidence) ? item.evidence : []).slice(0, 4)
+      .filter((line): line is Record<string, unknown> => typeof line === "object" && line !== null
+        && typeof (line as Record<string, unknown>).text === "string" && typeof (line as Record<string, unknown>).startMs === "number")
+      .map((line) => ({ startMs: line.startMs as number, endMs: finite(line.endMs), text: String(line.text).slice(0, 600) }));
+    if (evidence.length === 0) continue; // never a hit without indexed lines
+    const parts = (typeof item.components === "object" && item.components !== null ? item.components : {}) as Record<string, unknown>;
+    hits.push({
+      assetId: item.assetId, title: typeof item.title === "string" ? item.title.slice(0, 300) : null,
+      startMs: item.startMs, endMs: item.endMs, source: typeof item.source === "string" ? item.source : "",
+      language: typeof item.language === "string" ? item.language : null, score: finite(item.score),
+      components: { segment: finite(parts.segment), evidence: finite(parts.evidence), terms: finite(parts.terms),
+                    expansion: finite(parts.expansion) },
+      evidence,
+    });
+  }
+  const expansion = (typeof block.expansion === "object" && block.expansion !== null ? block.expansion : {}) as Record<string, unknown>;
+  const hints = Array.isArray(expansion.hints)
+    ? expansion.hints.filter((word): word is string => typeof word === "string").map((word) => word.slice(0, 40)).slice(0, 6)
+    : [];
+  const note = block.status === "unavailable"
+    ? `جست‌وجوی موضوعی در دسترس نیست: ${refusalText(typeof block.reason === "string" ? block.reason : "model_unavailable")}`
+    : null;
+  return { hits, note, hints, expanded: expansion.applied === true };
+}
+
 /** Report formats and kinds the media host renders from the one index schema (qronos_media/reports.py). */
 export const REPORT_FORMATS = ["pdf", "html", "json", "csv"] as const;
 export const REPORT_KINDS = ["short", "full", "transcript", "evidence"] as const;

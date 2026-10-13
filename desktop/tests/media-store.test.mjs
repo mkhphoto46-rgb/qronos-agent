@@ -26,6 +26,9 @@ function load(relative) {
 
 const media = load("../src/mediaStore.ts");
 
+// Values made in the vm realm, compared as plain JSON (no cross-realm prototype mismatch).
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
 function fakeTransport() {
   const sent = [];
   const timers = new Map();
@@ -161,6 +164,35 @@ test("reports: PDF and every kind are offered, the preview op is allowed, and an
   }
   assert.match(panel, /run\("report\.export", \{ assetId, destination: destination\.trim\(\), format: reportFormat, kind: reportKind \}\)/);
   assert.match(panel, /run\("report\.preview", \{ assetId, kind: reportKind \}\)/);
+});
+
+test("topic search: hits must carry indexed lines, hints are labelled hints, and the panel offers the mode", () => {
+  const asset = "a_" + "1".repeat(32);
+  const block = media.topicBlockOf({
+    requestId: "r1", op: "search", ok: true,
+    topic: {
+      status: "complete",
+      expansion: { applied: true, hints: ["trusted", 7, "brother"] },
+      results: [
+        { assetId: asset, title: "Film", startMs: 500, endMs: 34000, source: "embedded", score: 0.71,
+          components: { segment: 0.8, evidence: 0.9, terms: 0, expansion: 0.6 },
+          evidence: [{ startMs: 500, endMs: 4000, text: "You lied to me for three years." }] },
+        { assetId: asset, startMs: 1, endMs: 2, evidence: [] },
+        { assetId: "../x", startMs: 1, endMs: 2, evidence: [{ startMs: 1, text: "forged" }] },
+      ],
+    },
+  });
+  assert.equal(block.hits.length, 1);  // no lines or a bad asset id: dropped
+  assert.equal(block.hits[0].evidence[0].text, "You lied to me for three years.");
+  assert.deepEqual(plain(block.hints), ["trusted", "brother"]);
+  assert.equal(block.expanded, true);
+  const off = media.topicBlockOf({ requestId: "r2", op: "search", ok: true,
+    topic: { status: "unavailable", reason: "model_unavailable", results: [] } });
+  assert.match(off.note, /bge-m3/);
+  const panel = source("../src/components/MediaPanel.tsx");
+  assert.match(panel, /"exact", "fuzzy", "semantic", "topic"/);
+  assert.match(panel, /راهنمای جست‌وجو، نه واقعیت/);  // hints are shown as hints, never as facts
+  assert.match(panel, /امتیاز رتبه با وزن‌های ثابت؛ احتمال یا درصد نیست/);
 });
 
 test("the panel uses the registered action transport, clears the secret and starts no runtime itself", () => {
