@@ -1,7 +1,7 @@
-# Device Hub (H1): printers and 3D printers
+# Device Hub (H1): printers, 3D printers and waking this PC (H3)
 
-Status: the printer and 3D printer parts of H1 are implemented and fixture-tested. Other device classes, Wake-on-LAN
-(H3) and live acceptance on real hardware are still required.
+Status: the printer and 3D printer parts of H1, and waking this PC with a hardware wake timer (H3), are implemented
+and fixture-tested. Other device classes and live acceptance on real hardware are still required.
 
 ## What it does
 
@@ -77,6 +77,42 @@ as opaque streams. The model's 3MF version and required extensions must match wh
 - **Secret:** the typed secret is never echoed or stored. The desktop sends it only with the one decide request and
   clears it on submit and hide.
 
+## Waking this PC from sleep (H3)
+
+A sleeping PC runs nothing: not Qronos's voice, wake word or brain. Qronos therefore does not claim voice wake from
+sleep. What it offers is the hardware path Windows provides: a **wake timer** on this PC (`core/power_wake.py`).
+
+- **Capability, read-only:** shown before anything is asked.
+  - `GetPwrCapabilities` reports sleep states, Modern Standby and the firmware's RTC wake state.
+  - The power plan's **Allow wake timers** value for mains and for battery (off, on, or important timers only).
+  - The current power source.
+  - Qronos never changes these settings. Off or "important only" for the current power source means a Qronos
+    timer would not wake the PC; this is said, and nothing is armed.
+- **Setting a time** (`wake.schedule`):
+  - one exact time with its UTC offset, 2 minutes to 7 days ahead, plus 0–120 minutes to stay awake after it;
+  - one armed wake at a time;
+  - the `DEVICE_CONTROL` gate (target `power:this-pc/wake-timer`), then always a single-use `DEVICE_ACTION`
+    approval with the typed secret;
+  - at the answer, the current policy, the time window and the capability are checked again.
+- **Arming:**
+  - `CreateWaitableTimerExW` + `SetWaitableTimer` with resume, on a thread that stays alive while the timer is
+    armed (Windows cancels a timer whose setting thread exits).
+  - The answer says only that **Windows accepted the wake timer** (`claim: windows_accepted_wake_timer`). If Windows
+    reports that this system cannot resume on a timer, the answer is `wake_not_supported` and nothing is armed.
+- **When it fires:** the system is kept from idling back to sleep for the approved minutes, then released. The event
+  says the timer fired, never that the PC woke: it may already have been awake.
+- **Cancelling** (`wake.cancel`) passes the same gate (allowed, or an approval). Pause, Stop and shutdown cancel an
+  armed wake and revoke open approvals.
+
+Limits, shown with every status and approval:
+
+- Qronos must keep running. Shutdown, sign-out, or hibernation without wake support removes the timer.
+- Waking depends on the firmware and on the power plan.
+- On Modern Standby the processor wakes, but Windows keeps the display off.
+- Nothing is persisted: a wake timer lives only with the running process.
+
+Wake-on-LAN is not used. It would need a network sender outside Qronos's offline Core and narrow DeviceLink scope.
+
 ## Interfaces
 
 - **Action:** `qronos.device_hub` `{op, requestId, ...}`. The `op` is one of:
@@ -84,11 +120,13 @@ as opaque streams. The model's 3MF version and required extensions must match wh
   - `job.control` (`deviceId`, `jobId`, `command`);
   - `print.request` (`deviceId`, `path`, `copies`, `color`, `pages`);
   - `print3d.request` (`deviceId`, `path`);
+  - `wake.status` (read), `wake.schedule` (`at` with its offset, `stayAwakeMinutes`), `wake.cancel`;
   - `decide`, `decline`.
 - **Answer:** the `device_hub_result` event `{requestId, op, ok, ...}`; refusals carry stable codes.
 - **Tests:** these use a recording fake spooler and driver, and fake COM vtables, only:
   - `tests/test_device_hub.py`;
   - `tests/test_print3d_native.py`;
+  - `tests/test_power_wake.py` (a fake kernel32 timer API);
   - `desktop/tests/device-hub-store.test.mjs`.
 
   No real printer is enumerated or queried, and no job is touched. The live-device boundary blocks the real
