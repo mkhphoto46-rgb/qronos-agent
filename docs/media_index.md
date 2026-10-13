@@ -685,7 +685,7 @@ ONE in-process media host (`qronos_media/product.py`):
 Done in this chunk (leased): `qronos_media` is in `PRODUCT_PACKAGES` (offline
 policy and release hygiene), collected by `build_runtime`, a project root for
 notices; the bridge hosts the media worker (above); `core/update_stores.py`
-registers `media_index` (schema 3 since the semantic tables, reads schema 1, never snapshotted, so an
+registers `media_index` (schema 5 since the topic labels, reads schema 1, never snapshotted, so an
 update that changes its format is refused: a release compatibility gate, not
 rollback support).
 
@@ -703,11 +703,10 @@ Still open:
    `<RuntimeAssets>/runtime/` is a separate step (nothing installed by this code).
 3. Vision/OCR, subtitle/ASR fusion and the other pending capabilities
    listed by `PENDING_CAPABILITIES`: later chunks, under the same authority.
-4. The update registry is stale: `core/update_stores.py` still declares
-   `media_index` version 3 while the store is schema 5 (4 since round 46), so
+4. Resolved (round 49): `core/update_stores.py` declares `media_index` version 5
+   with the schema-5 layout fingerprint (schema 4 was repaired separately), and
    `test_the_registry_matches_each_store_modules_own_version_and_layout[media_index]`
-   fails. The repair (version 5 and the schema-5 layout fingerprint) is in
-   update code outside the media lease and is left to its owner.
+   passes.
 5. No real Fast-brain run of labels or hints has been accepted; their quality
    is unmeasured.
 
