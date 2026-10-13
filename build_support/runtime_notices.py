@@ -82,7 +82,18 @@ _CPYTHON_TCL_TK_DATA = cpython_notices.TCL_TK_DATA_ROOTS
 # Distributions whose wheels carry native binaries without the upstream
 # license text. Bundling one needs a reviewed entry for its exact version
 # whose pinned upstream texts cover every bundled native file by SHA-256.
-NATIVE_REVIEW_REQUIRED = frozenset({"sounddevice"})
+# uharfbuzz links HarfBuzz into its extension module, whose wheel ships only uharfbuzz's own licence.
+NATIVE_REVIEW_REQUIRED = frozenset({"sounddevice", "uharfbuzz"})
+
+# Third-party font software shipped inside the project folder for PDF reports (qronos_media/fonts). Every file
+# there must be listed with its SHA-256 in the bundled fonts.json; the font licence is copied and those files are
+# attributed to the font, never to Qronos.
+FONT_DIRECTORY = "qronos_media/fonts"
+FONT_REGISTRY_NAME = "fonts.json"
+FONT_NOTE = (
+    "Fonts used to draw PDF reports. They are third-party font software under their own licence (see the copied "
+    "licence text), shipped unmodified; they are not part of Qronos's own code."
+)
 
 # The sounddevice wheel ships PortAudio for several platforms. The packaged
 # x64 backend keeps only the default-host-API x64 build (MME, DirectSound,
@@ -560,6 +571,46 @@ def prune_portaudio(bundle: Path) -> tuple[str, ...]:
 # --------------------------------------------------------------------- plan
 
 
+def _plan_fonts(contents: FrozenContents, bundle_internal: Path | None) -> tuple[dict | None, list["NoticeCopy"]]:
+    """The bundled PDF fonts: each file exactly as its registry pins it, with the font licence copied."""
+    prefix = FONT_DIRECTORY + "/"
+    bundled = sorted(item for item in contents.internal_roots.get(FONT_DIRECTORY.split("/", 1)[0], ())
+                     if item.startswith(prefix))
+    if not bundled:
+        return None, []
+    if bundle_internal is None:
+        raise NoticeError("Bundled fonts need the bundle folder to be checked against their registry.")
+    registry_path = bundle_internal.joinpath(*FONT_DIRECTORY.split("/"), FONT_REGISTRY_NAME)
+    try:
+        _require_regular(registry_path)
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        files = {prefix + entry["file"]: entry for entry in registry["files"]}
+        family, version, licence = str(registry["family"]), str(registry["version"]), str(registry["licence"])
+        licence_file = prefix + registry["licenceFile"]
+        source = dict(registry["source"])
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise NoticeError(f"The bundled font registry is unusable: {type(error).__name__}") from None
+    if not _DIST_NAME.fullmatch(family) or not _DIST_VERSION.fullmatch(version):
+        raise NoticeError("The bundled font registry names an invalid family or version.")
+    expected = set(files) | {prefix + FONT_REGISTRY_NAME}
+    if set(bundled) != expected or licence_file not in files:
+        raise NoticeError(f"Bundled font files differ from their registry: {sorted(set(bundled) ^ expected)}")
+    for relative, entry in files.items():
+        path = bundle_internal.joinpath(*relative.split("/"))
+        _require_regular(path)
+        if path.stat().st_size != entry["bytes"] or _sha256(path) != entry["sha256"]:
+            raise NoticeError(f"Bundled font file is not the pinned one: {relative}")
+    destination = f"{NOTICE_DIRECTORY}/fonts/{family}-{version}/{registry['licenceFile']}"
+    copy = _planned_copy(bundle_internal.joinpath(*licence_file.split("/")).resolve(), destination, True)
+    if copy.kind != "license-text":
+        raise NoticeError("The bundled font licence text is empty.")
+    entry = {"family": family, "version": version, "licence": licence, "source": source, "notice": destination,
+             "files": [{"path": relative, "bytes": files[relative]["bytes"], "sha256": files[relative]["sha256"]}
+                       for relative in sorted(files)],
+             "note": FONT_NOTE}
+    return entry, [copy]
+
+
 def plan_runtime_notices(
     contents: FrozenContents,
     *,
@@ -650,6 +701,8 @@ def plan_runtime_notices(
         )
 
     copies: list[NoticeCopy] = []
+    fonts, font_copies = _plan_fonts(contents, bundle_internal)
+    copies.extend(font_copies)
     entries: list[dict] = []
     missing: list[str] = []
     for name in sorted(represented):
@@ -820,8 +873,10 @@ def plan_runtime_notices(
             "frozenRoots": sorted(project_roots),
             "license": "unspecified",
             "note": PRODUCT_LICENSE_NOTE,
+            "excludes": [FONT_DIRECTORY + "/"] if fonts else [],
         },
         "prunedBinaries": sorted(pruned),
+        "fonts": [fonts] if fonts else [],
     }
     _check_destinations([copy.destination for copy in copies])
     markers = _private_markers(default_private_roots() if private_roots is None else private_roots)
@@ -936,6 +991,8 @@ def _readme(inventory: dict) -> str:
         "",
         "Qronos itself: " + PRODUCT_LICENSE_NOTE,
         "",
+        "Fonts: " + FONT_NOTE,
+        "",
         "Models, speech binaries and voice assets are not part of this runtime; they are",
         "provisioned separately and carry their own terms.",
     ]
@@ -962,6 +1019,9 @@ def _readme(inventory: dict) -> str:
                 )
             if entry["review"].get("unresolved"):
                 lines.append(f"    Unresolved: {entry['review']['unresolved']}")
+    for font in inventory.get("fonts", []):
+        lines += ["", f"Font {font['family']} {font['version']} ({font['licence']}, {font['source']['release']}): "
+                  f"{font['notice']}"]
     if inventory.get("prunedBinaries"):
         lines += ["", "Removed from the bundle (not redistributed):"]
         lines += [f"  {item}" for item in inventory["prunedBinaries"]]

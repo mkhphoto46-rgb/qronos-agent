@@ -53,6 +53,37 @@
         "portaudioCMakeListsGitBlob": "122fe932f8a9e435a50c028a84be012f8001c0a3"
       },
       "unresolved": "The DLL imports only Windows system libraries, so it links the Microsoft C runtime statically; those terms fall under the Microsoft distributable-code review. pa_win_ds.c defines eight WAVE_FORMAT constants (only when the Windows SDK lacks them) from a Wine patch whose author granted use 'under the BSD license' without a license text; the note is reproduced in COPYRIGHT-NOTICES.txt. The binary was not rebuilt independently; its identity rests on the matching wheel, RECORD and repository blob hashes."
+    },
+    {
+      "name": "uharfbuzz",
+      "version": "0.56.3",
+      "provenance": "The uharfbuzz 0.56.3 cp310-abi3 win_amd64 wheel (PyPI) builds HarfBuzz statically into uharfbuzz/_harfbuzz.pyd. The wheel ships only uharfbuzz's own Apache-2.0 LICENSE, so HarfBuzz's licence text is vendored from the HarfBuzz commit that the uharfbuzz v0.56.3 tag pins as its harfbuzz submodule (HarfBuzz 14.6.0). Used only to shape Persian text in PDF reports (fpdf2).",
+      "vendoredNotices": [
+        {
+          "component": "HarfBuzz",
+          "version": "14.6.0",
+          "sourceRepository": "https://github.com/harfbuzz/harfbuzz",
+          "sourceCommit": "c7a7457b7385f33178e8cf87615ca077a810bbe7",
+          "sourceUrl": "https://github.com/harfbuzz/harfbuzz/blob/c7a7457b7385f33178e8cf87615ca077a810bbe7/COPYING",
+          "file": "harfbuzz-14.6.0/COPYING",
+          "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64",
+          "covers": [
+            {
+              "path": "uharfbuzz/_harfbuzz.pyd",
+              "sha256": "2ab785a40370050976c5ca1c26c2274b682290b047f2427a7a4c6fc83b7715c8"
+            }
+          ]
+        }
+      ],
+      "binaryProvenance": {
+        "wheelFile": "uharfbuzz-0.56.3-cp310-abi3-win_amd64.whl",
+        "wheelSha256": "6d1a4e9de1fa893e4a2ca7e8140b55073342f965bebb00f047196678d672c799",
+        "wheelUrl": "https://files.pythonhosted.org/packages/65/02/9e5155d9a1b7d4891064674e8db2cab754517d39f293c827e60e794bbd8a/uharfbuzz-0.56.3-cp310-abi3-win_amd64.whl",
+        "wheelRecordLine": "uharfbuzz/_harfbuzz.pyd,sha256=KreFpANwBQl2xcocJsInS2gikLBH8kJ6ekxvyDt3Fcg,3420672",
+        "uharfbuzzSourceTag": "https://github.com/harfbuzz/uharfbuzz/tree/v0.56.3",
+        "harfbuzzSubmoduleCommit": "https://github.com/harfbuzz/harfbuzz/tree/c7a7457b7385f33178e8cf87615ca077a810bbe7"
+      },
+      "unresolved": "HarfBuzz COPYING says parts of HarfBuzz under other licences carry their own COPYING files in subdirectories; which of those parts this build compiled was not checked file by file. The binary was not rebuilt independently; its identity rests on the PyPI wheel hash and its RECORD."
     }
   ]
 }
