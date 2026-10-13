@@ -8,6 +8,7 @@ import hashlib
 import json
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from core.action_audit import ActionAuditLog, AuditEvent
 from core.actions import ActionOutcome
 from core.approval_ledger import ApprovalKind, ApprovalLedger
 from core.print_workflow import PrinterState, PrintJobState
+from core.power_wake import ArmResult, WakeCapability
 from security.gate import Verdict
 from security.permissions import ActionCategory, PermissionDecision
 from tests.threemf_fixture import (CORE_2013, CORE_2015, MATERIAL_EXT, REL_MODEL, model_xml,
@@ -434,6 +436,173 @@ def test_a_driver_refusal_is_reported_and_audited_as_failed_and_no_secret_means_
     assert ask(world, "print3d.request", "f5", deviceId=workshop, path=str(package))["code"] == "secret_unavailable"
 
 
+# ------------------------------------------------------------ wake THIS PC from sleep (H3), a fake power layer
+
+NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+TEHRAN = timezone(timedelta(hours=3, minutes=30))
+
+
+class FakeArmed:
+    def __init__(self) -> None:
+        self.cancelled = 0
+
+    @property
+    def active(self) -> bool:
+        return not self.cancelled
+
+    def cancel(self) -> None:
+        self.cancelled += 1
+
+
+class FakePower:
+    """Stands for core/power_wake.WinPowerWake: records capability reads and arm requests; never touches Windows."""
+
+    def __init__(self, capability=None, state="armed") -> None:
+        self.cap = capability or WakeCapability(True, True, False, 4, True, "enabled", "disabled", "ac")
+        self.state, self.calls, self.armed = state, [], []
+        self.on_event = None
+
+    def capability(self):
+        self.calls.append(("capability",))
+        return self.cap
+
+    def arm(self, due, stay, on_event):
+        self.calls.append(("arm", due, stay))
+        self.on_event = on_event
+        armed = FakeArmed()
+        self.armed.append(armed)
+        return armed, ArmResult(self.state, "wk-0123456789abcdef", due.astimezone(timezone.utc).isoformat(
+            timespec="seconds"))
+
+
+@pytest.fixture
+def wake(world):
+    power = FakePower()
+    world.hub._power_factory = lambda: power
+    world.hub._now = lambda: NOW
+    world.power = power
+    return world
+
+
+def at(minutes: int, zone=TEHRAN) -> str:
+    return (NOW + timedelta(minutes=minutes)).astimezone(zone).isoformat(timespec="minutes")
+
+
+def armed_calls(world) -> list:
+    return [c for c in world.power.calls if c[0] == "arm"]
+
+
+def test_wake_status_is_read_only_shows_the_hardware_verdict_and_the_limits_also_while_paused(wake):
+    wake.state["paused"] = True
+    status = ask(wake, "wake.status", "w1")
+    assert status["ok"] and status["capability"]["verdict"] == "supported" and status["armed"] is None
+    assert status["capability"]["wakeTimersAc"] == "enabled" and status["capability"]["powerSource"] == "ac"
+    assert set(status["limits"]) == set(hub_module.WAKE_LIMITS) and "no_voice_or_brain_while_asleep" in status["limits"]
+    assert armed_calls(wake) == []
+    assert ask(wake, "wake.schedule", "w2", at=at(60))["code"] == "paused"  # changes are refused while paused
+
+
+@pytest.mark.parametrize("fields, code", [
+    ({"at": "2026-10-13T15:30"}, "bad_request"),                 # no UTC offset: never guessed
+    ({"at": "tomorrow at six"}, "bad_request"),
+    ({"at": None}, "bad_request"),
+    ({"at": "2026-10-13T15:30+03:30", "stayAwakeMinutes": 121}, "bad_request"),
+    ({"at": "2026-10-13T15:30+03:30", "stayAwakeMinutes": True}, "bad_request"),
+])
+def test_wake_requests_are_validated_before_the_power_layer_is_touched(wake, fields, code):
+    assert ask(wake, "wake.schedule", "v1", **fields)["code"] == code
+    assert wake.power.calls == []
+
+
+def test_a_wake_time_must_be_two_minutes_to_seven_days_ahead(wake):
+    assert ask(wake, "wake.schedule", "t1", at=at(1))["code"] == "bad_time"
+    assert ask(wake, "wake.schedule", "t2", at=at(8 * 24 * 60))["code"] == "bad_time"
+    assert ask(wake, "wake.schedule", "t3", at=at(3))["status"] == "approval_required"
+    assert armed_calls(wake) == []
+
+
+@pytest.mark.parametrize("capability, code", [
+    (WakeCapability(True, True, False, 4, True, "disabled", "disabled", "ac"), "wake_timers_disabled"),
+    (WakeCapability(True, True, False, 4, True, "important_only", "enabled", "ac"), "wake_timers_important_only"),
+    (WakeCapability(True, True, False, 4, True, "enabled", "disabled", "battery"), "wake_timers_disabled"),
+    (WakeCapability(False, True, False, 0, False, "enabled", "enabled", "ac"), "no_rtc_or_always_on_timer_wake"),
+])
+def test_hardware_or_power_plan_limits_are_said_truthfully_and_nothing_is_asked_or_armed(wake, capability, code):
+    wake.power.cap = capability
+    answer = ask(wake, "wake.schedule", "c1", at=at(60))
+    assert answer["ok"] is False and answer["code"] == code and answer["capability"]["verdict"] != "supported"
+    assert wake.hub._ledger.open_tickets() == () and armed_calls(wake) == []
+
+
+def test_arming_needs_the_typed_secret_every_time_and_claims_only_windows_acceptance(wake):
+    pending = ask(wake, "wake.schedule", "a1", at=at(90), stayAwakeMinutes=15)  # the fixture policy ALLOWS
+    assert pending["status"] == "approval_required" and pending["needsSecret"] is True
+    preview = pending["preview"]
+    assert preview["dueUtc"] == "2026-10-13T13:30:00+00:00" and preview["stayAwakeMinutes"] == 15
+    assert preview["action"] == "wake_schedule" and "modern_standby_keeps_display_off" in preview["limits"]
+    assert ask(wake, "decide", "a2", approvalId=pending["approvalId"], approved=True,
+               secret="wrong horse")["code"] == "secret_rejected"
+    assert ask(wake, "decide", "a3", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "stale_approval"  # single use
+    assert armed_calls(wake) == []
+    pending = ask(wake, "wake.schedule", "a4", at=at(90), stayAwakeMinutes=15)
+    done = ask(wake, "decide", "a5", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert done["status"] == "armed" and done["claim"] == "windows_accepted_wake_timer"
+    assert done["dueUtc"] == "2026-10-13T13:30:00+00:00" and "woke" not in json.dumps(done)
+    (_, due, stay), = armed_calls(wake)
+    assert due == NOW + timedelta(minutes=90) and stay == 15
+    assert ask(wake, "wake.schedule", "a6", at=at(200))["code"] == "already_armed"
+    status = ask(wake, "wake.status", "a7")["armed"]
+    assert status["state"] == "armed" and status["wakeId"] == "wk-0123456789abcdef"
+    rows = audit_rows(wake)
+    assert (AuditEvent.COMPLETED, "device_control", "power:this-pc/wake-timer", "succeeded") in rows
+    assert "correct horse" not in json.dumps(wake.events) and "wrong horse" not in json.dumps(wake.events)
+    wake.power.on_event("wake_timer_fired", {"wakeId": "wk-0123456789abcdef", "firedAtUtc": "2026-10-13T13:30:00+00:00",
+                                             "stayAwakeMinutes": 15})
+    assert ask(wake, "wake.status", "a8")["armed"]["state"] == "fired"
+    fired = [p for e, _, p in wake.events if e == hub_module.WAKE_EVENT]
+    assert fired and fired[-1]["event"] == "wake_timer_fired"
+
+
+def test_windows_refusing_to_resume_or_a_changed_power_plan_or_policy_never_arms(wake, monkeypatch):
+    wake.power.state = "not_supported"
+    pending = ask(wake, "wake.schedule", "n1", at=at(60))
+    refused = ask(wake, "decide", "n2", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert refused["code"] == "wake_not_supported"
+    assert (AuditEvent.COMPLETED, "device_control", "power:this-pc/wake-timer", "failed") in audit_rows(wake)
+    assert ask(wake, "wake.status", "n3")["armed"] is None
+    wake.power.state = "armed"
+    pending = ask(wake, "wake.schedule", "n4", at=at(60))
+    wake.power.cap = WakeCapability(True, True, False, 4, True, "disabled", "disabled", "ac")  # changed meanwhile
+    assert ask(wake, "decide", "n5", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "wake_timers_disabled"
+    wake.power.cap = WakeCapability(True, True, False, 4, True, "enabled", "disabled", "ac")
+    pending = ask(wake, "wake.schedule", "n6", at=at(60))
+    monkeypatch.setattr(gate_module, "evaluate", policy(PermissionDecision.DENY))  # the policy tightened
+    assert ask(wake, "decide", "n7", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "denied"
+    assert not [r for r in audit_rows(wake) if r[0] == AuditEvent.DENIED_BY_USER]
+    assert ask(wake, "wake.schedule", "n8", at=at(60))["code"] == "denied"  # refused before any approval
+    assert len(armed_calls(wake)) == 1  # only the Windows-refused attempt reached arm
+
+
+def test_cancel_is_gated_and_pause_stop_close_cancel_an_armed_wake(wake, monkeypatch):
+    assert ask(wake, "wake.cancel", "x1")["status"] == "none"
+    pending = ask(wake, "wake.schedule", "x2", at=at(60))
+    ask(wake, "decide", "x3", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    monkeypatch.setattr(gate_module, "evaluate", policy(PermissionDecision.REQUIRE_UI_CONFIRMATION))
+    asked = ask(wake, "wake.cancel", "x4")
+    assert asked["status"] == "approval_required" and asked["preview"]["action"] == "wake_cancel"
+    assert wake.power.armed[0].cancelled == 0  # nothing cancelled before the answer
+    assert ask(wake, "decide", "x5", approvalId=asked["approvalId"], approved=True)["status"] == "cancelled"
+    assert wake.power.armed[0].cancelled == 1 and ask(wake, "wake.status", "x6")["armed"] is None
+    monkeypatch.setattr(gate_module, "evaluate", policy(PermissionDecision.ALLOW))
+    pending = ask(wake, "wake.schedule", "x7", at=at(60))
+    ask(wake, "decide", "x8", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert wake.hub.cancel_wake("pause") is True and wake.power.armed[1].cancelled == 1
+    assert wake.hub.cancel_wake("pause") is False and ask(wake, "wake.status", "x9")["armed"] is None
+
+
 # ------------------------------------------------------------ the real bridge lifecycle with a pending device approval
 
 @pytest.fixture
@@ -516,3 +685,21 @@ def test_pause_revokes_a_pending_3d_approval_and_nothing_is_handed_over(runtime_
     late = hub_action(runtime, events, "w3", op="decide", approvalId=pending["approvalId"], approved=True,
                       secret="anything")
     assert late["code"] == "stale_approval" and spooler.submitted == []
+
+
+@pytest.mark.parametrize("lifecycle", ["pause", "stop", "close"])
+def test_the_real_runtime_pause_stop_and_close_cancel_an_armed_wake(runtime_with_hub, lifecycle):
+    runtime, events, spooler = runtime_with_hub
+    hub = runtime.device_hub()
+    armed = FakeArmed()
+    with hub._wake_lock:  # an armed wake as decide leaves it (arming itself is covered with the fake power layer)
+        hub._armed, hub._wake_info = armed, {"wakeId": "wk-0123456789abcdef", "dueUtc": "2026-10-13T13:30:00+00:00",
+                                             "stayAwakeMinutes": 10, "state": "armed"}
+    if lifecycle == "pause":
+        runtime.set_runtime_paused(True)
+        runtime.set_runtime_paused(False)
+    elif lifecycle == "stop":
+        assert isinstance(runtime.request_stop_response(), dict)
+    else:
+        runtime.close()
+    assert armed.cancelled == 1 and hub._wake_snapshot() is None

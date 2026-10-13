@@ -32,6 +32,7 @@ import os
 import re
 import secrets
 import threading
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from ctypes import wintypes
@@ -40,6 +41,7 @@ from typing import Any, Callable, Protocol
 from core.action_audit import ActionAuditLog, AuditEvent
 from core.actions import ActionOutcome, ActionRequest
 from core.approval_ledger import ApprovalKind, ApprovalLedger, StaleApproval
+from core.power_wake import PowerWakeError, WakeCapability, default_power
 from core.print3d_native import MAX_PACKAGE_BYTES, Package3MF, Print3DError, Win3DPrinting, read_3mf
 from core.print_workflow import PrinterState, PrintJobState, SpoolerUnavailable, WinSpooler, _is_link
 import security.gate as security_gate  # every job change reaches the permission gate
@@ -58,9 +60,20 @@ MAX_DEVICES = 64
 MAX_JOBS = 100
 MAX_PAPER_NAMES = 32
 
-OPS = frozenset({"devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "decide",
+OPS = frozenset({"devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "wake.status",
+                 "wake.schedule", "wake.cancel", "decide",
                  "decline"})
-READ_OPS = frozenset({"devices.list", "device.jobs", "decline"})
+READ_OPS = frozenset({"devices.list", "device.jobs", "wake.status", "decline"})
+
+# Wake THIS PC from sleep (H3): a hardware wake timer, never a voice wake or a network packet.
+WAKE_TARGET = "power:this-pc/wake-timer"
+WAKE_EVENT = "device_hub_wake"
+MIN_WAKE_LEAD_MINUTES = 2
+MAX_WAKE_DAYS = 7
+MAX_STAY_AWAKE_MINUTES = 120
+#: What a wake timer cannot do, shown with every status and approval (stable codes; Persian text in the desktop).
+WAKE_LIMITS = ("qronos_must_keep_running", "no_shutdown_hibernate_or_sign_out", "power_plan_allows_wake_timers",
+               "modern_standby_keeps_display_off", "no_voice_or_brain_while_asleep", "fired_is_not_proof_of_wake")
 
 # winspool / wingdi values (documented Windows constants)
 PRINTER_ATTRIBUTE_SHARED = 0x8
@@ -229,6 +242,25 @@ class PendingPrint3D:
     request_id: str = ""
 
 
+@dataclass(frozen=True)
+class PendingWake:
+    """The payload of one DEVICE_ACTION approval to arm a wake timer on this PC."""
+
+    due: datetime
+    stay: int
+    request: ActionRequest
+    decision: PermissionDecision
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class PendingWakeCancel:
+    wake_id: str
+    request: ActionRequest
+    decision: PermissionDecision
+    request_id: str = ""
+
+
 def _start_thread(target: Callable[[], None]) -> None:
     threading.Thread(target=target, name="qronos-device-hub", daemon=True).start()
 
@@ -246,6 +278,8 @@ class DeviceHub:
         audit: ActionAuditLog | None = None,
         evaluate: Callable[..., Any] | None = None,
         run_async: Callable[[Callable[[], None]], None] = _start_thread,
+        power: Callable[[], Any] = default_power,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._source = source
         self._ledger = ledger
@@ -257,6 +291,10 @@ class DeviceHub:
         self._evaluate = evaluate
         self._run_async = run_async
         self._lock = threading.Lock()  # one spooler conversation at a time
+        self._power_factory, self._power, self._now = power, None, now
+        self._wake_lock = threading.Lock()
+        self._armed: Any = None
+        self._wake_info: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ entry
 
@@ -332,6 +370,14 @@ class DeviceHub:
                     or not Path(path).is_absolute() or Path(path).suffix.casefold() != ".3mf":
                 raise DeviceHubError("bad_request", "path must be one exact absolute .3mf file path")
             return lambda: self._prepare_print3d(device_id_, Path(path), data["requestId"])
+        if op == "wake.status":
+            return self._wake_status
+        if op == "wake.schedule":
+            due = _wake_time(data)
+            stay = _int(data, "stayAwakeMinutes", 0, MAX_STAY_AWAKE_MINUTES, default=10)
+            return lambda: self._prepare_wake(due, stay, data["requestId"])
+        if op == "wake.cancel":
+            return lambda: self._prepare_wake_cancel(data["requestId"])
         if op == "decide":
             approval_id = _approval_id(data)
             secret = data.get("secret")
@@ -448,6 +494,10 @@ class DeviceHub:
         pending = ticket.payload
         if isinstance(pending, PendingPrint3D):
             return self._decide_print3d(pending, secret)
+        if isinstance(pending, PendingWake):
+            return self._decide_wake(pending, secret)
+        if isinstance(pending, PendingWakeCancel):
+            return self._decide_wake_cancel(pending, secret)
         if not isinstance(pending, PendingJobControl):
             return {"ok": False, "code": "stale_approval", "detail": "not a device approval"}
         verdict = self._gate(pending.request)  # the CURRENT policy decides again
@@ -474,7 +524,7 @@ class DeviceHub:
             ticket = self._ledger.take(approval_id, kinds=(ApprovalKind.DEVICE_ACTION,))
         except StaleApproval as stale:
             return {"ok": False, "code": "stale_approval", "detail": stale.reason}
-        if isinstance(ticket.payload, (PendingJobControl, PendingPrint3D)):
+        if isinstance(ticket.payload, (PendingJobControl, PendingPrint3D, PendingWake, PendingWakeCancel)):
             self._record(AuditEvent.DENIED_BY_USER, ticket.payload.request)
         return {"ok": True, "declined": True}
 
@@ -574,6 +624,173 @@ class DeviceHub:
         return {"ok": True, "status": "handed_to_spooler", "deviceId": device.id, "jobName": pending.job_name,
                 "jobId": job_id, "sha256": package.sha256, "size": package.size}
 
+    # ------------------------------------------------------------ wake THIS PC from sleep (H3, core/power_wake.py)
+
+    def _power_layer(self) -> Any:
+        if self._power is None:
+            try:
+                self._power = self._power_factory()
+            except PowerWakeError as error:
+                raise DeviceHubError("wake_" + error.code, str(error)) from None
+        return self._power
+
+    def _wake_capability(self) -> WakeCapability:
+        try:
+            return self._power_layer().capability()
+        except PowerWakeError as error:
+            raise DeviceHubError("wake_" + error.code, str(error)) from None
+        except OSError as error:
+            raise DeviceHubError("wake_capability_unreadable", type(error).__name__) from None
+
+    def _wake_snapshot(self) -> dict[str, Any] | None:
+        with self._wake_lock:
+            if self._wake_info and self._wake_info.get("state") == "armed" and self._armed is not None \
+                    and not self._armed.active:
+                self._wake_info["state"] = "ended"
+            return dict(self._wake_info) if self._wake_info else None
+
+    def _wake_armed(self) -> bool:
+        snapshot = self._wake_snapshot()
+        return bool(snapshot and snapshot.get("state") == "armed")
+
+    def _wake_status(self) -> dict:
+        return {"ok": True, "capability": self._wake_capability().to_json(), "armed": self._wake_snapshot(),
+                "limits": list(WAKE_LIMITS)}
+
+    def _wake_due_check(self, due: datetime) -> None:
+        now = self._now()
+        if due < now + timedelta(minutes=MIN_WAKE_LEAD_MINUTES) or due > now + timedelta(days=MAX_WAKE_DAYS):
+            raise DeviceHubError("bad_time", "the wake time must be 2 minutes to 7 days from now")
+
+    @staticmethod
+    def _wake_request(summary: str, parameters: dict[str, Any]) -> ActionRequest:
+        return ActionRequest(category=ActionCategory.DEVICE_CONTROL, target=WAKE_TARGET, summary=summary,
+                             parameters=parameters)
+
+    @staticmethod
+    def _wake_blocked(capability: WakeCapability) -> dict | None:
+        verdict, reason = capability.verdict()
+        if verdict in ("supported", "unknown"):  # "unknown": the setting is unreadable; Windows' answer decides
+            return None
+        return {"ok": False, "code": reason, "capability": capability.to_json()}
+
+    def _prepare_wake(self, due: datetime, stay: int, request_id: str) -> dict:
+        if self._verify_secret is None:
+            raise DeviceHubError("secret_unavailable", "waking this PC needs the typed approval secret")
+        self._wake_due_check(due)
+        if self._wake_armed():
+            raise DeviceHubError("already_armed", "a wake time is already set; cancel it first")
+        capability = self._wake_capability()
+        blocked = self._wake_blocked(capability)
+        if blocked is not None:
+            return blocked
+        due_text = due.astimezone(timezone.utc).isoformat(timespec="seconds")
+        request = self._wake_request("Wake this PC from sleep at a set time with a hardware wake timer.",
+                                     {"dueUtc": due_text, "stayAwakeMinutes": stay})
+        verdict = self._gate(request)
+        if verdict.refused:
+            return {"ok": False, "code": "denied", "detail": str(verdict.reason)[:200]}
+        # A power action: always a single-use approval with the typed secret, whatever the policy allows.
+        ticket = self._ledger.issue(ApprovalKind.DEVICE_ACTION, f"wake this PC at {due_text}",
+                                    payload=PendingWake(due, stay, request, verdict.decision, request_id))
+        return {"ok": True, "status": "approval_required", "approvalId": ticket.approval_id, "needsSecret": True,
+                "preview": {"action": "wake_schedule", "dueUtc": due_text, "stayAwakeMinutes": stay,
+                            "capability": capability.to_json(), "limits": list(WAKE_LIMITS)}}
+
+    def _decide_wake(self, pending: "PendingWake", secret: str | None) -> dict:
+        verdict = self._gate(pending.request)  # the CURRENT policy decides again
+        if verdict.refused:
+            self._record_policy_refusal(pending.request, PermissionDecision.REQUIRE_TYPED_SECRET)
+            return {"ok": False, "code": "denied", "detail": str(verdict.reason)[:200]}
+        if not self._secret_ok(secret):
+            return {"ok": False, "code": "secret_rejected"}
+        self._record(AuditEvent.APPROVED, pending.request, decision=verdict.decision)
+        self._wake_due_check(pending.due)
+        if self._wake_armed():
+            return {"ok": False, "code": "already_armed"}
+        capability = self._wake_capability()  # read again: the power plan may have changed meanwhile
+        blocked = self._wake_blocked(capability)
+        if blocked is not None:
+            return blocked
+        try:
+            armed, result = self._power_layer().arm(pending.due, pending.stay, self._on_wake_event)
+        except PowerWakeError as error:
+            self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.FAILED)
+            return {"ok": False, "code": "wake_" + error.code, "detail": str(error)[:200]}
+        if result.state != "armed":  # Windows accepted the call but says this system cannot resume on a timer
+            self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.FAILED)
+            return {"ok": False, "code": "wake_not_supported",
+                    "detail": "Windows reported that this PC cannot resume on a timer"}
+        info = {"wakeId": result.wake_id, "dueUtc": result.due_utc, "stayAwakeMinutes": pending.stay,
+                "state": "armed", "armedAtUtc": self._now().isoformat(timespec="seconds")}
+        with self._wake_lock:
+            self._armed, self._wake_info = armed, info
+        self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.SUCCEEDED)
+        return {"ok": True, "status": "armed", "claim": "windows_accepted_wake_timer", **info}
+
+    def _prepare_wake_cancel(self, request_id: str) -> dict:
+        snapshot = self._wake_snapshot()
+        if not snapshot or snapshot.get("state") != "armed":
+            return {"ok": True, "status": "none"}
+        request = self._wake_request("Cancel the wake time set for this PC.", {"wakeId": snapshot["wakeId"]})
+        verdict = self._gate(request)
+        if verdict.refused:
+            return {"ok": False, "code": "denied", "detail": str(verdict.reason)[:200]}
+        if verdict.allowed:
+            return self._run_wake_cancel(snapshot["wakeId"], request)
+        ticket = self._ledger.issue(ApprovalKind.DEVICE_ACTION, "cancel the wake time", payload=PendingWakeCancel(
+            snapshot["wakeId"], request, verdict.decision, request_id))
+        return {"ok": True, "status": "approval_required", "approvalId": ticket.approval_id,
+                "needsSecret": verdict.decision is PermissionDecision.REQUIRE_TYPED_SECRET,
+                "preview": {"action": "wake_cancel", "dueUtc": snapshot["dueUtc"]}}
+
+    def _decide_wake_cancel(self, pending: "PendingWakeCancel", secret: str | None) -> dict:
+        verdict = self._gate(pending.request)
+        if verdict.refused:
+            self._record_policy_refusal(pending.request, pending.decision)
+            return {"ok": False, "code": "denied", "detail": str(verdict.reason)[:200]}
+        if PermissionDecision.REQUIRE_TYPED_SECRET in (pending.decision, verdict.decision) \
+                and not self._secret_ok(secret):
+            return {"ok": False, "code": "secret_rejected"}
+        self._record(AuditEvent.APPROVED, pending.request, decision=verdict.decision)
+        return self._run_wake_cancel(pending.wake_id, pending.request)
+
+    def _run_wake_cancel(self, wake_id: str, request: ActionRequest) -> dict:
+        with self._wake_lock:
+            armed = self._armed if self._wake_info and self._wake_info.get("wakeId") == wake_id else None
+            if armed is not None:
+                self._armed, self._wake_info = None, None
+        if armed is None:
+            return {"ok": True, "status": "none"}
+        armed.cancel()
+        self._record(AuditEvent.COMPLETED, request, outcome=ActionOutcome.SUCCEEDED)
+        return {"ok": True, "status": "cancelled", "wakeId": wake_id}
+
+    def cancel_wake(self, reason: str) -> bool:
+        """Pause, Stop and shutdown: an armed wake timer is cancelled (no gate: it only removes a pending action)."""
+        with self._wake_lock:
+            armed, info = self._armed, self._wake_info
+            self._armed, self._wake_info = None, None
+        if armed is None:
+            return False
+        armed.cancel()
+        self._emit(WAKE_EVENT, "ready", {"event": "wake_cancelled", "reason": str(reason)[:64],
+                                         "wakeId": (info or {}).get("wakeId")})
+        return True
+
+    def _on_wake_event(self, name: str, payload: dict[str, Any]) -> None:
+        with self._wake_lock:
+            if name == "wake_timer_fired" and self._wake_info and self._wake_info.get("wakeId") == payload.get("wakeId"):
+                self._wake_info.update({"state": "fired", "firedAtUtc": payload.get("firedAtUtc")})
+        self._emit(WAKE_EVENT, "ready", {"event": name, **{k: payload[k] for k in ("wakeId", "firedAtUtc",
+                                                                                  "stayAwakeMinutes") if k in payload}})
+
+    def _secret_ok(self, secret: str | None) -> bool:
+        try:
+            return self._verify_secret is not None and bool(self._verify_secret(secret or ""))
+        except Exception:  # noqa: BLE001 - an unverifiable secret is a refusal
+            return False
+
     def _record_policy_refusal(self, request: ActionRequest, asked: PermissionDecision) -> None:
         """The person said yes but the CURRENT policy refused at the answer (the gate recorded its own refused
         verdict): never DENIED_BY_USER. APPROVED only when no typed secret was asked, since an unverified secret
@@ -635,6 +852,20 @@ def _checked_3mf(path: Path) -> None:
         raise DeviceHubError("file_empty", "the file is empty")
     if size > MAX_PACKAGE_BYTES:
         raise DeviceHubError("too_large", "the package is too large")
+
+
+def _wake_time(data: dict) -> datetime:
+    """An exact ISO-8601 time WITH its UTC offset (the desktop sends the person's chosen local time so)."""
+    value = data.get("at")
+    if not isinstance(value, str) or not 16 <= len(value) <= 40:
+        raise DeviceHubError("bad_request", "at must be an ISO-8601 time with its offset")
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        raise DeviceHubError("bad_request", "at must be an ISO-8601 time with its offset") from None
+    if when.tzinfo is None:
+        raise DeviceHubError("bad_request", "at must carry its UTC offset")
+    return when.replace(microsecond=0)
 
 
 def _approval_id(data: dict) -> str:

@@ -68,6 +68,8 @@ NATIVE_BACKENDS = {
     "core.print_renderer": frozenset({"core.print_workflow"}),
     # Print Ticket capabilities and the Windows 3D manufacturing package path: only the gated Device Hub.
     "core.print3d_native": frozenset({"core.device_hub"}),
+    # Read-only power capabilities and the hardware wake timer of this PC: only the gated Device Hub.
+    "core.power_wake": frozenset({"core.device_hub"}),
 }
 
 # Modules that legitimately touch these without being action executors, with

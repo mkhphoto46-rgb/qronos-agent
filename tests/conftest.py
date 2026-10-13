@@ -14,6 +14,7 @@ import core.audio_input as audio_input
 import core.audio_output as audio_output
 import core.computer_executor as computer_executor
 import core.device_hub as device_hub
+import core.power_wake as power_wake
 import core.print3d_native as print3d_native
 import core.print_renderer as print_renderer
 import core.print_workflow as print_workflow
@@ -57,6 +58,7 @@ LIVE_DEVICE_FUNCTIONS = (
     (print_renderer, "_create_printer_dc", "opening a real printer device context"),
     (device_hub, "WinDeviceSpooler", "reading or driving the real print spooler and drivers (Device Hub)"),
     (print3d_native, "Win3DPrinting", "reading or driving a real 3D printer's driver"),
+    (power_wake, "WinPowerWake", "reading or arming this PC's real power capabilities and wake timers"),
 )
 # Child processes that read the GPU or run local inference.
 LIVE_DEVICE_EXECUTABLES = frozenset({

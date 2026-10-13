@@ -7175,9 +7175,14 @@ class QronosRuntime:
         return len(self._approvals.revoke_kinds((ApprovalKind.MEDIA_ACTION,), reason))
 
     def _discard_pending_device_approvals(self, reason: str) -> int:
-        """Revoke every Device Hub job-control question (DEVICE_ACTION) at Pause, Stop and shutdown. Payloads
-        belong to core/device_hub.py and are never read here; a late answer is stale there. Idempotent."""
-        return len(self._approvals.revoke_kinds((ApprovalKind.DEVICE_ACTION,), reason))
+        """Revoke every Device Hub question (DEVICE_ACTION) at Pause, Stop and shutdown, and cancel an armed wake
+        timer. Payloads belong to core/device_hub.py and are never read here; a late answer is stale there.
+        Idempotent."""
+        revoked = len(self._approvals.revoke_kinds((ApprovalKind.DEVICE_ACTION,), reason))
+        hub = getattr(self, "_device_hub", None)
+        if hub is not None:
+            hub.cancel_wake(reason)
+        return revoked
 
     def _notify_file_stale(self, action_token: str, reason: str) -> None:
         self._notify(
