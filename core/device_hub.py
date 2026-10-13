@@ -11,11 +11,16 @@ is offered only when the device supports it:
                               DEVICE_CONTROL gate, single-use approval with the typed secret, one verified job);
 * list a device's jobs      - read-only;
 * pause / resume / cancel   - ONLY the caller's own job, through the DEVICE_CONTROL gate and a single-use
-                              DEVICE_ACTION approval (typed secret when the policy requires it), audited.
+                              DEVICE_ACTION approval (typed secret when the policy requires it), audited;
+* hand one exact .3mf to a  - only for a queue whose driver PROVES 3D capability (psk3d keywords in its
+  proven 3D printer           PrintCapabilities, core/print3d_native.py): the Files read gate, the DEVICE_CONTROL
+                              gate, always a single-use DEVICE_ACTION approval with the typed secret, the package
+                              re-read and re-hashed at the answer, then the Windows 3D print path. The answer claims
+                              only that Windows accepted the package for the queue, never that a part was printed.
 
-Truthfully unsupported (shown as such, never as a capability): a queue that looks like a 3D printer (no 3D
-printing workflow exists yet, so document printing is not offered to it either), and every other device class
-(scanners, cameras, other local devices). Desktop requests are typed ``qronos.device_hub`` actions
+Truthfully unsupported (shown as such, never as a capability): a queue that only LOOKS like a 3D printer by its
+name or driver but whose driver does not prove it (no workflow, not even document printing), and every other
+device class (scanners, cameras, other local devices). Desktop requests are typed ``qronos.device_hub`` actions
 ``{op, requestId, ...}``; answers are ``device_hub_result`` runtime events.
 """
 
@@ -25,6 +30,7 @@ import ctypes
 import hashlib
 import os
 import re
+import secrets
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +39,8 @@ from typing import Any, Callable, Protocol
 from core.action_audit import ActionAuditLog, AuditEvent
 from core.actions import ActionOutcome, ActionRequest
 from core.approval_ledger import ApprovalKind, ApprovalLedger, StaleApproval
-from core.print_workflow import PrinterState, PrintJobState, SpoolerUnavailable, WinSpooler
+from core.print3d_native import MAX_PACKAGE_BYTES, Package3MF, Print3DError, Win3DPrinting, read_3mf
+from core.print_workflow import PrinterState, PrintJobState, SpoolerUnavailable, WinSpooler, _is_link
 import security.gate as security_gate  # every job change reaches the permission gate
 from security.permissions import ActionCategory, PermissionDecision
 
@@ -50,7 +57,8 @@ MAX_DEVICES = 64
 MAX_JOBS = 100
 MAX_PAPER_NAMES = 32
 
-OPS = frozenset({"devices.list", "device.jobs", "job.control", "print.request", "decide", "decline"})
+OPS = frozenset({"devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "decide",
+                 "decline"})
 READ_OPS = frozenset({"devices.list", "device.jobs", "decline"})
 
 # winspool / wingdi values (documented Windows constants)
@@ -65,14 +73,13 @@ _JOB_STATUS = {0x1: "paused", 0x2: "error", 0x4: "deleting", 0x8: "spooling", 0x
 
 #: Device classes this Device Hub does not drive yet (truthful; no fake capability).
 UNSUPPORTED_CLASSES: tuple[dict[str, str], ...] = (
-    {"kind": "3d_printer", "reason": "3d_workflow_pending",
-     "detail": "چاپ سه‌بعدی هنوز گردش کار محلیِ مبتنی بر درایور ندارد؛ چاپگر سه‌بعدی فقط شناسایی می‌شود."},
     {"kind": "scanner", "reason": "not_supported_yet", "detail": "اسکنر هنوز پشتیبانی نمی‌شود."},
     {"kind": "camera", "reason": "not_supported_yet", "detail": "دوربین از این بخش کنترل نمی‌شود."},
     {"kind": "other_local_device", "reason": "not_supported_yet",
      "detail": "دستگاه‌های محلیِ دیگر هنوز در Device Hub پشتیبانی نمی‌شوند."},
 )
-#: A print queue whose name or driver says it is a 3D printer is never offered document printing.
+#: A print queue whose name or driver says 3D/3MF but whose driver does not PROVE 3D capability is offered nothing:
+#: not 3D printing (unproven) and not document printing (it may be a 3D printer).
 _LOOKS_3D = re.compile(r"(?<![0-9a-z])3d(?![0-9a-z])|\b3mf\b", re.IGNORECASE)
 
 
@@ -92,6 +99,8 @@ class DeviceSource(Protocol):
     def capabilities(self, printer: str, port: str) -> dict[str, Any]: ...
     def control_own_job(self, printer: str, job_id: int, command: int) -> None: ...
     def current_user(self) -> str: ...
+    def capabilities_3d(self, printer: str) -> dict[str, Any] | None: ...
+    def submit_3d(self, printer: str, job_name: str, package: Package3MF) -> None: ...
 
 
 class WinDeviceSpooler(WinSpooler):
@@ -131,6 +140,17 @@ class WinDeviceSpooler(WinSpooler):
                 raise SpoolerUnavailable(f"SetJob failed ({ctypes.get_last_error()}).")
         finally:
             self._winspool.ClosePrinter(handle)
+
+    def _native3d(self) -> Win3DPrinting:
+        if getattr(self, "_win3d", None) is None:
+            self._win3d = Win3DPrinting()
+        return self._win3d
+
+    def capabilities_3d(self, printer: str) -> dict[str, Any] | None:
+        return self._native3d().capabilities(printer)
+
+    def submit_3d(self, printer: str, job_name: str, package: Package3MF) -> None:
+        self._native3d().submit(printer, job_name, package)
 
 
 def device_id(printer: PrinterState) -> str:
@@ -174,6 +194,22 @@ class PendingJobControl:
     decision: PermissionDecision
     request_id: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PendingPrint3D:
+    """The payload of one DEVICE_ACTION approval to hand one exact .3mf to a proven 3D printer."""
+
+    device_id: str
+    printer: str
+    path: Path
+    sha256: str  # "" when the Files gate required approval before the package could be read
+    job_name: str
+    read_request: ActionRequest
+    read_decision: PermissionDecision
+    request: ActionRequest
+    decision: PermissionDecision
+    request_id: str = ""
 
 
 def _start_thread(target: Callable[[], None]) -> None:
@@ -272,6 +308,13 @@ class DeviceHub:
             if not isinstance(pages, str) or not _PAGES.match(pages):
                 raise DeviceHubError("bad_request", "pages must be all or ranges such as 1-3,5")
             return lambda: self._print(device_id_, path, copies, color, pages, data["requestId"])
+        if op == "print3d.request":
+            device_id_ = _device_id(data)
+            path = data.get("path")
+            if not isinstance(path, str) or not path.strip() or len(path) > MAX_PATH_CHARS or "\0" in path \
+                    or not Path(path).is_absolute() or Path(path).suffix.casefold() != ".3mf":
+                raise DeviceHubError("bad_request", "path must be one exact absolute .3mf file path")
+            return lambda: self._prepare_print3d(device_id_, Path(path), data["requestId"])
         if op == "decide":
             approval_id = _approval_id(data)
             secret = data.get("secret")
@@ -289,9 +332,16 @@ class DeviceHub:
         source = self._source()
         devices = []
         for printer in source.printers()[:MAX_DEVICES]:
-            looks_3d = bool(_LOOKS_3D.search(printer.name) or _LOOKS_3D.search(printer.driver))
-            if looks_3d:
-                devices.append(Device(device_id(printer), printer, "3d_printer", {}, (), "3d_workflow_pending"))
+            try:
+                proven_3d = source.capabilities_3d(printer.name)
+            except Exception:  # noqa: BLE001 - an unreadable 3D capability is not proof
+                proven_3d = None
+            if proven_3d:  # the driver itself declares the 3D manufacturing keywords
+                devices.append(Device(device_id(printer), printer, "3d_printer", dict(proven_3d),
+                                      ("print_3d", "jobs_view", "job_control_own")))
+                continue
+            if _LOOKS_3D.search(printer.name) or _LOOKS_3D.search(printer.driver):
+                devices.append(Device(device_id(printer), printer, "3d_printer", {}, (), "3d_capability_unproven"))
                 continue
             try:
                 capabilities = source.capabilities(printer.name, printer.port)
@@ -379,6 +429,8 @@ class DeviceHub:
         except StaleApproval as stale:
             return {"ok": False, "code": "stale_approval", "detail": stale.reason}
         pending = ticket.payload
+        if isinstance(pending, PendingPrint3D):
+            return self._decide_print3d(pending, secret)
         if not isinstance(pending, PendingJobControl):
             return {"ok": False, "code": "stale_approval", "detail": "not a device approval"}
         verdict = self._gate(pending.request)  # the CURRENT policy decides again
@@ -405,7 +457,7 @@ class DeviceHub:
             ticket = self._ledger.take(approval_id, kinds=(ApprovalKind.DEVICE_ACTION,))
         except StaleApproval as stale:
             return {"ok": False, "code": "stale_approval", "detail": stale.reason}
-        if isinstance(ticket.payload, PendingJobControl):
+        if isinstance(ticket.payload, (PendingJobControl, PendingPrint3D)):
             self._record(AuditEvent.DENIED_BY_USER, ticket.payload.request)
         return {"ok": True, "declined": True}
 
@@ -417,6 +469,93 @@ class DeviceHub:
             return {"ok": False, "code": "spooler_refused", "detail": type(error).__name__}
         self._record(AuditEvent.COMPLETED, request, outcome=ActionOutcome.SUCCEEDED)
         return {"ok": True, "status": "done", "deviceId": device.id, "jobId": job.job_id, "command": command}
+
+    # ------------------------------------------------------------ 3D
+
+    def _read_package(self, path: Path, device: Device) -> Package3MF:
+        _checked_3mf(path)
+        try:
+            return read_3mf(path, device.capabilities)
+        except Print3DError as error:
+            raise DeviceHubError(error.code, str(error)) from None
+        except OSError as error:
+            raise DeviceHubError("file_unreadable", type(error).__name__) from None
+
+    def _prepare_print3d(self, device_id_: str, path: Path, request_id: str) -> dict:
+        device = self._device(device_id_)
+        if "print_3d" not in device.workflows:
+            raise DeviceHubError("unsupported", device.unsupported or "this device is not a proven 3D printer")
+        if self._verify_secret is None:
+            raise DeviceHubError("secret_unavailable", "3D printing needs the typed approval secret")
+        _checked_3mf(path)
+        read_request = ActionRequest(
+            category=ActionCategory.READ_NON_SENSITIVE, target=str(path),
+            summary="Read one exact 3MF package to hand to a 3D printer.",
+            parameters={"deviceId": device.id, "reads": "3mf_package"},
+        )
+        read_verdict = self._gate(read_request)  # the Files policy decides before any byte is read
+        if read_verdict.refused:
+            return {"ok": False, "code": "denied", "detail": str(read_verdict.reason)[:200]}
+        package = self._read_package(path, device) if read_verdict.allowed else None
+        request = ActionRequest(
+            category=ActionCategory.DEVICE_CONTROL, target=f"printer:{device.printer.name}/3d",
+            summary="Hand one exact 3MF package to a 3D printer's Windows driver.",
+            parameters={"deviceId": device.id, "file": str(path), "sha256": package.sha256 if package else ""},
+        )
+        verdict = self._gate(request)
+        if verdict.refused:
+            return {"ok": False, "code": "denied", "detail": str(verdict.reason)[:200]}
+        # Physical fabrication: always a single-use approval with the typed secret, whatever the policy allows.
+        job_name = "Qronos 3D " + secrets.token_hex(6)
+        ticket = self._ledger.issue(ApprovalKind.DEVICE_ACTION, f"3D print {path.name}", payload=PendingPrint3D(
+            device.id, device.printer.name, path, package.sha256 if package else "", job_name,
+            read_request, read_verdict.decision, request, verdict.decision, request_id))
+        preview: dict[str, Any] = {"device": device.printer.name, "file": str(path)[:400], "jobName": job_name,
+                                   "buildVolumeMicrons": device.capabilities.get("buildVolumeMicrons")}
+        if package is not None:
+            preview.update({"size": package.size, "sha256": package.sha256, "textures": len(package.textures),
+                            "threeMfVersion": package.model_namespace[:200]})
+        else:
+            preview["readAfterApproval"] = True
+        return {"ok": True, "status": "approval_required", "approvalId": ticket.approval_id, "needsSecret": True,
+                "preview": preview}
+
+    def _decide_print3d(self, pending: PendingPrint3D, secret: str | None) -> dict:
+        read_verdict, verdict = self._gate(pending.read_request), self._gate(pending.request)  # CURRENT policies
+        if read_verdict.refused or verdict.refused:
+            refused = verdict if verdict.refused else read_verdict
+            self._record(AuditEvent.DENIED_BY_USER, pending.request, decision=refused.decision)
+            return {"ok": False, "code": "denied", "detail": str(refused.reason)[:200]}
+        try:
+            verified = self._verify_secret is not None and bool(self._verify_secret(secret or ""))
+        except Exception:  # noqa: BLE001 - an unverifiable secret is a refusal
+            verified = False
+        if not verified:  # the single-use identity is spent; a new request is needed
+            return {"ok": False, "code": "secret_rejected"}
+        self._record(AuditEvent.APPROVED, pending.read_request, decision=read_verdict.decision)
+        self._record(AuditEvent.APPROVED, pending.request, decision=verdict.decision)
+        device = self._device(pending.device_id)
+        if "print_3d" not in device.workflows:  # the driver no longer proves 3D capability
+            return {"ok": False, "code": "capability_gone", "detail": "the device no longer reports 3D printing"}
+        package = self._read_package(pending.path, device)  # read once more: these exact bytes are handed over
+        if pending.sha256 and package.sha256 != pending.sha256:
+            return {"ok": False, "code": "file_changed", "detail": "the file is not the one that was approved"}
+        source = self._source()
+        try:
+            source.submit_3d(device.printer.name, pending.job_name, package)
+        except Exception as error:  # noqa: BLE001 - reported, audited as failed
+            self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.FAILED)
+            code = error.code if isinstance(error, Print3DError) else "spooler_refused"
+            return {"ok": False, "code": code, "detail": str(error)[:200] if isinstance(error, Print3DError)
+                    else type(error).__name__}
+        self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.SUCCEEDED)
+        try:  # the spooler's own job id, when it lists the unique job name; nothing more is claimed
+            job_id = next((job.job_id for job in source.jobs(device.printer.name)
+                           if job.document == pending.job_name), None)
+        except Exception:  # noqa: BLE001 - the handoff happened; the id is optional
+            job_id = None
+        return {"ok": True, "status": "handed_to_spooler", "deviceId": device.id, "jobName": pending.job_name,
+                "jobId": job_id, "sha256": package.sha256, "size": package.size}
 
     def _record(self, event: AuditEvent, request: ActionRequest, *, outcome=None, decision=None) -> None:
         if self._audit is None:
@@ -432,6 +571,23 @@ def _device_id(data: dict) -> str:
     if not isinstance(value, str) or not _DEVICE_ID.match(value):
         raise DeviceHubError("bad_request", "deviceId is malformed")
     return value
+
+
+def _checked_3mf(path: Path) -> None:
+    """One exact regular local .3mf file, not through a link, within the package bound."""
+    if not path.is_absolute() or path.suffix.casefold() != ".3mf":
+        raise DeviceHubError("bad_request", "one exact absolute .3mf file is required")
+    if not path.exists() and not path.is_symlink():
+        raise DeviceHubError("file_missing", "the file does not exist")
+    if _is_link(path) or any(_is_link(parent) for parent in path.parents if parent.exists()):
+        raise DeviceHubError("link_refused", "the file or one of its folders is a link")
+    if not path.is_file():
+        raise DeviceHubError("file_missing", "the file does not exist")
+    size = path.stat().st_size
+    if size == 0:
+        raise DeviceHubError("file_empty", "the file is empty")
+    if size > MAX_PACKAGE_BYTES:
+        raise DeviceHubError("too_large", "the package is too large")
 
 
 def _approval_id(data: dict) -> str:

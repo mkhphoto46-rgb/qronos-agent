@@ -13,6 +13,8 @@ import pytest
 import core.audio_input as audio_input
 import core.audio_output as audio_output
 import core.computer_executor as computer_executor
+import core.device_hub as device_hub
+import core.print3d_native as print3d_native
 import core.print_renderer as print_renderer
 import core.print_workflow as print_workflow
 import core.screen_capture as screen_capture
@@ -53,6 +55,8 @@ LIVE_DEVICE_FUNCTIONS = (
     (print_renderer, "printer_capabilities", "reading a real printer's capabilities"),
     (print_renderer, "job_devmode", "opening a real printer's settings"),
     (print_renderer, "_create_printer_dc", "opening a real printer device context"),
+    (device_hub, "WinDeviceSpooler", "reading or driving the real print spooler and drivers (Device Hub)"),
+    (print3d_native, "Win3DPrinting", "reading or driving a real 3D printer's driver"),
 )
 # Child processes that read the GPU or run local inference.
 LIVE_DEVICE_EXECUTABLES = frozenset({

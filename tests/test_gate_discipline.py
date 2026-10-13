@@ -66,6 +66,8 @@ NATIVE_BACKENDS = {
     "core.windows_accessibility_mutation": frozenset({"core.accessibility_action_executor"}),
     # GDI/GDI+/Windows.Data.Pdf print renderer: only the gated print workflow.
     "core.print_renderer": frozenset({"core.print_workflow"}),
+    # Print Ticket capabilities and the Windows 3D manufacturing package path: only the gated Device Hub.
+    "core.print3d_native": frozenset({"core.device_hub"}),
 }
 
 # Modules that legitimately touch these without being action executors, with
@@ -295,6 +297,7 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
                     self.assertIn(name, callers, f"{name} bypasses the reviewed {backend} callers")
                     guard = "security.gate" if name in {
                         "core.computer_executor", "core.accessibility_action_executor", "core.print_workflow",
+                        "core.device_hub",
                     } else "core.input_safety"
                     self.assertIn(guard, imports, f"{name} lost its action guard")
 

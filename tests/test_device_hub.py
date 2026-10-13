@@ -4,6 +4,7 @@ Only a recording fake spooler/driver: no real printer is enumerated, no job is t
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -18,7 +19,9 @@ from core.actions import ActionOutcome
 from core.approval_ledger import ApprovalKind, ApprovalLedger
 from core.print_workflow import PrinterState, PrintJobState
 from security.gate import Verdict
-from security.permissions import PermissionDecision
+from security.permissions import ActionCategory, PermissionDecision
+from tests.threemf_fixture import (CORE_2013, CORE_2015, MATERIAL_EXT, REL_MODEL, model_xml,
+                                  relationships, write_3mf)
 
 USER = "amina"
 
@@ -33,7 +36,13 @@ class FakeSpooler:
             PrinterState("\\\\server\\Floor2", "IP_10.0.0.9", "Canon Generic PCL6", 0x80, 0x10, 0),
             PrinterState("Prusa 3D", "USB002", "Microsoft 3D Print Driver", 0, 0x40, 0),
             PrinterState("Odd Queue", "LPT1", "Broken Driver", 0, 0x40, 0),
+            PrinterState("Workshop", "USB003", "Vendor Additive Driver", 0, 0x40, 0),  # no "3D" anywhere
         ]
+        self.proven_3d = {"Workshop": {
+            "buildVolumeMicrons": {"width": 250000, "depth": 210000, "height": 220000},
+            "threeMfVersion": CORE_2015, "threeMfExtensions": [MATERIAL_EXT]}}
+        self.submitted: list[tuple] = []
+        self.submit_error: Exception | None = None
         self.capability = {
             "Office Laser": {"copiesMax": 9, "color": False, "duplex": True, "collate": True,
                              "paperSizes": ["A4", "Letter"]},
@@ -62,6 +71,20 @@ class FakeSpooler:
 
     def current_user(self):
         return USER
+
+    def capabilities_3d(self, printer):
+        self.calls.append(("capabilities_3d", printer))
+        if printer == "Odd Queue":
+            raise OSError("Print Ticket provider did not answer")
+        found = self.proven_3d.get(printer)
+        return dict(found) if found else None
+
+    def submit_3d(self, printer, job_name, package):
+        self.calls.append(("submit_3d", printer, job_name))
+        if self.submit_error is not None:
+            raise self.submit_error
+        self.submitted.append((printer, job_name, package))
+        self.job_list.setdefault(printer, []).append(PrintJobState(41, job_name, USER, 0x8, 0, 0))
 
 
 def policy(decision: PermissionDecision):
@@ -107,11 +130,13 @@ def test_the_inventory_is_the_spoolers_devices_with_driver_capabilities_and_hone
     assert laser["capabilities"]["copiesMax"] == 9 and laser["capabilities"]["color"] is False
     assert laser["workflows"] == ["print_document", "jobs_view", "job_control_own"]
     assert floor2["connection"] == "network" and floor2["status"]["ready"] is False  # offline bit set
-    assert prusa["kind"] == "3d_printer" and prusa["workflows"] == [] and prusa["unsupported"] == "3d_workflow_pending"
-    assert ("capabilities", "Prusa 3D", "USB002") not in world.spooler.calls  # nothing claimed for 3D
+    # A 3D-looking name without driver proof: not a 3D workflow, and never document printing either.
+    assert prusa["kind"] == "3d_printer" and prusa["workflows"] == [] and prusa["unsupported"] == \
+        "3d_capability_unproven" and prusa["capabilities"] == {}
+    assert ("capabilities", "Prusa 3D", "USB002") not in world.spooler.calls
     assert odd["unsupported"] == "driver_capabilities_unreadable" and "print_document" not in odd["workflows"]
     kinds = {item["kind"] for item in answer["unsupportedClasses"]}
-    assert {"3d_printer", "scanner", "camera", "other_local_device"} <= kinds
+    assert {"scanner", "camera", "other_local_device"} <= kinds and "3d_printer" not in kinds
 
 
 def test_a_device_id_is_stable_for_the_same_queue_and_changes_when_the_queue_changes():
@@ -218,6 +243,166 @@ def test_printing_goes_through_the_reviewed_print_step_within_the_devices_limits
     assert len(world.prints) == 1
 
 
+# ------------------------------------------------------------ 3D printers, proven by their driver
+
+def policy_by(decisions: dict, default: PermissionDecision = PermissionDecision.ALLOW):
+    """A fixture policy per category (the Files read and the device change are decided separately)."""
+    def evaluate(request, audit=None):
+        return policy(decisions.get(request.category, default))(request, audit)
+    return evaluate
+
+
+def handed(world) -> list:
+    return [c for c in world.spooler.calls if c[0] == "submit_3d"]
+
+
+def audit_rows(world) -> list[tuple]:
+    return [(r.event, r.category, r.target, r.outcome) for r in world.audit.records()]
+
+
+def test_3d_capability_comes_from_the_driver_not_from_the_name(world):
+    found = devices(world)
+    workshop = found["Workshop"]
+    assert workshop["kind"] == "3d_printer" and workshop["workflows"] == ["print_3d", "jobs_view", "job_control_own"]
+    assert workshop["capabilities"]["buildVolumeMicrons"] == {"width": 250000, "depth": 210000, "height": 220000}
+    assert workshop["capabilities"]["threeMfVersion"] == CORE_2015 and workshop["unsupported"] == ""
+    assert ("capabilities", "Workshop", "USB003") not in world.spooler.calls  # no 2D document path for it
+    assert "print_3d" not in found["Prusa 3D"]["workflows"] and "print_3d" not in found["Office Laser"]["workflows"]
+    assert found["Odd Queue"]["kind"] == "printer"  # an unreadable 3D answer is not proof
+    assert ask(world, "print.request", "q1", deviceId=workshop["id"], path="C:\\a.pdf")["code"] == "unsupported"
+    assert world.prints == []
+
+
+def test_3d_requests_are_validated_and_only_a_proven_3d_device_accepts_them(world, tmp_path):
+    found = devices(world)
+    package = write_3mf(tmp_path / "part.3mf")
+    (tmp_path / "empty.3mf").write_bytes(b"")
+    workshop = found["Workshop"]["id"]
+    for request_id, fields, code in (
+        ("v1", {"deviceId": workshop, "path": "part.3mf"}, "bad_request"),
+        ("v2", {"deviceId": workshop, "path": str(tmp_path / "part.stl")}, "bad_request"),
+        ("v3", {"deviceId": workshop, "path": str(tmp_path / "missing.3mf")}, "file_missing"),
+        ("v4", {"deviceId": workshop, "path": str(tmp_path / "empty.3mf")}, "file_empty"),
+        ("v5", {"deviceId": found["Prusa 3D"]["id"], "path": str(package)}, "unsupported"),
+        ("v6", {"deviceId": found["Office Laser"]["id"], "path": str(package)}, "unsupported"),
+        ("v7", {"deviceId": "prn-" + "e" * 20, "path": str(package)}, "device_gone"),
+    ):
+        assert ask(world, "print3d.request", request_id, **fields)["code"] == code, request_id
+    world.state["paused"] = True
+    assert ask(world, "print3d.request", "v8", deviceId=workshop, path=str(package))["code"] == "paused"
+    assert handed(world) == [] and world.hub._ledger.open_tickets() == ()
+
+
+def test_a_3mf_is_handed_over_only_after_the_typed_secret_and_never_claimed_as_printed(world, tmp_path):
+    workshop = devices(world)["Workshop"]
+    package = write_3mf(tmp_path / "bracket.3mf", textures={"/3D/Textures/skin.png": b"\x89PNG fixture"})
+    digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    pending = ask(world, "print3d.request", "t1", deviceId=workshop["id"], path=str(package))  # the policy allows
+    assert pending["status"] == "approval_required" and pending["needsSecret"] is True  # always, for 3D
+    preview = pending["preview"]
+    assert (preview["device"], preview["textures"], preview["threeMfVersion"], preview["sha256"]) == (
+        "Workshop", 1, CORE_2015, digest)
+    assert preview["buildVolumeMicrons"]["height"] == 220000 and handed(world) == []
+    assert ask(world, "decide", "t2", approvalId=pending["approvalId"], approved=True,
+               secret="wrong horse")["code"] == "secret_rejected"
+    assert ask(world, "decide", "t3", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "stale_approval"  # single use, also after a wrong secret
+    assert handed(world) == []
+    pending = ask(world, "print3d.request", "t4", deviceId=workshop["id"], path=str(package))
+    done = ask(world, "decide", "t5", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert done["status"] == "handed_to_spooler" and done["jobName"] == pending["preview"]["jobName"]
+    assert done["jobId"] == 41 and done["sha256"] == digest and "printed" not in json.dumps(done)
+    (printer, job_name, sent), = world.spooler.submitted
+    assert printer == "Workshop" and job_name == done["jobName"] and job_name.startswith("Qronos 3D ")
+    assert sent.model == model_xml() and sent.textures == (("/3D/Textures/skin.png", b"\x89PNG fixture"),)
+    rows = audit_rows(world)
+    assert any(r[:3] == (AuditEvent.APPROVED, "read_non_sensitive", str(package)) for r in rows)
+    assert (AuditEvent.COMPLETED, "device_control", "printer:Workshop/3d", "succeeded") in rows
+    assert "correct horse" not in json.dumps(world.events) and "wrong horse" not in json.dumps(world.events)
+    third = ask(world, "print3d.request", "t6", deviceId=workshop["id"], path=str(package))
+    assert ask(world, "decline", "t7", approvalId=third["approvalId"])["declined"] is True
+    assert any(r[:3] == (AuditEvent.DENIED_BY_USER, "device_control", "printer:Workshop/3d") for r in audit_rows(world))
+    assert len(handed(world)) == 1
+
+
+def test_the_files_gate_decides_before_any_byte_is_read_and_both_policies_decide_again(world, tmp_path, monkeypatch):
+    workshop = devices(world)["Workshop"]["id"]
+    package = write_3mf(tmp_path / "part.3mf")
+    reads: list[Path] = []
+    real_read = hub_module.read_3mf
+    monkeypatch.setattr(hub_module, "read_3mf", lambda path, caps=None: reads.append(Path(path)) or real_read(path, caps))
+    monkeypatch.setattr(gate_module, "evaluate", policy_by({ActionCategory.READ_NON_SENSITIVE: PermissionDecision.DENY}))
+    assert ask(world, "print3d.request", "g1", deviceId=workshop, path=str(package))["code"] == "denied"
+    assert reads == [] and world.hub._ledger.open_tickets() == ()
+    monkeypatch.setattr(gate_module, "evaluate", policy_by({ActionCategory.DEVICE_CONTROL: PermissionDecision.DENY}))
+    assert ask(world, "print3d.request", "g2", deviceId=workshop, path=str(package))["code"] == "denied"
+    assert world.hub._ledger.open_tickets() == ()
+    reads.clear()
+    monkeypatch.setattr(gate_module, "evaluate", policy_by(
+        {ActionCategory.READ_NON_SENSITIVE: PermissionDecision.REQUIRE_UI_CONFIRMATION}))
+    pending = ask(world, "print3d.request", "g3", deviceId=workshop, path=str(package))
+    assert pending["preview"]["readAfterApproval"] is True and "sha256" not in pending["preview"] and reads == []
+    done = ask(world, "decide", "g4", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert done["status"] == "handed_to_spooler" and reads == [package]
+    again = ask(world, "print3d.request", "g5", deviceId=workshop, path=str(package))
+    monkeypatch.setattr(gate_module, "evaluate", policy_by({ActionCategory.DEVICE_CONTROL: PermissionDecision.DENY}))
+    assert ask(world, "decide", "g6", approvalId=again["approvalId"], approved=True,
+               secret="correct horse")["code"] == "denied"  # tightened while the approval was open
+    assert len(handed(world)) == 1
+
+
+def test_a_changed_package_or_a_lost_3d_capability_is_refused_at_the_answer(world, tmp_path):
+    workshop = devices(world)["Workshop"]["id"]
+    package = write_3mf(tmp_path / "part.3mf")
+    pending = ask(world, "print3d.request", "c1", deviceId=workshop, path=str(package))
+    write_3mf(package, extra={"Metadata/note.txt": b"changed after the approval"})
+    assert ask(world, "decide", "c2", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "file_changed"
+    pending = ask(world, "print3d.request", "c3", deviceId=workshop, path=str(package))
+    world.spooler.proven_3d.clear()  # the driver no longer declares the 3D keywords
+    assert ask(world, "decide", "c4", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "capability_gone"
+    assert handed(world) == []
+
+
+def test_the_package_must_match_the_printers_declared_3mf_version_and_extensions(world, tmp_path):
+    workshop = devices(world)["Workshop"]["id"]
+    beam = {"b": "http://schemas.microsoft.com/3dmanufacturing/beamlattice/2017/02"}
+    twice = relationships((REL_MODEL, "/3D/3dmodel.model"), (REL_MODEL, "/3D/3dmodel.model"))
+    cases = (
+        ("x1", write_3mf(tmp_path / "old.3mf", model=model_xml(CORE_2013)), "incompatible_3mf_version"),
+        ("x2", write_3mf(tmp_path / "beam.3mf", model=model_xml(extensions=beam, required="b")),
+         "unsupported_3mf_extension"),
+        ("x3", write_3mf(tmp_path / "twice.3mf", root_rels=twice), "bad_package"),
+    )
+    for request_id, package, code in cases:
+        assert ask(world, "print3d.request", request_id, deviceId=workshop, path=str(package))["code"] == code
+    (tmp_path / "broken.3mf").write_bytes(b"not a zip")
+    assert ask(world, "print3d.request", "x4", deviceId=workshop, path=str(tmp_path / "broken.3mf"))["code"] == \
+        "bad_package"
+    colour = write_3mf(tmp_path / "colour.3mf", model=model_xml(extensions={"m": MATERIAL_EXT}, required="m"))
+    assert ask(world, "print3d.request", "x5", deviceId=workshop, path=str(colour))["status"] == "approval_required"
+    assert handed(world) == []
+
+
+def test_a_driver_refusal_is_reported_and_audited_as_failed_and_no_secret_means_no_3d(world, tmp_path):
+    from core.print3d_native import Print3DError
+
+    workshop = devices(world)["Workshop"]["id"]
+    package = write_3mf(tmp_path / "part.3mf")
+    for request_id, error, code in (("f1", Print3DError("not_3d_target", "no 3D package target"), "not_3d_target"),
+                                    ("f3", OSError("spooler"), "spooler_refused")):
+        world.spooler.submit_error = error
+        pending = ask(world, "print3d.request", request_id, deviceId=workshop, path=str(package))
+        failed = ask(world, "decide", request_id + "d", approvalId=pending["approvalId"], approved=True,
+                     secret="correct horse")
+        assert failed["ok"] is False and failed["code"] == code
+    assert (AuditEvent.COMPLETED, "device_control", "printer:Workshop/3d", "failed") in audit_rows(world)
+    assert world.spooler.submitted == []
+    world.hub._verify_secret = None
+    assert ask(world, "print3d.request", "f5", deviceId=workshop, path=str(package))["code"] == "secret_unavailable"
+
+
 # ------------------------------------------------------------ the real bridge lifecycle with a pending device approval
 
 @pytest.fixture
@@ -284,3 +469,19 @@ def test_a_device_approval_sent_as_a_file_decision_is_refused_and_left_for_the_h
     assert stale and stale[-1]["reason"] == "wrong_kind" and len(runtime._approvals.open_tickets()) == 1
     done = hub_action(runtime, events, "b4", op="decide", approvalId=approval, approved=True)
     assert done["status"] == "done" and ("control", "Office Laser", 7, hub_module.JOB_CONTROL_DELETE) in spooler.calls
+
+
+def test_pause_revokes_a_pending_3d_approval_and_nothing_is_handed_over(runtime_with_hub, tmp_path):
+    runtime, events, spooler = runtime_with_hub
+    workshop = next(d for d in hub_action(runtime, events, "w1", op="devices.list")["devices"]
+                    if d["name"] == "Workshop")
+    package = write_3mf(tmp_path / "part.3mf")
+    pending = hub_action(runtime, events, "w2", op="print3d.request", deviceId=workshop["id"], path=str(package))
+    assert pending["status"] == "approval_required" and pending["preview"]["readAfterApproval"] is True
+    assert [t.kind for t in runtime._approvals.open_tickets()] == [ApprovalKind.DEVICE_ACTION]
+    runtime.set_runtime_paused(True)
+    runtime.set_runtime_paused(False)
+    assert runtime._approvals.open_tickets() == ()
+    late = hub_action(runtime, events, "w3", op="decide", approvalId=pending["approvalId"], approved=True,
+                      secret="anything")
+    assert late["code"] == "stale_approval" and spooler.submitted == []
