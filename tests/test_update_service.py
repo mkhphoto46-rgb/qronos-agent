@@ -285,6 +285,23 @@ def test_the_fingerprint_changes_when_a_layout_changes():
     assert before == update_stores.ddl_fingerprint('X = """CREATE   TABLE t\n (a TEXT)"""')
 
 
+def test_the_media_index_entry_is_what_a_fresh_store_writes_and_changing_it_stays_refused(world, tmp_path):
+    from qronos_media.store import MediaStore
+
+    store = MediaStore(tmp_path / "media-index.sqlite3")  # a private fixture file, never the person's store
+    try:
+        written = int(store.get_meta("schema_version"))
+    finally:
+        store.close()
+    spec = update_stores.STORE_BY_ID["media_index"]
+    assert written == spec.version == BASE.stores["media_index"]  # the build declares the format it writes
+    assert spec.reads_from == 1 and spec.snapshot is None  # older files still migrate forward; never copied raw
+    with pytest.raises(UpdateError) as refused:
+        world.service().verify(*world.release("0.2.0", dataStores=stores(media_index=spec.version + 1)))
+    assert refused.value.code == "unsupported_migration"
+    assert world.authorizer.asked == []
+
+
 # ------------------------------------------------------- payload schema 2 rules
 
 
