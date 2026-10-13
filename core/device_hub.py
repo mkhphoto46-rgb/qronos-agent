@@ -42,6 +42,8 @@ from core.action_audit import ActionAuditLog, AuditEvent
 from core.actions import ActionOutcome, ActionRequest
 from core.approval_ledger import ApprovalKind, ApprovalLedger, StaleApproval
 from core.power_wake import PowerWakeError, WakeCapability, default_power
+from core.wia_imaging import (FORMATS as IMAGE_FORMATS, ImagingDevice, ImagingError, check_destination,
+                              default_imaging, finalize_scan, new_staging, remove_staging)
 from core.print3d_native import MAX_PACKAGE_BYTES, Package3MF, Print3DError, Win3DPrinting, read_3mf
 from core.print_workflow import PrinterState, PrintJobState, SpoolerUnavailable, WinSpooler, _is_link
 import security.gate as security_gate  # every job change reaches the permission gate
@@ -61,9 +63,16 @@ MAX_JOBS = 100
 MAX_PAPER_NAMES = 32
 
 OPS = frozenset({"devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "wake.status",
-                 "wake.schedule", "wake.cancel", "decide",
+                 "wake.schedule", "wake.cancel", "imaging.list", "image.capture", "decide",
                  "decline"})
-READ_OPS = frozenset({"devices.list", "device.jobs", "wake.status", "decline"})
+READ_OPS = frozenset({"devices.list", "device.jobs", "wake.status", "imaging.list", "decline"})
+_IMAGING_ID = re.compile(r"^img-[0-9a-f]{20}$")
+#: Imaging devices WIA 2.0 lists but this path does not drive (truthful; never captured).
+IMAGING_UNSUPPORTED = {"camera": "wia_camera_not_supported", "video": "webcam_not_supported",
+                       "other": "not_supported"}
+#: What a scan here is and is not (stable codes; Persian text in the desktop).
+SCAN_LIMITS = ("scanners_only_via_wia", "windows_dialog_drives_the_scan", "one_page_one_new_file",
+               "no_overwrite_no_links", "metadata_not_copied", "no_camera_webcam_or_phone_capture")
 
 # Wake THIS PC from sleep (H3): a hardware wake timer, never a voice wake or a network packet.
 WAKE_TARGET = "power:this-pc/wake-timer"
@@ -87,8 +96,8 @@ _JOB_STATUS = {0x1: "paused", 0x2: "error", 0x4: "deleting", 0x8: "spooling", 0x
 
 #: Device classes this Device Hub does not drive yet (truthful; no fake capability).
 UNSUPPORTED_CLASSES: tuple[dict[str, str], ...] = (
-    {"kind": "scanner", "reason": "not_supported_yet", "detail": "اسکنر هنوز پشتیبانی نمی‌شود."},
-    {"kind": "camera", "reason": "not_supported_yet", "detail": "دوربین از این بخش کنترل نمی‌شود."},
+    {"kind": "camera", "reason": "not_supported_yet",
+     "detail": "دوربین عکاسی (WIA 1.0/MTP)، وب‌کم و گوشی از این بخش ضبط یا کنترل نمی‌شوند؛ فقط اسکنرهای WIA."},
     {"kind": "other_local_device", "reason": "not_supported_yet",
      "detail": "دستگاه‌های محلیِ دیگر هنوز در Device Hub پشتیبانی نمی‌شوند."},
 )
@@ -243,6 +252,22 @@ class PendingPrint3D:
 
 
 @dataclass(frozen=True)
+class PendingScan:
+    """The payload of one DEVICE_ACTION approval to scan one page into one new image file."""
+
+    device_id: str
+    wia_id: str
+    name: str
+    destination: Path
+    fmt: str
+    device_request: ActionRequest
+    device_decision: PermissionDecision
+    file_request: ActionRequest
+    file_decision: PermissionDecision
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
 class PendingWake:
     """The payload of one DEVICE_ACTION approval to arm a wake timer on this PC."""
 
@@ -279,6 +304,7 @@ class DeviceHub:
         evaluate: Callable[..., Any] | None = None,
         run_async: Callable[[Callable[[], None]], None] = _start_thread,
         power: Callable[[], Any] = default_power,
+        imaging: Callable[[], Any] = default_imaging,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._source = source
@@ -292,6 +318,7 @@ class DeviceHub:
         self._run_async = run_async
         self._lock = threading.Lock()  # one spooler conversation at a time
         self._power_factory, self._power, self._now = power, None, now
+        self._imaging_factory, self._imaging = imaging, None
         self._wake_lock = threading.Lock()
         self._armed: Any = None
         self._wake_info: dict[str, Any] | None = None
@@ -371,6 +398,17 @@ class DeviceHub:
                     or not Path(path).is_absolute() or Path(path).suffix.casefold() != ".3mf":
                 raise DeviceHubError("bad_request", "path must be one exact absolute .3mf file path")
             return lambda: self._prepare_print3d(device_id_, Path(path), data["requestId"])
+        if op == "imaging.list":
+            return self._imaging_list
+        if op == "image.capture":
+            value = data.get("deviceId")
+            if not isinstance(value, str) or not _IMAGING_ID.match(value):
+                raise DeviceHubError("bad_request", "deviceId is malformed")
+            path = data.get("destination")
+            if not isinstance(path, str) or not path.strip() or len(path) > MAX_PATH_CHARS or "\0" in path \
+                    or not Path(path).is_absolute():
+                raise DeviceHubError("bad_request", "destination must be one exact absolute image path")
+            return lambda: self._prepare_scan(value, Path(path), data["requestId"])
         if op == "wake.status":
             return self._wake_status
         if op == "wake.schedule":
@@ -501,6 +539,8 @@ class DeviceHub:
             return self._decide_wake(pending, secret, epoch)
         if isinstance(pending, PendingWakeCancel):
             return self._decide_wake_cancel(pending, secret)
+        if isinstance(pending, PendingScan):
+            return self._decide_scan(pending, secret, epoch)
         if not isinstance(pending, PendingJobControl):
             return {"ok": False, "code": "stale_approval", "detail": "not a device approval"}
         verdict = self._gate(pending.request)  # the CURRENT policy decides again
@@ -529,6 +569,8 @@ class DeviceHub:
             return {"ok": False, "code": "stale_approval", "detail": stale.reason}
         if isinstance(ticket.payload, (PendingJobControl, PendingPrint3D, PendingWake, PendingWakeCancel)):
             self._record(AuditEvent.DENIED_BY_USER, ticket.payload.request)
+        elif isinstance(ticket.payload, PendingScan):
+            self._record(AuditEvent.DENIED_BY_USER, ticket.payload.device_request)
         return {"ok": True, "declined": True}
 
     def _run_job_control(self, device: Device, job: PrintJobState, command: str, request: ActionRequest) -> dict:
@@ -800,6 +842,115 @@ class DeviceHub:
                 self._wake_info.update({"state": "fired", "firedAtUtc": payload.get("firedAtUtc")})
         self._emit(WAKE_EVENT, "ready", {"event": name, **{k: payload[k] for k in ("wakeId", "firedAtUtc",
                                                                                   "stayAwakeMinutes") if k in payload}})
+
+    # ------------------------------------------------------------ scan to ONE exact new image file (H1, WIA 2.0)
+
+    def _imaging_layer(self) -> Any:
+        if self._imaging is None:
+            try:
+                self._imaging = self._imaging_factory()
+            except ImagingError as error:
+                raise DeviceHubError("scan_" + error.code, str(error)) from None
+        return self._imaging
+
+    def _imaging_devices(self) -> list[ImagingDevice]:
+        try:
+            return list(self._imaging_layer().list_devices())[:MAX_DEVICES]
+        except ImagingError as error:
+            raise DeviceHubError("scan_" + error.code, str(error)) from None
+
+    def _imaging_list(self) -> dict:
+        devices = []
+        for device in self._imaging_devices():
+            unsupported = "" if device.kind == "scanner" else IMAGING_UNSUPPORTED.get(device.kind, "not_supported")
+            devices.append({"id": device.device_id, "name": device.name[:200], "vendor": device.vendor[:200],
+                            "description": device.description[:200], "kind": device.kind,
+                            "workflows": ["scan_to_file"] if not unsupported else [], "unsupported": unsupported})
+        return {"ok": True, "devices": devices, "formats": sorted(set(IMAGE_FORMATS)), "limits": list(SCAN_LIMITS)}
+
+    def _scanner(self, device_id_: str) -> ImagingDevice:
+        found = [d for d in self._imaging_devices() if d.device_id == device_id_]
+        if not found:
+            raise DeviceHubError("device_gone", "the scanner is no longer listed by Windows")
+        if found[0].kind != "scanner":
+            raise DeviceHubError("unsupported", IMAGING_UNSUPPORTED.get(found[0].kind, "not_supported"))
+        return found[0]
+
+    @staticmethod
+    def _checked_destination(destination: Path) -> str:
+        try:
+            return check_destination(destination)
+        except ImagingError as error:
+            raise DeviceHubError(error.code, str(error)) from None
+
+    def _prepare_scan(self, device_id_: str, destination: Path, request_id: str) -> dict:
+        if self._verify_secret is None:
+            raise DeviceHubError("secret_unavailable", "scanning needs the typed approval secret")
+        fmt = self._checked_destination(destination)
+        scanner = self._scanner(device_id_)
+        device_request = ActionRequest(
+            category=ActionCategory.DEVICE_CONTROL, target=f"imaging:{scanner.name[:120]}/scan",
+            summary="Scan one page with a Windows WIA scanner (its own dialog) into one new image file.",
+            parameters={"deviceId": scanner.device_id})
+        file_request = ActionRequest(
+            category=ActionCategory.CREATE_OR_EDIT_FILE, target=str(destination),
+            summary="Create one new image file from a scan.", parameters={"writes": "scanned_image", "format": fmt})
+        device_verdict, file_verdict = self._gate(device_request), self._gate(file_request)
+        refused = device_verdict if device_verdict.refused else file_verdict if file_verdict.refused else None
+        if refused is not None:
+            return {"ok": False, "code": "denied", "detail": str(refused.reason)[:200]}
+        # A device that captures what is on the glass, plus a new file: always single use + the typed secret.
+        ticket = self._ledger.issue(ApprovalKind.DEVICE_ACTION, f"scan to {destination.name}", payload=PendingScan(
+            scanner.device_id, scanner.wia_id, scanner.name, destination, fmt, device_request, device_verdict.decision,
+            file_request, file_verdict.decision, request_id))
+        return {"ok": True, "status": "approval_required", "approvalId": ticket.approval_id, "needsSecret": True,
+                "preview": {"action": "scan", "device": scanner.name[:200], "file": str(destination)[:400],
+                            "format": fmt, "limits": list(SCAN_LIMITS)}}
+
+    def _decide_scan(self, pending: "PendingScan", secret: str | None, epoch: int) -> dict:
+        device_verdict, file_verdict = self._gate(pending.device_request), self._gate(pending.file_request)
+        if device_verdict.refused or file_verdict.refused:
+            refused = device_verdict if device_verdict.refused else file_verdict
+            self._record_policy_refusal(pending.device_request, PermissionDecision.REQUIRE_TYPED_SECRET)
+            return {"ok": False, "code": "denied", "detail": str(refused.reason)[:200]}
+        if not self._secret_ok(secret):
+            return {"ok": False, "code": "secret_rejected"}
+        self._record(AuditEvent.APPROVED, pending.device_request, decision=device_verdict.decision)
+        self._record(AuditEvent.APPROVED, pending.file_request, decision=file_verdict.decision)
+        if self._wake_stopped_since(epoch):  # Pause/Stop/shutdown came after the request was taken
+            self._record(AuditEvent.COMPLETED, pending.device_request, outcome=ActionOutcome.REFUSED)
+            return {"ok": False, "code": "paused", "detail": "Qronos was paused or stopped; nothing was scanned"}
+        scanner = self._scanner(pending.device_id)
+        if scanner.wia_id != pending.wia_id:
+            return {"ok": False, "code": "device_gone", "detail": "the scanner is not the one that was approved"}
+        self._checked_destination(pending.destination)
+        if self._wake_stopped_since(epoch):  # checked again right before Windows' dialog would open
+            self._record(AuditEvent.COMPLETED, pending.device_request, outcome=ActionOutcome.REFUSED)
+            return {"ok": False, "code": "paused", "detail": "Qronos was paused or stopped; nothing was scanned"}
+        staging = new_staging()
+        try:
+            try:
+                staged = self._imaging_layer().acquire(pending.wia_id, staging)  # Windows' own WIA dialog
+            except ImagingError as error:
+                self._record(AuditEvent.COMPLETED, pending.device_request, outcome=ActionOutcome.FAILED)
+                return {"ok": False, "code": "scan_" + error.code, "detail": str(error)[:200]}
+            if not staged:
+                self._record(AuditEvent.COMPLETED, pending.device_request, outcome=ActionOutcome.REFUSED)
+                return {"ok": False, "code": "scan_cancelled", "detail": "the scan was cancelled; nothing was written"}
+            if self._wake_stopped_since(epoch):  # Pause/Stop came while the dialog was open: keep nothing
+                self._record(AuditEvent.COMPLETED, pending.device_request, outcome=ActionOutcome.REFUSED)
+                return {"ok": False, "code": "paused",
+                        "detail": "Qronos was paused or stopped during the scan; nothing was written"}
+            try:
+                saved = finalize_scan(staged, staging, pending.destination)
+            except ImagingError as error:
+                self._record(AuditEvent.COMPLETED, pending.file_request, outcome=ActionOutcome.FAILED)
+                return {"ok": False, "code": error.code, "detail": str(error)[:200]}
+        finally:
+            remove_staging(staging)
+        self._record(AuditEvent.COMPLETED, pending.device_request, outcome=ActionOutcome.SUCCEEDED)
+        self._record(AuditEvent.COMPLETED, pending.file_request, outcome=ActionOutcome.SUCCEEDED)
+        return {"ok": True, "status": "saved", "deviceId": pending.device_id, **saved}
 
     def _wake_stopped_since(self, epoch: int) -> bool:
         if self._paused():

@@ -43,6 +43,8 @@ EXPECTED_LIVE_NODES = frozenset({
     "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_a_real_burst_costs_one_read",
     "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_invalidating_does_not_pay_for_accuracy_again",
     "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_the_first_real_reading_is_structurally_valid",
+    # Lists this computer's real WIA imaging devices (read-only; no scan).
+    "tests/test_wia_imaging.py::test_windows_wia_lists_imaging_devices_read_only",
     # Reads this computer's real printer list.
     "tests/test_print_workflow.py::test_windows_spooler_reads_printers_without_side_effects",
     # The production supervisor entry with the real bridge and production

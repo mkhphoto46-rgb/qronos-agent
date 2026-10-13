@@ -21,6 +21,7 @@ from core.approval_ledger import ApprovalKind, ApprovalLedger
 from core.print_workflow import PrinterState, PrintJobState
 from core import power_wake
 from core.power_wake import ArmResult, WakeCapability
+from core.wia_imaging import ImagingDevice
 from security.gate import Verdict
 from security.permissions import ActionCategory, PermissionDecision
 from tests.threemf_fixture import (CORE_2013, CORE_2015, MATERIAL_EXT, REL_MODEL, model_xml,
@@ -142,7 +143,8 @@ def test_the_inventory_is_the_spoolers_devices_with_driver_capabilities_and_hone
     assert ("capabilities", "Prusa 3D", "USB002") not in world.spooler.calls
     assert odd["unsupported"] == "driver_capabilities_unreadable" and "print_document" not in odd["workflows"]
     kinds = {item["kind"] for item in answer["unsupportedClasses"]}
-    assert {"scanner", "camera", "other_local_device"} <= kinds and "3d_printer" not in kinds
+    assert {"camera", "other_local_device"} <= kinds and "3d_printer" not in kinds
+    assert "scanner" not in kinds  # WIA 2.0 scanners are supported now (imaging.list)
 
 
 def test_a_device_id_is_stable_for_the_same_queue_and_changes_when_the_queue_changes():
@@ -712,6 +714,159 @@ def test_b2_a_fired_wake_still_holding_the_system_awake_is_live_until_pause_or_c
     power.armed[1].thread.join(5)
     assert not power.armed[1].thread.is_alive() and power.apis[1].states[-1] == power_wake.ES_CONTINUOUS
     assert all(thread_dead for thread_dead in (not a.thread.is_alive() for a in power.armed))
+
+
+# ------------------------------------------------------------ scan to ONE exact new image file (WIA 2.0 scanners)
+
+SCANNER = ImagingDevice("{6BDD1FC6-810F-11D0-BEC7-08002BE2092F}\\0000", "Office Scanner", "Acme", "A4", "scanner")
+CAMERA = ImagingDevice("{6BDD1FC6-810F-11D0-BEC7-08002BE2092F}\\0001", "Old Camera", "Cam Co", "WIA 1", "camera")
+WEBCAM = ImagingDevice("{6BDD1FC6-810F-11D0-BEC7-08002BE2092F}\\0002", "Webcam", "Cam Co", "video", "video")
+
+
+class FakeImaging:
+    """Stands for core/wia_imaging.WinWia: records listings and scans; a scan writes a synthetic page."""
+
+    def __init__(self) -> None:
+        self.devices = [SCANNER, CAMERA, WEBCAM]
+        self.calls: list[tuple] = []
+        self.stagings: list[Path] = []
+        self.during_scan = None  # a hook: what happens while Windows' dialog is open
+        self.page = "png"
+
+    def list_devices(self):
+        self.calls.append(("list",))
+        return list(self.devices)
+
+    def acquire(self, wia_id, staging):
+        self.calls.append(("acquire", wia_id))
+        self.stagings.append(Path(staging))
+        if self.page is None:
+            return []  # cancelled in the dialog
+        target = Path(staging) / "qronos-scan.png"
+        if self.page == "garbage":
+            target.write_bytes(b"not an image at all")
+        else:
+            from PIL import Image
+
+            Image.new("RGB", (64, 48), (250, 250, 240)).save(target, format="PNG")
+        if self.during_scan:
+            self.during_scan()
+        return [str(target)]
+
+
+@pytest.fixture
+def scan(world):
+    imaging = FakeImaging()
+    world.hub._imaging_factory = lambda: imaging
+    world.imaging = imaging
+    return world
+
+
+def scanner_id(world) -> str:
+    return next(d["id"] for d in ask(world, "imaging.list", f"il{len(world.events)}")["devices"]
+                if d["kind"] == "scanner")
+
+
+def scans(world) -> list:
+    return [c for c in world.imaging.calls if c[0] == "acquire"]
+
+
+def test_only_wia_scanners_are_offered_and_cameras_webcams_are_said_unsupported_also_while_paused(scan):
+    scan.state["paused"] = True
+    listed = ask(scan, "imaging.list", "s1")
+    by_kind = {d["kind"]: d for d in listed["devices"]}
+    assert by_kind["scanner"]["workflows"] == ["scan_to_file"] and by_kind["scanner"]["unsupported"] == ""
+    assert by_kind["camera"]["workflows"] == [] and by_kind["camera"]["unsupported"] == "wia_camera_not_supported"
+    assert by_kind["video"]["workflows"] == [] and by_kind["video"]["unsupported"] == "webcam_not_supported"
+    assert "no_camera_webcam_or_phone_capture" in listed["limits"] and scans(scan) == []
+    assert ask(scan, "image.capture", "s2", deviceId=by_kind["scanner"]["id"],
+               destination="C:\\scans\\a.png")["code"] == "paused"
+
+
+def test_scan_requests_are_validated_and_only_a_listed_scanner_and_a_new_file_qualify(scan, tmp_path):
+    good = scanner_id(scan)
+    camera = next(d["id"] for d in ask(scan, "imaging.list", "v0")["devices"] if d["kind"] == "camera")
+    (tmp_path / "exists.png").write_bytes(b"x")
+    for request_id, fields, code in (
+        ("v1", {"deviceId": "../../x", "destination": str(tmp_path / "a.png")}, "bad_request"),
+        ("v2", {"deviceId": good, "destination": "relative.png"}, "bad_request"),
+        ("v3", {"deviceId": good, "destination": str(tmp_path / "a.gif")}, "bad_destination"),
+        ("v4", {"deviceId": good, "destination": str(tmp_path / "exists.png")}, "destination_exists"),
+        ("v5", {"deviceId": good, "destination": str(tmp_path / "nope" / "a.png")}, "bad_destination"),
+        ("v6", {"deviceId": camera, "destination": str(tmp_path / "a.png")}, "unsupported"),
+        ("v7", {"deviceId": "img-" + "0" * 20, "destination": str(tmp_path / "a.png")}, "device_gone"),
+    ):
+        assert ask(scan, "image.capture", request_id, **fields)["code"] == code, request_id
+    assert scans(scan) == [] and scan.hub._ledger.open_tickets() == ()
+
+
+def test_one_scan_needs_the_typed_secret_and_writes_exactly_one_new_file(scan, tmp_path):
+    destination = tmp_path / "page.png"
+    pending = ask(scan, "image.capture", "c1", deviceId=scanner_id(scan), destination=str(destination))
+    assert pending["status"] == "approval_required" and pending["needsSecret"] is True  # the policy ALLOWS
+    assert pending["preview"]["device"] == "Office Scanner" and pending["preview"]["format"] == "PNG"
+    assert ask(scan, "decide", "c2", approvalId=pending["approvalId"], approved=True,
+               secret="wrong horse")["code"] == "secret_rejected"
+    assert scans(scan) == [] and not destination.exists()
+    pending = ask(scan, "image.capture", "c3", deviceId=scanner_id(scan), destination=str(destination))
+    done = ask(scan, "decide", "c4", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert done["status"] == "saved" and done["path"] == str(destination) and (done["width"], done["height"]) == (64, 48)
+    assert destination.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" and done["bytes"] == destination.stat().st_size
+    assert scans(scan) == [("acquire", SCANNER.wia_id)]
+    assert all(not staging.exists() for staging in scan.imaging.stagings)  # the private staging folder is gone
+    rows = audit_rows(scan)
+    assert (AuditEvent.COMPLETED, "device_control", "imaging:Office Scanner/scan", "succeeded") in rows
+    assert (AuditEvent.COMPLETED, "create_or_edit_file", str(destination), "succeeded") in rows
+    assert "correct horse" not in json.dumps(scan.events) and "wrong horse" not in json.dumps(scan.events)
+    assert ask(scan, "image.capture", "c5", deviceId=scanner_id(scan),
+               destination=str(destination))["code"] == "destination_exists"  # never overwritten
+    third = ask(scan, "image.capture", "c6", deviceId=scanner_id(scan), destination=str(tmp_path / "next.jpg"))
+    assert ask(scan, "decline", "c7", approvalId=third["approvalId"])["declined"] is True
+    assert any(r[:3] == (AuditEvent.DENIED_BY_USER, "device_control", "imaging:Office Scanner/scan") for r in audit_rows(scan))
+
+
+def test_both_gates_decide_before_and_at_the_answer(scan, tmp_path, monkeypatch):
+    destination = str(tmp_path / "page.png")
+    for category in (ActionCategory.CREATE_OR_EDIT_FILE, ActionCategory.DEVICE_CONTROL):
+        monkeypatch.setattr(gate_module, "evaluate", policy_by({category: PermissionDecision.DENY}))
+        assert ask(scan, "image.capture", f"g-{category.value}", deviceId=scanner_id(scan),
+                   destination=destination)["code"] == "denied"
+    assert scan.hub._ledger.open_tickets() == ()
+    monkeypatch.setattr(gate_module, "evaluate", policy(PermissionDecision.ALLOW))
+    pending = ask(scan, "image.capture", "g1", deviceId=scanner_id(scan), destination=destination)
+    monkeypatch.setattr(gate_module, "evaluate", policy_by({ActionCategory.CREATE_OR_EDIT_FILE: PermissionDecision.DENY}))
+    assert ask(scan, "decide", "g2", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "denied"
+    assert scans(scan) == [] and not Path(destination).exists()
+    assert not [r for r in audit_rows(scan) if r[0] == AuditEvent.DENIED_BY_USER]
+
+
+def test_cancel_garbage_pause_and_a_new_file_meanwhile_all_write_nothing(scan, tmp_path):
+    def approve(request_id, destination):
+        pending = ask(scan, "image.capture", request_id, deviceId=scanner_id(scan), destination=str(destination))
+        return ask(scan, "decide", request_id + "d", approvalId=pending["approvalId"], approved=True,
+                   secret="correct horse")
+
+    scan.imaging.page = None  # the person cancels in Windows' dialog
+    assert approve("x1", tmp_path / "a.png")["code"] == "scan_cancelled" and not (tmp_path / "a.png").exists()
+    scan.imaging.page = "garbage"  # the driver wrote something that is not an image
+    assert approve("x2", tmp_path / "b.png")["code"] == "not_an_image" and not (tmp_path / "b.png").exists()
+    scan.imaging.page = "png"
+
+    def pause_during_dialog():  # what set_runtime_paused does: the flag, then the bridge's lifecycle hook
+        scan.state["paused"] = True
+        scan.hub.cancel_wake("pause")
+
+    scan.imaging.during_scan = pause_during_dialog
+    assert approve("x3", tmp_path / "c.png")["code"] == "paused" and not (tmp_path / "c.png").exists()
+    scan.state["paused"], scan.imaging.during_scan = False, None
+    pending = ask(scan, "image.capture", "x4", deviceId=scanner_id(scan), destination=str(tmp_path / "d.png"))
+    (tmp_path / "d.png").write_bytes(b"made meanwhile")  # the destination appears before the answer
+    assert ask(scan, "decide", "x5", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "destination_exists"
+    assert (tmp_path / "d.png").read_bytes() == b"made meanwhile"  # untouched
+    assert all(not staging.exists() for staging in scan.imaging.stagings)
+    assert len(scans(scan)) == 3  # cancel, garbage and the paused one reached the dialog; the last did not
 
 
 # ------------------------------------------------------------ the real bridge lifecycle with a pending device approval

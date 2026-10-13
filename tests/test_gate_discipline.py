@@ -70,6 +70,8 @@ NATIVE_BACKENDS = {
     "core.print3d_native": frozenset({"core.device_hub"}),
     # Read-only power capabilities and the hardware wake timer of this PC: only the gated Device Hub.
     "core.power_wake": frozenset({"core.device_hub"}),
+    # WIA 2.0 scanner listing and the one-scan dialog: only the gated Device Hub.
+    "core.wia_imaging": frozenset({"core.device_hub"}),
 }
 
 # Modules that legitimately touch these without being action executors, with
