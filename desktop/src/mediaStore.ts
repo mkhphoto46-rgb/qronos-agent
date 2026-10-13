@@ -17,15 +17,36 @@
 export type MediaOp =
   | "status" | "capabilities" | "roots.list" | "roots.add" | "roots.remove" | "scan" | "index.start"
   | "index.stop" | "index.pause" | "index.resume" | "job.retry" | "job.reindex" | "job.cancel" | "job.pause"
-  | "job.resume" | "asset.priority" | "asset.detail" | "search" | "open.prepare" | "report.generate"
-  | "report.export" | "decide" | "decline";
+  | "job.resume" | "asset.priority" | "asset.detail" | "search" | "open.prepare" | "report.preview"
+  | "report.generate" | "report.export" | "decide" | "decline";
 
 export const MEDIA_OPS: ReadonlySet<string> = new Set<MediaOp>([
   "status", "capabilities", "roots.list", "roots.add", "roots.remove", "scan", "index.start", "index.stop",
   "index.pause", "index.resume", "job.retry", "job.reindex", "job.cancel", "job.pause", "job.resume",
-  "asset.priority", "asset.detail", "search", "open.prepare", "report.generate", "report.export", "decide",
-  "decline",
+  "asset.priority", "asset.detail", "search", "open.prepare", "report.preview", "report.generate", "report.export",
+  "decide", "decline",
 ]);
+
+/** Report formats and kinds the media host renders from the one index schema (qronos_media/reports.py). */
+export const REPORT_FORMATS = ["pdf", "html", "json", "csv"] as const;
+export const REPORT_KINDS = ["short", "full", "transcript", "evidence"] as const;
+export type ReportFormat = (typeof REPORT_FORMATS)[number];
+export type ReportKind = (typeof REPORT_KINDS)[number];
+
+export const REPORT_KIND_TEXT: Record<ReportKind, string> = {
+  short: "گزارش کوتاه",
+  full: "گزارش کامل",
+  transcript: "متن گفتار",
+  evidence: "گزارش شواهد",
+};
+
+/** An export destination must name its format by extension (the host refuses anything else). */
+export function exportDestinationProblem(destination: string, format: ReportFormat): string | null {
+  const path = destination.trim();
+  if (!path) return "مسیر فایل خروجی را بنویسید.";
+  if (!path.toLowerCase().endsWith(`.${format}`)) return `مسیر خروجی باید با .${format} تمام شود.`;
+  return null;
+}
 
 export const MEDIA_ACTION_ID = "qronos.media";
 export const MAX_EVENT_CHARS = 2_000_000;
@@ -120,6 +141,7 @@ export const MEDIA_REFUSAL_TEXT: Record<string, string> = {
   store_admission: "پوشهٔ دادهٔ رسانه پذیرفته نشد (به‌روزرسانی یا مالکیت داده).",
   bad_request: "درخواست نامعتبر بود.",
   refused: "رد شد.",
+  report_unavailable: "ساخت این گزارش در این نصب ممکن نیست (قلم یا کتابخانهٔ PDF با نسخهٔ تعیین‌شده یکی نیست).",
   internal: "خطای داخلی؛ جزئیات در گزارش‌های Qronos است.",
 };
 

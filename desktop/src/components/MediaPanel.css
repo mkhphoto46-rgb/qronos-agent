@@ -36,6 +36,31 @@
   padding: 0.5rem 0.75rem;
 }
 
+.media-report-options label {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.media-report-preview {
+  border: 1px solid rgba(88, 177, 224, 0.35);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-block: 0.5rem;
+  max-height: 24rem;
+  overflow: auto;
+}
+
+.media-report-lines {
+  list-style: none;
+  padding: 0;
+}
+
+.media-report-lines li,
+.media-report-missing {
+  overflow-wrap: anywhere;
+}
+
 .media-card-head {
   display: flex;
   gap: 0.75rem;

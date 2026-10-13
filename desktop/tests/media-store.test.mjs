@@ -146,6 +146,23 @@ test("refusal codes have Persian text and unknown codes are shown as codes", () 
   assert.match(media.refusalText("weird_code"), /weird_code/);
 });
 
+test("reports: PDF and every kind are offered, the preview op is allowed, and an export names its format", () => {
+  assert.ok(media.MEDIA_OPS.has("report.preview") && media.MEDIA_OPS.has("report.export"));
+  assert.deepEqual([...media.REPORT_FORMATS], ["pdf", "html", "json", "csv"]);
+  assert.deepEqual([...media.REPORT_KINDS], ["short", "full", "transcript", "evidence"]);
+  assert.equal(media.exportDestinationProblem("C:\\Reports\\film.PDF", "pdf"), null);
+  assert.match(media.exportDestinationProblem("C:\\Reports\\film.html", "pdf"), /\.pdf/);
+  assert.match(media.exportDestinationProblem("  ", "csv"), /مسیر/);
+  assert.match(media.refusalText("report_unavailable"), /PDF/);
+  const panel = source("../src/components/MediaPanel.tsx");
+  // The PDF is made by the media host from the index; the panel never prints HTML or opens a print dialog.
+  for (const forbidden of ["window.print", "print(", "iframe", "dangerouslySetInnerHTML"]) {
+    assert.ok(!panel.includes(forbidden), forbidden);
+  }
+  assert.match(panel, /run\("report\.export", \{ assetId, destination: destination\.trim\(\), format: reportFormat, kind: reportKind \}\)/);
+  assert.match(panel, /run\("report\.preview", \{ assetId, kind: reportKind \}\)/);
+});
+
 test("the panel uses the registered action transport, clears the secret and starts no runtime itself", () => {
   const panel = source("../src/components/MediaPanel.tsx");
   assert.match(panel, /invoke\("send_runtime_action", \{ actionId, data \}\)/);

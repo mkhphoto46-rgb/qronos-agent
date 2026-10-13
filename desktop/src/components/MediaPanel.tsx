@@ -4,9 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  approvalOf, createMediaClient, isAssetId, refusalText,
+  approvalOf, createMediaClient, exportDestinationProblem, isAssetId, refusalText, REPORT_FORMATS, REPORT_KIND_TEXT,
+  REPORT_KINDS,
 } from "../mediaStore";
-import type { MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, RuntimeEvent } from "../mediaStore";
+import type {
+  MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, ReportFormat, ReportKind, RuntimeEvent,
+} from "../mediaStore";
 
 import "./MediaPanel.css";
 
@@ -45,6 +48,23 @@ type Hit = {
 };
 
 type Capability = { capability: string; status: string; reason?: string };
+
+type ReportPreview = {
+  kind: ReportKind;
+  schema: string;
+  generatedAt: string;
+  asset: { assetId: string; sha256: string; title?: string | null; durationMs?: number | null; container?: string | null };
+  stages: Record<string, { state: string; version: number; finishedAt?: string | null }>;
+  summary: { dialogueLines: number; dialogueLinesBySource: Record<string, number>; scenes: number; keyframes: number };
+  subtitleTracks: Array<{ source: string; language?: string | null; status: string; cueCount: number; detail?: string | null }>;
+  notAvailable: Array<{ capability: string; status: string; stageState?: string | null }>;
+  limitations: Array<{ code: string; text: string }>;
+  dialogue?: Array<{ startMs: number; endMs: number; source: string; text: string }>;
+};
+
+const SOURCE_FA: Record<string, string> = {
+  embedded: "زیرنویس درون فایل", sidecar: "زیرنویس کنار فایل", asr: "رونویسی ماشینی (تأییدنشده)",
+};
 
 const STATUS_FA: Record<string, string> = {
   implemented_unverified: "پیاده‌سازی‌شده، تأییدنشده",
@@ -107,6 +127,9 @@ function MediaPanel(props: MediaPanelProps) {
   const [approval, setApproval] = useState<MediaApproval | null>(null);
   const [secret, setSecret] = useState("");
   const [destination, setDestination] = useState("");
+  const [reportFormat, setReportFormat] = useState<ReportFormat>("pdf");
+  const [reportKind, setReportKind] = useState<ReportKind>("full");
+  const [preview, setPreview] = useState<ReportPreview | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Bumped when the panel hides: an answer for an older generation is ignored.
@@ -150,6 +173,7 @@ function MediaPanel(props: MediaPanelProps) {
       client.reset();
       setSecret("");
       setApproval(null);
+      setPreview(null);
       return;
     }
     void refresh();
@@ -197,6 +221,26 @@ function MediaPanel(props: MediaPanelProps) {
     await refresh();
   }
 
+  async function generateReport(assetId: string) {
+    const answer = await run("report.generate", { assetId, format: reportFormat, kind: reportKind });
+    const report = answer?.ok ? (answer.report as Record<string, unknown> | undefined) : undefined;
+    if (report) setNotice(`${REPORT_KIND_TEXT[reportKind]} (${reportFormat}) ساخته شد: ${String(report.path)}`);
+  }
+
+  async function previewReport(assetId: string) {
+    const answer = await run("report.preview", { assetId, kind: reportKind });
+    if (answer?.ok && answer.preview && typeof answer.preview === "object") setPreview(answer.preview as ReportPreview);
+  }
+
+  async function exportReport(assetId: string) {
+    const problem = exportDestinationProblem(destination, reportFormat);
+    if (problem) {
+      setNotice(problem);
+      return;
+    }
+    await run("report.export", { assetId, destination: destination.trim(), format: reportFormat, kind: reportKind });
+  }
+
   const { exact, semantic, semanticNote } = hitsOf(result);
   const store = (status?.store ?? null) as Record<string, unknown> | null;
   const running = Boolean(status?.running);
@@ -216,17 +260,13 @@ function MediaPanel(props: MediaPanelProps) {
             onClick={() => void run("open.prepare", { assetId: hit.assetId, startMs: Math.max(0, Math.floor(hit.startMs)) })}>
             باز کردن در همین لحظه
           </button>
-          {(["json", "html", "csv"] as const).map((format) => (
-            <button key={format} type="button" disabled={busy}
-              onClick={() => void run("report.generate", { assetId: hit.assetId, format }).then((a) => {
-                if (a?.ok) setNotice(`گزارش ${format} ساخته شد.`);
-              })}>
-              گزارش {format}
-            </button>
-          ))}
-          <button type="button" disabled={busy || !destination.trim()}
-            onClick={() => void run("report.export", { assetId: hit.assetId, destination: destination.trim(),
-              format: destination.trim().toLowerCase().endsWith(".csv") ? "csv" : destination.trim().toLowerCase().endsWith(".html") ? "html" : "json" })}>
+          <button type="button" disabled={busy} onClick={() => void previewReport(hit.assetId)}>
+            پیش‌نمایش {REPORT_KIND_TEXT[reportKind]}
+          </button>
+          <button type="button" disabled={busy} onClick={() => void generateReport(hit.assetId)}>
+            ساخت {REPORT_KIND_TEXT[reportKind]} ({reportFormat})
+          </button>
+          <button type="button" disabled={busy || !destination.trim()} onClick={() => void exportReport(hit.assetId)}>
             خروجی گرفتن
           </button>
         </div>
@@ -275,8 +315,21 @@ function MediaPanel(props: MediaPanelProps) {
         </select>
         <button type="button" disabled={busy || !query.trim()} onClick={() => void search()}>جست‌وجو</button>
       </div>
-      <div className="media-row">
-        <input value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="مسیر فایل خروجی گزارش (.json/.html/.csv)" dir="ltr" maxLength={4096} />
+      <div className="media-row media-report-options">
+        <label>
+          نوع گزارش
+          <select value={reportKind} onChange={(e) => setReportKind(e.target.value as ReportKind)}>
+            {REPORT_KINDS.map((kind) => <option key={kind} value={kind}>{REPORT_KIND_TEXT[kind]}</option>)}
+          </select>
+        </label>
+        <label>
+          قالب
+          <select value={reportFormat} onChange={(e) => setReportFormat(e.target.value as ReportFormat)}>
+            {REPORT_FORMATS.map((format) => <option key={format} value={format}>{format.toUpperCase()}</option>)}
+          </select>
+        </label>
+        <input value={destination} onChange={(e) => setDestination(e.target.value)}
+          placeholder={`مسیر فایل خروجی گزارش (.${reportFormat})`} dir="ltr" maxLength={4096} />
       </div>
       {semanticNote && <p className="media-notice">{semanticNote}</p>}
       <ul className="media-results">{exact.map((hit, i) => card(hit, `e${i}`))}</ul>
@@ -284,6 +337,40 @@ function MediaPanel(props: MediaPanelProps) {
         <h4>نتیجه‌های معنایی (شباهت تأییدنشده)</h4>
         <ul className="media-results">{semantic.map((hit, i) => card(hit, `s${i}`))}</ul>
       </>}
+
+      {preview && (
+        <section className="media-report-preview" aria-label="پیش‌نمایش گزارش">
+          <div className="media-card-head">
+            <strong>{REPORT_KIND_TEXT[preview.kind] ?? preview.kind}: {preview.asset.title || "ویدیو"}</strong>
+            <button type="button" onClick={() => setPreview(null)}>بستن</button>
+          </div>
+          <p>SHA-256: <span className="ltr">{preview.asset.sha256}</span></p>
+          <p>
+            {preview.summary.dialogueLines} سطر دیالوگ، {preview.summary.scenes} برش، {preview.summary.keyframes} فریم کلیدی
+            {" — "}ساخته‌شده از فهرست، بدون اجرای مدل (<span className="ltr">{preview.generatedAt}</span>)
+          </p>
+          <h4>منابع دیالوگ</h4>
+          <ul>
+            {preview.subtitleTracks.map((track, i) => (
+              <li key={i}>{SOURCE_FA[track.source] ?? track.source} — {track.language ?? "نامشخص"} — {track.cueCount} سطر</li>
+            ))}
+          </ul>
+          {preview.dialogue && preview.dialogue.length > 0 && <>
+            <h4>نخستین سطرها</h4>
+            <ul className="media-report-lines">
+              {preview.dialogue.map((line, i) => (
+                <li key={i}><span className="ltr">{clock(line.startMs)}</span> <span dir="auto">{line.text}</span></li>
+              ))}
+            </ul>
+          </>}
+          <h4>در این فایل در دسترس نیست</h4>
+          <p className="media-report-missing">
+            {preview.notAvailable.map((item) => CAPABILITY_FA[item.capability] ?? item.capability).join("، ")}
+          </p>
+          <h4>محدودیت‌ها</h4>
+          <ul>{preview.limitations.map((item) => <li key={item.code}>{item.text}</li>)}</ul>
+        </section>
+      )}
 
       <h3>توانایی‌ها</h3>
       <ul className="media-capabilities">
