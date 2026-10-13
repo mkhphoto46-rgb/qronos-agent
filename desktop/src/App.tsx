@@ -62,6 +62,7 @@ import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
 import HistoryDrawer from "./components/HistoryDrawer";
 import MediaDrawer from "./components/MediaDrawer";
+import DeviceHubDrawer from "./components/DeviceHubDrawer";
 import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
 import AppWorkflowDialog from "./components/AppWorkflowDialog";
 import QronosOrb from "./components/QronosOrb";
@@ -2508,6 +2509,15 @@ function App() {
       {/* The media library: chosen folders, background indexing, search with evidence cards, open at a time
           and reports, all through the runtime's one media host (qronos.media actions). */}
       <MediaDrawer
+        hidden={
+          viewPhase !== "home" &&
+          viewPhase !== "conversations"
+        }
+      />
+
+      {/* The Device Hub: printers Windows already has (local and LAN connections), their driver capabilities,
+          the print queue with own-job pause/resume/cancel, and printing one exact file (qronos.device_hub). */}
+      <DeviceHubDrawer
         hidden={
           viewPhase !== "home" &&
           viewPhase !== "conversations"
