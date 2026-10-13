@@ -4,13 +4,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  approvalOf, createDeviceHubClient, devicesOf, handoffText, IMAGING_UNSUPPORTED_TEXT, imagingDevicesOf,
+  approvalOf, CAMERA_LIMIT_TEXT, cameraDevicesOf, cameraProblem, cameraSavedText, createDeviceHubClient, devicesOf,
+  handoffText, IMAGING_UNSUPPORTED_TEXT, imagingDevicesOf,
   isoWithOffset, jobsOf, limitText, print3dProblem, SCAN_LIMIT_TEXT, scanProblem, scanSavedText,
   printProblem, refusalText, unsupportedClassesOf, wakeArmedOf, wakeArmedText, wakeCapabilityOf, WAKE_LIMIT_TEXT,
   WAKE_VERDICT_TEXT,
 } from "../deviceHubStore";
 import type {
-  Device, DeviceApproval, DeviceHubClient, DeviceHubTransport, DeviceJob, JobCommand, PrintColor, RuntimeEvent,
+  CameraDevice, Device, DeviceApproval, DeviceHubClient, DeviceHubTransport, DeviceJob, JobCommand, PrintColor,
+  RuntimeEvent,
   ImagingDevice, UnsupportedClass, WakeArmed, WakeCapability,
 } from "../deviceHubStore";
 
@@ -42,6 +44,10 @@ function isScanApproval(approval: DeviceApproval): boolean {
   return approval.preview.action === "scan";
 }
 
+function isCameraApproval(approval: DeviceApproval): boolean {
+  return approval.preview.action === "camera";
+}
+
 function isWakeApproval(approval: DeviceApproval): boolean {
   return approval.preview.action === "wake_schedule" || approval.preview.action === "wake_cancel";
 }
@@ -71,6 +77,10 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
   const [scanner, setScanner] = useState("");
   const [scanPath, setScanPath] = useState("");
   const [scanNote, setScanNote] = useState("");
+  const [cameras, setCameras] = useState<CameraDevice[]>([]);
+  const [cameraId, setCameraId] = useState("");
+  const [cameraPath, setCameraPath] = useState("");
+  const [cameraNote, setCameraNote] = useState("");
 
   const device = devices.find((item) => item.id === selected);
 
@@ -144,8 +154,12 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
       : result.status === "armed" ? wakeArmedText({ wakeId: String(result.wakeId), dueUtc: String(result.dueUtc),
           stayAwakeMinutes: Number(result.stayAwakeMinutes), state: "armed" }, localTime(String(result.dueUtc)))
       : result.status === "cancelled" ? "زمان بیدار شدن لغو شد."
-      : result.status === "saved" ? scanSavedText(result)
+      : result.status === "saved" ? (isCameraApproval(current) ? cameraSavedText(result) : scanSavedText(result))
       : approved ? "انجام شد." : "لغو شد؛ چیزی تغییر نکرد.");
+    if (isCameraApproval(current)) {
+      setCameraNote(!result.ok ? refusalText(result.code) : cameraSavedText(result));
+      return;
+    }
     if (isScanApproval(current)) {
       setScanNote(!result.ok ? refusalText(result.code) : scanSavedText(result));
       return;
@@ -188,6 +202,38 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
       return;
     }
     setScanNote(refusalText(result.code));
+  }
+
+  async function cameraRefresh(): Promise<void> {
+    const result = await client.cameraList();
+    if (!result.ok) {
+      setCameras([]);
+      setCameraNote(refusalText(result.code));
+      return;
+    }
+    const found = cameraDevicesOf(result);
+    setCameras(found);
+    if (!found.some((item) => item.id === cameraId)) setCameraId("");
+    setCameraNote(found.length ? "" : "ویندوز هیچ دوربینی فهرست نکرد.");
+  }
+
+  async function cameraNow(): Promise<void> {
+    const device = cameras.find((item) => item.id === cameraId);
+    const problem = cameraProblem(device, cameraPath);
+    if (problem || !device) {
+      setCameraNote(problem ?? "یک دوربین انتخاب کنید.");
+      return;
+    }
+    setBusy(true);
+    const result = await client.cameraCapture(device.id, cameraPath);
+    setBusy(false);
+    const asked = approvalOf(result);
+    if (asked) {
+      setApproval(asked);
+      setCameraNote("گرفتن عکس به تأیید شما با رمز نیاز دارد.");
+      return;
+    }
+    setCameraNote(refusalText(result.code));
   }
 
   async function wakeStatus(): Promise<void> {
@@ -354,7 +400,7 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
             </div>
           )}
 
-          {approval && !isWakeApproval(approval) && !isScanApproval(approval) && (
+          {approval && !isWakeApproval(approval) && !isScanApproval(approval) && !isCameraApproval(approval) && (
             <div className="device-approval" role="dialog" aria-label="تأیید درخواست دستگاه">
               {typeof approval.preview.jobName === "string" ? (
                 <p>
@@ -450,6 +496,50 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
             <p>
               با «{String(approval.preview.device ?? "")}» یک صفحه اسکن و در
               {" "}<bdi dir="ltr">{String(approval.preview.file ?? "")}</bdi> ذخیره شود؟ پنجرهٔ اسکن ویندوز باز می‌شود.
+            </p>
+            {approval.needsSecret && (
+              <input type="password" value={secret} onChange={(event) => setSecret(event.target.value)}
+                     placeholder="رمز تأیید" maxLength={256} autoComplete="off" />
+            )}
+            <button type="button" disabled={approval.needsSecret && !secret} onClick={() => void answer(true)}>تأیید</button>
+            <button type="button" onClick={() => void answer(false)}>لغو</button>
+          </div>
+        )}
+      </section>
+
+      <section className="device-wake" aria-label="یک عکس از دوربین">
+        <h3>یک عکس از دوربین در یک فایل تازه</h3>
+        <p className="device-hub-note">
+          دوربین‌هایی که خود ویندوز فهرست می‌کند (وب‌کم داخلی یا USB). بعد از تأیید با رمز، دوربین فقط چند ثانیه روشن
+          می‌شود، یک عکس ثابت گرفته و در یک فایل تازهٔ PNG یا JPEG ذخیره می‌شود؛ نه فیلم، نه صدا، نه پیش‌نمایش.
+        </p>
+        <button type="button" onClick={() => void cameraRefresh()} disabled={busy}>فهرست دوربین‌ها</button>
+        {cameraNote && <p className="device-hub-message" role="status">{cameraNote}</p>}
+        <ul className="device-hub-list">
+          {cameras.map((item) => (
+            <li key={item.id}>
+              <button type="button" className={`device-card${item.id === cameraId ? " device-card-selected" : ""}`}
+                      aria-pressed={item.id === cameraId} onClick={() => setCameraId(item.id)}>
+                <strong>{item.name}</strong>
+                <span>دوربین</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        <form className="device-print" onSubmit={(event) => { event.preventDefault(); void cameraNow(); }}>
+          <input type="text" value={cameraPath} onChange={(event) => setCameraPath(event.target.value)} dir="ltr"
+                 placeholder="D:\...\photo.jpg" maxLength={4096} aria-label="مسیر فایل تازهٔ عکس" />
+          <button type="submit" disabled={busy || approval !== null || !cameraId}>گرفتن یک عکس</button>
+        </form>
+        <ul className="device-wake-limits">
+          {Object.values(CAMERA_LIMIT_TEXT).map((line) => <li key={line}>{line}</li>)}
+        </ul>
+        {approval && isCameraApproval(approval) && (
+          <div className="device-approval" role="dialog" aria-label="تأیید عکس از دوربین">
+            <p>
+              «{String(approval.preview.device ?? "")}» چند ثانیه روشن شود و یک عکس در
+              {" "}<bdi dir="ltr">{String(approval.preview.file ?? "")}</bdi> ذخیره شود؟ چراغ دوربین ویندوز روشن می‌شود؛
+              فیلم یا صدا گرفته نمی‌شود.
             </p>
             {approval.needsSecret && (
               <input type="password" value={secret} onChange={(event) => setSecret(event.target.value)}

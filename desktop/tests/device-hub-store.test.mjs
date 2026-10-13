@@ -240,3 +240,49 @@ test("scan: only WIA scanners qualify, exact new png/jpg, typed fields, truthful
   }
   assert.doesNotMatch(hub.DEVICE_REFUSAL_TEXT.too_large, /بسته/);  // neutral now that scans use it too
 });
+
+test("camera: only listed cameras, exact new png/jpg, typed fields, truthful saved and refusal words", async () => {
+  const listed = { requestId: "r", op: "camera.list", ok: true, devices: [
+    { id: "cam-0123456789abcdef0123", name: "USB Camera", workflows: ["still_to_file"] },
+    { id: "img-0123456789abcdef0123", name: "a scanner id", workflows: ["still_to_file"] },
+    { id: "../x", name: "bad" },
+  ] };
+  const [camera, ...rest] = hub.cameraDevicesOf(listed);
+  assert.equal(rest.length, 0);  // a scanner id or a malformed id is dropped
+  assert.equal(camera.name, "USB Camera");
+  assert.equal(hub.cameraProblem(undefined, "D:/s/a.png"), "یک دوربین فهرست‌شده انتخاب کنید.");
+  assert.notEqual(hub.cameraProblem(camera, "D:/s/a.gif"), null);
+  assert.notEqual(hub.cameraProblem(camera, "a.png"), null);
+  assert.equal(hub.cameraProblem(camera, " D:/s/a.JPG "), null);
+  const fake = fakeTransport();
+  const client = hub.createDeviceHubClient(fake.transport);
+  assert.equal((await client.cameraCapture("cam-0123456789abcdef0123", "D:/s/a.tif")).code, "bad_request");
+  assert.equal((await client.cameraCapture("img-0123456789abcdef0123", "D:/s/a.png")).code, "bad_request");
+  assert.equal(fake.sent.length, 0);
+  const answer = client.cameraCapture("cam-0123456789abcdef0123", " D:/s/a.png ");
+  await tick();
+  const [{ data }] = fake.sent;
+  assert.deepEqual(Object.keys(data).sort(), ["destination", "deviceId", "op", "requestId"]);
+  assert.equal(data.op, "camera.capture");
+  assert.equal(data.destination, "D:/s/a.png");
+  fake.deliver({ requestId: data.requestId, op: "camera.capture", ok: true, status: "approval_required",
+                 approvalId: "approval-camera-1", needsSecret: true, preview: { action: "camera" } });
+  assert.equal(hub.approvalOf(await answer).needsSecret, true);
+  const saved = hub.cameraSavedText({ requestId: "r", op: "decide", ok: true, status: "saved", path: "D:/s/a.png",
+                                      width: 640, height: 480, format: "PNG", dark: false });
+  assert.match(saved, /ذخیره شد/);
+  assert.match(saved, /640×480/);
+  assert.doesNotMatch(saved, /تاریک/);
+  assert.match(hub.cameraSavedText({ ok: true, status: "saved", path: "D:/s/b.png", format: "PNG", dark: true }), /تاریک/);
+  assert.equal(Object.keys(hub.CAMERA_LIMIT_TEXT).length, 6);
+  for (const code of ["camera_privacy_denied", "camera_busy", "camera_gone", "camera_format_unsupported",
+                      "camera_timeout", "camera_stuck", "camera_bad_frame", "camera_failed", "camera_unavailable"]) {
+    assert.ok(hub.DEVICE_REFUSAL_TEXT[code], code);
+  }
+  assert.match(hub.DEVICE_REFUSAL_TEXT.camera_privacy_denied, /حریم خصوصی/);
+  assert.doesNotMatch(hub.IMAGING_UNSUPPORTED_TEXT.webcam_not_supported, /تصویر یا ویدیو نمی‌گیرد/);  // truthful now
+  const panel = readFileSync(new URL("../src/components/DeviceHubPanel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /aria-label="تأیید عکس از دوربین"/);
+  assert.match(panel, /نه فیلم، نه صدا، نه پیش‌نمایش/);
+  assert.match(panel, /client\.cameraCapture\(device\.id, cameraPath\)/);
+});

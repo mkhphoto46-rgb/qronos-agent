@@ -19,11 +19,12 @@
 
 export type DeviceHubOp =
   | "devices.list" | "device.jobs" | "job.control" | "print.request" | "print3d.request" | "wake.status"
-  | "wake.schedule" | "wake.cancel" | "imaging.list" | "image.capture" | "decide" | "decline";
+  | "wake.schedule" | "wake.cancel" | "imaging.list" | "image.capture" | "camera.list" | "camera.capture" | "decide"
+  | "decline";
 
 export const DEVICE_HUB_OPS: ReadonlySet<string> = new Set<DeviceHubOp>([
   "devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "wake.status", "wake.schedule",
-  "wake.cancel", "imaging.list", "image.capture", "decide", "decline",
+  "wake.cancel", "imaging.list", "image.capture", "camera.list", "camera.capture", "decide", "decline",
 ]);
 
 export const DEVICE_HUB_ACTION_ID = "qronos.device_hub";
@@ -233,6 +234,16 @@ export const DEVICE_REFUSAL_TEXT: Record<string, string> = {
   not_one_image: "اسکن دقیقاً یک تصویر تحویل نداد؛ فایلی نوشته نشد.",
   not_an_image: "آنچه درایور تحویل داد تصویر معتبری نبود؛ فایلی نوشته نشد.",
   empty_image: "فایل اسکن‌شده خالی بود؛ فایلی نوشته نشد.",
+  camera_privacy_denied: "ویندوز دسترسی برنامه‌ها به دوربین را بسته است (تنظیمات > حریم خصوصی و امنیت > دوربین)؛ عکسی گرفته نشد.",
+  camera_busy: "دوربین در دست برنامهٔ دیگری است؛ عکسی گرفته نشد.",
+  camera_gone: "دوربین دیگر در دسترس نیست (جدا شد یا خاموش است)؛ عکسی گرفته نشد.",
+  camera_format_unsupported: "ویندوز تصویر این دوربین را به قالبی که Qronos می‌خواند تبدیل نکرد؛ عکسی گرفته نشد.",
+  camera_timeout: "دوربین در زمان مقرر تصویری نفرستاد و خاموش شد؛ عکسی گرفته نشد.",
+  camera_stuck: "دوربین به‌موقع بسته نشد؛ فایلی نوشته نشد.",
+  camera_bad_frame: "تصویر رسیده از دوربین اندازهٔ درستی نداشت؛ فایلی نوشته نشد.",
+  camera_failed: "ویندوز گرفتن عکس از دوربین را ناموفق گزارش کرد؛ عکسی گرفته نشد.",
+  camera_unavailable: "عکس گرفتن از دوربین فقط در ویندوز در دسترس است.",
+  camera_native_refused: "ویندوز درخواست دوربین را نپذیرفت.",
 };
 
 /** Persian words for a device's stated limit (Device.unsupported). */
@@ -392,7 +403,7 @@ export function imagingDevicesOf(result: DeviceHubResult): ImagingDevice[] {
 
 export const IMAGING_UNSUPPORTED_TEXT: Record<string, string> = {
   wia_camera_not_supported: "دوربین WIA 1.0: این مسیر فقط اسکنرهای WIA 2.0 را به کار می‌گیرد؛ عکس گرفته نمی‌شود.",
-  webcam_not_supported: "وب‌کم: ویندوز آن را دستگاه WIA نمی‌داند؛ Qronos از وب‌کم تصویر یا ویدیو نمی‌گیرد.",
+  webcam_not_supported: "وب‌کم از راه WIA (اسکن) به کار گرفته نمی‌شود؛ برای یک عکس از بخش «یک عکس از دوربین» استفاده کنید.",
   not_supported: "این دستگاه تصویربرداری پشتیبانی نمی‌شود.",
 };
 
@@ -403,7 +414,7 @@ export const SCAN_LIMIT_TEXT: Record<string, string> = {
   one_page_one_new_file: "هر بار یک صفحه، در یک فایل تازهٔ PNG یا JPEG.",
   no_overwrite_no_links: "فایل موجود هرگز بازنویسی نمی‌شود و پوشهٔ پیوندی پذیرفته نیست.",
   metadata_not_copied: "فراداده (مثل EXIF) در فایل نهایی کپی نمی‌شود.",
-  no_camera_webcam_or_phone_capture: "از دوربین، وب‌کم، میکروفون یا گوشی چیزی گرفته نمی‌شود.",
+  no_camera_webcam_or_phone_capture: "اسکن از دوربین، وب‌کم، میکروفون یا گوشی چیزی نمی‌گیرد (دوربین: بخش جداگانه).",
 };
 
 /** Why a scan form cannot be sent (Persian), or null when it is well-formed for this device. */
@@ -424,6 +435,53 @@ export function scanSavedText(result: DeviceHubResult): string {
   return `تصویر اسکن‌شده در «${String(result.path ?? "")}» ذخیره شد${size}، قالب ${String(result.format ?? "")}.`;
 }
 
+// ------------------------------------------------------------ ONE still frame from a camera (Media Foundation)
+
+export type CameraDevice = { id: string; name: string; workflows: string[] };
+
+const CAMERA_ID = /^cam-[0-9a-f]{20}$/;
+
+/** The cameras of a `camera.list` answer, validated field by field. */
+export function cameraDevicesOf(result: DeviceHubResult): CameraDevice[] {
+  if (!result.ok || !Array.isArray(result.devices)) return [];
+  const out: CameraDevice[] = [];
+  for (const item of result.devices.slice(0, 64)) {
+    if (!isRecord(item) || typeof item.id !== "string" || !CAMERA_ID.test(item.id) || typeof item.name !== "string") {
+      continue;
+    }
+    out.push({ id: item.id, name: text(item.name, 200), workflows: strings(item.workflows, 4) });
+  }
+  return out;
+}
+
+/** What a camera capture here is and is not (core CAMERA_LIMITS). */
+export const CAMERA_LIMIT_TEXT: Record<string, string> = {
+  cameras_windows_lists_only: "فقط دوربین‌هایی که خود ویندوز به‌عنوان دوربین فهرست می‌کند.",
+  one_still_frame_no_video_no_audio: "فقط یک عکس ثابت؛ نه فیلم، نه صدا، نه پیش‌نمایش.",
+  camera_on_only_during_capture: "دوربین فقط چند ثانیهٔ گرفتن عکس روشن است و چراغ دوربین ویندوز دیده می‌شود.",
+  one_new_file_no_overwrite_no_links: "یک فایل تازهٔ PNG یا JPEG؛ هیچ فایلی بازنویسی نمی‌شود و پوشهٔ پیوندی پذیرفته نیست.",
+  no_recognition_no_model: "هیچ تشخیص چهره یا شخص و هیچ مدلی روی عکس اجرا نمی‌شود.",
+  no_wia_still_cameras_or_unlisted_phones:
+    "دوربین عکاسی WIA 1.0 و گوشی یا دوربین شبکه‌ای که ویندوز آن را دوربین فهرست نکند پشتیبانی نمی‌شوند.",
+};
+
+/** Why a camera form cannot be sent (Persian), or null when it is well-formed for this device. */
+export function cameraProblem(device: CameraDevice | undefined, destination: string): string | null {
+  if (!device || !device.workflows.includes("still_to_file")) return "یک دوربین فهرست‌شده انتخاب کنید.";
+  const path = destination.trim();
+  if (!path || path.length > MAX_PATH_CHARS || !/^([A-Za-z]:[\\/]|\\\\)/.test(path) || !/\.(png|jpe?g)$/i.test(path)) {
+    return "مسیر کامل یک فایل تازهٔ .png یا .jpg را وارد کنید.";
+  }
+  return null;
+}
+
+/** The truthful words for a saved still: exactly what was written. */
+export function cameraSavedText(result: DeviceHubResult): string {
+  const size = typeof result.width === "number" && typeof result.height === "number" ? ` (${result.width}×${result.height})` : "";
+  const dark = result.dark === true ? " تصویر تقریباً کاملاً تاریک است (شاید جلوی لنز پوشیده بوده)." : "";
+  return `یک عکس از دوربین در «${String(result.path ?? "")}» ذخیره شد${size}، قالب ${String(result.format ?? "")}.${dark}`;
+}
+
 export type DeviceHubClient = {
   list(): Promise<DeviceHubResult>;
   jobs(deviceId: string): Promise<DeviceHubResult>;
@@ -438,6 +496,9 @@ export type DeviceHubClient = {
   imagingList(): Promise<DeviceHubResult>;
   /** One scan of a WIA scanner into one exact NEW .png/.jpg; the answer asks for the typed-secret approval. */
   scan(deviceId: string, destination: string): Promise<DeviceHubResult>;
+  cameraList(): Promise<DeviceHubResult>;
+  /** ONE still frame from a listed camera into one exact NEW .png/.jpg; the answer asks for the typed secret. */
+  cameraCapture(deviceId: string, destination: string): Promise<DeviceHubResult>;
   /** The person's yes for one approval this client was shown; the secret goes to this one send only. */
   decide(approval: DeviceApproval, secret?: string): Promise<DeviceHubResult>;
   decline(approval: DeviceApproval): Promise<DeviceHubResult>;
@@ -546,6 +607,14 @@ export function createDeviceHubClient(transport: DeviceHubTransport, options: { 
         return refuse("image.capture", "bad_request");
       }
       return send("image.capture", { deviceId, destination: path });
+    },
+    cameraList: () => send("camera.list", {}),
+    cameraCapture(deviceId, destination) {
+      const path = destination.trim();
+      if (!CAMERA_ID.test(deviceId) || !path || path.length > MAX_PATH_CHARS || !/\.(png|jpe?g)$/i.test(path)) {
+        return refuse("camera.capture", "bad_request");
+      }
+      return send("camera.capture", { deviceId, destination: path });
     },
     decide(approval, secret) {
       const fields: Record<string, unknown> = { approvalId: approval.approvalId, approved: true };
