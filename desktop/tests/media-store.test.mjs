@@ -239,6 +239,25 @@ test("visual hits are generated frame text with a frame SHA, joined to dialogue 
   assert.match(panel, /"visual"\] as const/);
 });
 
+test("semantic visual hits say their channel and an uncalibrated text similarity; a missing model is a note", () => {
+  const asset = "a_" + "4".repeat(32);
+  const sha = "c".repeat(64);
+  const block = media.visualBlockOf({ requestId: "r1", op: "search", ok: true, visual: { status: "complete",
+    semantic: { status: "unavailable", reason: "model_unavailable" }, results: [
+      { assetId: asset, timeMs: 5000, frameSha256: sha, caption: "A red bicycle.", verified: false,
+        channels: ["lexical", "semantic", "image"], similarity: 0.71 },
+      { assetId: asset, timeMs: 9000, frameSha256: sha, caption: "A street.", verified: false, channels: ["semantic"],
+        similarity: "high" },
+    ] } });
+  assert.deepEqual(plain(block.hits[0].channels), ["lexical", "semantic"]);
+  assert.equal(block.hits[0].similarity, 0.71);
+  assert.equal(block.hits[1].similarity, null);
+  assert.match(block.semanticNote, /نتیجه‌های واژه‌ای همچنان معتبرند/);
+  const panel = source("../src/components/MediaPanel.tsx");
+  assert.match(panel, /نه شباهت تصویر/);
+  assert.match(panel, /کالیبره‌نشده/);
+});
+
 test("the panel uses the registered action transport, clears the secret and starts no runtime itself", () => {
   const panel = source("../src/components/MediaPanel.tsx");
   assert.match(panel, /invoke\("send_runtime_action", \{ actionId, data \}\)/);

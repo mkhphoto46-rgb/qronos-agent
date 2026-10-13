@@ -120,9 +120,13 @@ export type VisualHit = {
   observations: string[];
   /** Indexed dialogue lines whose time overlaps the frame (joined by time only, never by meaning). */
   dialogue: Array<{ startMs: number; text: string }>;
+  /** Which channel found it: lexical words, and/or bge-m3 similarity of the generated TEXT (never the image). */
+  channels: Array<"lexical" | "semantic">;
+  /** Uncalibrated cosine of the generated-text vectors (semantic channel only). */
+  similarity: number | null;
 };
 
-export type VisualBlock = { hits: VisualHit[]; note: string | null };
+export type VisualBlock = { hits: VisualHit[]; note: string | null; semanticNote: string | null };
 
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -133,7 +137,7 @@ function strings(value: unknown, count: number, size: number): string[] {
 
 /** The visual block of a `search` answer in mode "visual", validated field by field. */
 export function visualBlockOf(result: MediaResult | null): VisualBlock {
-  const empty: VisualBlock = { hits: [], note: null };
+  const empty: VisualBlock = { hits: [], note: null, semanticNote: null };
   if (!result || !result.ok || typeof result.visual !== "object" || result.visual === null) return empty;
   const block = result.visual as Record<string, unknown>;
   const hits: VisualHit[] = [];
@@ -150,12 +154,21 @@ export function visualBlockOf(result: MediaResult | null): VisualBlock {
         .filter((line): line is Record<string, unknown> => typeof line === "object" && line !== null
           && typeof (line as Record<string, unknown>).text === "string" && typeof (line as Record<string, unknown>).startMs === "number")
         .map((line) => ({ startMs: line.startMs as number, text: String(line.text).slice(0, 600) })),
+      channels: (Array.isArray(item.channels) ? item.channels : [])
+        .filter((name): name is "lexical" | "semantic" => name === "lexical" || name === "semantic").slice(0, 2),
+      similarity: typeof item.similarity === "number" && Number.isFinite(item.similarity) ? item.similarity : null,
     });
   }
   const note = block.status === "unavailable"
     ? `جست‌وجوی تصویری در دسترس نیست: ${refusalText(typeof block.reason === "string" ? block.reason : "no_visual_evidence")}`
     : null;
-  return { hits, note };
+  const channel = (typeof block.semantic === "object" && block.semantic !== null ? block.semantic : {}) as Record<string, unknown>;
+  const semanticNote = channel.status === "unavailable" || channel.status === "partial"
+    ? `جست‌وجوی هم‌معنای تصویری ${channel.status === "partial" ? "ناقص ماند" : "در دسترس نبود"}: `
+      + `${refusalText(typeof channel.reason === "string" ? channel.reason : String(channel.stoppedBy ?? "model_unavailable"))}؛ `
+      + "نتیجه‌های واژه‌ای همچنان معتبرند."
+    : null;
+  return { hits, note, semanticNote };
 }
 
 /** Report formats and kinds the media host renders from the one index schema (qronos_media/reports.py). */
@@ -266,6 +279,7 @@ export const MEDIA_REFUSAL_TEXT: Record<string, string> = {
   model_busy: "مدل مشغول است؛ کمی بعد دوباره امتحان کنید.",
   no_visual_evidence: "هنوز هیچ فریمی با مدل بینایی توصیف نشده است (مرحلهٔ شواهد تصویری انجام نشده).",
   no_visual_index: "این نمایه قدیمی‌تر از شواهد تصویری است.",
+  no_visual_vectors: "هنوز برای متن فریم‌ها بردار bge-m3 ساخته نشده است.",
   vision_profile_mismatch: "مدل بینایی تنظیم‌شده همان مدل اعلام‌شده نیست؛ چیزی اجرا نشد.",
   queue_full: "صف رسانه پر است؛ کمی بعد دوباره امتحان کنید.",
   stopped: "متوقف شد؛ هیچ کاری انجام نشد.",

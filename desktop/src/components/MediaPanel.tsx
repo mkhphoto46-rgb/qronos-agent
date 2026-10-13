@@ -258,6 +258,12 @@ function MediaPanel(props: MediaPanelProps) {
           <span className="ltr">{clock(hit.timeMs)}</span>
           <small className="ltr" title="SHA-256 همان فریم ذخیره‌شده">{hit.frameSha256.slice(0, 12)}</small>
         </div>
+        <small>
+          {hit.channels.includes("lexical") ? "هم‌واژه" : ""}
+          {hit.channels.length === 2 ? " + " : ""}
+          {hit.channels.includes("semantic")
+            ? `هم‌معنا از روی متن تولیدشده، نه شباهت تصویر (≈ ${(hit.similarity ?? 0).toFixed(2)}، کالیبره‌نشده)` : ""}
+        </small>
         <p className="media-topic-generated">
           <span dir="auto">{hit.caption}</span>{" "}
           <small>(توصیف تولیدشده با مدل بینایی از همین فریم؛ تأییدنشده، نه واقعیت و نه شناسایی)</small>
@@ -417,6 +423,7 @@ function MediaPanel(props: MediaPanelProps) {
       {semanticNote && <p className="media-notice">{semanticNote}</p>}
       {topic.note && <p className="media-notice">{topic.note}</p>}
       {visual.note && <p className="media-notice">{visual.note}</p>}
+      {visual.semanticNote && <p className="media-notice">{visual.semanticNote}</p>}
       {visual.hits.length > 0 && <>
         <h4>فریم‌های هم‌خوان (جست‌وجوی واژه‌ای در متن تولیدشدهٔ فریم‌ها، نه شباهت تصویر)</h4>
         <ul className="media-results">{visual.hits.map((hit, i) => visualCard(hit, `v${i}`))}</ul>
