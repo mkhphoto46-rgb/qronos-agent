@@ -134,3 +134,10 @@
   font-size: 0.9em;
   opacity: 0.85;
 }
+
+.media-topic-generated {
+  margin: 0.25rem 0;
+  padding: 0.25rem 0.5rem;
+  border-inline-start: 3px solid rgba(255, 196, 0, 0.6);
+  overflow-wrap: anywhere;
+}

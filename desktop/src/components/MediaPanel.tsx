@@ -124,6 +124,7 @@ function MediaPanel(props: MediaPanelProps) {
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<"exact" | "fuzzy" | "semantic" | "topic">("exact");
+  const [brainHints, setBrainHints] = useState(false);
   const [result, setResult] = useState<MediaResult | null>(null);
   const [approval, setApproval] = useState<MediaApproval | null>(null);
   const [secret, setSecret] = useState("");
@@ -199,7 +200,9 @@ function MediaPanel(props: MediaPanelProps) {
   async function search() {
     const text = query.trim();
     if (!text) return;
-    const answer = await run("search", { query: text, mode, limit: 20 });
+    const answer = await run("search", mode === "topic" && brainHints
+      ? { query: text, mode, limit: 20, brainHints: true }
+      : { query: text, mode, limit: 20 });
     if (answer) setResult(answer);
   }
 
@@ -254,6 +257,13 @@ function MediaPanel(props: MediaPanelProps) {
           <span className="ltr">{clock(hit.startMs)} – {clock(hit.endMs)}</span>
           <span title="امتیاز رتبه با وزن‌های ثابت؛ احتمال یا درصد نیست">≈ {hit.score.toFixed(2)}</span>
         </div>
+        {hit.generated && (
+          <p className="media-topic-generated">
+            <strong dir="auto">{hit.generated.label}</strong>{" "}
+            <small>(برچسب تولیدشده با مغز سریع از جمله‌های زیر؛ تأییدنشده، نقل‌قول نیست)</small>
+            <br /><span dir="auto">{hit.generated.summary}</span>
+          </p>
+        )}
         <ul className="media-topic-lines">
           {hit.evidence.map((line, i) => (
             <li key={i}><span className="ltr">{clock(line.startMs)}</span> <span dir="auto">{line.text}</span></li>
@@ -344,6 +354,12 @@ function MediaPanel(props: MediaPanelProps) {
         <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
           {(["exact", "fuzzy", "semantic", "topic"] as const).map((m) => <option key={m} value={m}>{MODE_FA[m]}</option>)}
         </select>
+        {mode === "topic" && (
+          <label title="فقط وقتی جست‌وجوی اول ضعیف یا پرسش خیلی کوتاه باشد؛ عبارت‌ها راهنما هستند، نه نتیجه">
+            <input type="checkbox" checked={brainHints} onChange={(e) => setBrainHints(e.target.checked)} />
+            پیشنهاد عبارت با مغز سریع
+          </label>
+        )}
         <button type="button" disabled={busy || !query.trim()} onClick={() => void search()}>جست‌وجو</button>
       </div>
       <div className="media-row media-report-options">
@@ -364,6 +380,14 @@ function MediaPanel(props: MediaPanelProps) {
       </div>
       {semanticNote && <p className="media-notice">{semanticNote}</p>}
       {topic.note && <p className="media-notice">{topic.note}</p>}
+      {topic.brainHints.length > 0 && (
+        <p className="media-topic-hints">
+          عبارت‌های پیشنهادی مغز سریع (تولیدشده؛ راهنمای جست‌وجو، نه واقعیت و نه نتیجه): <span dir="auto">{topic.brainHints.join("، ")}</span>
+        </p>
+      )}
+      {topic.brainHintsReason && (
+        <p className="media-topic-hints">پیشنهاد مغز سریع به کار نرفت ({topic.brainHintsReason})؛ جست‌وجوی موضوعی بدون آن انجام شد.</p>
+      )}
       {topic.expanded && topic.hints.length > 0 && (
         <p className="media-topic-hints">
           جست‌وجو با واژه‌های جمله‌های نزدیک گسترش یافت (راهنمای جست‌وجو، نه واقعیت): <span dir="auto">{topic.hints.join("، ")}</span>

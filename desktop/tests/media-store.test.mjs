@@ -195,6 +195,28 @@ test("topic search: hits must carry indexed lines, hints are labelled hints, and
   assert.match(panel, /امتیاز رتبه با وزن‌های ثابت؛ احتمال یا درصد نیست/);
 });
 
+test("generated labels and brain hints are shown only as generated text with the indexed lines they cite", () => {
+  const asset = "a_" + "2".repeat(32);
+  const line = { startMs: 500, endMs: 4000, text: "You lied to me for three years." };
+  const block = media.topicBlockOf({ requestId: "r1", op: "search", ok: true, topic: {
+    status: "complete", brainHints: { requested: true, applied: true, hints: ["you lied to me", 3] },
+    results: [
+      { assetId: asset, startMs: 500, endMs: 34000, evidence: [line],
+        generated: { label: "اعتماد", summary: "دربارهٔ دروغ", cites: [{ lineId: "L7", startMs: 500 }] } },
+      { assetId: asset, startMs: 1, endMs: 2, evidence: [line], generated: { label: "x", summary: "y", cites: [] } },
+    ] } });
+  assert.equal(block.hits[0].generated.label, "اعتماد");
+  assert.equal(block.hits[1].generated, null);  // a label without cited lines is not shown
+  assert.deepEqual(plain(block.brainHints), ["you lied to me"]);
+  const declined = media.topicBlockOf({ requestId: "r2", op: "search", ok: true, topic: { status: "complete",
+    brainHints: { requested: true, applied: false, reason: "model_unavailable" }, results: [] } });
+  assert.equal(declined.brainHintsReason, "model_unavailable");
+  const panel = source("../src/components/MediaPanel.tsx");
+  assert.match(panel, /تأییدنشده، نقل‌قول نیست/);
+  assert.match(panel, /راهنمای جست‌وجو، نه واقعیت و نه نتیجه/);
+  assert.match(panel, /brainHints: true/);
+});
+
 test("the panel uses the registered action transport, clears the secret and starts no runtime itself", () => {
   const panel = source("../src/components/MediaPanel.tsx");
   assert.match(panel, /invoke\("send_runtime_action", \{ actionId, data \}\)/);
