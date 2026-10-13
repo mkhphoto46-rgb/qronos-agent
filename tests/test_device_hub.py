@@ -22,6 +22,7 @@ from core.print_workflow import PrinterState, PrintJobState
 from core import power_wake
 from core.power_wake import ArmResult, WakeCapability
 from core.wia_imaging import ImagingDevice
+from core.camera_capture import CameraDevice, CameraError, Frame as CameraFrame
 from security.gate import Verdict
 from security.permissions import ActionCategory, PermissionDecision
 from tests.threemf_fixture import (CORE_2013, CORE_2015, MATERIAL_EXT, REL_MODEL, model_xml,
@@ -867,6 +868,162 @@ def test_cancel_garbage_pause_and_a_new_file_meanwhile_all_write_nothing(scan, t
     assert (tmp_path / "d.png").read_bytes() == b"made meanwhile"  # untouched
     assert all(not staging.exists() for staging in scan.imaging.stagings)
     assert len(scans(scan)) == 3  # cancel, garbage and the paused one reached the dialog; the last did not
+
+
+# ------------------------------------------------------------ ONE still frame from a camera (Media Foundation)
+
+USB_CAMERA = CameraDevice(r"\\?\usb#vid_046d&pid_0825&mi_00#7&1a2b3c&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global",
+                          "USB Camera")
+
+
+class FakeCamera:
+    """Stands for core/camera_capture.WinCamera: records listings and captures; a capture returns a synthetic frame."""
+
+    def __init__(self) -> None:
+        self.devices = [USB_CAMERA]
+        self.calls: list[tuple] = []
+        self.during_capture = None  # a hook: what happens while the camera is on
+        self.error: CameraError | None = None
+
+    def list_devices(self):
+        self.calls.append(("list",))
+        return list(self.devices)
+
+    def capture(self, symbolic_link, should_stop):
+        self.calls.append(("capture", symbolic_link))
+        if self.during_capture:
+            self.during_capture()
+        if should_stop():  # what the real worker does when Pause/Stop lands: the camera is shut down, nothing kept
+            raise CameraError("cancelled", "stopped")
+        if self.error is not None:
+            raise self.error
+        return CameraFrame(64, 48, bytes([30, 60, 200, 0]) * (64 * 48), 5)
+
+
+@pytest.fixture
+def camera(world):
+    fake = FakeCamera()
+    world.hub._camera_factory = lambda: fake
+    world.camera = fake
+    return world
+
+
+def camera_id(world) -> str:
+    return ask(world, "camera.list", f"cl{len(world.events)}")["devices"][0]["id"]
+
+
+def captures(world) -> list:
+    return [c for c in world.camera.calls if c[0] == "capture"]
+
+
+def test_cameras_are_listed_also_while_paused_but_nothing_is_captured_then(camera):
+    camera.state["paused"] = True
+    listed = ask(camera, "camera.list", "k1")
+    (device,) = listed["devices"]
+    assert device["name"] == "USB Camera" and device["workflows"] == ["still_to_file"]
+    assert device["id"] == USB_CAMERA.device_id and "symbolic" not in json.dumps(listed).lower()
+    assert set(listed["limits"]) == set(hub_module.CAMERA_LIMITS) and set(listed["formats"]) >= {".png", ".jpg"}
+    assert ask(camera, "camera.capture", "k2", deviceId=device["id"], destination="C:\\stills\\a.png")["code"] == "paused"
+    assert captures(camera) == []
+
+
+def test_camera_requests_are_validated_and_only_a_listed_camera_and_a_new_file_qualify(camera, tmp_path):
+    good = camera_id(camera)
+    (tmp_path / "exists.png").write_bytes(b"x")
+    for request_id, fields, code in (
+        ("q1", {"deviceId": "img-" + "0" * 20, "destination": str(tmp_path / "a.png")}, "bad_request"),
+        ("q2", {"deviceId": good, "destination": "relative.png"}, "bad_request"),
+        ("q3", {"deviceId": good, "destination": str(tmp_path / "a.gif")}, "bad_destination"),
+        ("q4", {"deviceId": good, "destination": str(tmp_path / "exists.png")}, "destination_exists"),
+        ("q5", {"deviceId": good, "destination": str(tmp_path / "nope" / "a.png")}, "bad_destination"),
+        ("q6", {"deviceId": "cam-" + "0" * 20, "destination": str(tmp_path / "a.png")}, "device_gone"),
+    ):
+        assert ask(camera, "camera.capture", request_id, **fields)["code"] == code, request_id
+    assert captures(camera) == [] and camera.hub._ledger.open_tickets() == ()
+
+
+def test_one_still_needs_the_typed_secret_and_writes_exactly_one_new_file(camera, tmp_path):
+    destination = tmp_path / "still.png"
+    pending = ask(camera, "camera.capture", "p1", deviceId=camera_id(camera), destination=str(destination))
+    assert pending["status"] == "approval_required" and pending["needsSecret"] is True  # the policy ALLOWS
+    assert pending["preview"]["action"] == "camera" and pending["preview"]["device"] == "USB Camera"
+    assert ask(camera, "decide", "p2", approvalId=pending["approvalId"], approved=True,
+               secret="wrong horse")["code"] == "secret_rejected"
+    assert captures(camera) == [] and not destination.exists()
+    pending = ask(camera, "camera.capture", "p3", deviceId=camera_id(camera), destination=str(destination))
+    done = ask(camera, "decide", "p4", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert done["status"] == "saved" and done["path"] == str(destination) and (done["width"], done["height"]) == (64, 48)
+    assert done["framesRead"] == 5 and done["dark"] is False and done["bytes"] == destination.stat().st_size
+    from PIL import Image
+
+    with Image.open(destination) as written:
+        assert written.format == "PNG" and written.getpixel((0, 0)) == (200, 60, 30)
+    assert captures(camera) == [("capture", USB_CAMERA.symbolic_link)]
+    rows = audit_rows(camera)
+    assert (AuditEvent.COMPLETED, "device_control", "camera:USB Camera/capture", "succeeded") in rows
+    assert (AuditEvent.COMPLETED, "create_or_edit_file", str(destination), "succeeded") in rows
+    assert "correct horse" not in json.dumps(camera.events) and "wrong horse" not in json.dumps(camera.events)
+    assert ask(camera, "camera.capture", "p5", deviceId=camera_id(camera),
+               destination=str(destination))["code"] == "destination_exists"  # never overwritten
+    third = ask(camera, "camera.capture", "p6", deviceId=camera_id(camera), destination=str(tmp_path / "next.jpg"))
+    assert ask(camera, "decline", "p7", approvalId=third["approvalId"])["declined"] is True
+    assert any(r[:3] == (AuditEvent.DENIED_BY_USER, "device_control", "camera:USB Camera/capture")
+               for r in audit_rows(camera))
+    assert len(captures(camera)) == 1
+
+
+def test_both_camera_gates_decide_before_and_at_the_answer(camera, tmp_path, monkeypatch):
+    destination = str(tmp_path / "still.png")
+    for category in (ActionCategory.CREATE_OR_EDIT_FILE, ActionCategory.DEVICE_CONTROL):
+        monkeypatch.setattr(gate_module, "evaluate", policy_by({category: PermissionDecision.DENY}))
+        assert ask(camera, "camera.capture", f"h-{category.value}", deviceId=camera_id(camera),
+                   destination=destination)["code"] == "denied"
+    assert camera.hub._ledger.open_tickets() == ()
+    monkeypatch.setattr(gate_module, "evaluate", policy(PermissionDecision.ALLOW))
+    pending = ask(camera, "camera.capture", "h1", deviceId=camera_id(camera), destination=destination)
+    monkeypatch.setattr(gate_module, "evaluate", policy_by({ActionCategory.DEVICE_CONTROL: PermissionDecision.DENY}))
+    assert ask(camera, "decide", "h2", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "denied"
+    assert captures(camera) == [] and not Path(destination).exists()
+    assert not [r for r in audit_rows(camera) if r[0] == AuditEvent.DENIED_BY_USER]
+
+
+def test_pause_before_or_during_the_capture_a_changed_camera_and_os_refusals_write_nothing(camera, tmp_path):
+    def approve(request_id, destination, before=None):
+        pending = ask(camera, "camera.capture", request_id, deviceId=camera_id(camera), destination=str(destination))
+        if before:
+            before()
+        return ask(camera, "decide", request_id + "d", approvalId=pending["approvalId"], approved=True,
+                   secret="correct horse")
+
+    def pause():  # what set_runtime_paused does: the flag, then the bridge's lifecycle hook
+        camera.state["paused"] = True
+        camera.hub.cancel_wake("pause")
+
+    assert approve("z1", tmp_path / "a.png", before=pause)["code"] == "paused"  # paused before the answer
+    assert captures(camera) == [] and not (tmp_path / "a.png").exists()  # the camera was never turned on
+    camera.state["paused"] = False
+    camera.camera.during_capture = pause
+    assert approve("z2", tmp_path / "b.png")["code"] == "paused" and not (tmp_path / "b.png").exists()
+    camera.state["paused"], camera.camera.during_capture = False, None
+    rows = audit_rows(camera)
+    assert rows.count((AuditEvent.COMPLETED, "device_control", "camera:USB Camera/capture", "refused")) == 1
+    for error in ("camera_privacy_denied", "camera_busy", "camera_format_unsupported", "camera_timeout"):
+        camera.camera.error = CameraError(error, "from Windows")
+        assert approve("z-" + error, tmp_path / f"{error}.png")["code"] == error
+        assert not (tmp_path / f"{error}.png").exists()
+    camera.camera.error = None
+    pending = ask(camera, "camera.capture", "z3", deviceId=camera_id(camera), destination=str(tmp_path / "c.png"))
+    camera.camera.devices = [CameraDevice(USB_CAMERA.symbolic_link.replace("046d", "1234"), "USB Camera")]
+    assert ask(camera, "decide", "z3d", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "device_gone"  # the approved camera is no longer listed
+    camera.camera.devices = [USB_CAMERA]
+    pending = ask(camera, "camera.capture", "z4", deviceId=camera_id(camera), destination=str(tmp_path / "d.png"))
+    (tmp_path / "d.png").write_bytes(b"made meanwhile")  # the destination appears before the answer
+    assert ask(camera, "decide", "z4d", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "destination_exists"
+    assert (tmp_path / "d.png").read_bytes() == b"made meanwhile"  # untouched
+    assert len(captures(camera)) == 1 + 4  # the paused-during one and the four OS refusals reached the camera
 
 
 # ------------------------------------------------------------ the real bridge lifecycle with a pending device approval

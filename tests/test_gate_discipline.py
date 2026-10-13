@@ -72,6 +72,8 @@ NATIVE_BACKENDS = {
     "core.power_wake": frozenset({"core.device_hub"}),
     # WIA 2.0 scanner listing and the one-scan dialog: only the gated Device Hub.
     "core.wia_imaging": frozenset({"core.device_hub"}),
+    # Media Foundation camera listing and the one still frame: only the gated Device Hub.
+    "core.camera_capture": frozenset({"core.device_hub"}),
 }
 
 # Modules that legitimately touch these without being action executors, with
