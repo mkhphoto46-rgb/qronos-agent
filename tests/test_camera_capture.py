@@ -28,6 +28,7 @@ GUIDP, PVOIDP = ctypes.c_void_p, ctypes.c_void_p
 LINK = r"\\?\usb#vid_046d&pid_0825&mi_00#7&1a2b3c&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global"
 OTHER = r"\\?\usb#vid_1234&pid_5678&mi_00#7&9&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global"
 W, H = 8, 6
+ATTRIBUTE_NOT_FOUND = -1072875802  # MF_E_ATTRIBUTENOTFOUND 0xC00D36E6
 
 
 def guid_text(pointer) -> str:
@@ -94,6 +95,7 @@ class FakeMf(cam.MfApi):
         self.activate_hr, self.set_type_hr, self.frame_size = activate_hr, set_type_hr, frame_size
         self.reads = list(reads if reads is not None else [("frame", (10, 20, 100 + i)) for i in range(8)])
         self.shutdown_event = threading.Event()
+        self.release_event = threading.Event()
         self.memory: list = []
 
     # -- the SDK functions
@@ -143,16 +145,26 @@ class FakeMf(cam.MfApi):
     def enum_device_sources(self, attributes, out_array, out_count):
         self.log.append(("MFEnumDeviceSources",))
         array = self._ole.CoTaskMemAlloc(ctypes.sizeof(ctypes.c_void_p) * max(1, len(self.cameras)))
-        for index, (link, name) in enumerate(self.cameras):
-            ctypes.cast(array, ctypes.POINTER(ctypes.c_void_p))[index] = self.activate(link, name).pointer
+        for index, camera in enumerate(self.cameras):
+            link, name, hw, provider = (*camera, True, "")[:4] if len(camera) == 2 else camera
+            ctypes.cast(array, ctypes.POINTER(ctypes.c_void_p))[index] = self.activate(link, name, hw, provider).pointer
         put(out_array, array)
         put(out_count, len(self.cameras), ctypes.c_uint32)
         return 0
 
-    def activate(self, link, name):
+    def activate(self, link, name, hw=True, provider=""):
+        def get_uint32(this, key, out):  # VIDCAP_HW_SOURCE: None = Windows did not set it
+            if guid_text(key) != cam.GUIDS["MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_HW_SOURCE"] or hw is None:
+                return ATTRIBUTE_NOT_FOUND
+            put(out, int(hw), ctypes.c_uint32)
+            return 0
+
         def get_string(this, key, out, length):
             text = {cam.GUIDS["MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK"]: link,
-                    cam.GUIDS["MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME"]: name}[guid_text(key)]
+                    cam.GUIDS["MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME"]: name,
+                    cam.GUIDS["MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_PROVIDER_DEVICE_ID"]: provider}[guid_text(key)]
+            if not text:
+                return ATTRIBUTE_NOT_FOUND
             memory = self._ole.CoTaskMemAlloc(2 * (len(text) + 1))
             ctypes.memmove(memory, ctypes.create_unicode_buffer(text), 2 * (len(text) + 1))
             put(out, memory)
@@ -170,7 +182,7 @@ class FakeMf(cam.MfApi):
             self.log.append(("ShutdownObject", link))
             return 0
 
-        return self.make(f"activate:{name}", {13: ((GUIDP, PVOIDP, PVOIDP), get_string),
+        return self.make(f"activate:{name}", {7: ((GUIDP, PVOIDP), get_uint32), 13: ((GUIDP, PVOIDP, PVOIDP), get_string),
                                               33: ((GUIDP, PVOIDP), activate_object), 34: ((), shutdown_object)})
 
     def source(self):
@@ -203,6 +215,9 @@ class FakeMf(cam.MfApi):
             if step[0] == "block":  # a camera that delivers nothing until the source is shut down
                 self.shutdown_event.wait(10)
                 return cam.HRESULTS["MF_E_SHUTDOWN"]
+            if step[0] == "stuck":  # a driver that does not return even after the shutdown, until released
+                self.release_event.wait(30)
+                return cam.HRESULTS["MF_E_SHUTDOWN"]
             if step[0] == "hr":
                 return step[1]
             if step[0] == "flags":
@@ -231,7 +246,7 @@ class FakeMf(cam.MfApi):
 
         def get_uint32(this, key, out):
             if self.stride is None:
-                return -1072875802  # MF_E_ATTRIBUTENOTFOUND
+                return ATTRIBUTE_NOT_FOUND
             put(out, self.stride & 0xFFFFFFFF, ctypes.c_uint32)
             return 0
 
@@ -379,6 +394,46 @@ def test_the_deadline_stops_a_silent_camera_and_keeps_a_frame_only_if_one_arrive
     slow = FakeMf(reads=[("frame", (5, 6, 7)), ("block",)])
     frame = cam._capture_with(slow, LINK, should_stop=lambda: False, timeout=0.3)
     assert frame.frames_read == 1 and frame.bgrx == b"".join(rows_of((5, 6, 7))) and all_released(slow)
+
+
+@needs_windows
+def test_only_a_proven_local_hardware_camera_is_offered_and_anything_else_is_never_turned_on():
+    virtual = r"\\?\root#image#0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global"
+    network = r"\\?\swd#netcam#0001#{e5323777-f976-4f5b-9b55-b94699c46e44}\global"
+    cameras = [(LINK, "USB Camera", True, ""), (virtual, "Virtual Camera", False, ""), (OTHER, "No HW flag", None, ""),
+               (network, "Network Camera", True, ""), (OTHER.replace("1234", "abcd"), "Phone", True, "provider#42")]
+    listed = {d.name: d.unsupported for d in cam._list_with(FakeMf(cameras=cameras))}
+    assert listed == {"USB Camera": "", "Virtual Camera": "not_hardware_source", "No HW flag": "not_hardware_source",
+                      "Network Camera": "origin_not_proven_local", "Phone": "origin_not_proven_local"}
+    for link in (virtual, network):  # checked again on the fresh listing in the worker: refused BEFORE activation
+        fake = FakeMf(cameras=cameras)
+        with pytest.raises(CameraError) as refused:
+            cam._capture_with(fake, link, should_stop=lambda: False, timeout=5)
+        assert refused.value.code == "camera_not_local" and not entries(fake, "ActivateObject") and all_released(fake)
+
+
+@needs_windows
+def test_a_capture_that_does_not_close_blocks_every_new_capture_until_its_worker_exits(monkeypatch):
+    monkeypatch.setattr(cam, "JOIN_GRACE_S", 0.2)
+    stuck = FakeMf(reads=[("stuck",)])
+    try:
+        with pytest.raises(CameraError) as refused:
+            cam._capture_with(stuck, LINK, should_stop=lambda: False, timeout=0.3)
+        assert refused.value.code == "camera_stuck" and "may still be on" in str(refused.value)
+        assert entries(stuck, "Source.Shutdown") and cam.capture_in_flight()  # asked to stop, not proven closed
+        later = FakeMf()
+        with pytest.raises(CameraError) as blocked:
+            cam._capture_with(later, LINK, should_stop=lambda: False, timeout=5)
+        assert blocked.value.code == "camera_still_closing" and later.log == []  # not even Media Foundation started
+    finally:
+        stuck.release_event.set()  # the driver finally returns
+    with cam._OWNER_LOCK:
+        workers = list(cam._IN_FLIGHT)
+    for worker in workers:
+        worker.join(10)
+    assert not cam.capture_in_flight() and all_released(stuck) and stuck.log[-1] == ("CoUninitialize",)
+    frame = cam._capture_with(FakeMf(), LINK, should_stop=lambda: False, timeout=5)  # now a new capture may start
+    assert frame.frames_read == cam.WARMUP_FRAMES + 1
 
 
 # ------------------------------------------------------------------ the one new file

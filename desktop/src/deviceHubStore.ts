@@ -239,7 +239,9 @@ export const DEVICE_REFUSAL_TEXT: Record<string, string> = {
   camera_gone: "دوربین دیگر در دسترس نیست (جدا شد یا خاموش است)؛ عکسی گرفته نشد.",
   camera_format_unsupported: "ویندوز تصویر این دوربین را به قالبی که Qronos می‌خواند تبدیل نکرد؛ عکسی گرفته نشد.",
   camera_timeout: "دوربین در زمان مقرر تصویری نفرستاد و خاموش شد؛ عکسی گرفته نشد.",
-  camera_stuck: "دوربین به‌موقع بسته نشد؛ فایلی نوشته نشد.",
+  camera_stuck: "از دوربین خواسته شد خاموش شود اما هنوز بسته نشده و ممکن است روشن باشد؛ فایلی نوشته نشد و تا بسته شدن آن عکس تازه‌ای گرفته نمی‌شود.",
+  camera_still_closing: "گرفتن عکس قبلی هنوز دوربین را نبسته است؛ تا بسته شدن آن عکس تازه‌ای گرفته نمی‌شود.",
+  camera_not_local: "محلی و سخت‌افزاری بودن این دوربین ثابت نشد؛ روشن نشد و عکسی گرفته نشد.",
   camera_bad_frame: "تصویر رسیده از دوربین اندازهٔ درستی نداشت؛ فایلی نوشته نشد.",
   camera_failed: "ویندوز گرفتن عکس از دوربین را ناموفق گزارش کرد؛ عکسی گرفته نشد.",
   camera_unavailable: "عکس گرفتن از دوربین فقط در ویندوز در دسترس است.",
@@ -437,7 +439,7 @@ export function scanSavedText(result: DeviceHubResult): string {
 
 // ------------------------------------------------------------ ONE still frame from a camera (Media Foundation)
 
-export type CameraDevice = { id: string; name: string; workflows: string[] };
+export type CameraDevice = { id: string; name: string; workflows: string[]; unsupported: string };
 
 const CAMERA_ID = /^cam-[0-9a-f]{20}$/;
 
@@ -449,16 +451,24 @@ export function cameraDevicesOf(result: DeviceHubResult): CameraDevice[] {
     if (!isRecord(item) || typeof item.id !== "string" || !CAMERA_ID.test(item.id) || typeof item.name !== "string") {
       continue;
     }
-    out.push({ id: item.id, name: text(item.name, 200), workflows: strings(item.workflows, 4) });
+    const unsupported = text(item.unsupported, 64);
+    out.push({ id: item.id, name: text(item.name, 200), workflows: unsupported ? [] : strings(item.workflows, 4),
+               unsupported });
   }
   return out;
 }
 
+/** Why a listed camera is not used (core camera_capture.origin_of). */
+export const CAMERA_UNSUPPORTED_TEXT: Record<string, string> = {
+  not_hardware_source: "ویندوز این را دوربین سخت‌افزاری نشان نمی‌دهد (مثلاً دوربین مجازی)؛ روشن نمی‌شود.",
+  origin_not_proven_local: "محلی بودن این دوربین ثابت نشد (مثلاً دوربین شبکه‌ای، گوشی یا دوربین داخلیِ غیر USB)؛ روشن نمی‌شود.",
+};
+
 /** What a camera capture here is and is not (core CAMERA_LIMITS). */
 export const CAMERA_LIMIT_TEXT: Record<string, string> = {
-  cameras_windows_lists_only: "فقط دوربین‌هایی که خود ویندوز به‌عنوان دوربین فهرست می‌کند.",
+  proven_local_usb_hardware_only: "فقط دوربین سخت‌افزاری که ویندوز آن را دوربین متصل از راه USB به همین کامپیوتر نشان می‌دهد؛ دوربین مجازی، شبکه‌ای، گوشی یا ناشناخته روشن نمی‌شود.",
   one_still_frame_no_video_no_audio: "فقط یک عکس ثابت؛ نه فیلم، نه صدا، نه پیش‌نمایش.",
-  camera_on_only_during_capture: "دوربین فقط چند ثانیهٔ گرفتن عکس روشن است و چراغ دوربین ویندوز دیده می‌شود.",
+  camera_on_only_during_capture: "دوربین فقط برای گرفتن همین عکس روشن می‌شود و Qronos پس از حداکثر ۱۰ ثانیه از ویندوز می‌خواهد آن را ببندد؛ اگر به‌موقع بسته نشود همین را می‌گوید و تا بسته شدن، عکس تازه‌ای نمی‌گیرد.",
   one_new_file_no_overwrite_no_links: "یک فایل تازهٔ PNG یا JPEG؛ هیچ فایلی بازنویسی نمی‌شود و پوشهٔ پیوندی پذیرفته نیست.",
   no_recognition_no_model: "هیچ تشخیص چهره یا شخص و هیچ مدلی روی عکس اجرا نمی‌شود.",
   no_wia_still_cameras_or_unlisted_phones:
@@ -467,6 +477,7 @@ export const CAMERA_LIMIT_TEXT: Record<string, string> = {
 
 /** Why a camera form cannot be sent (Persian), or null when it is well-formed for this device. */
 export function cameraProblem(device: CameraDevice | undefined, destination: string): string | null {
+  if (device && device.unsupported) return CAMERA_UNSUPPORTED_TEXT[device.unsupported] ?? "این دوربین پشتیبانی نمی‌شود.";
   if (!device || !device.workflows.includes("still_to_file")) return "یک دوربین فهرست‌شده انتخاب کنید.";
   const path = destination.trim();
   if (!path || path.length > MAX_PATH_CHARS || !/^([A-Za-z]:[\\/]|\\\\)/.test(path) || !/\.(png|jpe?g)$/i.test(path)) {

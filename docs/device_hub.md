@@ -110,9 +110,21 @@ vtable slot, GUID and constant is checked against the Windows SDK 10.0.26100 hea
 
 - **List** (`camera.list`, read-only, also while paused): what Windows itself lists as video capture devices
   (`MFEnumDeviceSources`, VIDCAP). Each is shown by name; its identity is `cam-` plus a hash of its symbolic link.
-  Listing never turns a camera on.
+  Listing never turns a camera on. The answer also says `closing` while an earlier capture has not closed.
+- **Only a proven LOCAL hardware camera is ever turned on** (`origin_of`). All three must hold:
+  - Windows marks it a hardware source (`MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_HW_SOURCE` = TRUE);
+  - it is not provided through another device (no `..._VIDCAP_PROVIDER_DEVICE_ID`);
+  - its device-interface path is on the USB bus (`\\?\usb#`).
+
+  Everything else is listed but shown as unsupported and is never turned on:
+  - `not_hardware_source`: a virtual/software camera, or the flag is not set;
+  - `origin_not_proven_local`: a network or phone camera, a provider-based source, or a built-in camera on another
+    bus.
+
+  The rule is checked at the request, at the answer, and again in the capture worker on a fresh listing, right
+  before `ActivateObject` (`camera_not_local`).
 - **Capture** (`camera.capture`):
-  - one listed camera and one exact NEW `.png`/`.jpg`/`.jpeg` path in an existing, non-linked folder;
+  - one listed, proven local camera and one exact NEW `.png`/`.jpg`/`.jpeg` path in an existing, non-linked folder;
   - the `DEVICE_CONTROL` gate (`camera:<name>/capture`) and the Files `CREATE_OR_EDIT_FILE` gate (the path) both
     decide; then always a single-use `DEVICE_ACTION` approval with the typed secret;
   - at the answer, these are checked: both current policies, the secret, the same camera (symbolic link) still
@@ -121,8 +133,13 @@ vtable slot, GUID and constant is checked against the Windows SDK 10.0.26100 hea
     down at once), and checked again after;
   - only the approved camera is opened, video stream only (never audio). Windows' own video processing converts its
     format to RGB32. Up to 4 frames are dropped in memory while the exposure settles, and the next one is kept;
-  - the camera is on for at most 10 seconds. Windows shows its own camera indicator. The frame never touches the disk
-    before the final write;
+  - the camera is turned on only for this capture. Qronos stops it after at most 10 seconds (or at once on
+    Pause/Stop) by shutting down the media source. Windows shows its own camera indicator. The frame never touches the
+    disk before the final write;
+  - "stopped" is claimed only when the capture worker has actually exited after releasing everything. If it has not
+    exited 5 seconds after the stop, the answer is `camera_stuck`: the camera may still be on and nothing is written.
+    That worker stays owned, and every new capture is refused (`camera_still_closing`, before any approval is asked)
+    until it has exited;
   - the frame (at most 7680x4320) is encoded to the path with exclusive create: never an overwrite, and no metadata;
   - the answer states exactly what was written: path, SHA-256, bytes, size, format, frames read, and whether the image
     is almost completely dark (for example a covered lens).
@@ -135,12 +152,12 @@ vtable slot, GUID and constant is checked against the Windows SDK 10.0.26100 hea
   Nothing is written in any of these cases.
 
 Not supported, shown as such:
-- WIA 1.0 still cameras; phones, network cameras or other devices that Windows does not itself list as a camera;
+- WIA 1.0 still cameras;
+- virtual, network and phone cameras, and built-in cameras that are not on the USB bus (not proven local);
 - video or sound recording, a live preview, and any face or person recognition (no model runs on the image).
 
-A camera that Windows does list (virtual, network or phone cameras included) works the same way, but only built-in
-and USB webcams are the intended case; none of this has been tried on real hardware. Live acceptance on real cameras
-is still required.
+None of this has been tried on real hardware. Live acceptance on real cameras is still required (including whether
+a given webcam reports VIDCAP_HW_SOURCE).
 
 ## Waking this PC from sleep (H3)
 

@@ -873,7 +873,8 @@ def test_cancel_garbage_pause_and_a_new_file_meanwhile_all_write_nothing(scan, t
 # ------------------------------------------------------------ ONE still frame from a camera (Media Foundation)
 
 USB_CAMERA = CameraDevice(r"\\?\usb#vid_046d&pid_0825&mi_00#7&1a2b3c&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global",
-                          "USB Camera")
+                          "USB Camera", True, "")
+VIRTUAL_CAMERA = CameraDevice(r"\\?\root#image#0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global", "Virtual Cam", False, "")
 
 
 class FakeCamera:
@@ -884,6 +885,10 @@ class FakeCamera:
         self.calls: list[tuple] = []
         self.during_capture = None  # a hook: what happens while the camera is on
         self.error: CameraError | None = None
+        self.closing = False  # an earlier capture's worker has not exited
+
+    def capture_in_flight(self):
+        return self.closing
 
     def list_devices(self):
         self.calls.append(("list",))
@@ -1014,7 +1019,7 @@ def test_pause_before_or_during_the_capture_a_changed_camera_and_os_refusals_wri
         assert not (tmp_path / f"{error}.png").exists()
     camera.camera.error = None
     pending = ask(camera, "camera.capture", "z3", deviceId=camera_id(camera), destination=str(tmp_path / "c.png"))
-    camera.camera.devices = [CameraDevice(USB_CAMERA.symbolic_link.replace("046d", "1234"), "USB Camera")]
+    camera.camera.devices = [CameraDevice(USB_CAMERA.symbolic_link.replace("046d", "1234"), "USB Camera", True, "")]
     assert ask(camera, "decide", "z3d", approvalId=pending["approvalId"], approved=True,
                secret="correct horse")["code"] == "device_gone"  # the approved camera is no longer listed
     camera.camera.devices = [USB_CAMERA]
@@ -1024,6 +1029,35 @@ def test_pause_before_or_during_the_capture_a_changed_camera_and_os_refusals_wri
                secret="correct horse")["code"] == "destination_exists"
     assert (tmp_path / "d.png").read_bytes() == b"made meanwhile"  # untouched
     assert len(captures(camera)) == 1 + 4  # the paused-during one and the four OS refusals reached the camera
+
+
+def test_a_camera_not_proven_local_hardware_is_listed_unsupported_and_never_offered(camera, tmp_path):
+    camera.camera.devices = [USB_CAMERA, VIRTUAL_CAMERA]
+    by_name = {d["name"]: d for d in ask(camera, "camera.list", "o1")["devices"]}
+    assert by_name["USB Camera"]["workflows"] == ["still_to_file"] and by_name["USB Camera"]["unsupported"] == ""
+    assert by_name["Virtual Cam"]["workflows"] == [] and by_name["Virtual Cam"]["unsupported"] == "not_hardware_source"
+    assert ask(camera, "camera.capture", "o2", deviceId=by_name["Virtual Cam"]["id"],
+               destination=str(tmp_path / "v.png"))["code"] == "unsupported"
+    pending = ask(camera, "camera.capture", "o3", deviceId=by_name["USB Camera"]["id"], destination=str(tmp_path / "u.png"))
+    camera.camera.devices = [CameraDevice(USB_CAMERA.symbolic_link, "USB Camera", False, "")]  # no longer proven local
+    assert ask(camera, "decide", "o3d", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "unsupported"
+    assert captures(camera) == [] and not (tmp_path / "u.png").exists()
+
+
+def test_while_an_earlier_capture_is_still_closing_no_new_capture_is_asked_or_started(camera, tmp_path):
+    camera.camera.closing = True
+    listed = ask(camera, "camera.list", "w1")
+    assert listed["closing"] is True
+    assert ask(camera, "camera.capture", "w2", deviceId=listed["devices"][0]["id"],
+               destination=str(tmp_path / "a.png"))["code"] == "camera_still_closing"
+    assert camera.hub._ledger.open_tickets() == () and captures(camera) == []  # no secret was even asked for
+    camera.camera.error = CameraError("camera_stuck", "asked to stop, may still be on")
+    camera.camera.closing = False
+    pending = ask(camera, "camera.capture", "w3", deviceId=listed["devices"][0]["id"], destination=str(tmp_path / "b.png"))
+    assert ask(camera, "decide", "w3d", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["code"] == "camera_stuck"
+    assert not (tmp_path / "b.png").exists()
 
 
 # ------------------------------------------------------------ the real bridge lifecycle with a pending device approval

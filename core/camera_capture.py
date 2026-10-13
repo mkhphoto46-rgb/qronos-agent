@@ -1,9 +1,12 @@
 """One still frame from a local camera/webcam (Device Hub, H1) through Windows Media Foundation.
 
 What it does: lists what Windows itself lists as video capture devices, and for ONE approved request opens the one
-camera that was approved, reads a few frames (the first ones are dropped in memory while the exposure settles), keeps
-ONE frame and writes it to one exact NEW PNG/JPEG file. The camera is on only during that capture (at most
-:data:`CAPTURE_TIMEOUT_S`); Windows shows its own camera indicator. No preview, no audio, no video, no recognition.
+camera that was approved - only one PROVEN local hardware camera (:func:`origin_of`) - reads a few frames (the first
+ones are dropped in memory while the exposure settles), keeps ONE frame and writes it to one exact NEW PNG/JPEG file.
+The camera is turned on only for that capture; Qronos stops it after at most :data:`CAPTURE_TIMEOUT_S`. If the
+worker has not exited :data:`JOIN_GRACE_S` after the stop, the answer is ``camera_stuck`` (the camera may still be
+on) and no new capture starts until that worker has exited (:func:`capture_in_flight`). Windows shows its own camera
+indicator. No preview, no audio, no video, no recognition.
 
 How: Media Foundation COM through ctypes (mfplat/mf/mfreadwrite/ole32; every slot, GUID and constant was read from the
 Windows SDK 10.0.26100 headers - see tests/test_camera_capture.py). ``MFStartup`` runs with ``MFSTARTUP_LITE`` (no
@@ -59,6 +62,8 @@ GUIDS = {
     "MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID": "8ac3587a-4ae7-42d8-99e0-0a6013eef90f",
     "MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME": "60d0e559-52f8-4fa2-bbce-acdb34a8ec01",
     "MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK": "58f0aad8-22bf-4f8a-bb3d-d2c4978c6e2f",
+    "MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_HW_SOURCE": "de7046ba-54d6-4487-a2a4-ec7c0d1bd163",
+    "MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_PROVIDER_DEVICE_ID": "36689d42-a06c-40ae-84cf-f5a034067cc4",
     "MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING": "0f81da2c-b537-4672-a8b2-a681b17307a3",
     "MF_MT_MAJOR_TYPE": "48eba18e-f8c9-4687-bf11-0a74c9f96a8f",
     "MF_MT_SUBTYPE": "f7e34c9a-42e8-4714-b74b-cb29d72c35e5",
@@ -91,16 +96,41 @@ def _hr_error(hr: int, what: str, default: str = "camera_failed") -> CameraError
     return CameraError(_HR_CODE.get(unsigned, default), f"{what} failed (0x{unsigned:08X})")
 
 
+#: Device-interface paths of devices attached on the USB bus (the enumerator "USB"): physically local.
+LOCAL_BUS_PREFIXES = ("\\\\?\\usb#",)
+
+
 @dataclass(frozen=True)
 class CameraDevice:
-    """One video capture device as Windows lists it; ``symbolic_link`` is its identity."""
+    """One video capture device as Windows lists it; ``symbolic_link`` is its identity. ``hw_source`` is
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_HW_SOURCE (None when Windows does not set it) and ``provider`` the
+    VIDCAP_PROVIDER_DEVICE_ID (a source provided through another device), both read from the device's activate."""
 
     symbolic_link: str
     name: str
+    hw_source: bool | None = None
+    provider: str = ""
 
     @property
     def device_id(self) -> str:
         return "cam-" + hashlib.sha256(self.symbolic_link.casefold().encode("utf-8")).hexdigest()[:20]
+
+    @property
+    def unsupported(self) -> str:
+        """"" for a proven local hardware camera, else why it is not used (see :func:`origin_of`)."""
+        return origin_of(self)
+
+
+def origin_of(device: CameraDevice) -> str:
+    """"" only with proof of a LOCAL hardware camera: Windows marks it a hardware source (VIDCAP_HW_SOURCE TRUE), it is
+    not provided through another device (no VIDCAP_PROVIDER_DEVICE_ID) and its device-interface path is on the USB bus.
+    Anything else - a software/virtual camera, a network or phone camera, a provider-based or other-bus source - is
+    not proven local and is never turned on."""
+    if device.hw_source is not True:
+        return "not_hardware_source"
+    if device.provider or not device.symbolic_link.casefold().startswith(LOCAL_BUS_PREFIXES):
+        return "origin_not_proven_local"
+    return ""
 
 
 @dataclass
@@ -256,6 +286,13 @@ def _string(api: MfApi, attributes, key: str) -> str:
         api.task_free(text)
 
 
+def _flag(attributes, key: str) -> bool | None:
+    value = ctypes.c_uint32(0)
+    hr = _call(attributes, "IMFAttributes", "GetUINT32", ctypes.byref(_GUID.of(key)), ctypes.byref(value),
+               argtypes=(ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_uint32)))
+    return None if hr < 0 else bool(value.value)
+
+
 def _enumerate(api: MfApi) -> list[tuple[Any, CameraDevice]]:
     """(activate, device) for every video capture device Windows lists; the caller releases the activates."""
     attributes = ctypes.c_void_p()
@@ -285,7 +322,9 @@ def _enumerate(api: MfApi) -> list[tuple[Any, CameraDevice]]:
                 _release(activate)
                 continue
             device = CameraDevice(_string(api, activate, "MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK"),
-                                  _string(api, activate, "MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME")[:200])
+                                  _string(api, activate, "MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME")[:200],
+                                  _flag(activate, "MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_HW_SOURCE"),
+                                  _string(api, activate, "MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_PROVIDER_DEVICE_ID"))
             if device.symbolic_link:
                 found.append((activate, device))
             else:
@@ -380,6 +419,9 @@ def _read_one(api: MfApi, symbolic_link: str, live: _Live, deadline: float) -> F
                 _release(candidate)
         if activate is None:
             raise CameraError("camera_gone", "the camera is no longer listed by Windows")
+        why = origin_of(next(device for candidate, device in pairs if candidate is activate))
+        if why:  # checked again on the fresh listing, right before the camera would be turned on
+            raise CameraError("camera_not_local", why)
         hr = _call(activate, "IMFActivate", "ActivateObject", ctypes.byref(_GUID.of("IMFMediaSource")),
                    ctypes.byref(source), argtypes=(ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)))
         if hr < 0 or not source:
@@ -480,9 +522,21 @@ def _read_one(api: MfApi, symbolic_link: str, live: _Live, deadline: float) -> F
         _release(source)
 
 
+_OWNER_LOCK = threading.Lock()
+_IN_FLIGHT: list[threading.Thread] = []  # the capture worker that has not been seen to exit yet (at most one)
+
+
+def capture_in_flight() -> bool:
+    """True while an earlier capture worker has not exited (its camera may still be on)."""
+    with _OWNER_LOCK:
+        _IN_FLIGHT[:] = [thread for thread in _IN_FLIGHT if thread.is_alive()]
+        return bool(_IN_FLIGHT)
+
+
 def _capture_with(api: MfApi, symbolic_link: str, should_stop: Callable[[], bool],
                   timeout: float = CAPTURE_TIMEOUT_S) -> Frame:
-    """ONE frame from the ONE camera, in a worker; ``should_stop`` (Pause/Stop/shutdown) and the deadline stop it."""
+    """ONE frame from the ONE camera, in a worker; ``should_stop`` (Pause/Stop/shutdown) and the deadline stop it.
+    Refused while an earlier worker has not exited; a worker that does not exit stays owned here until it does."""
     live = _Live()
     result: dict[str, Any] = {}
     deadline = time.monotonic() + timeout
@@ -496,7 +550,13 @@ def _capture_with(api: MfApi, symbolic_link: str, should_stop: Callable[[], bool
             result["error"] = CameraError("camera_failed", type(error).__name__)
 
     thread = threading.Thread(target=worker, name="qronos-camera-capture", daemon=True)
-    thread.start()
+    with _OWNER_LOCK:
+        _IN_FLIGHT[:] = [earlier for earlier in _IN_FLIGHT if earlier.is_alive()]
+        if _IN_FLIGHT:
+            raise CameraError("camera_still_closing",
+                              "an earlier capture has not finished closing the camera; no new capture until it has")
+        _IN_FLIGHT.append(thread)
+        thread.start()
     while thread.is_alive():
         thread.join(0.05)
         if not thread.is_alive():
@@ -508,8 +568,9 @@ def _capture_with(api: MfApi, symbolic_link: str, should_stop: Callable[[], bool
             live.stop("timeout")
             break
     thread.join(JOIN_GRACE_S)
-    if thread.is_alive():
-        raise CameraError("camera_stuck", "the camera did not close in time; nothing was written")
+    if thread.is_alive():  # stays in _IN_FLIGHT: no new capture until this worker is seen to exit
+        raise CameraError("camera_stuck", "the camera was asked to stop but has not closed; it may still be on; "
+                                          "nothing was written and no new capture starts until it closes")
     if live.stopped == "stopped" or should_stop():
         raise CameraError("cancelled", "Qronos was paused or stopped during the capture; nothing was written")
     if "error" in result:
@@ -525,6 +586,9 @@ class WinCamera(MfApi):
 
     def capture(self, symbolic_link: str, should_stop: Callable[[], bool]) -> Frame:
         return _capture_with(self, symbolic_link, should_stop)
+
+    def capture_in_flight(self) -> bool:
+        return capture_in_flight()
 
 
 def default_camera() -> WinCamera:

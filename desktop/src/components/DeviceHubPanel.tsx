@@ -4,7 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  approvalOf, CAMERA_LIMIT_TEXT, cameraDevicesOf, cameraProblem, cameraSavedText, createDeviceHubClient, devicesOf,
+  approvalOf, CAMERA_LIMIT_TEXT, CAMERA_UNSUPPORTED_TEXT, cameraDevicesOf, cameraProblem, cameraSavedText,
+  createDeviceHubClient, devicesOf,
   handoffText, IMAGING_UNSUPPORTED_TEXT, imagingDevicesOf,
   isoWithOffset, jobsOf, limitText, print3dProblem, SCAN_LIMIT_TEXT, scanProblem, scanSavedText,
   printProblem, refusalText, unsupportedClassesOf, wakeArmedOf, wakeArmedText, wakeCapabilityOf, WAKE_LIMIT_TEXT,
@@ -213,8 +214,10 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
     }
     const found = cameraDevicesOf(result);
     setCameras(found);
-    if (!found.some((item) => item.id === cameraId)) setCameraId("");
-    setCameraNote(found.length ? "" : "ویندوز هیچ دوربینی فهرست نکرد.");
+    if (!found.some((item) => item.id === cameraId && !item.unsupported)) setCameraId("");
+    setCameraNote(result.closing === true ? refusalText("camera_still_closing")
+      : found.some((item) => !item.unsupported) ? ""
+      : found.length ? "هیچ دوربین سخت‌افزاری محلیِ ثابت‌شده‌ای پیدا نشد." : "ویندوز هیچ دوربینی فهرست نکرد.");
   }
 
   async function cameraNow(): Promise<void> {
@@ -510,8 +513,9 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
       <section className="device-wake" aria-label="یک عکس از دوربین">
         <h3>یک عکس از دوربین در یک فایل تازه</h3>
         <p className="device-hub-note">
-          دوربین‌هایی که خود ویندوز فهرست می‌کند (وب‌کم داخلی یا USB). بعد از تأیید با رمز، دوربین فقط چند ثانیه روشن
-          می‌شود، یک عکس ثابت گرفته و در یک فایل تازهٔ PNG یا JPEG ذخیره می‌شود؛ نه فیلم، نه صدا، نه پیش‌نمایش.
+          فقط وب‌کم سخت‌افزاری که ویندوز آن را متصل از راه USB به همین کامپیوتر نشان می‌دهد. بعد از تأیید با رمز، دوربین
+          فقط برای گرفتن همین عکس روشن می‌شود، یک عکس ثابت گرفته و در یک فایل تازهٔ PNG یا JPEG ذخیره می‌شود؛ نه فیلم،
+          نه صدا، نه پیش‌نمایش.
         </p>
         <button type="button" onClick={() => void cameraRefresh()} disabled={busy}>فهرست دوربین‌ها</button>
         {cameraNote && <p className="device-hub-message" role="status">{cameraNote}</p>}
@@ -519,9 +523,11 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
           {cameras.map((item) => (
             <li key={item.id}>
               <button type="button" className={`device-card${item.id === cameraId ? " device-card-selected" : ""}`}
-                      aria-pressed={item.id === cameraId} onClick={() => setCameraId(item.id)}>
+                      aria-pressed={item.id === cameraId} disabled={Boolean(item.unsupported)}
+                      onClick={() => setCameraId(item.id)}>
                 <strong>{item.name}</strong>
                 <span>دوربین</span>
+                {item.unsupported && <span className="device-unsupported">{CAMERA_UNSUPPORTED_TEXT[item.unsupported] ?? item.unsupported}</span>}
               </button>
             </li>
           ))}
@@ -537,7 +543,7 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
         {approval && isCameraApproval(approval) && (
           <div className="device-approval" role="dialog" aria-label="تأیید عکس از دوربین">
             <p>
-              «{String(approval.preview.device ?? "")}» چند ثانیه روشن شود و یک عکس در
+              «{String(approval.preview.device ?? "")}» برای گرفتن یک عکس روشن شود و آن عکس در
               {" "}<bdi dir="ltr">{String(approval.preview.file ?? "")}</bdi> ذخیره شود؟ چراغ دوربین ویندوز روشن می‌شود؛
               فیلم یا صدا گرفته نمی‌شود.
             </p>

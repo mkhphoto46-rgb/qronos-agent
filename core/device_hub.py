@@ -77,7 +77,7 @@ SCAN_LIMITS = ("scanners_only_via_wia", "windows_dialog_drives_the_scan", "one_p
                "no_overwrite_no_links", "metadata_not_copied", "no_camera_webcam_or_phone_capture")
 _CAMERA_ID = re.compile(r"^cam-[0-9a-f]{20}$")
 #: What a camera capture here is and is not (stable codes; Persian text in the desktop).
-CAMERA_LIMITS = ("cameras_windows_lists_only", "one_still_frame_no_video_no_audio", "camera_on_only_during_capture",
+CAMERA_LIMITS = ("proven_local_usb_hardware_only", "one_still_frame_no_video_no_audio", "camera_on_only_during_capture",
                  "one_new_file_no_overwrite_no_links", "no_recognition_no_model", "no_wia_still_cameras_or_unlisted_phones")
 
 # Wake THIS PC from sleep (H3): a hardware wake timer, never a voice wake or a network packet.
@@ -1008,14 +1008,23 @@ class DeviceHub:
                                  str(error)) from None
 
     def _camera_list(self) -> dict:
-        devices = [{"id": device.device_id, "name": device.name[:200] or "دوربین", "workflows": ["still_to_file"]}
+        devices = [{"id": device.device_id, "name": device.name[:200] or "دوربین", "unsupported": device.unsupported,
+                    "workflows": [] if device.unsupported else ["still_to_file"]}
                    for device in self._camera_devices()]
-        return {"ok": True, "devices": devices, "formats": sorted(set(IMAGE_FORMATS)), "limits": list(CAMERA_LIMITS)}
+        return {"ok": True, "devices": devices, "formats": sorted(set(IMAGE_FORMATS)), "limits": list(CAMERA_LIMITS),
+                "closing": self._camera_closing()}
+
+    def _camera_closing(self) -> bool:
+        """An earlier capture's worker has not exited (its camera may still be on): no new capture until it has."""
+        in_flight = getattr(self._camera_layer(), "capture_in_flight", None)
+        return bool(in_flight()) if callable(in_flight) else False
 
     def _camera_device(self, device_id_: str) -> CameraDevice:
         found = [d for d in self._camera_devices() if d.device_id == device_id_]
         if not found:
             raise DeviceHubError("device_gone", "the camera is no longer listed by Windows")
+        if found[0].unsupported:  # not proven a LOCAL hardware camera: never turned on
+            raise DeviceHubError("unsupported", found[0].unsupported)
         return found[0]
 
     def _prepare_camera(self, device_id_: str, destination: Path, request_id: str) -> dict:
@@ -1023,6 +1032,8 @@ class DeviceHub:
             raise DeviceHubError("secret_unavailable", "a camera capture needs the typed approval secret")
         fmt = self._checked_destination(destination)
         camera = self._camera_device(device_id_)
+        if self._camera_closing():
+            raise DeviceHubError("camera_still_closing", "an earlier capture has not finished closing the camera")
         device_request = ActionRequest(
             category=ActionCategory.DEVICE_CONTROL, target=f"camera:{camera.name[:120]}/capture",
             summary="Turn on a local camera briefly and keep ONE still frame (no video, no audio, no preview).",

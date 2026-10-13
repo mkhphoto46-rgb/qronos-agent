@@ -283,6 +283,24 @@ test("camera: only listed cameras, exact new png/jpg, typed fields, truthful sav
   assert.doesNotMatch(hub.IMAGING_UNSUPPORTED_TEXT.webcam_not_supported, /تصویر یا ویدیو نمی‌گیرد/);  // truthful now
   const panel = readFileSync(new URL("../src/components/DeviceHubPanel.tsx", import.meta.url), "utf8");
   assert.match(panel, /aria-label="تأیید عکس از دوربین"/);
-  assert.match(panel, /نه فیلم، نه صدا، نه پیش‌نمایش/);
+  assert.match(panel, /نه فیلم،\s+نه صدا، نه پیش‌نمایش/);
   assert.match(panel, /client\.cameraCapture\(device\.id, cameraPath\)/);
+  assert.doesNotMatch(panel, /چند ثانیه/);  // no unproven promise of how long the camera stays on
+});
+
+test("camera: only a proven local hardware camera is offered; closing and stuck are said truthfully", () => {
+  const [usb, virtual, network] = hub.cameraDevicesOf({ requestId: "r", op: "camera.list", ok: true, devices: [
+    { id: "cam-0123456789abcdef0123", name: "USB Camera", workflows: ["still_to_file"], unsupported: "" },
+    { id: "cam-ffffffffffffffffffff", name: "Virtual", workflows: ["still_to_file"], unsupported: "not_hardware_source" },
+    { id: "cam-eeeeeeeeeeeeeeeeeeee", name: "Network", workflows: [], unsupported: "origin_not_proven_local" },
+  ] });
+  assert.deepEqual(plain(usb.workflows), ["still_to_file"]);
+  assert.deepEqual(plain(virtual.workflows), []);  // never offered, whatever is sent
+  assert.equal(hub.cameraProblem(virtual, "D:/s/a.png"), hub.CAMERA_UNSUPPORTED_TEXT.not_hardware_source);
+  assert.equal(hub.cameraProblem(network, "D:/s/a.png"), hub.CAMERA_UNSUPPORTED_TEXT.origin_not_proven_local);
+  assert.ok(hub.CAMERA_LIMIT_TEXT.proven_local_usb_hardware_only);
+  assert.match(hub.DEVICE_REFUSAL_TEXT.camera_stuck, /ممکن است روشن باشد/);
+  assert.ok(hub.DEVICE_REFUSAL_TEXT.camera_still_closing);
+  assert.ok(hub.DEVICE_REFUSAL_TEXT.camera_not_local);
+  assert.doesNotMatch(hub.CAMERA_LIMIT_TEXT.camera_on_only_during_capture, /چند ثانیه/);
 });
