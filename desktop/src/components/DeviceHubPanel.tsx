@@ -4,7 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  approvalOf, createDeviceHubClient, devicesOf, jobsOf, printProblem, refusalText, unsupportedClassesOf,
+  approvalOf, createDeviceHubClient, devicesOf, handoffText, jobsOf, limitText, print3dProblem, printProblem,
+  refusalText, unsupportedClassesOf,
 } from "../deviceHubStore";
 import type {
   Device, DeviceApproval, DeviceHubClient, DeviceHubTransport, DeviceJob, JobCommand, PrintColor, RuntimeEvent,
@@ -50,6 +51,7 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
   const [copies, setCopies] = useState(1);
   const [color, setColor] = useState<PrintColor>("default");
   const [pages, setPages] = useState("all");
+  const [path3d, setPath3d] = useState("");
 
   const device = devices.find((item) => item.id === selected);
 
@@ -118,8 +120,30 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
     setSecret("");  // the secret lives only until this one send
     setApproval(null);
     const result = approved ? await client.decide(current, typed) : await client.decline(current);
-    setMessage(result.ok ? (approved ? "انجام شد." : "لغو شد؛ چیزی تغییر نکرد.") : refusalText(result.code));
+    setMessage(!result.ok ? refusalText(result.code)
+      : result.status === "handed_to_spooler" ? handoffText(result)
+      : approved ? "انجام شد." : "لغو شد؛ چیزی تغییر نکرد.");
     if (device) await loadJobs(device.id);
+  }
+
+  async function print3d(): Promise<void> {
+    if (!device) return;
+    const fields = { deviceId: device.id, path: path3d };
+    const problem = print3dProblem(device, fields);
+    if (problem) {
+      setMessage(problem);
+      return;
+    }
+    setBusy(true);
+    const result = await client.print3d(fields);
+    setBusy(false);
+    const asked = approvalOf(result);
+    if (asked) {
+      setApproval(asked);
+      setMessage("سپردن این بسته به چاپگر سه‌بعدی به تأیید شما با رمز نیاز دارد.");
+      return;
+    }
+    setMessage(refusalText(result.ok ? "bad_request" : result.code));
   }
 
   async function print(): Promise<void> {
@@ -159,7 +183,7 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
                 {item.isDefault ? " · پیش‌فرض" : ""}</span>
               <span>{item.status.ready ? "آماده" : `مشکل: ${item.status.problems.join("، ")}`}</span>
               {item.status.warnings.length > 0 && <span>هشدار: {item.status.warnings.join("، ")}</span>}
-              {item.unsupported && <span className="device-unsupported">پشتیبانی‌نشده: {item.unsupported}</span>}
+              {item.unsupported && <span className="device-unsupported">{limitText(item.unsupported)}</span>}
             </button>
           </li>
         ))}
@@ -169,7 +193,18 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
         <div className="device-detail">
           <h3>{device.name}</h3>
           {device.kind === "3d_printer" ? (
-            <p className="device-unsupported">چاپ سه‌بعدی هنوز گردش کار محلی ندارد؛ این دستگاه فقط شناسایی شده است.</p>
+            device.workflows.includes("print_3d") ? (
+              <dl className="device-capabilities">
+                <dt>حجم ساخت (میلی‌متر)</dt>
+                <dd dir="ltr">{device.capabilities.buildVolumeMicrons
+                  ? [device.capabilities.buildVolumeMicrons.width, device.capabilities.buildVolumeMicrons.depth,
+                     device.capabilities.buildVolumeMicrons.height].map((value) => (value / 1000).toFixed(1)).join(" × ")
+                  : "نامعلوم"}</dd>
+                <dt>نسخهٔ 3MF</dt><dd dir="ltr">{device.capabilities.threeMfVersion || "نامعلوم"}</dd>
+                <dt>افزونه‌های 3MF</dt>
+                <dd dir="ltr">{(device.capabilities.threeMfExtensions ?? []).join(" ") || "هیچ"}</dd>
+              </dl>
+            ) : <p className="device-unsupported">{limitText(device.unsupported)}</p>
           ) : (
             <dl className="device-capabilities">
               <dt>حداکثر نسخه</dt><dd>{device.capabilities.copiesMax ?? "نامعلوم"}</dd>
@@ -205,11 +240,21 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
           )}
 
           {approval && (
-            <div className="device-approval" role="dialog" aria-label="تأیید تغییر کار چاپ">
-              <p>
-                {COMMAND_FA[(approval.preview.command as JobCommand) ?? "pause"] ?? ""} «{String(approval.preview.document ?? "")}»
-                در «{String(approval.preview.device ?? "")}»؟
-              </p>
+            <div className="device-approval" role="dialog" aria-label="تأیید درخواست دستگاه">
+              {typeof approval.preview.jobName === "string" ? (
+                <p>
+                  فایل <bdi dir="ltr">{String(approval.preview.file ?? "")}</bdi> به چاپگر سه‌بعدی
+                  «{String(approval.preview.device ?? "")}» سپرده شود؟
+                  {approval.preview.readAfterApproval === true
+                    ? " (سیاست فایل‌ها خواندن بسته را به همین تأیید وابسته کرده است؛ بسته پس از تأیید خوانده و بررسی می‌شود.)"
+                    : ` (${String(approval.preview.textures ?? 0)} بافت، SHA-256 ${String(approval.preview.sha256 ?? "").slice(0, 12)}…)`}
+                </p>
+              ) : (
+                <p>
+                  {COMMAND_FA[(approval.preview.command as JobCommand) ?? "pause"] ?? ""} «{String(approval.preview.document ?? "")}»
+                  در «{String(approval.preview.device ?? "")}»؟
+                </p>
+              )}
               {approval.needsSecret && (
                 <input type="password" value={secret} onChange={(event) => setSecret(event.target.value)}
                        placeholder="رمز تأیید" maxLength={256} autoComplete="off" />
@@ -238,6 +283,19 @@ function DeviceHubPanel({ client, visible }: DeviceHubPanelProps) {
                 <input type="text" value={pages} onChange={(event) => setPages(event.target.value)} dir="ltr" maxLength={200} />
               </label>
               <button type="submit" disabled={busy}>درخواست چاپ</button>
+            </form>
+          )}
+
+          {device.workflows.includes("print_3d") && (
+            <form className="device-print" onSubmit={(event) => { event.preventDefault(); void print3d(); }}>
+              <h4>سپردن یک فایل 3MF به چاپگر سه‌بعدی</h4>
+              <input type="text" value={path3d} onChange={(event) => setPath3d(event.target.value)} dir="ltr"
+                     placeholder="D:\...\part.3mf" maxLength={4096} aria-label="مسیر کامل فایل 3MF" />
+              <p className="device-hub-note">
+                فقط مدل و بافت‌های همین بسته، از راه درایور خود ویندوز. تنظیمات کیفیت، تکیه‌گاه و مواد در درایور یا خود
+                دستگاه است، نه اینجا. بعد از تأیید با رمز، Qronos فقط تحویل به صف چاپ را گزارش می‌کند، نه چاپ شدن قطعه را.
+              </p>
+              <button type="submit" disabled={busy || approval !== null}>درخواست چاپ سه‌بعدی</button>
             </form>
           )}
         </div>

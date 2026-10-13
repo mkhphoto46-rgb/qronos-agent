@@ -127,3 +127,37 @@ test("devices are validated field by field and the print form follows the device
                                 approvalId: "short" }), null);
   assert.equal(hub.refusalText("not_own_job"), hub.DEVICE_REFUSAL_TEXT.not_own_job);
 });
+
+test("a 3D device is driven only by its driver's proof, and success means only a spooler handoff", async () => {
+  const proven = { id: DEVICE, name: "Workshop", kind: "3d_printer", workflows: ["print_3d", "jobs_view"],
+    unsupported: "", capabilities: { buildVolumeMicrons: { width: 250000, depth: 210000, height: 220000 },
+      threeMfVersion: "http://schemas.microsoft.com/3dmanufacturing/core/2015/02", threeMfExtensions: ["urn:m"] } };
+  const unproven = { ...proven, id: "prn-ffffffffffffffffffff", name: "Prusa 3D", workflows: [],
+    unsupported: "3d_capability_unproven", capabilities: { buildVolumeMicrons: { width: -1, depth: 2, height: 3 } } };
+  const [ok, named] = hub.devicesOf({ requestId: "r", op: "devices.list", ok: true, devices: [proven, unproven] });
+  assert.deepEqual(plain(ok.capabilities.buildVolumeMicrons), { width: 250000, depth: 210000, height: 220000 });
+  assert.equal(named.capabilities.buildVolumeMicrons, null);  // malformed dimensions are dropped, not guessed
+  assert.match(hub.limitText(named.unsupported), /PrintCapabilities/);
+  assert.equal(hub.print3dProblem(named, { deviceId: named.id, path: "D:/m/a.3mf" }), hub.DEVICE_REFUSAL_TEXT.unsupported);
+  assert.notEqual(hub.print3dProblem(ok, { deviceId: ok.id, path: "D:/m/a.stl" }), null);
+  assert.notEqual(hub.print3dProblem(ok, { deviceId: ok.id, path: "a.3mf" }), null);
+  assert.equal(hub.print3dProblem(ok, { deviceId: ok.id, path: " D:/m/a.3mf " }), null);
+  const fake = fakeTransport();
+  const client = hub.createDeviceHubClient(fake.transport);
+  assert.equal((await client.print3d({ deviceId: DEVICE, path: "D:/m/a.stl" })).code, "bad_request");
+  assert.equal(fake.sent.length, 0);
+  const answer = client.print3d({ deviceId: DEVICE, path: " D:/m/a.3mf " });
+  await tick();
+  const [{ data }] = fake.sent;
+  assert.deepEqual(Object.keys(data).sort(), ["deviceId", "op", "path", "requestId"]);
+  assert.equal(data.op, "print3d.request");
+  assert.equal(data.path, "D:/m/a.3mf");
+  fake.deliver({ requestId: data.requestId, op: "print3d.request", ok: true, status: "approval_required",
+                 approvalId: "approval-123456", needsSecret: true, preview: { jobName: "Qronos 3D ab" } });
+  const approval = hub.approvalOf(await answer);
+  assert.equal(approval.needsSecret, true);
+  const text = hub.handoffText({ requestId: "r", op: "decide", ok: true, status: "handed_to_spooler", jobId: 41 });
+  assert.match(text, /سپرده شد/);
+  assert.match(text, /41/);
+  assert.match(text, /نیست/);  // it says that a handoff is not a printed part
+});

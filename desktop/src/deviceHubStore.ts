@@ -11,14 +11,17 @@
  *   resolves as `timeout`.
  * - A typed approval secret goes straight to the one `decide` send and is never stored here.
  * - Printing itself is approved in the existing print approval dialog (app workflow), not here.
+ * - A 3D package (.3mf) goes only to a device whose driver proved 3D capability; it is approved here with the typed
+ *   secret, and a success means only "handed to the Windows spooler", never a printed part.
  *
  * No runtime imports: the transport is injected, so this module runs in tests as is.
  */
 
-export type DeviceHubOp = "devices.list" | "device.jobs" | "job.control" | "print.request" | "decide" | "decline";
+export type DeviceHubOp =
+  | "devices.list" | "device.jobs" | "job.control" | "print.request" | "print3d.request" | "decide" | "decline";
 
 export const DEVICE_HUB_OPS: ReadonlySet<string> = new Set<DeviceHubOp>([
-  "devices.list", "device.jobs", "job.control", "print.request", "decide", "decline",
+  "devices.list", "device.jobs", "job.control", "print.request", "print3d.request", "decide", "decline",
 ]);
 
 export const DEVICE_HUB_ACTION_ID = "qronos.device_hub";
@@ -38,6 +41,10 @@ export type DeviceCapabilities = {
   duplex?: boolean;
   collate?: boolean;
   paperSizes?: string[];
+  /** 3D printers only, as the driver declares them (microns). */
+  buildVolumeMicrons?: { width: number; depth: number; height: number } | null;
+  threeMfVersion?: string;
+  threeMfExtensions?: string[];
 };
 
 export type Device = {
@@ -113,6 +120,9 @@ export function devicesOf(result: DeviceHubResult): Device[] {
     if (!isRecord(item) || !isDeviceId(item.id) || typeof item.name !== "string") continue;
     const status = isRecord(item.status) ? item.status : {};
     const caps = isRecord(item.capabilities) ? item.capabilities : {};
+    const volume = isRecord(caps.buildVolumeMicrons) ? caps.buildVolumeMicrons : null;
+    const dimensions = volume && [volume.width, volume.depth, volume.height].every(
+      (value) => typeof value === "number" && Number.isInteger(value) && value > 0);
     out.push({
       id: item.id,
       name: text(item.name, 300),
@@ -129,6 +139,10 @@ export function devicesOf(result: DeviceHubResult): Device[] {
         duplex: caps.duplex === true,
         collate: caps.collate === true,
         paperSizes: strings(caps.paperSizes, 32),
+        buildVolumeMicrons: volume && dimensions
+          ? { width: volume.width as number, depth: volume.depth as number, height: volume.height as number } : null,
+        threeMfVersion: text(caps.threeMfVersion, 200),
+        threeMfExtensions: strings(caps.threeMfExtensions, 16),
       },
       workflows: strings(item.workflows, 8),
       unsupported: text(item.unsupported, 64),
@@ -183,7 +197,32 @@ export const DEVICE_REFUSAL_TEXT: Record<string, string> = {
   closed: "ارتباط با Qronos بسته شد.",
   bad_request: "درخواست نامعتبر بود.",
   internal: "خطای داخلی؛ جزئیات در گزارش‌های Qronos است.",
+  secret_unavailable: "برای چاپ سه‌بعدی، رمز تأیید Qronos باید تنظیم شده باشد.",
+  file_missing: "این فایل وجود ندارد.",
+  file_empty: "این فایل خالی است.",
+  file_unreadable: "این فایل خوانده نشد.",
+  link_refused: "فایل یا یکی از پوشه‌هایش پیوند (link) است؛ پذیرفته نشد.",
+  too_large: "بسته یا بخشی از آن بیش از حد بزرگ است.",
+  bad_package: "این فایل یک بستهٔ 3MF سالم و خودبسنده نیست؛ چیزی فرستاده نشد.",
+  incompatible_3mf_version: "نسخهٔ 3MF این مدل با نسخه‌ای که درایور چاپگر اعلام کرده یکی نیست.",
+  unsupported_3mf_extension: "این مدل افزونه‌ای از 3MF لازم دارد که درایور چاپگر اعلام نکرده است.",
+  capability_gone: "درایور دیگر توان چاپ سه‌بعدی را اعلام نمی‌کند؛ چیزی فرستاده نشد.",
+  file_changed: "فایل بعد از تأیید تغییر کرده است؛ چیزی فرستاده نشد.",
+  not_3d_target: "صف چاپ ویندوز بستهٔ سه‌بعدی را نپذیرفت؛ چیزی فرستاده نشد.",
+  native_refused: "ویندوز تحویل بستهٔ سه‌بعدی را رد کرد؛ کار نیمه‌کاره لغو شد.",
+  unavailable: "چاپ سه‌بعدی فقط از راه ویندوز در دسترس است.",
 };
+
+/** Persian words for a device's stated limit (Device.unsupported). */
+export const DEVICE_LIMIT_TEXT: Record<string, string> = {
+  "3d_capability_unproven":
+    "نام یا درایور این صف به چاپگر سه‌بعدی اشاره می‌کند، اما درایورش توان چاپ سه‌بعدی (کلیدواژه‌های 3D در PrintCapabilities) را اعلام نمی‌کند؛ نه چاپ سه‌بعدی و نه چاپ سند پیشنهاد نمی‌شود.",
+  driver_capabilities_unreadable: "توانایی‌های این چاپگر از درایور خوانده نشد؛ چاپ پیشنهاد نمی‌شود.",
+};
+
+export function limitText(code: string): string {
+  return DEVICE_LIMIT_TEXT[code] ?? code;
+}
 
 export function refusalText(code: unknown): string {
   return typeof code === "string" && code in DEVICE_REFUSAL_TEXT ? DEVICE_REFUSAL_TEXT[code] : `رد شد (${String(code)})`;
@@ -207,11 +246,32 @@ export function printProblem(device: Device | undefined, fields: PrintFields): s
   return null;
 }
 
+export type Print3DFields = { deviceId: string; path: string };
+
+/** Why a 3D form cannot be sent (Persian), or null when it is well-formed for this device. */
+export function print3dProblem(device: Device | undefined, fields: Print3DFields): string | null {
+  if (!device || device.id !== fields.deviceId) return "یک چاپگر سه‌بعدی انتخاب کنید.";
+  if (device.kind !== "3d_printer" || !device.workflows.includes("print_3d")) return DEVICE_REFUSAL_TEXT.unsupported;
+  const path = fields.path.trim();
+  if (!path || path.length > MAX_PATH_CHARS || !/^([A-Za-z]:[\\/]|\\\\)/.test(path) || !/\.3mf$/i.test(path)) {
+    return "مسیر کامل یک فایل ‎.3mf‎ را وارد کنید.";
+  }
+  return null;
+}
+
+/** The truthful words for a 3D handoff: Windows accepted the package; nothing is said about a printed part. */
+export function handoffText(result: DeviceHubResult): string {
+  const job = typeof result.jobId === "number" ? ` (کار ${result.jobId} در صف)` : "";
+  return `بستهٔ 3MF به صف چاپ ویندوز سپرده شد${job}. این به معنای چاپ شدن قطعه نیست؛ وضعیت را روی خود دستگاه ببینید.`;
+}
+
 export type DeviceHubClient = {
   list(): Promise<DeviceHubResult>;
   jobs(deviceId: string): Promise<DeviceHubResult>;
   controlJob(deviceId: string, jobId: number, command: JobCommand): Promise<DeviceHubResult>;
   print(fields: PrintFields): Promise<DeviceHubResult>;
+  /** Ask to hand one exact .3mf to a proven 3D printer; the answer asks for an approval with the typed secret. */
+  print3d(fields: Print3DFields): Promise<DeviceHubResult>;
   /** The person's yes for one approval this client was shown; the secret goes to this one send only. */
   decide(approval: DeviceApproval, secret?: string): Promise<DeviceHubResult>;
   decline(approval: DeviceApproval): Promise<DeviceHubResult>;
@@ -297,6 +357,13 @@ export function createDeviceHubClient(transport: DeviceHubTransport, options: { 
       }
       return send("print.request", { deviceId: fields.deviceId, path: fields.path.trim(), copies: fields.copies,
                                      color: fields.color, pages: fields.pages.trim() });
+    },
+    print3d(fields) {
+      const path = fields.path.trim();
+      if (!isDeviceId(fields.deviceId) || !path || path.length > MAX_PATH_CHARS || !/\.3mf$/i.test(path)) {
+        return refuse("print3d.request", "bad_request");
+      }
+      return send("print3d.request", { deviceId: fields.deviceId, path });
     },
     decide(approval, secret) {
       const fields: Record<string, unknown> = { approvalId: approval.approvalId, approved: true };
