@@ -34,6 +34,7 @@ import secrets
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from ctypes import wintypes
 from typing import Any, Callable, Protocol
 
 from core.action_audit import ActionAuditLog, AuditEvent
@@ -99,6 +100,7 @@ class DeviceSource(Protocol):
     def capabilities(self, printer: str, port: str) -> dict[str, Any]: ...
     def control_own_job(self, printer: str, job_id: int, command: int) -> None: ...
     def current_user(self) -> str: ...
+    def current_machines(self) -> tuple[str, ...]: ...  # this computer's own names (NetBIOS, DNS)
     def capabilities_3d(self, printer: str) -> dict[str, Any] | None: ...
     def submit_3d(self, printer: str, job_name: str, package: Package3MF) -> None: ...
 
@@ -140,6 +142,21 @@ class WinDeviceSpooler(WinSpooler):
                 raise SpoolerUnavailable(f"SetJob failed ({ctypes.get_last_error()}).")
         finally:
             self._winspool.ClosePrinter(handle)
+
+    def current_machines(self) -> tuple[str, ...]:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel.GetComputerNameExW
+        function.argtypes = [ctypes.c_int, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        function.restype = wintypes.BOOL
+        names = []
+        for kind in (0, 1, 3):  # ComputerNameNetBIOS, ComputerNameDnsHostname, ComputerNameDnsFullyQualified
+            size = wintypes.DWORD(256)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if function(kind, buffer, ctypes.byref(size)) and buffer.value:
+                names.append(buffer.value)
+        if not names:
+            raise SpoolerUnavailable("GetComputerNameEx failed.")
+        return tuple(names)
 
     def _native3d(self) -> Win3DPrinting:
         if getattr(self, "_win3d", None) is None:
@@ -363,8 +380,8 @@ class DeviceHub:
     def _jobs(self, device_id_: str) -> dict[str, Any]:
         device = self._device(device_id_)
         source = self._source()
-        user = source.current_user().casefold()
-        jobs = [{"jobId": job.job_id, "document": job.document[:200], "own": job.user.casefold() == user,
+        is_own = _owner_check(source, device)
+        jobs = [{"jobId": job.job_id, "document": job.document[:200], "own": is_own(job),
                  "status": [text for bit, text in _JOB_STATUS.items() if job.status & bit],
                  "pagesPrinted": job.pages_printed, "totalPages": job.total_pages}
                 for job in source.jobs(device.printer.name)[:MAX_JOBS]]
@@ -390,10 +407,10 @@ class DeviceHub:
 
     def _own_job(self, device: Device, job_id: int) -> PrintJobState:
         source = self._source()
-        user = source.current_user().casefold()
+        is_own = _owner_check(source, device)
         for job in source.jobs(device.printer.name):
             if job.job_id == job_id:
-                if job.user.casefold() != user:
+                if not is_own(job):
                     raise DeviceHubError("not_own_job", "only your own print jobs can be changed")
                 return job
         raise DeviceHubError("job_gone", "the job is no longer in the queue")
@@ -435,7 +452,7 @@ class DeviceHub:
             return {"ok": False, "code": "stale_approval", "detail": "not a device approval"}
         verdict = self._gate(pending.request)  # the CURRENT policy decides again
         if verdict.refused:
-            self._record(AuditEvent.DENIED_BY_USER, pending.request, decision=verdict.decision)
+            self._record_policy_refusal(pending.request, pending.decision)
             return {"ok": False, "code": "denied", "detail": str(verdict.reason)[:200]}
         needs_secret = PermissionDecision.REQUIRE_TYPED_SECRET in (pending.decision, verdict.decision)
         if needs_secret:
@@ -524,7 +541,7 @@ class DeviceHub:
         read_verdict, verdict = self._gate(pending.read_request), self._gate(pending.request)  # CURRENT policies
         if read_verdict.refused or verdict.refused:
             refused = verdict if verdict.refused else read_verdict
-            self._record(AuditEvent.DENIED_BY_USER, pending.request, decision=refused.decision)
+            self._record_policy_refusal(pending.request, PermissionDecision.REQUIRE_TYPED_SECRET)
             return {"ok": False, "code": "denied", "detail": str(refused.reason)[:200]}
         try:
             verified = self._verify_secret is not None and bool(self._verify_secret(secret or ""))
@@ -557,6 +574,14 @@ class DeviceHub:
         return {"ok": True, "status": "handed_to_spooler", "deviceId": device.id, "jobName": pending.job_name,
                 "jobId": job_id, "sha256": package.sha256, "size": package.size}
 
+    def _record_policy_refusal(self, request: ActionRequest, asked: PermissionDecision) -> None:
+        """The person said yes but the CURRENT policy refused at the answer (the gate recorded its own refused
+        verdict): never DENIED_BY_USER. APPROVED only when no typed secret was asked, since an unverified secret
+        proves nobody; then COMPLETED with nothing done."""
+        if asked is not PermissionDecision.REQUIRE_TYPED_SECRET:
+            self._record(AuditEvent.APPROVED, request, decision=asked)
+        self._record(AuditEvent.COMPLETED, request, outcome=ActionOutcome.REFUSED)
+
     def _record(self, event: AuditEvent, request: ActionRequest, *, outcome=None, decision=None) -> None:
         if self._audit is None:
             return
@@ -564,6 +589,28 @@ class DeviceHub:
             self._audit.record(event, request, outcome=outcome, decision=decision)
         except Exception:  # noqa: BLE001 - auditing never hides the result
             pass
+
+
+def _machine(name: str) -> str:
+    return name.strip().lstrip("\\").rstrip(".").casefold()
+
+
+def _owner_check(source: DeviceSource, device: Device) -> Callable[[PrintJobState], bool]:
+    """A job is the caller's own only when its user is the caller AND it came from this computer: the origin
+    equals one of this computer's explicit names exactly (no substring). An empty origin counts only on a local,
+    unshared queue, where nothing else can submit; on a network or shared queue it is not this computer."""
+    user = source.current_user().casefold()
+    here = {_machine(name) for name in source.current_machines() if _machine(name)}
+    attributes = device.printer.attributes
+    local_only = not attributes & (PRINTER_ATTRIBUTE_NETWORK | PRINTER_ATTRIBUTE_SHARED)
+
+    def is_own(job: PrintJobState) -> bool:
+        if job.user.casefold() != user:
+            return False
+        origin = _machine(job.machine)
+        return origin in here if origin else local_only
+
+    return is_own
 
 
 def _device_id(data: dict) -> str:

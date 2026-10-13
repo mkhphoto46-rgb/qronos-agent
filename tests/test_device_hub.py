@@ -72,6 +72,9 @@ class FakeSpooler:
     def current_user(self):
         return USER
 
+    def current_machines(self):
+        return ("THIS-PC", "this-pc", "this-pc.example.lan")
+
     def capabilities_3d(self, printer):
         self.calls.append(("capabilities_3d", printer))
         if printer == "Odd Queue":
@@ -177,6 +180,27 @@ def test_paused_refuses_changes_but_still_lists(world):
     assert not [c for c in world.spooler.calls if c[0] == "control"] and world.prints == []
 
 
+def test_own_means_this_user_from_this_computer_not_a_same_named_user_elsewhere(world):
+    found = devices(world)
+    laser, floor2 = found["Office Laser"], found["\\\\server\\Floor2"]
+    world.spooler.job_list["Office Laser"] += [
+        PrintJobState(9, "remote.pdf", USER.upper(), 0, 0, 1, machine="\\\\OTHER-PC"),   # same name, other PC
+        PrintJobState(10, "near.pdf", USER, 0, 0, 1, machine="\\\\THIS-PC-2"),       # not a substring match
+        PrintJobState(11, "mine.pdf", USER, 0, 0, 1, machine="\\\\this-pc.example.lan")]  # an explicit alias
+    world.spooler.job_list["\\\\server\\Floor2"] = [PrintJobState(12, "unknown.pdf", USER, 0, 0, 1)]
+    own = {j["jobId"]: j["own"] for j in ask(world, "device.jobs", "o1", deviceId=laser["id"])["jobs"]}
+    assert own == {7: True, 8: False, 9: False, 10: False, 11: True}  # 7: empty origin on a local, unshared queue
+    for request_id, job_id in (("o2", 9), ("o3", 10)):
+        assert ask(world, "job.control", request_id, deviceId=laser["id"], jobId=job_id,
+                   command="cancel")["code"] == "not_own_job"
+    remote = ask(world, "device.jobs", "o4", deviceId=floor2["id"])["jobs"]
+    assert remote[0]["own"] is False  # an unknown origin on a network queue is not this computer
+    assert ask(world, "job.control", "o5", deviceId=floor2["id"], jobId=12, command="cancel")["code"] == \
+        "not_own_job"
+    assert ask(world, "job.control", "o6", deviceId=laser["id"], jobId=11, command="pause")["status"] == "done"
+    assert [c for c in world.spooler.calls if c[0] == "control"] == [("control", "Office Laser", 11, 1)]
+
+
 def test_only_your_own_job_can_be_changed_and_it_is_audited(world):
     laser = devices(world)["Office Laser"]
     jobs = ask(world, "device.jobs", "j1", deviceId=laser["id"])["jobs"]
@@ -200,6 +224,10 @@ def test_a_job_change_waits_for_a_single_use_approval_and_the_current_policy(wor
     again = ask(world, "job.control", "a4", deviceId=laser["id"], jobId=7, command="resume")
     monkeypatch.setattr(gate_module, "evaluate", policy(PermissionDecision.DENY))  # tightened while open
     assert ask(world, "decide", "a5", approvalId=again["approvalId"], approved=True)["code"] == "denied"
+    # The person said yes and the CURRENT policy refused: the history says exactly that, never DENIED_BY_USER.
+    rows = [(r.event, r.outcome) for r in world.audit.records() if r.target == "printer:Office Laser/job:7"]
+    assert AuditEvent.DENIED_BY_USER not in [event for event, _ in rows]
+    assert rows[-2:] == [(AuditEvent.APPROVED, ""), (AuditEvent.COMPLETED, "refused")]
     monkeypatch.setattr(gate_module, "evaluate", policy(PermissionDecision.REQUIRE_UI_CONFIRMATION))
     third = ask(world, "job.control", "a6", deviceId=laser["id"], jobId=7, command="cancel")
     assert ask(world, "decline", "a7", approvalId=third["approvalId"])["declined"] is True
@@ -348,6 +376,9 @@ def test_the_files_gate_decides_before_any_byte_is_read_and_both_policies_decide
     monkeypatch.setattr(gate_module, "evaluate", policy_by({ActionCategory.DEVICE_CONTROL: PermissionDecision.DENY}))
     assert ask(world, "decide", "g6", approvalId=again["approvalId"], approved=True,
                secret="correct horse")["code"] == "denied"  # tightened while the approval was open
+    rows = audit_rows(world)
+    assert not [r for r in rows if r[0] == AuditEvent.DENIED_BY_USER]  # the person did not refuse
+    assert rows[-1] == (AuditEvent.COMPLETED, "device_control", "printer:Workshop/3d", "refused")
     assert len(handed(world)) == 1
 
 

@@ -183,6 +183,7 @@ class PrintJobState:
     status: int
     pages_printed: int
     total_pages: int
+    machine: str = ""  # the submitting computer as the spooler reports it (JOB_INFO_1 pMachineName)
 
 
 class JobWatcher(Protocol):
@@ -789,6 +790,7 @@ class WinSpooler:
                     job_id=int(items[i].JobId), document=items[i].pDocument or "",
                     user=items[i].pUserName or "", status=int(items[i].Status),
                     pages_printed=int(items[i].PagesPrinted), total_pages=int(items[i].TotalPages),
+                    machine=items[i].pMachineName or "",
                 )
                 for i in range(returned.value)
             )
