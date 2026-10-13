@@ -81,6 +81,10 @@ STAGES: dict[str, StageSpec] = {
         # mismatching profile: unavailable, never COMPLETED. Keyframes that change requeue it.
         StageSpec("visual_evidence", visual_evidence.VISUAL_VERSION, ("keyframes",), 5,
                   StageNeeds("visual_evidence", disk_bytes=32 * 1024**2, model=QWEN3_VL_4B)),
+        # Model-bearing (the SAME bge-m3 on the runtime's CPU memory sidecar): vectors of the stored GENERATED
+        # visual text, never of the image. Re-run whenever visual_evidence is; unchanged texts are cache hits.
+        StageSpec("visual_semantic", visual_evidence.VISUAL_SEMANTIC_VERSION, ("visual_evidence",), 5,
+                  StageNeeds("visual_semantic", disk_bytes=16 * 1024**2, model=BGE_M3)),
     )
 }
 
@@ -103,6 +107,8 @@ PENDING_CAPABILITIES: tuple[dict[str, object], ...] = (
                "'topics', no model call); a query vector needs the memory sidecar. Hits are always backed by indexed "
                "lines; expansion is pseudo-relevance feedback from those lines, shown as search hints, never facts; "
                "the rank score uses fixed weights and is uncalibrated. Segments carry no labels or summaries."},
+    {"capability": "visual_semantic_text", "level": 3, "status": "implemented_unverified",
+     "reason": "Cross-language bge-m3 retrieval over the stored GENERATED visual text (captions, text read, observations; stage 'visual_semantic'), only inside the Qronos runtime with its memory sidecar; text vectors, never image similarity; scores are uncalibrated; no real-model run has been accepted."},
     {"capability": "visual_embeddings", "level": 3, "status": "decision_pending",
      "reason": "No joint image-text embedding backend is specified for Qronos; adding one needs an explicit decision."},
     {"capability": "vision_captions", "level": 4, "status": "implemented_unverified",
@@ -1110,6 +1116,88 @@ def _delete_visual_evidence(db: sqlite3.Connection, asset_id: str) -> None:
     db.execute("DELETE FROM visual_evidence WHERE asset_id = ?", (asset_id,))
 
 
+def run_visual_semantic(ctx: StageContext) -> Commit:
+    """bge-m3 vectors of the stored GENERATED visual text (see qronos_media.visual_evidence): text, never pixels."""
+    from qronos_media.model_authority import ModelLease
+
+    lease = ctx.lease()
+    if not isinstance(lease, ModelLease) or lease.spec is not BGE_M3:
+        raise ResourceRefused("model_lease_required", "visual_semantic")
+    if ctx.embedder is None:
+        raise ResourceRefused("model_unavailable", "no bge-m3 sidecar capability in this process")
+    binding = ctx.sidecar_binding if ctx.sidecar_binding is not None else ctx.embedder.bind()
+    lease.bind_capability(getattr(binding, "capability", None))
+    ctx.primary_file()  # the asset's root is admitted now and bound: a revocation stops the work and the commit
+    rows = ctx.db.execute("SELECT * FROM visual_evidence WHERE asset_id = ? AND status = 'described' ORDER BY time_ms",
+                          (ctx.asset_id,)).fetchall()
+    items = []
+    for row in rows:
+        lines = json.loads(row["visible_text_json"]) if row["visible_text_json"] else []
+        seen = json.loads(row["observations_json"]) if row["observations_json"] else []
+        text = visual_evidence.embedding_text(row["caption"], lines, seen)
+        if text:
+            items.append((row, text, semantic.cache_key(text)))
+    keys = sorted({key for _, _, key in items})
+    present: set[str] = set()
+    for start in range(0, len(keys), 500):
+        part = keys[start:start + 500]
+        present |= {r[0] for r in ctx.db.execute(
+            f"SELECT cache_key FROM semantic_cache WHERE cache_key IN ({','.join('?' for _ in part)})", part)}
+    missing: dict[str, str] = {}
+    for _, text, key in items:
+        if key not in present:
+            missing.setdefault(key, text)
+    todo = list(missing.items())
+    done = 0
+    for start in range(0, len(todo), semantic.EMBED_BATCH):
+        batch = todo[start:start + semantic.EMBED_BATCH]
+        ctx.checkpoint_boundary()  # Stop, Pause, deadline, permission, the person's foreground turn
+        ctx.renew()
+        try:
+            vectors = ctx.embedder.embed([text for _, text in batch], on_dispatch=lease.mark_dispatched,
+                                         binding=binding)
+        except semantic.EmbeddingInvalid as exc:
+            raise StageFailed(f"bge-m3 answer rejected: {exc}") from None
+        except ResourceRefused as exc:
+            if exc.reason == "embedding_request_failed":
+                lease.mark_unresolved()  # the server may still be working on it: not proven drained
+            raise
+        done += len(batch)
+        cached = [(key, semantic._fixed_profile()["model"], semantic.model_version(), semantic.DIMENSION, vector,
+                   time.time()) for (key, _), vector in zip(batch, vectors)]
+
+        def write(db: sqlite3.Connection, cached: list = cached) -> None:
+            db.executemany("INSERT OR IGNORE INTO semantic_cache(cache_key, model, model_version, dim, vector, "
+                           "created_at) VALUES (?,?,?,?,?,?)", cached)
+
+        ctx.checkpoint = {"embedded": done, "of": len(todo)}
+        ctx.save_checkpoint(ctx.checkpoint, write)  # vectors and checkpoint: one transaction (never searchable yet)
+
+    def commit(db: sqlite3.Connection) -> None:
+        db.execute("DELETE FROM visual_semantic WHERE asset_id = ?", (ctx.asset_id,))
+        # Only where the cache vector exists and the visual row is still the same described frame.
+        db.executemany(
+            "INSERT INTO visual_semantic(asset_id, scene_index, ordinal, time_ms, frame_sha256, cache_key, text, "
+            "provenance_json) SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM semantic_cache WHERE cache_key = ?) "
+            "AND EXISTS (SELECT 1 FROM visual_evidence WHERE asset_id = ? AND scene_index = ? AND ordinal = ? "
+            "AND frame_sha256 = ? AND status = 'described')",
+            [(ctx.asset_id, row["scene_index"], row["ordinal"], row["time_ms"], row["frame_sha256"], key, text,
+              json.dumps(visual_evidence.semantic_provenance(row, key, text), sort_keys=True, ensure_ascii=False),
+              key, ctx.asset_id, row["scene_index"], row["ordinal"], row["frame_sha256"]) for row, text, key in items])
+
+    return commit
+
+
+def visual_semantic_skip_reason(db: sqlite3.Connection, asset_id: str) -> str | None:
+    described = db.execute("SELECT 1 FROM visual_evidence WHERE asset_id = ? AND status = 'described' LIMIT 1",
+                           (asset_id,)).fetchone()
+    return None if described else "no_visual_evidence"
+
+
+def _delete_visual_semantic(db: sqlite3.Connection, asset_id: str) -> None:
+    db.execute("DELETE FROM visual_semantic WHERE asset_id = ?", (asset_id,))
+
+
 def topics_skip_reason(db: sqlite3.Connection, asset_id: str) -> str | None:
     has_windows = db.execute("SELECT 1 FROM semantic_windows WHERE asset_id = ? LIMIT 1", (asset_id,)).fetchone()
     return None if has_windows else "no_semantic_windows"
@@ -1136,13 +1224,15 @@ SKIPS: dict[str, Callable[[sqlite3.Connection, str], object]] = {"asr": asr.skip
                                                                   "semantic": semantic_skip_reason,
                                                                   "topics": topics_skip_reason,
                                                                   "topic_labels": topic_labels_skip_reason,
-                                                                  "visual_evidence": visual_evidence_skip_reason}
+                                                                  "visual_evidence": visual_evidence_skip_reason,
+                                                                  "visual_semantic": visual_semantic_skip_reason}
 #: What a skipped stage removes (rows from an earlier run that no longer apply), in the same transaction.
 SKIP_CLEANUP: dict[str, Callable[[sqlite3.Connection, str], None]] = {"asr": _delete_asr,
                                                                        "semantic": _delete_semantic,
                                                                        "topics": _delete_topics,
                                                                        "topic_labels": _delete_topic_labels,
-                                                                       "visual_evidence": _delete_visual_evidence}
+                                                                       "visual_evidence": _delete_visual_evidence,
+                                                                       "visual_semantic": _delete_visual_semantic}
 
 RUNNERS: dict[str, Callable[[StageContext], Commit]] = {
     "metadata": run_metadata,
@@ -1154,4 +1244,5 @@ RUNNERS: dict[str, Callable[[StageContext], Commit]] = {
     "scenes": run_scenes,
     "keyframes": run_keyframes,
     "visual_evidence": run_visual_evidence,
+    "visual_semantic": run_visual_semantic,
 }

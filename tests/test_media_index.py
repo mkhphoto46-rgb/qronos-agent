@@ -75,7 +75,11 @@ def test_duplicates_become_one_asset_and_every_stage_completes(tmp_path: Path, b
         "SELECT stage, state, note FROM stages WHERE asset_id = ?", (asset,))}
     assert notes["asr"] == ("COMPLETED", "skipped:subtitles_present")
     assert notes["semantic"] == ("QUEUED", "unavailable:model_unavailable")
-    assert report["refused"] == [f"{asset}/semantic:model_unavailable"]
+    # visual_evidence needs the runtime's Vision, which this service does not have either (never reserved);
+    # visual_semantic waits for it.
+    assert notes["visual_evidence"] == ("QUEUED", "unavailable:model_unavailable")
+    assert notes["visual_semantic"][0] == "QUEUED"
+    assert report["refused"] == [f"{asset}/semantic:model_unavailable", f"{asset}/visual_evidence:model_unavailable"]
     files = service.get_asset(asset)["files"]
     assert {Path(f["path"]).name for f in files} == {"Film One.mkv", "Film One (copy).mkv"}
     tracks = {t["track_id"].split(":")[1][0]: t for t in service.get_asset(asset)["subtitleTracks"]}
@@ -172,7 +176,8 @@ def test_new_sidecar_requeues_only_subtitles_and_replaces_its_text(tmp_path: Pat
     assert summary["requeued_stages"] == 5
     assert _states(service, asset) == {"metadata": "COMPLETED", "subtitles": "QUEUED", "asr": "QUEUED",
                                        "semantic": "QUEUED", "topics": "QUEUED", "topic_labels": "QUEUED",
-                                       "scenes": "COMPLETED", "keyframes": "COMPLETED"}
+                                       "scenes": "COMPLETED", "keyframes": "COMPLETED",
+                                       "visual_evidence": "QUEUED", "visual_semantic": "QUEUED"}  # no Vision here
     report = service.index(max_seconds=120)
     assert report["completed"] == [f"{asset}/subtitles", f"{asset}/asr"]  # asr: a skip (subtitles present)
     assert service.search_dialogue("نخواستم", mode="exact")["results"] == []
@@ -188,7 +193,7 @@ def test_stage_version_change_requeues_it_and_its_dependents_only(tmp_path: Path
     with service.store.transaction() as db:
         from qronos_media.jobs import ensure_stages
         requeued = ensure_stages(db, asset)
-    assert requeued == ["scenes", "keyframes"]
+    assert requeued == ["scenes", "keyframes", "visual_evidence", "visual_semantic"]
     assert _states(service, asset)["subtitles"] == "COMPLETED"
     service.close()
 

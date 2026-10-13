@@ -542,17 +542,21 @@ class MediaService:
                 "provenance": brain_labels.provenance(binding, prompt_digest=prompt_hash(brain_labels.HINTS_SYSTEM, user),
                                                       input_digest=prompt_hash(query), kind="query_hints")}
 
-    def search_visual(self, query: str, *, limit: int = 10, asset_id: str | None = None) -> dict[str, Any]:
+    def search_visual(self, query: str, *, limit: int = 10, asset_id: str | None = None,
+                      budget_seconds: float = 3.0) -> dict[str, Any]:
         """Exact dialogue first (lexical, unchanged), then the SEPARATE visual channel: a lexical match over the stored
-        generated visual text (captions, text the Vision model read, observations; qronos_media.visual_evidence).
-        Each hit carries its frame time and SHA-256 and the dialogue lines that overlap that time (joined by time,
-        not by meaning). No model call is made; no image embedding exists."""
+        generated visual text (captions, text the Vision model read, observations; qronos_media.visual_evidence),
+        then - only when text vectors exist - the semantic channel: ONE governed bge-m3 query vector against the stored
+        vectors of that same generated TEXT (never the image), its hits appended after the lexical ones. Each hit
+        says its channels, carries its frame time and SHA-256 and the dialogue lines that overlap that time (joined
+        by time, not by meaning). No Vision or other model call is made; no image embedding exists."""
         from qronos_media import semantic, visual_evidence
         from qronos_media.text import normalise_for_search
 
         if not isinstance(query, str) or not query.strip() or len(query) > semantic.MAX_TEXT_CHARS:
             raise MediaRequestError("query must be 1..1200 characters")
         limit = max(1, min(50, int(limit)))
+        budget_seconds = max(0.2, min(10.0, float(budget_seconds)))
         exact = self.search_dialogue(query, mode="exact", limit=limit, asset_id=asset_id)
         block: dict[str, Any] = {"status": "complete", "results": [],
                                  "method": "lexical match over generated visual text (FTS5), not image similarity",
@@ -564,7 +568,12 @@ class MediaService:
             raise MediaRequestError("the media index is empty") from None
         try:
             try:
-                indexed = db.execute("SELECT COUNT(*) FROM visual_evidence WHERE status = 'described'").fetchone()[0]
+                # Counted in the CURRENT scope (and asset filter), as the candidates are: nothing out of scope
+                # changes the answer.
+                indexed = db.execute(
+                    "SELECT COUNT(*) FROM visual_evidence v WHERE v.status = 'described' AND "
+                    "NOT (EXISTS (SELECT 1 FROM files f WHERE f.asset_id = v.asset_id) AND NOT EXISTS (SELECT 1 FROM files f WHERE f.asset_id = v.asset_id AND (f.error IS NULL OR f.error != 'out_of_scope')))"
+                    + (" AND v.asset_id = ?" if asset_id else ""), [asset_id] if asset_id else []).fetchone()[0]
             except sqlite3.OperationalError:
                 block.update({"status": "unavailable", "reason": "no_visual_index"})
                 return {"query": query, "exact": exact, "visual": block}
@@ -587,12 +596,68 @@ class MediaService:
                 hit = visual_evidence.row_json(row)
                 title = db.execute("SELECT title FROM assets WHERE asset_id = ?", (row["asset_id"],)).fetchone()
                 hit.update({"title": title["title"] if title else None, "score": round(-float(row["rank_score"]), 4),
-                            "scoreKind": "bm25 over generated visual text",
+                            "scoreKind": "bm25 over generated visual text", "channels": ["lexical"],
                             "dialogue": visual_evidence.joined_dialogue(db, row["asset_id"], row["time_ms"])})
+                hit["rowId"] = row["row_id"]
                 block["results"].append(hit)
+            block["semantic"] = self._visual_semantic(db, query, limit, asset_id, budget_seconds, block["results"])
+            for hit in block["results"]:
+                hit.pop("rowId", None)
         finally:
             db.close()
         return {"query": query, "exact": exact, "visual": block}
+
+    def _visual_semantic(self, db: sqlite3.Connection, query: str, limit: int, asset_id: str | None,
+                         budget_seconds: float, results: list[dict[str, Any]]) -> dict[str, Any]:
+        """The semantic visual channel, merged into ``results`` after the lexical hits; its own status/reason."""
+        from qronos_media import visual_evidence
+        from qronos_media.search import Budget, BudgetExhausted
+
+        channel: dict[str, Any] = {"status": "unavailable", "scoreNote": visual_evidence.SEMANTIC_NOTE}
+        try:
+            # In the CURRENT scope (and asset filter) before any query vector is asked for.
+            vectors = db.execute(
+                "SELECT COUNT(*) FROM visual_semantic s WHERE "
+                "NOT (EXISTS (SELECT 1 FROM files f WHERE f.asset_id = s.asset_id) AND NOT EXISTS (SELECT 1 FROM files f WHERE f.asset_id = s.asset_id AND (f.error IS NULL OR f.error != 'out_of_scope')))"
+                + (" AND s.asset_id = ?" if asset_id else ""), [asset_id] if asset_id else []).fetchone()[0]
+        except sqlite3.OperationalError:  # an index from before schema 7
+            vectors = 0
+        if not vectors:
+            channel["reason"] = "no_visual_vectors"
+            return channel
+        vector, reason = self._query_vector(query)  # ONE governed bge-m3 call, as every semantic query
+        if vector is None:
+            channel["reason"] = reason  # busy/unavailable: the lexical visual hits above still stand
+            return channel
+        by_row = {hit["rowId"]: hit for hit in results}
+        try:
+            found, scan = visual_evidence.visual_candidates(db, vector, limit=limit, asset_id=asset_id,
+                                                            check=Budget(budget_seconds, self._excluded).check)
+        except BudgetExhausted as exc:
+            channel.update({"status": "partial", "stoppedBy": exc.reason})
+            return channel
+        added = 0
+        for item in found:
+            hit = by_row.get(item["rowId"])
+            if hit is not None:
+                hit["channels"].append("semantic")
+                hit["similarity"] = item["similarity"]
+                continue
+            if len(results) >= limit:
+                continue
+            row = db.execute("SELECT * FROM visual_evidence WHERE row_id = ?", (item["rowId"],)).fetchone()
+            if row is None:
+                continue
+            hit = visual_evidence.row_json(row)
+            title = db.execute("SELECT title FROM assets WHERE asset_id = ?", (row["asset_id"],)).fetchone()
+            hit.update({"title": title["title"] if title else None, "channels": ["semantic"],
+                        "similarity": item["similarity"], "scoreKind": "cosine over generated visual text (uncalibrated)",
+                        "dialogue": visual_evidence.joined_dialogue(db, row["asset_id"], row["time_ms"])})
+            results.append(hit)
+            added += 1
+        channel.update({"status": "partial" if scan["truncated"] else "complete", "scanned": scan["scanned"],
+                        "added": added, "model": visual_evidence.semantic_provenance_model()})
+        return channel
 
     def search_dialogue(self, query: str, **options: Any) -> dict[str, Any]:
         try:

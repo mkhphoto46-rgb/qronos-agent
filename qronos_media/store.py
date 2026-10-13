@@ -44,6 +44,11 @@ time and SHA-256, or the reason it was rejected; provenance marks every row gene
 keyframe (deleted with it) and is written only in the "visual_evidence" stage's result+COMPLETED transaction.
 ``visual_fts`` indexes that generated text for the separate visual search channel. The schema-5 to 6 step only adds
 tables.
+
+Schema 7 adds the semantic visual channel. ``visual_semantic`` maps each described visual row (by its frame SHA-256)
+to the ``semantic_cache`` vector of its generated TEXT (bge-m3; never the image); it references its visual row
+(deleted with it) and is written only in the "visual_semantic" stage's result+COMPLETED transaction. The schema-6
+to 7 step only adds a table.
 """
 from __future__ import annotations
 
@@ -52,7 +57,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -294,6 +299,20 @@ END;
 CREATE TRIGGER IF NOT EXISTS visual_evidence_ad AFTER DELETE ON visual_evidence BEGIN
     INSERT INTO visual_fts(visual_fts, rowid, norm_text) VALUES ('delete', old.row_id, old.norm_text);
 END;
+
+CREATE TABLE IF NOT EXISTS visual_semantic (
+    asset_id TEXT NOT NULL,
+    scene_index INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    time_ms INTEGER NOT NULL,
+    frame_sha256 TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    text TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    PRIMARY KEY (asset_id, scene_index, ordinal),
+    FOREIGN KEY (asset_id, scene_index, ordinal) REFERENCES visual_evidence(asset_id, scene_index, ordinal)
+        ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS stages (
     asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,

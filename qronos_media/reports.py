@@ -153,6 +153,11 @@ def _attach_visual(db: sqlite3.Connection, asset_id: str, kind: str, report: dic
     frames = visual_evidence.asset_visual(db, asset_id, limit=cap) if cap and total else []
     for frame in frames:
         frame["dialogue"] = visual_evidence.joined_dialogue(db, asset_id, frame["timeMs"])
+    try:
+        vectors = db.execute("SELECT COUNT(*) FROM visual_semantic WHERE asset_id = ?", (asset_id,)).fetchone()[0]
+    except sqlite3.OperationalError:  # an index from before schema 7
+        vectors = 0
+    report["summary"]["visualFramesSemanticIndexed"] = int(vectors)
     report["summary"].update({"visualFrames": int(total), "visualFramesListed": len(frames),
                               "visualFramesOmitted": int(total) - len(frames), "visualFramesRejected": int(rejected),
                               "visualFramesCap": cap})
@@ -204,6 +209,10 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
             and not str(stages.get("visual_evidence", {}).get("note") or "").startswith("skipped"):
         items.append({"code": "generated_visual_unverified",
                       "text": "توصیف، متن خوانده‌شده و مشاهده‌های فریم‌ها را مدل بینایی از روی فریم‌های کلیدی ذخیره‌شده ساخته است؛ متن تولیدشده و تأییدنشده است، نه واقعیت، نه شناسایی و نه OCR؛ زمان و SHA-256 هر فریم کنارش آمده است."})
+    if stages.get("visual_semantic", {}).get("state") == "COMPLETED" \
+            and not str(stages.get("visual_semantic", {}).get("note") or "").startswith("skipped"):
+        items.append({"code": "visual_semantic_text_only",
+                      "text": "جست‌وجوی هم‌معنای تصویری فقط بردارهای bge-m3 از متن تولیدشدهٔ فریم‌ها (توصیف، متن خوانده‌شده، مشاهده‌ها) است، نه شباهت تصویر؛ امتیاز آن کالیبره نشده و دقت آن میان زبان‌ها سنجیده نشده است."})
     items.append({"code": "no_confidence",
                   "text": "هیچ اطمینان کالیبره‌شده‌ای محاسبه نمی‌شود و در این گزارش هم عددی برای اطمینان نیست."})
     items.append({"code": "no_generated_content",
@@ -215,7 +224,7 @@ def _not_available(stages: dict[str, Any]) -> list[dict[str, Any]]:
     """Capabilities this asset does not have: never implemented, or implemented but not completed here."""
     out = []
     stage_of = {"asr": "asr", "semantic_dialogue": "semantic", "topic_retrieval": "topics", "topics": "topic_labels",
-                "vision_captions": "visual_evidence"}
+                "vision_captions": "visual_evidence", "visual_semantic_text": "visual_semantic"}
     for item in PENDING_CAPABILITIES:
         stage = stage_of.get(str(item["capability"]))
         if item["status"] == "implemented_unverified" and stage \

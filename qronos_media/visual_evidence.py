@@ -188,3 +188,88 @@ def asset_visual(db: sqlite3.Connection, asset_id: str, *, limit: int = MAX_FRAM
     except sqlite3.OperationalError:
         return []
     return [row_json(row) for row in rows]
+
+
+# ------------------------------------------------------------ the semantic visual channel (bge-m3 over TEXT only)
+
+#: Version of the visual_semantic stage (what text is embedded and how it is indexed).
+VISUAL_SEMANTIC_VERSION = 1
+MAX_EMBED_CHARS = 1_200
+SEMANTIC_NOTE = ("cosine similarity of bge-m3 vectors of the GENERATED visual text (caption, text read, observations): "
+                 "uncalibrated, not image similarity, not OCR, not a probability")
+MAX_SCAN_ROWS = 50_000
+SCAN_CHUNK = 2_000
+
+
+def embedding_text(caption: str | None, lines: list[str], observations: list[str]) -> str:
+    """The one bounded text embedded for a described frame: exactly its stored generated fields, nothing added."""
+    return " | ".join(part for part in (caption or "", " / ".join(lines), "; ".join(observations)) if part)[
+        :MAX_EMBED_CHARS]
+
+
+def semantic_provenance(row: sqlite3.Row, cache_key: str, text: str) -> dict[str, Any]:
+    from qronos_media import semantic
+
+    return {"kind": "visual_semantic", "visualSemanticVersion": VISUAL_SEMANTIC_VERSION,
+            "embeds": "the stored generated visual text of this frame (unverified), never the image",
+            "frameSha256": row["frame_sha256"], "timeMs": row["time_ms"], "sceneIndex": row["scene_index"],
+            "ordinal": row["ordinal"], "visualVersion": json.loads(row["provenance_json"]).get("visualVersion"),
+            "textSha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "cacheKey": cache_key,
+            "model": semantic._fixed_profile()["model"], "modelVersion": semantic.model_version(),
+            "quantization": semantic.REQUIRED_QUANTIZATION, "dimension": semantic.DIMENSION}
+
+
+def semantic_provenance_model() -> dict[str, Any]:
+    """Which fixed text-embedding profile answered (for the search answer)."""
+    from qronos_media import semantic
+
+    return {"model": semantic._fixed_profile()["model"], "modelVersion": semantic.model_version(),
+            "quantization": semantic.REQUIRED_QUANTIZATION, "dimension": semantic.DIMENSION,
+            "embeds": "generated visual text, never the image"}
+
+
+def visual_candidates(db: sqlite3.Connection, query_vector: bytes, *, limit: int, asset_id: str | None,
+                      check) -> tuple[list[dict], dict]:
+    """Top described frames by cosine of their stored TEXT vectors; bounded chunked scan, scope filter in SQL first."""
+    import heapq
+
+    import numpy as np
+
+    from qronos_media import semantic
+
+    query = np.frombuffer(query_vector, dtype="<f4")
+    where = ("v.status = 'described' AND NOT (EXISTS (SELECT 1 FROM files f WHERE f.asset_id = s.asset_id) "
+             "AND NOT EXISTS (SELECT 1 FROM files f WHERE f.asset_id = s.asset_id "
+             "AND (f.error IS NULL OR f.error != 'out_of_scope')))")
+    params: list[Any] = []
+    if asset_id:
+        where += " AND s.asset_id = ?"
+        params.append(asset_id)
+    heap: list[tuple[float, int, int]] = []
+    scanned, offset, counter, truncated = 0, 0, 0, False
+    while True:
+        check()
+        rows = db.execute(
+            "SELECT v.row_id, c.vector FROM visual_semantic s "
+            "JOIN visual_evidence v ON v.asset_id = s.asset_id AND v.scene_index = s.scene_index "
+            "AND v.ordinal = s.ordinal AND v.frame_sha256 = s.frame_sha256 "
+            f"JOIN semantic_cache c ON c.cache_key = s.cache_key WHERE {where} "
+            f"ORDER BY s.rowid LIMIT {SCAN_CHUNK} OFFSET {offset}", params).fetchall()
+        if not rows:
+            break
+        scores = semantic.decode_many([row["vector"] for row in rows]) @ query
+        for row, score in zip(rows, scores.tolist()):
+            counter += 1
+            item = (float(score), -counter, int(row["row_id"]))
+            if len(heap) < limit:
+                heapq.heappush(heap, item)
+            elif item[0] > heap[0][0]:
+                heapq.heapreplace(heap, item)
+        scanned += len(rows)
+        offset += SCAN_CHUNK
+        if scanned >= MAX_SCAN_ROWS:
+            truncated = True
+            break
+    best = sorted(heap, key=lambda entry: (-entry[0], -entry[1]))
+    return [{"rowId": row_id, "similarity": round(score, 6)} for score, _, row_id in best], \
+        {"scanned": scanned, "truncated": truncated}

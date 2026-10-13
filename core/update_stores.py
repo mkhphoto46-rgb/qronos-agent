@@ -92,9 +92,9 @@ STORES: tuple[StoreSpec, ...] = (
               "be006f4135bd470f1da242fe441258599bf21f00530d4fa774573983ec670249"),
     # The media index is rebuildable from the user's files but is never copied raw: a package that changes its
     # format is refused (unsupported_migration), which is a release compatibility gate, not rollback support.
-    # Schema 6 code (visual evidence) still reads (and migrates forward, once) schema-1 to -5 files.
-    StoreSpec("media_index", 6, "qronos_media.store:SCHEMA_VERSION", None, "Media index (SQLite)",
-              "727a81d4c286e005c689145cb7471846a2dc5f5c71f01628c6ca5329eae033d0", reads_from=1,
+    # Schema 7 code (visual semantic) still reads (and migrates forward, once) schema-1 to -6 files.
+    StoreSpec("media_index", 7, "qronos_media.store:SCHEMA_VERSION", None, "Media index (SQLite)",
+              "5afba11e9639c72f7b346ab5cbfd1face673b955d564ff387582fe99bc657e77", reads_from=1,
               relocation_env=("QRONOS_MEDIA_DATA_DIR",)),
 )
 
