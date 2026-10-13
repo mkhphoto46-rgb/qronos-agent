@@ -48,8 +48,10 @@ The PDF is Persian and right to left, drawn with the bundled Vazirmatn 33.003
 if different) and shaped by HarfBuzz through fpdf2: Persian labels, timecodes,
 hashes and identifiers in their own left-to-right cells, untrusted subtitle
 text as plain text with bidi controls removed, a header and page number on
-every page. A PDF lists at most 4,000 dialogue lines and 2,000 scenes and
-states how many it left out (JSON and CSV carry them all). HTML stays escaped;
+every page. A PDF lists at most 4,000 dialogue lines, at most 240,000
+characters of dialogue text in total and 2,000 scenes, and states how many
+lines it left out (JSON and CSV carry them all), so a transcript of very long
+lines is still a bounded render. HTML stays escaped;
 CSV keeps the formula guard.
 
 Lexical scores are BM25 or a similarity ratio, labelled as such. Results carry

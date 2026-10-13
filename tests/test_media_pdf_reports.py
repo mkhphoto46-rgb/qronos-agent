@@ -172,6 +172,26 @@ def test_a_long_transcript_is_paginated_and_bounded_with_a_count(tmp_path, no_de
     assert all("Qronos" in page for page in pages)  # the header on every page
 
 
+def test_a_transcript_of_very_long_lines_is_bounded_by_total_text_and_counts_the_rest(tmp_path, no_decoding,
+                                                                                       monkeypatch):
+    monkeypatch.setattr(reports, "MAX_PDF_DIALOGUE_CHARS", 12_000)  # the same rule, at fixture scale
+    store, _ = make_store(tmp_path, lines=200, sidecar=False)
+    long_line = "This line is far longer than any ordinary subtitle cue. " * 11  # about 600 characters
+    with store.transaction() as tx:
+        tx.execute("UPDATE dialogue SET text = ? WHERE asset_id = ?", (long_line, ASSET))
+    report = reports.gather(store.db, ASSET, "transcript")
+    drawn_text = len(reports._plain(long_line))
+    expected_drawn = 12_000 // drawn_text
+    reader, _ = pdf_text(reports.render_bytes(report, "pdf"))
+    # layout extraction: pypdf's plain mode drops parts of this mixed-direction line, which the page shows whole
+    text = "\n".join(page.extract_text(extraction_mode="layout") for page in reader.pages)
+    assert f"{200 - expected_drawn}" in text and "12000" in text  # the omitted lines are counted, the cap named
+    assert len(reader.pages) < 12  # bounded by text, not by the 4,000-row cap
+    short = reports.gather(make_store(tmp_path / "short", lines=200, sidecar=False)[0].db, ASSET, "transcript")
+    _, short_text = pdf_text(reports.render_bytes(short, "pdf"))
+    assert "سطر دیگر" not in short_text  # ordinary lines are all drawn under the same budget
+
+
 def test_the_pdf_refuses_a_font_that_is_not_the_pinned_one(tmp_path, monkeypatch):
     fonts = tmp_path / "fonts"
     shutil.copytree(reports.FONT_DIR, fonts)

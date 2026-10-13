@@ -42,6 +42,9 @@ MAX_DIALOGUE_ROWS = 50_000
 MAX_PDF_DIALOGUE_ROWS = 4_000
 MAX_PDF_SCENE_ROWS = 2_000
 MAX_PDF_TEXT_CHARS = 600
+#: ...and at most this many characters of dialogue text in total, so a transcript of very long lines stays a bounded
+#: render (4,000 ordinary ~50-character cues fit; 4,000 lines of 600 characters do not). The omitted lines are counted.
+MAX_PDF_DIALOGUE_CHARS = 240_000
 SHORT_KEYFRAMES = 12
 FONT_DIR = Path(__file__).resolve().parent / "fonts"
 FONT_REGISTRY = FONT_DIR / "fonts.json"
@@ -555,13 +558,19 @@ def to_pdf(report: dict[str, Any]) -> bytes:
         else:
             doc.row([("زمان", 42, "rtl"), ("منبع", 24, "rtl"), ("متن", width - 66, "rtl")], bold=True)
             short = {"embedded": "زیرنویس", "sidecar": "زیرنویس", "asr": "ماشینی"}
+            drawn = drawn_chars = 0
             for line in dialogue[:MAX_PDF_DIALOGUE_ROWS]:
+                text = _plain(line["text"]) or "—"
+                if drawn_chars + len(text) > MAX_PDF_DIALOGUE_CHARS:
+                    break  # the total text budget: every later line is counted below, none is half-drawn
                 doc.row([(f"{clock_text(line['startMs'])}\n{clock_text(line['endMs'])}", 42, "ltr"),
-                         (short.get(line["source"], line["source"]), 24, "rtl"),
-                         (_plain(line["text"]) or "—", width - 66, "auto")])
-            left_out = report["summary"]["dialogueLines"] - min(len(dialogue), MAX_PDF_DIALOGUE_ROWS)
+                         (short.get(line["source"], line["source"]), 24, "rtl"), (text, width - 66, "auto")])
+                drawn += 1
+                drawn_chars += len(text)
+            left_out = report["summary"]["dialogueLines"] - drawn
             if left_out > 0:
-                doc.paragraph(f"{left_out} سطر دیگر در این PDF نیامده است؛ خروجی JSON یا CSV همه را دارد.")
+                doc.paragraph(f"{left_out} سطر دیگر در این PDF نیامده است (سقف {MAX_PDF_DIALOGUE_ROWS} سطر و "
+                              f"{MAX_PDF_DIALOGUE_CHARS} نویسهٔ متن در PDF)؛ خروجی JSON یا CSV همه را دارد.")
 
     doc.heading("در این فایل در دسترس نیست")
     doc.row([("توانایی", 45, "rtl"), ("وضعیت", 45, "rtl"), ("شرح (متن پروژه)", width - 90, "rtl")], bold=True, size=8)
