@@ -125,8 +125,8 @@ an item to a document does not change its key.
 
 | # | Requirement | Key | Evidence / gap |
 |---|---|---|---|
-| H1 | Device Hub for printers, 3D printers and other local/LAN devices, with explicit per-device capability limits, permission, audit and live acceptance per workflow (project context; delivery status) | M | No source; not assigned this phase. The single print workflow (D6) is not Device Hub |
-| H2 | Local driver/spooler only; no vendor cloud or smart-device service | V (rule) | AGENTS rule; to be re-verified when H1 starts |
+| H1 | Device Hub for printers, 3D printers and other local/LAN devices, with explicit per-device capability limits, permission, audit and live acceptance per workflow (project context; delivery status) | P | Printer chunk only (docs/device_hub.md): Windows-installed local and LAN printers, driver capabilities, queue, own-job pause/resume/cancel and exact-file print, gated, approved and audited; Persian drawer. 3D printers (detected, no workflow), other device classes and live acceptance remain REQUIRED |
+| H2 | Local driver/spooler only; no vendor cloud or smart-device service | V (rule) | The printer chunk uses only the Windows spooler and drivers (no socket/HTTP/vendor API in core/device_hub.py); re-verify for each new device class |
 | H3 | Wake-from-sleep via hardware capability or secure Wake-on-LAN, not a universal voice-wake claim | M | Not implemented. The `link_server` "wake" sockets are an internal socketpair that stops the accept loop, not Wake-on-LAN |
 
 ### F. Cross-cutting invariants
