@@ -217,6 +217,28 @@ test("generated labels and brain hints are shown only as generated text with the
   assert.match(panel, /brainHints: true/);
 });
 
+test("visual hits are generated frame text with a frame SHA, joined to dialogue by time only", () => {
+  const asset = "a_" + "3".repeat(32);
+  const sha = "b".repeat(64);
+  const block = media.visualBlockOf({ requestId: "r1", op: "search", ok: true, visual: { status: "complete", results: [
+    { assetId: asset, timeMs: 5000, frameSha256: sha, caption: "A red bicycle.", visibleText: ["EXIT", 7],
+      observations: ["bicycle"], verified: false, dialogue: [{ startMs: 4000, text: "Look at that red bicycle." }] },
+    { assetId: asset, timeMs: 6000, frameSha256: "not-a-sha", caption: "x", verified: false },
+    { assetId: asset, timeMs: 7000, frameSha256: sha, caption: "claims to be verified", verified: true },
+  ] } });
+  assert.equal(block.hits.length, 1);
+  assert.deepEqual(plain(block.hits[0].visibleText), ["EXIT"]);
+  assert.equal(block.hits[0].dialogue[0].text, "Look at that red bicycle.");
+  const none = media.visualBlockOf({ requestId: "r2", op: "search", ok: true,
+    visual: { status: "unavailable", reason: "no_visual_evidence", results: [] } });
+  assert.match(none.note, /هنوز هیچ فریمی با مدل بینایی توصیف نشده است/);
+  const panel = source("../src/components/MediaPanel.tsx");
+  assert.match(panel, /OCR نیست/);
+  assert.match(panel, /نه شباهت تصویر/);
+  assert.match(panel, /تأییدنشده، نه واقعیت و نه شناسایی/);
+  assert.match(panel, /"visual"\] as const/);
+});
+
 test("the panel uses the registered action transport, clears the secret and starts no runtime itself", () => {
   const panel = source("../src/components/MediaPanel.tsx");
   assert.match(panel, /invoke\("send_runtime_action", \{ actionId, data \}\)/);

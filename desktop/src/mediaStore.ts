@@ -109,6 +109,55 @@ export function topicBlockOf(result: MediaResult | null): TopicBlock {
   return { hits, note, hints, expanded: expansion.applied === true, brainHints, brainHintsReason };
 }
 
+/** One visual hit (qronos_media/visual_evidence.py): GENERATED text about one stored keyframe, never a fact. */
+export type VisualHit = {
+  assetId: string;
+  title: string | null;
+  timeMs: number;
+  frameSha256: string;
+  caption: string;
+  visibleText: string[];
+  observations: string[];
+  /** Indexed dialogue lines whose time overlaps the frame (joined by time only, never by meaning). */
+  dialogue: Array<{ startMs: number; text: string }>;
+};
+
+export type VisualBlock = { hits: VisualHit[]; note: string | null };
+
+const SHA256 = /^[0-9a-f]{64}$/;
+
+function strings(value: unknown, count: number, size: number): string[] {
+  return (Array.isArray(value) ? value : []).filter((item): item is string => typeof item === "string")
+    .slice(0, count).map((item) => item.slice(0, size));
+}
+
+/** The visual block of a `search` answer in mode "visual", validated field by field. */
+export function visualBlockOf(result: MediaResult | null): VisualBlock {
+  const empty: VisualBlock = { hits: [], note: null };
+  if (!result || !result.ok || typeof result.visual !== "object" || result.visual === null) return empty;
+  const block = result.visual as Record<string, unknown>;
+  const hits: VisualHit[] = [];
+  for (const raw of Array.isArray(block.results) ? block.results.slice(0, 50) : []) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const item = raw as Record<string, unknown>;
+    if (!isAssetId(item.assetId) || typeof item.timeMs !== "number" || typeof item.caption !== "string"
+      || typeof item.frameSha256 !== "string" || !SHA256.test(item.frameSha256) || item.verified !== false) continue;
+    hits.push({
+      assetId: item.assetId, title: typeof item.title === "string" ? item.title.slice(0, 300) : null,
+      timeMs: item.timeMs, frameSha256: item.frameSha256, caption: item.caption.slice(0, 240),
+      visibleText: strings(item.visibleText, 8, 120), observations: strings(item.observations, 6, 120),
+      dialogue: (Array.isArray(item.dialogue) ? item.dialogue : []).slice(0, 4)
+        .filter((line): line is Record<string, unknown> => typeof line === "object" && line !== null
+          && typeof (line as Record<string, unknown>).text === "string" && typeof (line as Record<string, unknown>).startMs === "number")
+        .map((line) => ({ startMs: line.startMs as number, text: String(line.text).slice(0, 600) })),
+    });
+  }
+  const note = block.status === "unavailable"
+    ? `جست‌وجوی تصویری در دسترس نیست: ${refusalText(typeof block.reason === "string" ? block.reason : "no_visual_evidence")}`
+    : null;
+  return { hits, note };
+}
+
 /** Report formats and kinds the media host renders from the one index schema (qronos_media/reports.py). */
 export const REPORT_FORMATS = ["pdf", "html", "json", "csv"] as const;
 export const REPORT_KINDS = ["short", "full", "transcript", "evidence"] as const;
@@ -215,6 +264,9 @@ export const MEDIA_REFUSAL_TEXT: Record<string, string> = {
   generation_changed: "سرویس حافظه دوباره راه‌اندازی شد؛ دوباره امتحان کنید.",
   request_unresolved: "درخواست قبلی مدل هنوز روشن نشده؛ تا آن موقع مدل دیگری بارگذاری نمی‌شود.",
   model_busy: "مدل مشغول است؛ کمی بعد دوباره امتحان کنید.",
+  no_visual_evidence: "هنوز هیچ فریمی با مدل بینایی توصیف نشده است (مرحلهٔ شواهد تصویری انجام نشده).",
+  no_visual_index: "این نمایه قدیمی‌تر از شواهد تصویری است.",
+  vision_profile_mismatch: "مدل بینایی تنظیم‌شده همان مدل اعلام‌شده نیست؛ چیزی اجرا نشد.",
   queue_full: "صف رسانه پر است؛ کمی بعد دوباره امتحان کنید.",
   stopped: "متوقف شد؛ هیچ کاری انجام نشد.",
   closed: "سرویس رسانه بسته شد.",

@@ -5,10 +5,10 @@ import { listen } from "@tauri-apps/api/event";
 
 import {
   approvalOf, createMediaClient, exportDestinationProblem, isAssetId, refusalText, REPORT_FORMATS, REPORT_KIND_TEXT,
-  REPORT_KINDS, topicBlockOf,
+  REPORT_KINDS, topicBlockOf, visualBlockOf,
 } from "../mediaStore";
 import type {
-  MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, ReportFormat, ReportKind, RuntimeEvent, TopicHit,
+  MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, ReportFormat, ReportKind, RuntimeEvent, TopicHit, VisualHit,
 } from "../mediaStore";
 
 import "./MediaPanel.css";
@@ -80,14 +80,15 @@ const CAPABILITY_FA: Record<string, string> = {
   semantic_dialogue: "جست‌وجوی معنایی دیالوگ (bge-m3)",
   topic_retrieval: "جست‌وجوی موضوعی (بخش‌های بدون برچسب، با جمله‌های نمایه‌شده)",
   visual_embeddings: "جست‌وجوی تصویری",
-  vision_captions: "توصیف تصویر",
+  vision_captions: "توصیف فریم‌ها با مدل بینایی (تولیدشده، تأییدنشده)",
   ocr: "خواندن متن روی تصویر",
   topics: "موضوع‌ها",
   speaker_turns: "تفکیک گوینده‌ها",
   actions_motion: "حرکت و کنش",
 };
 
-const MODE_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "معنایی", topic: "موضوعی" };
+const MODE_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "معنایی", topic: "موضوعی",
+  visual: "تصویری (متن تولیدشدهٔ فریم‌ها)" };
 
 export function clock(ms: unknown): string {
   const total = typeof ms === "number" && Number.isFinite(ms) && ms >= 0 ? Math.floor(ms / 1000) : 0;
@@ -123,7 +124,7 @@ function MediaPanel(props: MediaPanelProps) {
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<"exact" | "fuzzy" | "semantic" | "topic">("exact");
+  const [mode, setMode] = useState<"exact" | "fuzzy" | "semantic" | "topic" | "visual">("exact");
   const [brainHints, setBrainHints] = useState(false);
   const [result, setResult] = useState<MediaResult | null>(null);
   const [approval, setApproval] = useState<MediaApproval | null>(null);
@@ -247,6 +248,41 @@ function MediaPanel(props: MediaPanelProps) {
 
   const { exact, semantic, semanticNote } = hitsOf(result);
   const topic = topicBlockOf(result);
+  const visual = visualBlockOf(result);
+
+  function visualCard(hit: VisualHit, key: string) {
+    return (
+      <li key={key} className="media-card">
+        <div className="media-card-head">
+          <strong>{hit.title || "ویدیو"}</strong>
+          <span className="ltr">{clock(hit.timeMs)}</span>
+          <small className="ltr" title="SHA-256 همان فریم ذخیره‌شده">{hit.frameSha256.slice(0, 12)}</small>
+        </div>
+        <p className="media-topic-generated">
+          <span dir="auto">{hit.caption}</span>{" "}
+          <small>(توصیف تولیدشده با مدل بینایی از همین فریم؛ تأییدنشده، نه واقعیت و نه شناسایی)</small>
+        </p>
+        {hit.visibleText.length > 0 && (
+          <p><small>متنی که مدل در فریم خواند (OCR نیست):</small> <span dir="auto">{hit.visibleText.join(" / ")}</span></p>
+        )}
+        {hit.observations.length > 0 && <p><small>مشاهده‌ها:</small> <span dir="auto">{hit.observations.join("، ")}</span></p>}
+        {hit.dialogue.length > 0 && (
+          <ul className="media-topic-lines">
+            {hit.dialogue.map((line, i) => (
+              <li key={i}><span className="ltr">{clock(line.startMs)}</span> <span dir="auto">{line.text}</span></li>
+            ))}
+          </ul>
+        )}
+        <small>دیالوگ بالا فقط به خاطر هم‌زمانی کنار فریم آمده است، نه به خاطر معنا.</small>
+        <div className="media-card-actions">
+          <button type="button" disabled={busy}
+            onClick={() => void run("open.prepare", { assetId: hit.assetId, startMs: Math.max(0, Math.floor(hit.timeMs)) })}>
+            باز کردن در همین لحظه
+          </button>
+        </div>
+      </li>
+    );
+  }
 
   function topicCard(hit: TopicHit, key: string) {
     const parts = hit.components;
@@ -352,7 +388,7 @@ function MediaPanel(props: MediaPanelProps) {
       <div className="media-row">
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="چه چیزی گفته شد؟" dir="auto" maxLength={1200} />
         <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-          {(["exact", "fuzzy", "semantic", "topic"] as const).map((m) => <option key={m} value={m}>{MODE_FA[m]}</option>)}
+          {(["exact", "fuzzy", "semantic", "topic", "visual"] as const).map((m) => <option key={m} value={m}>{MODE_FA[m]}</option>)}
         </select>
         {mode === "topic" && (
           <label title="فقط وقتی جست‌وجوی اول ضعیف یا پرسش خیلی کوتاه باشد؛ عبارت‌ها راهنما هستند، نه نتیجه">
@@ -380,6 +416,11 @@ function MediaPanel(props: MediaPanelProps) {
       </div>
       {semanticNote && <p className="media-notice">{semanticNote}</p>}
       {topic.note && <p className="media-notice">{topic.note}</p>}
+      {visual.note && <p className="media-notice">{visual.note}</p>}
+      {visual.hits.length > 0 && <>
+        <h4>فریم‌های هم‌خوان (جست‌وجوی واژه‌ای در متن تولیدشدهٔ فریم‌ها، نه شباهت تصویر)</h4>
+        <ul className="media-results">{visual.hits.map((hit, i) => visualCard(hit, `v${i}`))}</ul>
+      </>}
       {topic.brainHints.length > 0 && (
         <p className="media-topic-hints">
           عبارت‌های پیشنهادی مغز سریع (تولیدشده؛ راهنمای جست‌وجو، نه واقعیت و نه نتیجه): <span dir="auto">{topic.brainHints.join("، ")}</span>
