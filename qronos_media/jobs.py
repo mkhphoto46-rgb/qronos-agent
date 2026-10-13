@@ -357,9 +357,11 @@ class Watch:
 #: provisioned as pinned): the stage stays QUEUED with the reason and the run carries on with other work.
 #: Stages that need the runtime's governed Fast brain (checked before any reservation).
 BRAIN_STAGES = frozenset({"topic_labels"})
+#: Stages that need the runtime's configured Vision profile (checked before any reservation).
+VISION_STAGES = frozenset({"visual_evidence"})
 UNAVAILABLE_REASONS = frozenset({
     "requires_qronos_governor", "requires_trusted_model_authority", "gpu_lease_contract_pending",
-    "undeclared_model", "model_lease_required", "model_unavailable",
+    "undeclared_model", "model_lease_required", "model_unavailable", "vision_profile_mismatch",
 })
 
 
@@ -386,7 +388,7 @@ class StageRunner:
                  permissions: MediaPermissions, cache_dir: Path, cache_quota_bytes: int,
                  excluded: tuple[Path, ...] = (), clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic, embedder: object = None,
-                 brain: object = None) -> None:
+                 brain: object = None, vision: object = None) -> None:
         self.store = store
         self.db = store.db
         self.tools = tools
@@ -404,6 +406,7 @@ class StageRunner:
         self._watch: Watch | None = None
         self.embedder = embedder  # the runtime's bge-m3 embedder (semantic stage) or None
         self.brain = brain  # the runtime's governed Fast-brain gateway (topic_labels stage) or None
+        self.vision = vision  # the runtime's Vision gateway (visual_evidence stage) or None
 
     def _admit_now(self, path: Path) -> Path:
         """Admit a copy immediately before a decoder opens it: scope, and a fresh gate answer.
@@ -678,6 +681,16 @@ class StageRunner:
                                (f"unavailable:{missing}", asset_id, stage))
                 report.refused.append(f"{key}:{missing}")
                 return "unavailable"
+        if stage in VISION_STAGES:
+            # No runtime Vision in this process, or the configured profile is not the declared one: nothing could
+            # run, so no model slot is reserved and the stage is never marked complete.
+            missing = "model_unavailable" if self.vision is None else self.vision.unavailable_reason()
+            if missing is not None:
+                with self.store.transaction() as db:
+                    db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
+                               (f"unavailable:{missing}", asset_id, stage))
+                report.refused.append(f"{key}:{missing}")
+                return "unavailable"
         try:
             lease = self.authority.reserve(task, spec.needs)
         except ResourceRefused as exc:
@@ -729,6 +742,7 @@ class StageRunner:
                 embedder=self.embedder,
                 sidecar_binding=sidecar_binding,
                 brain=self.brain,
+                vision=self.vision,
             )
             try:
                 commit = RUNNERS[stage](ctx)

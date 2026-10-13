@@ -37,6 +37,13 @@ Schema 5 adds generated topic labels. ``topic_labels`` (qronos_media.brain_label
 validated label/summary from the governed Fast brain with the indexed lines it cites, or the reason it was rejected;
 every row is marked generated/unverified in its provenance. It references its segment (deleted with it) and is
 written only in the "topic_labels" stage's result+COMPLETED transaction. The schema-4 to 5 step only adds a table.
+
+Schema 6 adds generated visual evidence. ``visual_evidence`` (qronos_media.visual_evidence) holds, per stored keyframe,
+either the validated caption / text read / observations from the runtime's configured Vision model with the frame's
+time and SHA-256, or the reason it was rejected; provenance marks every row generated/unverified. It references its
+keyframe (deleted with it) and is written only in the "visual_evidence" stage's result+COMPLETED transaction.
+``visual_fts`` indexes that generated text for the separate visual search channel. The schema-5 to 6 step only adds
+tables.
 """
 from __future__ import annotations
 
@@ -45,7 +52,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -254,6 +261,39 @@ CREATE TABLE IF NOT EXISTS keyframes (
     bytes INTEGER NOT NULL,
     PRIMARY KEY (asset_id, scene_index, ordinal)
 );
+
+CREATE TABLE IF NOT EXISTS visual_evidence (
+    row_id INTEGER PRIMARY KEY,
+    asset_id TEXT NOT NULL,
+    scene_index INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    time_ms INTEGER NOT NULL,
+    frame_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('described', 'rejected')),
+    caption TEXT,
+    visible_text_json TEXT,
+    observations_json TEXT,
+    text_check_json TEXT,
+    reason TEXT,
+    provenance_json TEXT NOT NULL,
+    norm_text TEXT NOT NULL DEFAULT '',
+    UNIQUE (asset_id, scene_index, ordinal),
+    FOREIGN KEY (asset_id, scene_index, ordinal) REFERENCES keyframes(asset_id, scene_index, ordinal) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS visual_evidence_by_asset ON visual_evidence(asset_id, time_ms);
+CREATE VIRTUAL TABLE IF NOT EXISTS visual_fts USING fts5(
+    norm_text, content='visual_evidence', content_rowid='row_id', tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS visual_evidence_ai AFTER INSERT ON visual_evidence BEGIN
+    INSERT INTO visual_fts(rowid, norm_text) VALUES (new.row_id, new.norm_text);
+END;
+CREATE TRIGGER IF NOT EXISTS visual_evidence_au AFTER UPDATE OF norm_text ON visual_evidence BEGIN
+    INSERT INTO visual_fts(visual_fts, rowid, norm_text) VALUES ('delete', old.row_id, old.norm_text);
+    INSERT INTO visual_fts(rowid, norm_text) VALUES (new.row_id, new.norm_text);
+END;
+CREATE TRIGGER IF NOT EXISTS visual_evidence_ad AFTER DELETE ON visual_evidence BEGIN
+    INSERT INTO visual_fts(visual_fts, rowid, norm_text) VALUES ('delete', old.row_id, old.norm_text);
+END;
 
 CREATE TABLE IF NOT EXISTS stages (
     asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,

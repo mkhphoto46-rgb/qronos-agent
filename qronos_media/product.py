@@ -33,7 +33,7 @@ MAX_QUERY_CHARS = 1200
 MAX_SECRET_CHARS = 256
 MAX_START_MS = 7 * 24 * 3600 * 1000
 MAX_PENDING_APPROVALS = 32
-SEARCH_MODES = ("exact", "fuzzy", "semantic", "topic")
+SEARCH_MODES = ("exact", "fuzzy", "semantic", "topic", "visual")
 
 #: Operations that only read (allowed while Qronos is paused). Everything else is refused while paused.
 READ_OPS = frozenset({"status", "roots.list", "search", "asset.detail", "capabilities", "decline", "report.preview"})
@@ -338,6 +338,8 @@ def _search(service: Any, query: str, mode: str, limit: int, language: str | Non
         return {"ok": True, **service.search_semantic(query, limit=limit, language=language)}
     if mode == "topic":
         return {"ok": True, **service.search_topics(query, limit=limit, language=language, brain_hints=brain_hints)}
+    if mode == "visual":  # the separate visual channel; the exact dialogue answer comes first, unchanged
+        return {"ok": True, **service.search_visual(query, limit=limit)}
     return {"ok": True, "results": service.search_dialogue(query, mode=mode, limit=limit, language=language)}
 
 

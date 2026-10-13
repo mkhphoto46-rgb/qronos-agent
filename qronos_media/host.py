@@ -89,6 +89,7 @@ class MediaHost:
         service_factory: Callable[..., Any] | None = None,
         embedder: Callable[[], Any] = lambda: None,
         brain: Callable[[], Any] = lambda: None,
+        vision: Callable[[], Any] = lambda: None,
     ) -> None:
         if not is_issued(authority):
             # A DTO, a Boolean, a flag or a home-made object is never a model authority.
@@ -101,6 +102,7 @@ class MediaHost:
         self._service_factory = service_factory
         self._embedder = embedder
         self._brain = brain
+        self._vision = vision
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._requests: deque[dict[str, Any]] = deque()
@@ -309,7 +311,7 @@ class MediaHost:
         factory = self._service_factory or MediaService
         self._service = factory(root, tools=self._tools(), authority=self.authority,
                                 permissions=self._permissions(), embedder=self._embedder(),
-                                brain=self._brain())
+                                brain=self._brain(), vision=self._vision())
         return self._service
 
     def _run(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -385,5 +387,13 @@ def build_bridge_media_host(
     def brain() -> Any:
         return shared_brain
 
+    from qronos_media.vision_gateway import VisionGateway
+
+    # The runtime's CONFIGURED Vision profile on the SAME source's orchestrator runtime; None: unavailable.
+    shared_vision = VisionGateway(fast_brain) if fast_brain is not None else None
+
+    def vision() -> Any:
+        return shared_vision
+
     return MediaHost(authority, data_dir=default_data_dir, tools=tools_from_environment, permissions=permissions,
-                     embedder=embedder, brain=brain)
+                     embedder=embedder, brain=brain, vision=vision)

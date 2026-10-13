@@ -119,7 +119,21 @@ BGE_M3 = ModelSpec(
     dimension=1024,
 )
 
-DECLARED_MODELS: tuple[ModelSpec, ...] = (WHISPER_LARGE_V3_TURBO_Q5_0, BGE_M3)
+#: The runtime's CONFIGURED Vision profile (config/brains.json "qwen3vl_4b", core.model_registry role "vision"),
+#: served by the runtime's own brain runtime (Ollama) and called exactly as core/vision_worker does; media never
+#: chooses or overrides it, and qronos_media.vision_gateway refuses when the configured profile differs from this
+#: declaration. VRAM is the profile's declared 4.6 GB estimate (ceil(4.6 * 1024) MB, not measured); RAM is media's
+#: declared host-side allowance for one request. Freed only when the runtime proves the model unloaded.
+QWEN3_VL_4B = ModelSpec(
+    name="qwen3-vl:4b-instruct",
+    vram_mb=4711,
+    ram_mb=1024,
+    weight="heavy",
+    served_by="brain_runtime",
+    runtime="the runtime's configured Vision profile (ollama)",
+)
+
+DECLARED_MODELS: tuple[ModelSpec, ...] = (WHISPER_LARGE_V3_TURBO_Q5_0, BGE_M3, QWEN3_VL_4B)
 
 
 def is_declared(model: object) -> bool:

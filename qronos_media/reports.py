@@ -48,6 +48,10 @@ MAX_PDF_DIALOGUE_CHARS = 240_000
 SHORT_KEYFRAMES = 12
 #: Topic segments listed per report (each with its most central indexed lines); the rest are counted.
 REPORT_TOPIC_SEGMENTS = {"short": 10, "full": 200, "evidence": 200, "transcript": 0}
+#: Generated visual evidence rows listed per report kind (the stage keeps at most 24 frames per asset).
+REPORT_VISUAL_FRAMES = {"short": 8, "full": 24, "evidence": 24, "transcript": 0}
+#: The PDF draws at most this many characters of generated visual text.
+MAX_PDF_VISUAL_CHARS = 20_000
 #: The PDF draws at most this many characters of topic-segment lines (same rule as the dialogue budget).
 MAX_PDF_TOPIC_CHARS = 60_000
 FONT_DIR = Path(__file__).resolve().parent / "fonts"
@@ -135,6 +139,33 @@ def _topic_segments(db: sqlite3.Connection, asset_id: str, limit: int) -> tuple[
     return (topics.asset_segments(db, asset_id, limit=limit) if limit and count else []), count
 
 
+def _attach_visual(db: sqlite3.Connection, asset_id: str, kind: str, report: dict[str, Any]) -> None:
+    """Stored generated visual evidence (no model call), capped per kind, with the dialogue overlapping each frame."""
+    from qronos_media import visual_evidence
+
+    cap = REPORT_VISUAL_FRAMES[kind]
+    try:
+        total, rejected = db.execute(
+            "SELECT COALESCE(SUM(status = 'described'), 0), COALESCE(SUM(status = 'rejected'), 0) "
+            "FROM visual_evidence WHERE asset_id = ?", (asset_id,)).fetchone()
+    except sqlite3.OperationalError:  # an index from before schema 6
+        total, rejected = 0, 0
+    frames = visual_evidence.asset_visual(db, asset_id, limit=cap) if cap and total else []
+    for frame in frames:
+        frame["dialogue"] = visual_evidence.joined_dialogue(db, asset_id, frame["timeMs"])
+    report["summary"].update({"visualFrames": int(total), "visualFramesListed": len(frames),
+                              "visualFramesOmitted": int(total) - len(frames), "visualFramesRejected": int(rejected),
+                              "visualFramesCap": cap})
+    if frames:
+        report["visualEvidence"] = frames
+
+
+def _visual_omission_text(report: dict[str, Any]) -> str:
+    summary = report["summary"]
+    return (f"{summary['visualFramesOmitted']} فریم دیگر از {summary['visualFrames']} فریم توصیف‌شدهٔ این فایل در این "
+            f"گزارش نیست (سقف {summary['visualFramesCap']} فریم برای {KIND_FA[report['kind']]})؛ هیچ خروجی این گزارش آن‌ها را ندارد.")
+
+
 def _topic_omission_text(report: dict[str, Any]) -> str:
     summary = report["summary"]
     return (f"{summary['topicSegmentsOmitted']} بخش دیگر از {summary['topicSegments']} بخش این فایل در این گزارش نیست "
@@ -169,17 +200,22 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
         items.append({"code": "topic_segments_unlabelled",
                       "text": "بخش‌های موضوعی گروه‌بندی جمله‌های یک ترک بر پایهٔ معنای آن‌ها (بردارهای bge-m3) هستند؛ "
                               "برچسب یا خلاصه ندارند و فقط با خود جمله‌ها نشان داده می‌شوند."})
+    if stages.get("visual_evidence", {}).get("state") == "COMPLETED" \
+            and not str(stages.get("visual_evidence", {}).get("note") or "").startswith("skipped"):
+        items.append({"code": "generated_visual_unverified",
+                      "text": "توصیف، متن خوانده‌شده و مشاهده‌های فریم‌ها را مدل بینایی از روی فریم‌های کلیدی ذخیره‌شده ساخته است؛ متن تولیدشده و تأییدنشده است، نه واقعیت، نه شناسایی و نه OCR؛ زمان و SHA-256 هر فریم کنارش آمده است."})
     items.append({"code": "no_confidence",
                   "text": "هیچ اطمینان کالیبره‌شده‌ای محاسبه نمی‌شود و در این گزارش هم عددی برای اطمینان نیست."})
     items.append({"code": "no_generated_content",
-                  "text": "خلاصه، موضوع، رتبه‌بندی صحنه‌های مهم، توصیف تصویر و OCR تولید نمی‌شوند (فهرست «در این فایل در دسترس نیست»)."})
+                  "text": "خلاصهٔ کل فایل، رتبه‌بندی صحنه‌های مهم و OCR تولید نمی‌شوند؛ برچسب موضوع و توصیف فریم فقط وقتی هست که مرحلهٔ خودش انجام شده باشد و همیشه تولیدشده و تأییدنشده است (فهرست «در این فایل در دسترس نیست»)."})
     return items
 
 
 def _not_available(stages: dict[str, Any]) -> list[dict[str, Any]]:
     """Capabilities this asset does not have: never implemented, or implemented but not completed here."""
     out = []
-    stage_of = {"asr": "asr", "semantic_dialogue": "semantic", "topic_retrieval": "topics", "topics": "topic_labels"}
+    stage_of = {"asr": "asr", "semantic_dialogue": "semantic", "topic_retrieval": "topics", "topics": "topic_labels",
+                "vision_captions": "visual_evidence"}
     for item in PENDING_CAPABILITIES:
         stage = stage_of.get(str(item["capability"]))
         if item["status"] == "implemented_unverified" and stage \
@@ -220,7 +256,7 @@ def gather(db: sqlite3.Connection, asset_id: str, kind: str = "full") -> dict[st
         "levels": level,
         "summary": {"dialogueLines": sum(cue_counts.values()), "dialogueLinesBySource": cue_counts,
                     "subtitleTracks": len(sources), "scenes": scene_count, "keyframes": keyframe_count,
-                    "topicSegments": 0},
+                    "topicSegments": 0, "visualFrames": 0},
         "notAvailable": _not_available(level["stages"]),
         "limitations": _limitations(level["stages"], sources),
     }
@@ -242,14 +278,15 @@ def gather(db: sqlite3.Connection, asset_id: str, kind: str = "full") -> dict[st
                 "provenance": record["provenance"]}
         report["summary"]["topicSegmentsLabelled"] = sum(1 for s in segments if s["generated"])
         report["topicSegments"] = segments
+    _attach_visual(db, asset_id, kind, report)
     if kind == "short":
         report["keyframes"] = [{"sceneIndex": f["scene_index"], "timeMs": f["time_ms"]} for f in db.execute(
             "SELECT scene_index, time_ms FROM keyframes WHERE asset_id = ? ORDER BY time_ms LIMIT ?",
             (asset_id, SHORT_KEYFRAMES))]
         report["generated"] = {name: {"available": False, "reason": reason} for name, reason in (
             ("summary", "no summary is generated from the index"),
-            ("topics", "topic labels are deferred: no brain authority is wired to media; unlabelled topic "
-                       "segments with their indexed lines are under topicSegments"),
+            ("topics", "no topic list is generated for the whole file; topic segments with their indexed lines "
+                       "(and a generated, unverified label where the topic_labels stage ran) are under topicSegments"),
             ("importantScenes", "no importance ranking exists; scene boundaries only"),
             ("keyDialogue", "no key-dialogue selection exists; see the transcript report"))}
     if kind in {"full", "evidence"}:
@@ -363,6 +400,18 @@ def to_html(report: dict[str, Any]) -> str:
         parts.append("</table>")
         if report["summary"]["topicSegmentsOmitted"] > 0:
             parts.append(f"<p>{e(_topic_omission_text(report))}</p>")
+    if report.get("visualEvidence"):
+        parts.append(f"<h2>شواهد تصویری ({e(report['summary']['visualFrames'])} فریم؛ تولیدشده با مدل بینایی، تأییدنشده)</h2>"
+                     "<table><tr><th>زمان</th><th>توصیف</th><th>متن خوانده‌شده</th><th>مشاهده‌ها</th><th>دیالوگ هم‌زمان</th></tr>")
+        for frame in report["visualEvidence"]:
+            read = "<br>".join(f"<span dir=\"auto\">{e(line)}</span>" for line in frame["visibleText"]) or "—"
+            seen = "<br>".join(f"<span dir=\"auto\">{e(line)}</span>" for line in frame["observations"]) or "—"
+            said = "<br>".join(f"<span dir=\"auto\">{e(line['text'])}</span>" for line in frame["dialogue"]) or "—"
+            parts.append(f"<tr><td class=\"ltr\">{e(clock_text(frame['timeMs']))}<br><small>{e(frame['frameSha256'][:12])}</small>"
+                         f"</td><td dir=\"auto\">{e(frame['caption'])}</td><td>{read}</td><td>{seen}</td><td>{said}</td></tr>")
+        parts.append("</table>")
+        if report["summary"]["visualFramesOmitted"] > 0:
+            parts.append(f"<p>{e(_visual_omission_text(report))}</p>")
     if "keyframes" in report:
         parts.append("<h2>فریم‌های کلیدی (زمان)</h2><ul>")
         parts += [f"<li class=\"ltr\">{e(clock_text(f['timeMs']))}</li>" for f in report["keyframes"]]
@@ -613,6 +662,32 @@ def to_pdf(report: dict[str, Any]) -> bytes:
         if report["summary"]["topicSegmentsOmitted"] > 0:  # not in this report at all: no export of it has them
             doc.paragraph(_topic_omission_text(report))
 
+    if report.get("visualEvidence"):
+        frames = report["visualEvidence"]
+        doc.heading(f"شواهد تصویری ({report['summary']['visualFrames']} فریم)")
+        doc.paragraph("توصیف، متن خوانده‌شده و مشاهده‌ها را مدل بینایی از روی فریم‌های کلیدی ذخیره‌شده ساخته است؛ "
+                      "تولیدشده و تأییدنشده، نه واقعیت و نه OCR. دیالوگ هم‌زمان فقط بر پایهٔ زمان کنار فریم آمده است.", size=9)
+        doc.row([("زمان", 30, "rtl"), ("شواهد تولیدشده", width - 30, "rtl")], bold=True)
+        drawn = drawn_chars = 0
+        for frame in frames:
+            text = " — ".join(part for part in (
+                _plain(frame["caption"], 240),
+                ("متن: " + " / ".join(_plain(line, 120) for line in frame["visibleText"])) if frame["visibleText"] else "",
+                " / ".join(_plain(line, 120) for line in frame["observations"]),
+                ("دیالوگ هم‌زمان: " + " / ".join(_plain(line["text"], 160) for line in frame["dialogue"]))
+                if frame["dialogue"] else "") if part)
+            if drawn_chars + len(text) > MAX_PDF_VISUAL_CHARS:
+                break
+            doc.row([(f"{clock_text(frame['timeMs'])}\n{frame['frameSha256'][:12]}", 30, "ltr"),
+                     (text, width - 30, "auto")])
+            drawn += 1
+            drawn_chars += len(text)
+        if len(frames) > drawn:  # listed in this report, not drawn here: the report's JSON has them
+            doc.paragraph(f"{len(frames) - drawn} فریم فهرست‌شدهٔ این گزارش به‌خاطر سقف {MAX_PDF_VISUAL_CHARS} نویسهٔ "
+                          "متن در این PDF کشیده نشده است؛ خروجی JSON همین گزارش آن‌ها را دارد.")
+        if report["summary"]["visualFramesOmitted"] > 0:
+            doc.paragraph(_visual_omission_text(report))
+
     if "streams" in report:
         doc.heading("جریان‌های فایل")
         doc.row([("#", 10, "rtl"), ("نوع", 25, "rtl"), ("کدک", 30, "rtl"), ("زبان", 25, "rtl"),
@@ -709,6 +784,12 @@ def preview(report: dict[str, Any]) -> dict[str, Any]:
                                  "generatedLabel": (s.get("generated") or {}).get("label"),
                                  "lines": [_plain(line["text"], PREVIEW_TEXT_CHARS) for line in s["lines"]]}
                                 for s in report["topicSegments"][:PREVIEW_TRACKS]]
+    if report.get("visualEvidence"):
+        out["visualEvidence"] = [{"timeMs": f["timeMs"], "frameSha256": f["frameSha256"],
+                                  "caption": _plain(f["caption"], PREVIEW_TEXT_CHARS),
+                                  "visibleText": [_plain(line, PREVIEW_TEXT_CHARS) for line in f["visibleText"]],
+                                  "generated": True, "verified": False}
+                                 for f in report["visualEvidence"][:PREVIEW_TRACKS]]
     if "scenes" in report:
         out["scenes"] = len(report["scenes"])
     return out

@@ -409,9 +409,11 @@ class HostedModelAuthority:
         with self._lock:
             lease.close()
             self._event("release_requested", lease.task_id)
-            if lease.spec.served_by == "memory_sidecar":
+            if lease.spec.served_by in ("memory_sidecar", "brain_runtime"):
                 # The HTTP request has returned (drained), but the sidecar keeps the model loaded, and a failed
-                # request may still be running there: nothing is freed until residency is proven gone.
+                # request may still be running there: nothing is freed until residency is proven gone. The Vision
+                # model on the runtime's brain runtime is asked with keep_alive "0" and stopped after each request,
+                # yet it is likewise counted until that runtime proves it unloaded.
                 if lease.unresolved:
                     lease.state = "request_unresolved"
                 elif lease.dispatched or lease.inherited_resident:
@@ -423,6 +425,8 @@ class HostedModelAuthority:
                     self._free(lease, proof="no_request_dispatched")
                     return
                 self._event(lease.state, lease.task_id, model=lease.spec.name)
+                if lease.spec.served_by == "brain_runtime":
+                    self._reconcile_slot(lease.spec.name)  # usually already unloaded (keep_alive "0" + stop_model)
                 return
             self._try_free(lease, teardown=True)
 
@@ -438,6 +442,17 @@ class HostedModelAuthority:
     def _reconcile_slot(self, name: str) -> None:
         slot = self._slots.get(name)
         if slot is None or not slot.closed:
+            return
+        if slot.spec.served_by == "brain_runtime":
+            # Only the bound runtime's own model list decides (qronos_media.vision_gateway.RuntimeResidency). A model
+            # that runtime no longer lists is not loaded and runs no request (a running request keeps it listed),
+            # so "unloaded" frees a resident AND a request_unresolved slot; anything else keeps both counted.
+            try:
+                proof = slot.capability.residency() if slot.capability is not None else "unknown"
+            except Exception:  # noqa: BLE001 - an unreadable state is not proof
+                proof = "unknown"
+            if proof == "unloaded":
+                self._free(slot, proof="model_unloaded")
             return
         if slot.spec.served_by == "memory_sidecar":
             try:
