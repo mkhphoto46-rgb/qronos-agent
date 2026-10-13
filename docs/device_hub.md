@@ -1,7 +1,8 @@
-# Device Hub (H1): printers, 3D printers and waking this PC (H3)
+# Device Hub (H1): printers, 3D printers, scanners and waking this PC (H3)
 
-Status: the printer and 3D printer parts of H1, and waking this PC with a hardware wake timer (H3), are implemented
-and fixture-tested. Other device classes and live acceptance on real hardware are still required.
+Status: the printer, 3D printer and WIA scanner parts of H1, and waking this PC with a hardware wake timer (H3),
+are implemented and fixture-tested. Cameras/webcams, other device classes and live acceptance on real hardware
+are still required.
 
 ## What it does
 
@@ -64,7 +65,7 @@ as opaque streams. The model's 3MF version and required extensions must match wh
 - 3D print options (quality, density, supports, raft, material) stay in the driver or on the device. Qronos sends
   no print ticket of its own and does not check that the model fits the build volume; the driver and device do.
 - There is no G-code, serial, network or vendor path. A printer without a Windows 3D driver is not reachable.
-- Scanners, cameras and other local devices are not supported yet.
+- Cameras, webcams, phones and other local devices are not supported yet (scanners: see below).
 
 ## Rules kept
 
@@ -76,6 +77,28 @@ as opaque streams. The model's 3MF version and required extensions must match wh
 - **Wrong kind:** a Device Hub approval sent as a file decision is refused as `wrong_kind` and left untouched.
 - **Secret:** the typed secret is never echoed or stored. The desktop sends it only with the one decide request and
   clears it on submit and hide.
+
+## Scanning one page into one new image file (WIA 2.0 scanners)
+
+Windows Image Acquisition 2.0 serves **scanners** (`core/wia_imaging.py`). The SDK's own note says still cameras are
+WIA 1.0 and webcams are no longer WIA devices, so those are listed as not supported and never captured.
+
+- **List** (`imaging.list`, read-only, also while paused): the devices WIA lists, with their kind (from the device
+  type's high word). Only a scanner gets the scan workflow.
+- **Scan** (`image.capture`):
+  - one listed scanner and one exact NEW `.png`/`.jpg`/`.jpeg` path in an existing, non-linked folder;
+  - the `DEVICE_CONTROL` gate (`imaging:<scanner>/scan`) and the Files `CREATE_OR_EDIT_FILE` gate (the path) both
+    decide; then always a single-use `DEVICE_ACTION` approval with the typed secret;
+  - at the answer, both current policies, the secret, the scanner still listed, and the path still new are checked;
+    Pause/Stop/shutdown is checked before Windows' dialog opens and again after it closes;
+  - Windows' own WIA dialog drives the scan (`IWiaDevMgr2::GetImageDlg`), into a fresh private staging folder;
+  - exactly one staged image is decoded (bounded size and pixels) and re-encoded to the path with exclusive create
+    (never an overwrite; no metadata copied);
+  - the staging folder is removed; a cancel, a failure or a Pause writes nothing;
+  - the answer states exactly what was written: path, SHA-256, bytes, size and format.
+
+Not supported, shown as such: WIA cameras, webcams, phones, multi-page feeds (one page per scan), and any capture
+without Windows' dialog. Live acceptance on a real scanner is still required.
 
 ## Waking this PC from sleep (H3)
 
@@ -121,6 +144,7 @@ Wake-on-LAN is not used. It would need a network sender outside Qronos's offline
   - `job.control` (`deviceId`, `jobId`, `command`);
   - `print.request` (`deviceId`, `path`, `copies`, `color`, `pages`);
   - `print3d.request` (`deviceId`, `path`);
+  - `imaging.list` (read), `image.capture` (`deviceId`, `destination`);
   - `wake.status` (read), `wake.schedule` (`at` with its offset, `stayAwakeMinutes`), `wake.cancel`;
   - `decide`, `decline`.
 - **Answer:** the `device_hub_result` event `{requestId, op, ok, ...}`; refusals carry stable codes.
@@ -128,6 +152,7 @@ Wake-on-LAN is not used. It would need a network sender outside Qronos's offline
   - `tests/test_device_hub.py`;
   - `tests/test_print3d_native.py`;
   - `tests/test_power_wake.py` (a fake kernel32 timer API);
+  - `tests/test_wia_imaging.py` (fake WIA COM vtables, synthetic images);
   - `desktop/tests/device-hub-store.test.mjs`.
 
   No real printer is enumerated or queried, and no job is touched. The live-device boundary blocks the real
