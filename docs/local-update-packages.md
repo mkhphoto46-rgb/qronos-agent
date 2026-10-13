@@ -14,9 +14,10 @@ library is imported.
 
 `core/update_service.py` adds the product lifecycle around it (request,
 approval with the approval secret, launch, start-up confirmation, rollback with
-data snapshots); see below. One reviewed owner key is trusted (see "Keys"), but
-the update launch stays refused until its wiring is reviewed, so no update can
-be installed today.
+data snapshots); see below. One reviewed owner key is trusted (see "Keys"). The
+update launch is enabled in this source (round 59) and opens for the product
+only once this source is independently accepted; no package has been
+owner-signed yet, so nothing can be installed until one is.
 
 ## What a signed manifest binds
 
@@ -62,8 +63,9 @@ Provenance:
   Ed25519 point.
 
 Listing the key does not activate anything:
-- The update launch stays refused (`launch_unavailable`) until its wiring is
-  reviewed.
+- The update launch is enabled in this source (round 59), behind every check
+  below; it opens for the product only once this source is independently
+  accepted.
 - A package can verify only if it is signed by this key.
 - No package has been signed with it yet.
 - It adds no public Windows release signing; that stays the closed Authenticode
@@ -206,16 +208,21 @@ reviewed code in the new build.
 
 ## The product lifecycle (`core/update_service.py`)
 
-**Activation status: launching an installer is REFUSED by default**
-(`launch_unavailable`). It opens only when the dependencies in
-`LAUNCH_DEPENDENCIES` exist and are independently accepted together with this
-code: the runtime's own instance ownership, store admission in every
-store-opening process, the awaited start-up barrier, and the desktop's drain of
-its writers. No request field, flag or frontend value can open it. The product's
-one enablement point is `LAUNCH_ENABLED` in `core/update_cli.py` (False): while
-it is False the CLI supplies `launch_unavailable`; once it is True, only
-`owned_launch_hold` on the data root. The `UpdateService` default stays
-`launch_unavailable`. The exact
+**Activation status (round 59): the product launch is ENABLED in this source**,
+pending its independent acceptance. Every dependency in `LAUNCH_DEPENDENCIES`
+is present: the runtime's own instance ownership, store admission in every
+store-opening process (the media host included), the fence refusal of every
+backend service (`build_support/runtime_entry.py` `FENCED_SERVICES` for the
+services that open no store), the awaited start-up barrier, and the desktop's
+drain of its writers (`tests/test_update_launch_composition.py`). The product's
+one enablement point is `LAUNCH_ENABLED` in `core/update_cli.py` (True): the CLI
+supplies only `owned_launch_hold` on the data root. No request field, flag or
+frontend value can change it or the provider, and every check still refuses: an
+unsigned, unknown-key, revoked or changed package, a spent or expired token, a
+running runtime, an admitted writer, an update in progress or a pending
+recovery. The `UpdateService` class default stays `launch_unavailable`.
+Authenticode is the owner's release gate (`release_signing preflight`), not a
+runtime check, and it stays closed without a public-CA certificate. The exact
 cross-owner contract is in `work/opus-production-installer-contract-round5.txt`
 (coordination file, outside the repository).
 
@@ -599,8 +606,8 @@ fence".
 - The post-ready hook seam stays empty. Only a reviewed read-only status reader
   may ever use it.
 
-**Control: present in this source (round 22), independent review pending; the
-launch stays refused at its enablement point.** In
+**Control: present in this source (round 22); the launch is enabled at its
+enablement point (round 59), pending independent acceptance.** In
 `desktop/src-tauri/src/runtime/` (`lifecycle.rs`, `job.rs`, `mod.rs`):
 - `update_command(operation, payload)` reaches only `Service::Update`. Reads,
   approval steps and the native pickers (`pick_package`, `pick_folder`) are gated
@@ -637,23 +644,24 @@ launch stays refused at its enablement point.** In
   across exit and restart is the update lifecycle file and the start-up barrier.
 - C4: `UpdatePanel` is mounted in Settings ("به‌روزرسانی"). Its launch button
   opens only when the backend reports `launchAvailable`, a ready launch, nothing
-  in progress or pending, and no earlier launch from the panel is unresolved, so
-  it is closed today. The panel has no stop, restart or exit hook; stale answers
-  are dropped.
-- Media: this source has no media host. The required composition is that the
-  bridge's existing shutdown calls the media host's `shutdown()` before it exits.
-  The desktop's Job proof covers any remaining media or model child either way,
-  because the media Jobs nest inside the supervisor's Job, which nests in the
-  desktop's.
+  in progress or pending, and no earlier launch from the panel is unresolved. The
+  panel has no stop, restart or exit hook; stale answers are dropped.
+- Media: the media host runs inside the admitted bridge. It admits its own store
+  (`media_store_admission`, `enter_for_store`) before opening it, and the
+  bridge's shutdown calls `media_host.close()` (the stage is preempted, its
+  workers joined, the store closed). The desktop's Job proof covers any
+  remaining media or model child either way, because the media Jobs nest inside
+  the supervisor's Job, which nests in the desktop's.
 - Not proved here: a real runtime, installer or update. The tests use inert
   base-interpreter process trees in real private Jobs and fake update services.
 
 **Elevation:** none. Installs are per user (`installMode: currentUser`).
 
-`LAUNCH_DEPENDENCIES` in `core/update_service.py` still lists every dependency.
-The launch opens only when they are all independently accepted together, by
-switching `LAUNCH_ENABLED` in `core/update_cli.py` in a reviewed change. Its
-first entry's remark that the bridge does not use an instance guard predates R1.
+`LAUNCH_DEPENDENCIES` in `core/update_service.py` lists every dependency with
+where it lives in this source. Round 59 switched `LAUNCH_ENABLED` in
+`core/update_cli.py` on in a reviewed change, together with the one missing
+hook (`FENCED_SERVICES`) and the composition regression; it takes effect for the
+product only once that change is independently accepted.
 
 The unsigned review installers built so far are not owner-signed and must not
 be described as such.

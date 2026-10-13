@@ -53,6 +53,12 @@ store_admission.UPDATE_IN_PROGRESS_MUTEX = fence
 store_admission.update_in_progress.__defaults__ = (fence,)
 store_admission.admit_writer.__defaults__ = (fence,)
 update_service.update_in_progress.__defaults__ = (fence,)
+# The updater's own hold (a `launch` entry, now that the product enables it) takes the fence AND the runtime
+# singletons: every one of them is a private name here too (bound at import, so their defaults are replaced).
+_private_names = (fence, *(f"{fence}.runtime{index}" for index in range(len(update_service.RUNTIME_MUTEXES))))
+update_service.UPDATE_IN_PROGRESS_MUTEX = fence
+update_service.LaunchHold.__init__.__defaults__ = (_private_names, update_service.LaunchHold.__init__.__defaults__[1])
+update_service.hold_runtime_mutexes.__defaults__ = (_private_names,)
 if mode == "source":
     from core import config
 

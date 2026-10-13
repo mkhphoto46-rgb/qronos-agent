@@ -1151,18 +1151,32 @@ def _product_config(monkeypatch, world):
     return config.CONFIG
 
 
-def test_the_product_launch_stays_refused_at_its_one_enablement_point(world, monkeypatch):
-    """Round 22: the product composition supplies launch_unavailable while LAUNCH_ENABLED is False, whatever the
-    request says; the service default is unchanged."""
-    _product_config(monkeypatch, world)
-    assert update_cli.LAUNCH_ENABLED is False
-    assert update_cli.launch_quiescence(world.data) is update_service.launch_unavailable
-    assert update_cli.run("status", {}, version="0.1.0")["status"]["launchAvailable"] is False
-    for payload in ({"launchToken": "A" * 43}, {"launchToken": "A" * 43, "launchEnabled": True,
-                                                "runtimeStopped": True, "quiesce": "owned"}):
+def test_the_product_launch_is_opened_only_at_its_one_enablement_point(world, monkeypatch):
+    """Round 59: the one enablement point is open in this source, so the product supplies ONLY the owned launch hold;
+    no request field changes the provider or skips it, the class default is unchanged, and switching the one point
+    off gives launch_unavailable again."""
+    config = _product_config(monkeypatch, world)
+    data_root = Path(config.paths.data)
+    assert update_cli.LAUNCH_ENABLED is True
+    built = []
+
+    class RefusingHold:
+        def __init__(self, data_root):
+            built.append(Path(data_root))
+            raise UpdateError("runtime_running", "fixture: the runtime still owns its singleton")
+
+    monkeypatch.setattr(update_service, "LaunchHold", RefusingHold)
+    assert update_cli.launch_quiescence(data_root) is not update_service.launch_unavailable
+    assert update_cli.run("status", {}, version="0.1.0")["status"]["launchAvailable"] is True
+    for payload in ({"launchToken": "A" * 43}, {"launchToken": "A" * 43, "launchEnabled": False,
+                                                "runtimeStopped": True, "quiesce": "none"}):
         with pytest.raises(UpdateError) as refused:
             update_cli.run("launch", payload, version="0.1.0")
-        assert refused.value.code == "launch_unavailable"
+        assert refused.value.code == "runtime_running"  # the owned hold decided, whatever the request said
+    assert built == [data_root] * 2
+    assert update_service.UpdateService.__init__.__kwdefaults__["quiesce"] is update_service.launch_unavailable
+    monkeypatch.setattr(update_cli, "LAUNCH_ENABLED", False)
+    assert update_cli.launch_quiescence(data_root) is update_service.launch_unavailable
 
 
 def test_once_enabled_the_product_supplies_only_the_owned_launch_hold_on_its_data_root(world, monkeypatch):

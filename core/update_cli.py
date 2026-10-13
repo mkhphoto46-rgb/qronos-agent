@@ -18,14 +18,18 @@ startup_check, pick_package, pick_folder.
 * ``approve`` {approvalToken, secret} checks the approval secret, re-verifies,
   stages, and returns a single-use ``launchToken``. The secret arrives only in
   this stdin JSON (never argv or the environment) and is never echoed.
-* ``launch`` {launchToken} is REFUSED (``launch_unavailable``) until the
-  launch dependencies in ``core.update_service.LAUNCH_DEPENDENCIES`` exist and
-  are accepted; nothing in a request can enable it. ``LAUNCH_ENABLED`` below is
-  the one enablement point: while it is False the product supplies
-  ``launch_unavailable``; once it is True, only the trusted wired provider
-  (``owned_launch_hold`` on the data root: the exclusive store admission, then
-  the owned runtime mutexes). The desktop runs ``launch`` only through its own
-  update lifecycle (drain, proved stop, one-line read, never killed).
+* ``launch`` {launchToken} starts the approved, staged, re-verified installer
+  through the trusted wired quiescence only (``owned_launch_hold`` on the data
+  root: the exclusive store admission, then the owned runtime mutexes and the
+  update fence, handed to the installer by ``fenced_launcher``). Every
+  dependency in ``core.update_service.LAUNCH_DEPENDENCIES`` is present in this
+  source; ``LAUNCH_ENABLED`` below is the one enablement point, and nothing in a
+  request can change it or the provider. It still refuses whatever the
+  verification, authorisation or quiescence refuses (an unsigned or unknown-key
+  package, a changed file, a spent or expired token, a running runtime, an
+  admitted writer, an update in progress, a pending recovery). The desktop runs
+  ``launch`` only through its own update lifecycle (drain, proved stop,
+  one-line read, never killed).
 * ``pick_package`` / ``pick_folder`` show a native dialog and return the chosen
   absolute paths (or null when cancelled). Nothing is opened or verified until
   ``request`` / ``discover``.
@@ -56,10 +60,11 @@ OPERATIONS = ("status", "discover", "verify", "request", "approve", "launch", "d
               "pick_package", "pick_folder")
 PICK_OPERATIONS = ("pick_package", "pick_folder")
 
-#: The ONE enablement point of the installer launch. False until every entry of
-#: core.update_service.LAUNCH_DEPENDENCIES, the desktop lifecycle included, is independently accepted together
-#: with the launch path; changing it is a reviewed source change, never a request, environment or frontend value.
-LAUNCH_ENABLED = False
+#: The ONE enablement point of the installer launch. Every entry of core.update_service.LAUNCH_DEPENDENCIES, the
+#: desktop lifecycle included, is present in this source (tests/test_update_launch_composition.py); the launch
+#: opens for the product once this source is independently accepted. Changing it is a reviewed source change,
+#: never a request, environment or frontend value.
+LAUNCH_ENABLED = True
 
 
 def launch_quiescence(data_root: Path) -> Callable[[], Any]:

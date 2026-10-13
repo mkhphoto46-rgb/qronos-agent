@@ -5,16 +5,17 @@ the product lifecycle around the verifier and store in ``core.local_update``
 and never weakens them.
 
 Activation status (read first)
-    LAUNCHING IS REFUSED BY DEFAULT (``launch_unavailable``). Starting an
-    installer is safe only when nothing else can write Qronos's stores for the
-    installer's whole lifetime, and that needs work outside this module that
-    does not exist yet (see ``LAUNCH_DEPENDENCIES``): the runtime bridge and
-    supervisor must hold exclusive instance mutexes, every backend service must
-    refuse while an update is in progress, the desktop must block and drain its
-    own writers, and the start-up recovery barrier below must run before any
-    store opens. Until those are implemented and independently accepted, the
-    default ``quiesce`` refuses. Tests inject owned fixtures; nothing a request
-    carries (no flag, no frontend value) can switch it on.
+    This class's default ``quiesce`` refuses (``launch_unavailable``). Starting
+    an installer is safe only when nothing else can write Qronos's stores for
+    the installer's whole lifetime, which needs the work outside this module
+    listed in ``LAUNCH_DEPENDENCIES``: the runtime bridge and supervisor hold
+    exclusive instance mutexes, every backend service refuses while an update
+    is in progress, the desktop blocks and drains its own writers, and the
+    start-up recovery barrier below runs before any store opens. All of it is
+    present in this source; the product supplies the wired ``owned_launch_hold``
+    through its one enablement point (``core.update_cli.LAUNCH_ENABLED``). Tests
+    inject owned fixtures; nothing a request carries (no flag, no frontend
+    value) can switch the provider.
 
 Inputs and verification
     Only local paths the person chose: an installer and its signed
@@ -144,16 +145,23 @@ RUNTIME_MUTEXES = (
     "Local\\Qronos.Memory.Sidecar.v1",
     "Local\\Qronos.Whisper.Sidecar.v1",
 )
-#: What must exist, and be independently accepted, before the default launch path opens.
+#: What the launch path depends on outside this module. Each is present in this source (where, in parentheses);
+#: tests/test_update_launch_composition.py checks the composition. A composition without them keeps
+#: launch_unavailable.
 LAUNCH_DEPENDENCIES = (
     "Runtime: the bridge and supervisor own exclusive instance mutexes for their whole life "
-    "(core/runtime_instance_guard.py is not used by the bridge today).",
+    "(core/startup_admission.py enter(instance=True), core/supervisor.py SupervisorInstanceGuard, "
+    "core/instance_ownership.py; the sidecars through core/windows_sidecar_guard.py).",
     "Runtime and Control: EVERY process that opens a Qronos store (bridge, settings/permissions/library/memory/"
-    "update services, standalone jobs) takes core.store_admission.admit_writer before its first store opens and "
-    "keeps it for its life.",
-    "Runtime: every backend service entry (runtime_entry, sidecar guards) refuses while update_in_progress() is true.",
-    "Runtime: recover_before_stores() runs and is awaited before any store opens, and its refusal stops start-up.",
-    "Control: the desktop blocks and drains its own service writers during a launch and derives the stop result itself.",
+    "update services, standalone jobs, the media host) takes core.store_admission.admit_writer before its first store "
+    "opens and keeps it for its life (build_support/runtime_entry.py STORE_SERVICES, each CLI's enter_cli, "
+    "qronos_media/host.py enter_for_store).",
+    "Runtime: every backend service entry refuses while update_in_progress() is true (the writer admission, the "
+    "instance and sidecar guards, and build_support/runtime_entry.py FENCED_SERVICES).",
+    "Runtime: recover_before_stores() runs and is awaited before any store opens, and its refusal stops start-up "
+    "(core/startup_admission.py step 3).",
+    "Control: the desktop blocks and drains its own service writers during a launch and derives the stop result itself "
+    "(desktop/src-tauri/src/runtime/lifecycle.rs).",
     "Independent acceptance of these hooks together with this launch path.",
 )
 _LIFECYCLE_LIMIT = 256 * 1024
