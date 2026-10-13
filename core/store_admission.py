@@ -46,6 +46,10 @@ UPDATE_IN_PROGRESS_MUTEX = "Local\\Qronos.UpdateInProgress.v1"
 
 _LOCKFILE_FAIL_IMMEDIATELY = 0x1
 _LOCKFILE_EXCLUSIVE_LOCK = 0x2
+_SYNCHRONIZE = 0x00100000
+# winerror.h. OpenMutexW documents ERROR_FILE_NOT_FOUND as "the named mutex does not exist"; nothing else is absence.
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_ACCESS_DENIED = 5
 
 
 class Admission:
@@ -129,22 +133,41 @@ def _unlock(descriptor: int) -> None:
     kernel.UnlockFileEx(msvcrt.get_osfhandle(descriptor), 0, 1, 0, overlapped)
 
 
+def _fence_unknown(detail: str) -> UpdateError:
+    return UpdateError("ownership_unavailable",
+                       f"Windows could not say whether an update is in progress ({detail}); nothing was opened.")
+
+
 def update_in_progress(name: str = UPDATE_IN_PROGRESS_MUTEX) -> bool:
-    """True while the named update mutex exists: a launch or the installer it started is alive."""
+    """True while the named update mutex exists: a launch or the installer it started is alive.
+
+    Every answer of ``OpenMutexW`` is classified, never guessed: a handle (closed at once) or
+    ERROR_ACCESS_DENIED (it exists, this process may not open it) is True; ERROR_FILE_NOT_FOUND, its one
+    documented "the named mutex does not exist", is False. Any other failure, or a probe that raises, is an
+    unknown fence and raises ``UpdateError("ownership_unavailable")``: it is never taken for "no update".
+    """
     if os.name != "nt":
         return False
     import ctypes
     from ctypes import wintypes
 
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel.OpenMutexW.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = kernel.OpenMutexW(0x00100000, False, name)  # SYNCHRONIZE
+    try:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel.OpenMutexW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenMutexW(_SYNCHRONIZE, False, name)
+        error = 0 if handle else ctypes.get_last_error()
+    except Exception as failure:  # noqa: BLE001 - typed below; an unknown fence never means "no update"
+        raise _fence_unknown(type(failure).__name__) from failure
     if handle:
         kernel.CloseHandle(handle)
         return True
-    return ctypes.get_last_error() == 5  # exists but cannot be opened: still an update in progress
+    if error == _ERROR_ACCESS_DENIED:
+        return True
+    if error == _ERROR_FILE_NOT_FOUND:
+        return False
+    raise _fence_unknown(f"Windows error {error}")
 
 
 def _admit(data_root: Path, exclusive: bool) -> Admission:
@@ -167,7 +190,12 @@ def admit_writer(data_root: Path, fence: str = UPDATE_IN_PROGRESS_MUTEX) -> Admi
     admission is given back and refused.
     """
     admission = _admit(data_root, exclusive=False)
-    if update_in_progress(fence):
+    try:
+        live = update_in_progress(fence)
+    except BaseException:
+        admission.release()  # an unknown fence: give the shared lock back, then refuse (typed)
+        raise
+    if live:
         admission.release()
         raise UpdateError("update_in_progress", "An update is being installed; Qronos's data cannot be opened now.")
     return admission

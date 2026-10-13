@@ -420,3 +420,147 @@ def test_a_writer_holding_its_admission_never_sees_the_fence_appear(tmp_path):
         assert store_admission.update_in_progress(fence) is False  # no fence was created
     finally:
         writer.release()
+
+
+# ---------------------------------------------------------------- the fence probe: present, absent, or unknown
+# A FULLY FAKE kernel: ctypes.WinDLL and ctypes.get_last_error are replaced for the call, so no DLL function runs and
+# no named object (of any name) is opened; the fake only records which name it was asked for.
+
+ERROR_FILE_NOT_FOUND, ERROR_ACCESS_DENIED, ERROR_NOT_ENOUGH_MEMORY, ERROR_INVALID_PARAMETER = 2, 5, 8, 87
+
+
+class FakeKernel:
+    class Function:
+        def __init__(self, body) -> None:
+            self.body = body
+
+        def __call__(self, *args):
+            return self.body(*args)
+
+    def __init__(self, handle, error: int) -> None:
+        self.handle, self.error = handle, error
+        self.opened: list = []
+        self.closed: list = []
+        self.OpenMutexW = self.Function(self._open)
+        self.CloseHandle = self.Function(lambda handle: self.closed.append(handle) or 1)
+
+    def _open(self, access, inherit, name):
+        self.opened.append(name)
+        if isinstance(self.handle, BaseException):
+            raise self.handle  # the call itself failed (e.g. a broken binding)
+        return self.handle
+
+
+def fake_kernel(monkeypatch, handle, error: int) -> FakeKernel:
+    import ctypes
+
+    kernel = FakeKernel(handle, error)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, use_last_error=False: kernel)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: kernel.error)
+    return kernel
+
+
+def test_the_fence_probe_answers_present_absent_or_unknown_never_a_guess(monkeypatch):
+    fence = unique_fence()
+    present = fake_kernel(monkeypatch, 0x1234, 0)
+    assert store_admission.update_in_progress(fence) is True and present.closed == [0x1234]  # its handle is closed
+    absent = fake_kernel(monkeypatch, None, ERROR_FILE_NOT_FOUND)  # the one documented "does not exist"
+    assert store_admission.update_in_progress(fence) is False and absent.opened == [fence] and absent.closed == []
+    denied = fake_kernel(monkeypatch, None, ERROR_ACCESS_DENIED)  # exists but cannot be opened: an update runs
+    assert store_admission.update_in_progress(fence) is True and denied.closed == []
+    for error in (ERROR_NOT_ENOUGH_MEMORY, ERROR_INVALID_PARAMETER, 0, 3, 6, 0xFFFFFFFF):
+        unknown = fake_kernel(monkeypatch, None, error)
+        with pytest.raises(UpdateError) as refused:  # never "no update"
+            store_admission.update_in_progress(fence)
+        assert refused.value.code == "ownership_unavailable" and str(error) in str(refused.value)
+        assert unknown.opened == [fence]
+
+
+def test_off_windows_there_is_no_fence_and_nothing_is_asked(monkeypatch):
+    import types
+
+    kernel = fake_kernel(monkeypatch, None, ERROR_NOT_ENOUGH_MEMORY)
+    monkeypatch.setattr(store_admission, "os", types.SimpleNamespace(name="posix"))
+    assert store_admission.update_in_progress(unique_fence()) is False and kernel.opened == []
+
+
+class HeldAdmission:
+    def __init__(self) -> None:
+        self.released = 0
+
+    def release(self) -> None:
+        self.released += 1
+
+
+def test_a_writer_admission_already_taken_is_given_back_when_the_fence_is_unknown(monkeypatch, tmp_path):
+    from core import startup_admission
+
+    taken: list[HeldAdmission] = []
+    monkeypatch.setattr(store_admission, "_admit", lambda root, exclusive: taken.append(HeldAdmission()) or taken[-1])
+    for error, code in ((ERROR_NOT_ENOUGH_MEMORY, "ownership_unavailable"), (ERROR_INVALID_PARAMETER,
+                                                                          "ownership_unavailable"),
+                        (ERROR_ACCESS_DENIED, "update_in_progress")):
+        fake_kernel(monkeypatch, None, error)
+        with pytest.raises(UpdateError) as refused:
+            store_admission.admit_writer(tmp_path, fence=unique_fence())
+        assert refused.value.code == code and taken[-1].released == 1  # the shared lock is given back at once
+    fake_kernel(monkeypatch, OSError("the call failed"), 0)  # a probe that raises: still given back, typed
+    with pytest.raises(UpdateError) as refused:
+        store_admission.admit_writer(tmp_path, fence=unique_fence())
+    assert refused.value.code == "ownership_unavailable" and taken[-1].released == 1
+    fake_kernel(monkeypatch, None, ERROR_FILE_NOT_FOUND)
+    assert store_admission.admit_writer(tmp_path, fence=unique_fence()) is taken[-1] and taken[-1].released == 0
+    # Through the start-up order (its default admission is admit_writer on the default fence, asked of the fake):
+    # a typed refusal, nothing kept.
+    kernel = fake_kernel(monkeypatch, None, ERROR_INVALID_PARAMETER)
+    startup_admission._reset_for_tests()
+    try:
+        with pytest.raises(startup_admission.StartupRefused) as start:
+            startup_admission.enter("settings", data_root=tmp_path, version="0.1.0", recover=lambda v: {"ok": True},
+                                    confirm=lambda v: {"ok": True}, windows=True, installed=True)
+        assert start.value.code == "ownership_unavailable" and taken[-1].released == 1
+        assert not startup_admission.admitted() and kernel.opened == [store_admission.UPDATE_IN_PROGRESS_MUTEX]
+    finally:
+        startup_admission._reset_for_tests()
+
+
+@pytest.mark.parametrize("error, code", [(ERROR_NOT_ENOUGH_MEMORY, "ownership_unavailable"),
+                                         (ERROR_INVALID_PARAMETER, "ownership_unavailable"),
+                                         (ERROR_ACCESS_DENIED, "update_in_progress")])
+def test_a_fenced_backend_service_is_refused_before_import_on_an_unknown_or_denied_fence(error, code, monkeypatch,
+                                                                                         capsys):
+    import json
+
+    from build_support import runtime_entry
+    from core import startup_admission
+
+    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    imported: list = []
+    monkeypatch.setattr(runtime_entry.importlib, "import_module",
+                        lambda name: imported.append(name) or type("M", (), {"main": staticmethod(lambda: 0)}))
+    kernel = fake_kernel(monkeypatch, None, error)
+    assert runtime_entry.main(["audio"]) == startup_admission.STARTUP_REFUSED_EXIT
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["code"] == code and imported == []
+    assert kernel.opened == [store_admission.UPDATE_IN_PROGRESS_MUTEX]  # asked of the fake only
+    fake_kernel(monkeypatch, None, ERROR_FILE_NOT_FOUND)  # control: a documented absence lets it start
+    assert runtime_entry.main(["audio"]) == 0 and imported == [runtime_entry.SERVICES["audio"]]
+
+
+def test_the_updaters_own_checks_and_the_instance_guard_refuse_on_an_unknown_fence(monkeypatch, tmp_path):
+    from core.instance_ownership import MutexApi, OwnershipUnavailable, acquire_unless_updating
+
+    world = World(tmp_path)
+    service = world.service("0.1.0", liveness=update_service.update_in_progress)
+    service.store.root.mkdir(parents=True, exist_ok=True)
+    fake_kernel(monkeypatch, None, ERROR_INVALID_PARAMETER)
+    for check in (service.status, service.recover_before_stores):
+        with pytest.raises(UpdateError) as refused:
+            check()
+        assert refused.value.code == "ownership_unavailable"
+    calls: list = []
+    api = MutexApi(lambda name: calls.append("create") or 77, lambda handle, ms: calls.append("wait") or 0,
+                   lambda handle: calls.append("release") or True, lambda handle: calls.append("close") or True,
+                   lambda: 0)
+    with pytest.raises(OwnershipUnavailable):
+        acquire_unless_updating("Local\\QronosR61Test-singleton", api=api)
+    assert calls[-2:] == ["release", "close"]  # the singleton it had taken is given back
