@@ -44,6 +44,8 @@ EXECUTOR_MODULES: tuple[str, ...] = (
     "core.browser_research",
     # Performs one exact approved typed action, re-asking the gate first.
     "core.action_broker",
+    # Device Hub: changes only the caller's own print job (SetJob), each time through the DEVICE_CONTROL gate.
+    "core.device_hub",
 )
 
 # The one sanctioned route to performing an action.

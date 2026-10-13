@@ -186,25 +186,37 @@ class AppWorkflowCoordinator:
             ), f"پیدا کردن گفتگوی دقیق «{request.contact}» در تلگرام و خواندن پیام‌های اخیر آن، بدون ارسال پیام.")
             return "برای ادامه، درخواست تأیید را ببینید. بدون تأیید شما هیچ کاری در تلگرام انجام نمی‌شود."
         if isinstance(intent, PrintIntent):
-            if self._verify_secret is None:
-                # Printing needs the typed approval secret, and this process is
-                # not one of the reviewed paths allowed to check it. Refuse
-                # before showing a prompt that could never be approved.
-                message = (
-                    "چاپ به رمز تأیید نیاز دارد و این مسیر هنوز اجازهٔ بررسی رمز را ندارد؛ "
-                    "چیزی چاپ نشد."
-                )
-                self._finish(request_id, PHASE_PRINT, "refused", message, "typed-secret path unavailable")
-                return message
-            state = self._secret_state()
-            if state != "ready":
-                # A prompt nobody can approve would only invite guesses.
-                message = _SECRET_STATE_FA.get(state, _SECRET_STATE_FA["unavailable"])
-                self._finish(request_id, PHASE_PRINT, "refused", message, f"approval secret {state}")
-                return message
-            self._run_async(lambda: self._prepare_print(intent, request_id))
-            return "فایل و چاپگر بررسی می‌شوند؛ پیش از چاپ، جزئیات برای تأیید نشان داده می‌شود."
+            return self.begin_print(intent, request_id)
         return None
+
+    def begin_print(self, intent: PrintIntent, request_id: str) -> str:
+        """Start the reviewed print step for one exact request (text intent or Device Hub's typed request).
+
+        The same checks, prompt, approval, typed secret, submission and recovery apply whatever asked for it.
+        Returns the Persian reply; the prompt and the result follow as events.
+        """
+        if self._paused():
+            message = "کرونوس متوقف است؛ کاری شروع نشد."
+            self._finish(request_id, "workflow", "stopped", message, "runtime paused")
+            return message
+        if self._verify_secret is None:
+            # Printing needs the typed approval secret, and this process is
+            # not one of the reviewed paths allowed to check it. Refuse
+            # before showing a prompt that could never be approved.
+            message = (
+                "چاپ به رمز تأیید نیاز دارد و این مسیر هنوز اجازهٔ بررسی رمز را ندارد؛ "
+                "چیزی چاپ نشد."
+            )
+            self._finish(request_id, PHASE_PRINT, "refused", message, "typed-secret path unavailable")
+            return message
+        state = self._secret_state()
+        if state != "ready":
+            # A prompt nobody can approve would only invite guesses.
+            message = _SECRET_STATE_FA.get(state, _SECRET_STATE_FA["unavailable"])
+            self._finish(request_id, PHASE_PRINT, "refused", message, f"approval secret {state}")
+            return message
+        self._run_async(lambda: self._prepare_print(intent, request_id))
+        return "فایل و چاپگر بررسی می‌شوند؛ پیش از چاپ، جزئیات برای تأیید نشان داده می‌شود."
 
     def _secret_state(self) -> str:
         if self._secret_status is None:

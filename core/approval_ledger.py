@@ -60,6 +60,8 @@ class ApprovalKind(Enum):
     # One media library question (qronos_media.permissions: index a root, export a report, open at a time).
     # Its payload is media's own; only the media route consumes it.
     MEDIA_ACTION = "media_action"
+    # One Device Hub job-control question (core/device_hub.py). Its payload is the Device Hub's own.
+    DEVICE_ACTION = "device_action"
 
 
 class StaleApproval(LookupError):

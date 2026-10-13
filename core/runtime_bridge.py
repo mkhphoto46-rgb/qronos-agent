@@ -227,6 +227,8 @@ LINK_RELAY_SET_ACTION = "qronos.link_relay_set"
 LINK_SECURITY_RESET_ACTION = "qronos.link_security_reset"
 # The media product route (qronos_media.product): typed {op, requestId, ...} operations on the one media host.
 MEDIA_ACTION = "qronos.media"
+# The Device Hub (core/device_hub.py): typed {op, requestId, ...} operations on local spooler/driver devices.
+DEVICE_HUB_ACTION = "qronos.device_hub"
 #: How long a brain/voice media request waits for its typed result before answering honestly that it did not.
 MEDIA_INTENT_WAIT_SECONDS = 12.0
 LINK_ACTIONS = frozenset({
@@ -1658,6 +1660,32 @@ class QronosRuntime:
         except Exception:  # an unreadable generation is no generation
             return None
 
+    def device_hub(self) -> Any:
+        """The Device Hub (core/device_hub.py), built on first use; spooler/driver calls happen only per request."""
+        with self._media_host_lock:
+            hub = getattr(self, "_device_hub", None)
+        if hub is not None:
+            return hub
+        from core.device_hub import DeviceHub, default_source
+        from core.library_executor import WorkflowSecretCheck
+
+        workflows = self._ensure_app_workflows()
+        secret_check = WorkflowSecretCheck()  # the bridge never opens the secret store itself
+        with self._media_host_lock:
+            hub = getattr(self, "_device_hub", None)
+            if hub is None:
+                hub = DeviceHub(
+                    source=default_source,
+                    ledger=self._approvals,
+                    emit=lambda event, status, payload: self._notify(event, status, _compact(payload)),
+                    paused=lambda: self.runtime_paused,
+                    begin_print=workflows.begin_print,
+                    verify_secret=secret_check.verify,
+                    audit=self.action_audit,
+                )
+                self._device_hub = hub
+        return hub
+
     def media_product(self) -> Any:
         """The typed media operations (qronos_media.product) on the one media host, built with it."""
         with self._media_host_lock:
@@ -2741,6 +2769,7 @@ class QronosRuntime:
         if paused:
             self._discard_pending_file_approvals(CANCEL_REASON_PAUSE)
             self._discard_pending_media_approvals(CANCEL_REASON_PAUSE)
+            self._discard_pending_device_approvals(CANCEL_REASON_PAUSE)
             self._discard_pending_history_undo(CANCEL_REASON_PAUSE)
             # Pause stops GUI work the same way Stop does: in-flight actions
             # are cancelled cooperatively (releasing held buttons), turns in
@@ -7131,6 +7160,11 @@ class QronosRuntime:
         """
         return len(self._approvals.revoke_kinds((ApprovalKind.MEDIA_ACTION,), reason))
 
+    def _discard_pending_device_approvals(self, reason: str) -> int:
+        """Revoke every Device Hub job-control question (DEVICE_ACTION) at Pause, Stop and shutdown. Payloads
+        belong to core/device_hub.py and are never read here; a late answer is stale there. Idempotent."""
+        return len(self._approvals.revoke_kinds((ApprovalKind.DEVICE_ACTION,), reason))
+
     def _notify_file_stale(self, action_token: str, reason: str) -> None:
         self._notify(
             "file_action_stale",
@@ -7264,6 +7298,7 @@ class QronosRuntime:
             CANCEL_REASON_USER_STOP
         )
         self._discard_pending_media_approvals(CANCEL_REASON_USER_STOP)
+        self._discard_pending_device_approvals(CANCEL_REASON_USER_STOP)
         self._discard_pending_history_undo(CANCEL_REASON_USER_STOP)
 
         with self._lock:
@@ -9968,6 +10003,7 @@ class QronosRuntime:
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_media_approvals(CANCEL_REASON_SHUTDOWN)
+        self._discard_pending_device_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_history_undo(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
@@ -10189,6 +10225,11 @@ def handle_action(
         "ready",
         action_id,
     )
+
+    if action_id == DEVICE_HUB_ACTION:
+        # The Device Hub applies its own pause rule per operation (reads stay available while paused).
+        handle_device_hub_action(runtime, payload)
+        return
 
     if action_id == MEDIA_ACTION:
         # The media product applies its own pause rule per operation (reads stay available while paused).
@@ -11174,6 +11215,14 @@ def handle_media_status(
     host = runtime._media_host
     status = host.status() if host is not None else {"workerStarted": False}
     runtime._notify("media_status", "ready", _compact(status))
+
+
+def handle_device_hub_action(
+    runtime: QronosRuntime,
+    payload: dict[str, Any],
+) -> None:
+    """One typed Device Hub operation (the data object only; validated in core/device_hub.py)."""
+    runtime.device_hub().handle(payload.get("data"))
 
 
 def handle_media_action(
