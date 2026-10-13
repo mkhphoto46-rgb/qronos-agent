@@ -1,0 +1,19 @@
+{
+ "schema": "qronos.media.benchmark.retrieval/1",
+ "dataset": {"id": "synthetic-sample", "version": "1", "source": "hand-written synthetic fixture (no real archive)",
+             "synthetic": true, "labelledBy": "fixture author", "description": "tiny contract sample; not a quality benchmark"},
+ "matching": {"toleranceMs": 1000},
+ "items": [
+  {"id": "q1", "query": "Where did you leave the key?", "type": "exact", "queryLanguage": "en", "contentLanguage": "en",
+   "difficulty": "easy", "relevant": [{"assetId": "a1", "scene": 3, "startMs": 10000, "endMs": 14000}]},
+  {"id": "q2", "query": "کلید را کجا گذاشتی؟", "type": "cross-language", "queryLanguage": "fa", "contentLanguage": "en",
+   "difficulty": "medium", "relevant": [{"assetId": "a1", "scene": 3, "startMs": 10000, "endMs": 14000}]},
+  {"id": "q3", "query": "the train is late", "type": "semantic", "queryLanguage": "en", "contentLanguage": "fa",
+   "difficulty": "hard", "relevant": [{"assetId": "a2", "startMs": 60000, "endMs": 65000},
+                                      {"assetId": "a2", "startMs": 90000, "endMs": 95000}]},
+  {"id": "q4", "query": "a red bicycle against a wall", "type": "visual", "queryLanguage": "en", "contentLanguage": "en",
+   "difficulty": "medium", "relevant": [{"assetId": "a3", "scene": 7, "startMs": 5000, "endMs": 6000}]},
+  {"id": "q5", "query": "دعوا درباره پول", "type": "topic", "queryLanguage": "fa", "contentLanguage": "fa",
+   "difficulty": "easy", "relevant": [{"assetId": "a4", "startMs": 1000, "endMs": 2000}]}
+ ]
+}

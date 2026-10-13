@@ -1,0 +1,11 @@
+{
+ "schema": "qronos.media.benchmark.speech/1",
+ "dataset": {"id": "synthetic-speech", "version": "1", "source": "hand-written synthetic fixture (no real audio)",
+             "synthetic": true, "labelledBy": "fixture author"},
+ "segments": [
+  {"id": "s1", "language": "en", "reference": "Where did you leave the key?", "startMs": 1000, "endMs": 3000},
+  {"id": "s2", "language": "fa", "reference": "کلید را کجا گذاشتی", "startMs": 4000, "endMs": 6000},
+  {"id": "s3", "language": "en", "reference": "", "startMs": 7000, "endMs": 8000},
+  {"id": "s4", "language": "en", "reference": "we leave at midnight"}
+ ]
+}

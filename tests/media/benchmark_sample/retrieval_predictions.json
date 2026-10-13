@@ -1,0 +1,21 @@
+{
+ "schema": "qronos.media.benchmark.predictions/1",
+ "dataset": {"id": "synthetic-sample", "version": "1"},
+ "system": {"name": "saved fixture predictions", "model": "none (hand-written)", "profile": "none",
+            "note": "synthetic; not produced by any Qronos model"},
+ "results": [
+  {"itemId": "q1", "ranked": [{"assetId": "a1", "scene": 3, "startMs": 10000, "endMs": 14000, "score": 0.9}]},
+  {"itemId": "q2", "ranked": [{"assetId": "a9", "startMs": 1, "endMs": 2},
+                              {"assetId": "a1", "scene": 4, "startMs": 10000, "endMs": 14000},
+                              {"assetId": "a1", "scene": 3, "startMs": 14500, "endMs": 16000}]},
+  {"itemId": "q3", "ranked": [{"assetId": "a2", "startMs": 60000, "endMs": 65000},
+                              {"assetId": "a2", "startMs": 61000, "endMs": 62000},
+                              {"assetId": "a8", "startMs": 1, "endMs": 2}, {"assetId": "a8", "startMs": 3, "endMs": 4},
+                              {"assetId": "a8", "startMs": 5, "endMs": 6}, {"assetId": "a8", "startMs": 7, "endMs": 8},
+                              {"assetId": "a8", "startMs": 9, "endMs": 10}, {"assetId": "a8", "startMs": 11, "endMs": 12},
+                              {"assetId": "a8", "startMs": 13, "endMs": 14}, {"assetId": "a8", "startMs": 15, "endMs": 16},
+                              {"assetId": "a8", "startMs": 17, "endMs": 18}, {"assetId": "a8", "startMs": 19, "endMs": 20},
+                              {"assetId": "a2", "startMs": 90000, "endMs": 95000}]},
+  {"itemId": "q4", "ranked": [{"assetId": "a3", "scene": 8, "startMs": 5000, "endMs": 6000}]}
+ ]
+}

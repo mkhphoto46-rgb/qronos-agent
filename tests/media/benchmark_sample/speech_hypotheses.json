@@ -1,0 +1,10 @@
+{
+ "schema": "qronos.media.benchmark.speech-hypotheses/1",
+ "dataset": {"id": "synthetic-speech", "version": "1"},
+ "system": {"name": "saved fixture hypotheses", "model": "none (hand-written)", "note": "synthetic; not a Whisper output"},
+ "segments": [
+  {"id": "s1", "hypothesis": "where did you leave a key", "startMs": 1200, "endMs": 2900},
+  {"id": "s2", "hypothesis": "كليد را كجا گذاشتي"},
+  {"id": "s3", "hypothesis": "uh", "startMs": 7100, "endMs": 7900}
+ ]
+}
