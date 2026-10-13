@@ -19,6 +19,7 @@ from core.action_audit import ActionAuditLog, AuditEvent
 from core.actions import ActionOutcome
 from core.approval_ledger import ApprovalKind, ApprovalLedger
 from core.print_workflow import PrinterState, PrintJobState
+from core import power_wake
 from core.power_wake import ArmResult, WakeCapability
 from security.gate import Verdict
 from security.permissions import ActionCategory, PermissionDecision
@@ -601,6 +602,116 @@ def test_cancel_is_gated_and_pause_stop_close_cancel_an_armed_wake(wake, monkeyp
     ask(wake, "decide", "x8", approvalId=pending["approvalId"], approved=True, secret="correct horse")
     assert wake.hub.cancel_wake("pause") is True and wake.power.armed[1].cancelled == 1
     assert wake.hub.cancel_wake("pause") is False and ask(wake, "wake.status", "x9")["armed"] is None
+
+
+# ------------------------------------------------------------ Media49 B1/B2 regressions (wake lifecycle)
+
+
+def test_b1_a_pause_landing_while_a_wake_is_being_answered_leaves_nothing_armed(wake):
+    original_arm, original_capability = wake.power.arm, wake.hub._wake_capability
+
+    def pause_now():  # what set_runtime_paused does: the flag first, then the bridge's revoke + cancel_wake
+        wake.state["paused"] = True
+        wake.hub.cancel_wake("pause")
+
+    def arm_then_pause(due, stay, on_event):  # (a) Pause lands while Windows is arming the timer
+        armed, result = original_arm(due, stay, on_event)
+        pause_now()
+        return armed, result
+
+    wake.power.arm = arm_then_pause
+    pending = ask(wake, "wake.schedule", "b1a", at=at(60))
+    answer = ask(wake, "decide", "b1b", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert answer["ok"] is False and answer["code"] == "paused"
+    assert wake.power.armed[0].cancelled == 1  # the timer Windows accepted is cancelled at once
+    assert ask(wake, "wake.status", "b1c")["armed"] is None  # nothing armed while paused
+    assert (AuditEvent.COMPLETED, "device_control", "power:this-pc/wake-timer", "refused") in audit_rows(wake)
+    wake.state["paused"] = False
+    wake.power.arm = original_arm
+
+    def capability_then_pause():  # (b) Pause lands after the ticket was taken, before arming
+        found = original_capability()
+        pause_now()
+        return found
+
+    pending = ask(wake, "wake.schedule", "b1d", at=at(60))
+    wake.hub._wake_capability = capability_then_pause  # only the answer's capability re-read pauses
+    answer = ask(wake, "decide", "b1e", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    assert answer["code"] == "paused" and len(armed_calls(wake)) == 1  # arm was never called for this one
+    wake.state["paused"] = False
+    wake.hub._wake_capability = original_capability
+    pending = ask(wake, "wake.schedule", "b1f", at=at(60))  # control: without Pause the same flow arms
+    assert ask(wake, "decide", "b1g", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["status"] == "armed"
+
+
+class ControlledTimerApi:
+    """A fake kernel32 timer for a REAL ArmedWake: the timer fires only when the test says so."""
+
+    def __init__(self) -> None:
+        self.fire = threading.Event()
+        self.states: list[int] = []
+        self.closed = threading.Event()
+
+    def create_timer(self):
+        return 5
+
+    def set_timer(self, handle, due):
+        return True, 0
+
+    def wait(self, handle, timeout_ms):
+        return power_wake.WAIT_OBJECT_0 if self.fire.wait(0.01) else power_wake.WAIT_TIMEOUT
+
+    def cancel_timer(self, handle):
+        pass
+
+    def close(self, handle):
+        self.closed.set()
+
+    def execution_state(self, flags):
+        self.states.append(flags)
+
+
+class RealArmedPower(FakePower):
+    def __init__(self) -> None:
+        super().__init__()
+        self.apis: list[ControlledTimerApi] = []
+
+    def arm(self, due, stay, on_event):
+        api = ControlledTimerApi()
+        self.apis.append(api)
+        armed = power_wake.ArmedWake(api, due, stay, on_event, sleep=lambda seconds: time.sleep(0.01))
+        self.armed.append(armed)
+        self.calls.append(("arm", due, stay))
+        return armed, armed.arm()
+
+
+def _fire_and_wait(world, api) -> None:
+    api.fire.set()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and ask(world, "wake.status", f"f{time.monotonic_ns()}")["armed"]["state"] != "fired":
+        time.sleep(0.01)
+    assert api.states == [power_wake.ES_CONTINUOUS | power_wake.ES_SYSTEM_REQUIRED]  # holding the system awake
+
+
+def test_b2_a_fired_wake_still_holding_the_system_awake_is_live_until_pause_or_cancel_ends_it(wake):
+    power = RealArmedPower()
+    wake.hub._power_factory = lambda: power
+    pending = ask(wake, "wake.schedule", "b2a", at=at(60), stayAwakeMinutes=1)
+    assert ask(wake, "decide", "b2b", approvalId=pending["approvalId"], approved=True,
+               secret="correct horse")["status"] == "armed"
+    _fire_and_wait(wake, power.apis[0])
+    assert ask(wake, "wake.schedule", "b2c", at=at(90))["code"] == "already_armed"  # no newer wake orphans it
+    assert wake.hub.cancel_wake("pause") is True  # Pause ends the hold
+    power.armed[0].thread.join(5)
+    assert not power.armed[0].thread.is_alive() and power.apis[0].states[-1] == power_wake.ES_CONTINUOUS
+    pending = ask(wake, "wake.schedule", "b2d", at=at(90), stayAwakeMinutes=1)  # now a new wake may be set
+    ask(wake, "decide", "b2e", approvalId=pending["approvalId"], approved=True, secret="correct horse")
+    _fire_and_wait(wake, power.apis[1])
+    assert ask(wake, "wake.cancel", "b2f")["status"] == "cancelled"  # wake.cancel ends a fired hold too
+    power.armed[1].thread.join(5)
+    assert not power.armed[1].thread.is_alive() and power.apis[1].states[-1] == power_wake.ES_CONTINUOUS
+    assert all(thread_dead for thread_dead in (not a.thread.is_alive() for a in power.armed))
 
 
 # ------------------------------------------------------------ the real bridge lifecycle with a pending device approval

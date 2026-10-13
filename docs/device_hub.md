@@ -102,7 +102,8 @@ sleep. What it offers is the hardware path Windows provides: a **wake timer** on
 - **When it fires:** the system is kept from idling back to sleep for the approved minutes, then released. The event
   says the timer fired, never that the PC woke: it may already have been awake.
 - **Cancelling** (`wake.cancel`) passes the same gate (allowed, or an approval). Pause, Stop and shutdown cancel an
-  armed wake and revoke open approvals.
+  armed wake (or end a fired wake's stay-awake hold) and revoke open approvals; a wake whose approval was being
+  answered when Pause came is cancelled, never left armed. Until a fired wake's hold ends, no new wake is set.
 
 Limits, shown with every status and approval:
 

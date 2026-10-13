@@ -295,6 +295,7 @@ class DeviceHub:
         self._wake_lock = threading.Lock()
         self._armed: Any = None
         self._wake_info: dict[str, Any] | None = None
+        self._wake_epoch = 0  # bumped by cancel_wake (Pause/Stop/shutdown): an answer begun before it never arms
 
     # ------------------------------------------------------------ entry
 
@@ -487,6 +488,8 @@ class DeviceHub:
         return evaluate(request, audit=self._audit.record_verdict if self._audit is not None else None)
 
     def _decide(self, approval_id: str, secret: str | None) -> dict:
+        with self._wake_lock:
+            epoch = self._wake_epoch  # captured BEFORE the ticket is taken (B1)
         try:
             ticket = self._ledger.take(approval_id, kinds=(ApprovalKind.DEVICE_ACTION,))
         except StaleApproval as stale:
@@ -495,7 +498,7 @@ class DeviceHub:
         if isinstance(pending, PendingPrint3D):
             return self._decide_print3d(pending, secret)
         if isinstance(pending, PendingWake):
-            return self._decide_wake(pending, secret)
+            return self._decide_wake(pending, secret, epoch)
         if isinstance(pending, PendingWakeCancel):
             return self._decide_wake_cancel(pending, secret)
         if not isinstance(pending, PendingJobControl):
@@ -644,14 +647,15 @@ class DeviceHub:
 
     def _wake_snapshot(self) -> dict[str, Any] | None:
         with self._wake_lock:
-            if self._wake_info and self._wake_info.get("state") == "armed" and self._armed is not None \
+            if self._wake_info and self._wake_info.get("state") in ("armed", "fired") and self._armed is not None \
                     and not self._armed.active:
                 self._wake_info["state"] = "ended"
             return dict(self._wake_info) if self._wake_info else None
 
     def _wake_armed(self) -> bool:
-        snapshot = self._wake_snapshot()
-        return bool(snapshot and snapshot.get("state") == "armed")
+        """A wake is live while its timer thread is: armed, or fired and still holding the system awake (B2)."""
+        with self._wake_lock:
+            return self._armed is not None and bool(self._armed.active)
 
     def _wake_status(self) -> dict:
         return {"ok": True, "capability": self._wake_capability().to_json(), "armed": self._wake_snapshot(),
@@ -697,7 +701,7 @@ class DeviceHub:
                 "preview": {"action": "wake_schedule", "dueUtc": due_text, "stayAwakeMinutes": stay,
                             "capability": capability.to_json(), "limits": list(WAKE_LIMITS)}}
 
-    def _decide_wake(self, pending: "PendingWake", secret: str | None) -> dict:
+    def _decide_wake(self, pending: "PendingWake", secret: str | None, epoch: int) -> dict:
         verdict = self._gate(pending.request)  # the CURRENT policy decides again
         if verdict.refused:
             self._record_policy_refusal(pending.request, PermissionDecision.REQUIRE_TYPED_SECRET)
@@ -712,6 +716,9 @@ class DeviceHub:
         blocked = self._wake_blocked(capability)
         if blocked is not None:
             return blocked
+        if self._wake_stopped_since(epoch):  # Pause/Stop/shutdown came after the request was taken: arm nothing
+            self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.REFUSED)
+            return {"ok": False, "code": "paused", "detail": "Qronos was paused or stopped; no wake was set"}
         try:
             armed, result = self._power_layer().arm(pending.due, pending.stay, self._on_wake_event)
         except PowerWakeError as error:
@@ -723,15 +730,23 @@ class DeviceHub:
                     "detail": "Windows reported that this PC cannot resume on a timer"}
         info = {"wakeId": result.wake_id, "dueUtc": result.due_utc, "stayAwakeMinutes": pending.stay,
                 "state": "armed", "armedAtUtc": self._now().isoformat(timespec="seconds")}
-        with self._wake_lock:
-            self._armed, self._wake_info = armed, info
+        paused = bool(self._paused())  # read outside _wake_lock (Pause sets it before cancel_wake bumps the epoch)
+        with self._wake_lock:  # stored only if no Pause/Stop/shutdown came meanwhile (atomic with cancel_wake)
+            stale = paused or self._wake_epoch != epoch
+            if not stale:
+                self._armed, self._wake_info = armed, info
+        if stale:
+            armed.cancel()  # Windows had accepted it: cancel it now, so the PC is not woken while paused
+            self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.REFUSED)
+            return {"ok": False, "code": "paused",
+                    "detail": "Qronos was paused or stopped while the wake was being set; it was cancelled"}
         self._record(AuditEvent.COMPLETED, pending.request, outcome=ActionOutcome.SUCCEEDED)
         return {"ok": True, "status": "armed", "claim": "windows_accepted_wake_timer", **info}
 
     def _prepare_wake_cancel(self, request_id: str) -> dict:
         snapshot = self._wake_snapshot()
-        if not snapshot or snapshot.get("state") != "armed":
-            return {"ok": True, "status": "none"}
+        if not snapshot or snapshot.get("state") not in ("armed", "fired") or not self._wake_armed():
+            return {"ok": True, "status": "none"}  # a fired wake still holding the system awake can be ended
         request = self._wake_request("Cancel the wake time set for this PC.", {"wakeId": snapshot["wakeId"]})
         verdict = self._gate(request)
         if verdict.refused:
@@ -771,6 +786,7 @@ class DeviceHub:
         with self._wake_lock:
             armed, info = self._armed, self._wake_info
             self._armed, self._wake_info = None, None
+            self._wake_epoch += 1  # an answer still in flight will not arm (B1)
         if armed is None:
             return False
         armed.cancel()
@@ -784,6 +800,12 @@ class DeviceHub:
                 self._wake_info.update({"state": "fired", "firedAtUtc": payload.get("firedAtUtc")})
         self._emit(WAKE_EVENT, "ready", {"event": name, **{k: payload[k] for k in ("wakeId", "firedAtUtc",
                                                                                   "stayAwakeMinutes") if k in payload}})
+
+    def _wake_stopped_since(self, epoch: int) -> bool:
+        if self._paused():
+            return True
+        with self._wake_lock:
+            return self._wake_epoch != epoch
 
     def _secret_ok(self, secret: str | None) -> bool:
         try:
