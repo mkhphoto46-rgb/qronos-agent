@@ -1,8 +1,8 @@
-# Device Hub (H1): printers, 3D printers, scanners and waking this PC (H3)
+# Device Hub (H1): printers, 3D printers, scanners, cameras and waking this PC (H3)
 
-Status: the printer, 3D printer and WIA scanner parts of H1, and waking this PC with a hardware wake timer (H3),
-are implemented and fixture-tested. Cameras/webcams, other device classes and live acceptance on real hardware
-are still required.
+Status: the printer, 3D printer, WIA scanner and camera (one still frame) parts of H1, and waking this PC with a
+hardware wake timer (H3), are implemented and fixture-tested. WIA 1.0 still cameras, phones and other device
+classes Windows does not expose, and live acceptance on real hardware, are still required.
 
 ## What it does
 
@@ -65,7 +65,7 @@ as opaque streams. The model's 3MF version and required extensions must match wh
 - 3D print options (quality, density, supports, raft, material) stay in the driver or on the device. Qronos sends
   no print ticket of its own and does not check that the model fits the build volume; the driver and device do.
 - There is no G-code, serial, network or vendor path. A printer without a Windows 3D driver is not reachable.
-- Cameras, webcams, phones and other local devices are not supported yet (scanners: see below).
+- WIA 1.0 still cameras, phones and other local devices are not supported yet (scanners and cameras: see below).
 
 ## Rules kept
 
@@ -97,8 +97,50 @@ WIA 1.0 and webcams are no longer WIA devices, so those are listed as not suppor
   - the staging folder is removed; a cancel, a failure or a Pause writes nothing;
   - the answer states exactly what was written: path, SHA-256, bytes, size and format.
 
-Not supported, shown as such: WIA cameras, webcams, phones, multi-page feeds (one page per scan), and any capture
-without Windows' dialog. Live acceptance on a real scanner is still required.
+Not supported, shown as such: WIA cameras, webcams (through WIA; see the camera section), phones, multi-page
+feeds (one page per scan), and any capture without Windows' dialog. Live acceptance on a real scanner is still
+required.
+
+## One still frame from a camera into one new image file (Media Foundation)
+
+`core/camera_capture.py` uses Windows Media Foundation, the OS camera stack, through ctypes COM. It needs no helper,
+driver, service, vendor SDK or network: `MFStartup` runs with `MFSTARTUP_LITE`, so no socket library is loaded. Every
+vtable slot, GUID and constant is checked against the Windows SDK 10.0.26100 headers in
+`tests/test_camera_capture.py`.
+
+- **List** (`camera.list`, read-only, also while paused): what Windows itself lists as video capture devices
+  (`MFEnumDeviceSources`, VIDCAP). Each is shown by name; its identity is `cam-` plus a hash of its symbolic link.
+  Listing never turns a camera on.
+- **Capture** (`camera.capture`):
+  - one listed camera and one exact NEW `.png`/`.jpg`/`.jpeg` path in an existing, non-linked folder;
+  - the `DEVICE_CONTROL` gate (`camera:<name>/capture`) and the Files `CREATE_OR_EDIT_FILE` gate (the path) both
+    decide; then always a single-use `DEVICE_ACTION` approval with the typed secret;
+  - at the answer, these are checked: both current policies, the secret, the same camera (symbolic link) still
+    listed, and the path still new;
+  - Pause/Stop/shutdown is checked before the camera turns on, polled while it is on (a stop shuts the media source
+    down at once), and checked again after;
+  - only the approved camera is opened, video stream only (never audio). Windows' own video processing converts its
+    format to RGB32. Up to 4 frames are dropped in memory while the exposure settles, and the next one is kept;
+  - the camera is on for at most 10 seconds. Windows shows its own camera indicator. The frame never touches the disk
+    before the final write;
+  - the frame (at most 7680x4320) is encoded to the path with exclusive create: never an overwrite, and no metadata;
+  - the answer states exactly what was written: path, SHA-256, bytes, size, format, frames read, and whether the image
+    is almost completely dark (for example a covered lens).
+- **Honest refusals:**
+  - Windows camera privacy off: `camera_privacy_denied`;
+  - in use by another app: `camera_busy`;
+  - unplugged: `camera_gone`;
+  - a format Windows cannot convert: `camera_format_unsupported`;
+  - no frame in time: `camera_timeout`.
+  Nothing is written in any of these cases.
+
+Not supported, shown as such:
+- WIA 1.0 still cameras; phones, network cameras or other devices that Windows does not itself list as a camera;
+- video or sound recording, a live preview, and any face or person recognition (no model runs on the image).
+
+A camera that Windows does list (virtual, network or phone cameras included) works the same way, but only built-in
+and USB webcams are the intended case; none of this has been tried on real hardware. Live acceptance on real cameras
+is still required.
 
 ## Waking this PC from sleep (H3)
 
@@ -145,6 +187,7 @@ Wake-on-LAN is not used. It would need a network sender outside Qronos's offline
   - `print.request` (`deviceId`, `path`, `copies`, `color`, `pages`);
   - `print3d.request` (`deviceId`, `path`);
   - `imaging.list` (read), `image.capture` (`deviceId`, `destination`);
+  - `camera.list` (read), `camera.capture` (`deviceId`, `destination`);
   - `wake.status` (read), `wake.schedule` (`at` with its offset, `stayAwakeMinutes`), `wake.cancel`;
   - `decide`, `decline`.
 - **Answer:** the `device_hub_result` event `{requestId, op, ok, ...}`; refusals carry stable codes.
@@ -153,6 +196,7 @@ Wake-on-LAN is not used. It would need a network sender outside Qronos's offline
   - `tests/test_print3d_native.py`;
   - `tests/test_power_wake.py` (a fake kernel32 timer API);
   - `tests/test_wia_imaging.py` (fake WIA COM vtables, synthetic images);
+  - `tests/test_camera_capture.py` (fake Media Foundation COM vtables, synthetic frames);
   - `desktop/tests/device-hub-store.test.mjs`.
 
   No real printer is enumerated or queried, and no job is touched. The live-device boundary blocks the real
