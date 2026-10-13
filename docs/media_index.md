@@ -25,10 +25,11 @@ returning empty results that look like answers.
 | 1 | Subtitle/ASR agreement labels (handoff s9) | **pending** |
 | 1 | Exact phrase search (FTS5, Persian/Arabic normalisation, split-line pairs) and fuzzy search (rare trigrams + similarity) | done |
 | 2 | Semantic / cross-language dialogue search (bge-m3 F16, 1024 dims, via the runtime's CPU memory sidecar) | **implemented, unverified**: runs only in the runtime's media host with the memory sidecar running (`QRONOS_MEMORY_RUNTIME=1`) and bge-m3 installed; never in the standalone tool; scores are uncalibrated similarities; no real-model run accepted |
+| 2 | Topic search (stage `topics`: segments of one track's dialogue grouped by their stored bge-m3 vectors; evidence-backed hits, selective pseudo-relevance expansion, bounded rerank) | **implemented, unverified**: segments are built without a model call; a query needs the memory sidecar; every hit carries its indexed lines; hints are search hints, not facts; the rank score is uncalibrated; segments carry no labels or summaries |
 | 3 | Shot boundaries (`scdet`, chunked and checkpointed) and adaptive keyframes under a cache quota | done |
 | 3 | Visual embeddings | **decision pending**: no joint image–text embedding backend is specified |
 | 4–5 | Captions, OCR, speaker turns | **pending** |
-| 4 | Topics | **deferred**: labels would come from a brain model and no specified brain authority is wired to media; none are generated |
+| 4 | Topic labels and summaries | **deferred**: labels would come from a brain model and no specified brain authority is wired to media; none are generated (topic SEARCH above needs none) |
 | 5 | Actions and motion | **not supported**: sparse keyframes cannot establish them |
 
 Reports (schema `qronos.media.report/2`; kinds short, full, transcript and
@@ -573,7 +574,28 @@ change requeues it), `MediaService.search_semantic`.
 - **Cross-language:** bge-m3 is multilingual, so a Persian query may match
   English dialogue; results report the track language and whether query and
   window scripts differ. Nothing is translated and no accuracy is claimed.
-- **Topics:** deferred (above).
+- **Topics (round 46, schema 4):** the `topics` stage (version 1, after `semantic`)
+  groups each track's consecutive semantic windows into segments while their
+  stored bge-m3 vectors stay near the running centroid (at most 3 minutes and
+  12 windows; a drift below 0.55 cosine starts a new segment). A segment keeps
+  its track, time range, the exact window keys and a centroid vector (the mean
+  of the stored vectors: no model call), plus provenance (method, embedding
+  model version, counts; `labels: null`). It is written only in the stage's
+  result+COMPLETED transaction, deleted with its asset or track, and requeued
+  whenever the semantic stage is (ASR changes, versions, inputs); with no
+  windows the stage completes as `skipped:no_semantic_windows` and clears it.
+  Search mode `topic`: the exact lexical answer first (unchanged), then ONE
+  governed bge-m3 query vector scores segment centroids. Each candidate is
+  backed by its best actual windows; a candidate without indexed lines is never
+  returned. Only when the first pass is weak (best similarity below 0.5) or the
+  query has three words or fewer, the query vector is blended (weight 0.35) with
+  the stored vectors of the three best evidence windows, and words from those
+  windows are shown as hints: search hints, never facts. At most 50 candidates
+  are reranked with fixed weights (segment 0.45, best line 0.35, query-word
+  overlap 0.1, expanded pass 0.1); the score is an uncalibrated rank score and
+  every hit carries its components. Reports list segments with their most
+  central indexed lines (no label). No brain hint or label is generated: no
+  brain authority is wired to media yet.
 
 ## Product route (round 32)
 
@@ -586,7 +608,7 @@ ONE in-process media host (`qronos_media/product.py`):
   operation while Qronos is paused (status, capabilities, roots.list, search, asset.detail, report.preview and decline still answer).
 - Operations (allow-listed, every field bounded): roots.add / roots.remove / roots.list, scan (then a continuous
   background index), index.start / stop / pause / resume, job.retry / reindex / cancel / pause / resume,
-  asset.priority, asset.detail, search (exact, fuzzy, semantic), open.prepare, report.preview (a bounded view of
+  asset.priority, asset.detail, search (exact, fuzzy, semantic, topic), open.prepare, report.preview (a bounded view of
   the same report; a read, so it also answers while paused), report.generate and report.export (format json,
   html, csv or pdf; kind short, full, transcript or evidence), decide / decline. A PDF export goes through the
   same write gate, single-use MEDIA_ACTION approval and typed secret as every export, on the exact PDF bytes.
