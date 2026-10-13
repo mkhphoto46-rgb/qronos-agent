@@ -181,21 +181,27 @@ def _fuzzy(db: sqlite3.Connection, norm: str, language: str | None, asset_id: st
     grams = _rare_trigrams(db, norm)
     if not grams:
         return []
+    # The scope, language and asset filters apply INSIDE each trigram lookup, before its row limit and before the
+    # candidate limit: rows of other assets or out of scope never use up the candidates of the ones asked about.
+    where, params = _filters(language, asset_id)
     hits: dict[int, int] = {}
     for gram in grams:
         budget.check()
         rowids = [row[0] for row in db.execute(
-            f"SELECT rowid FROM dialogue_tri WHERE dialogue_tri MATCH ? LIMIT {ROWS_PER_TRIGRAM}",
-            ('"' + gram.replace('"', '""') + '"',),
+            "SELECT d.unit_id FROM dialogue_tri JOIN dialogue d ON d.unit_id = dialogue_tri.rowid "
+            f"JOIN subtitle_tracks t ON t.track_id = d.track_id WHERE dialogue_tri MATCH ?{where} "
+            f"LIMIT {ROWS_PER_TRIGRAM}",
+            ['"' + gram.replace('"', '""') + '"', *params],
         )]
         if len(rowids) == ROWS_PER_TRIGRAM and "common_terms" not in notes:
             notes.append("common_terms")  # some candidate lists were cut at the per-trigram limit
         for rowid in rowids:
             hits[rowid] = hits.get(rowid, 0) + 1
+    if len(hits) > FUZZY_CANDIDATES:
+        notes.append("candidates_cut")  # only the FUZZY_CANDIDATES rows sharing the most trigrams are scored
     ranked = sorted(hits, key=lambda rowid: (-hits[rowid], rowid))[:FUZZY_CANDIDATES]
     if not ranked:
         return []
-    where, params = _filters(language, asset_id)
     placeholders = ",".join("?" for _ in ranked)
     rows = db.execute(
         "SELECT d.* FROM dialogue d JOIN subtitle_tracks t ON t.track_id = d.track_id "

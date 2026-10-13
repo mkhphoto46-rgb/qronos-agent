@@ -251,6 +251,68 @@ def test_a_stopped_budget_is_partial_and_never_invents_a_pair(tmp_path, monkeypa
     assert block["results"] == []  # the dialogue was never gathered: no pair can be claimed
 
 
+def common_phrase_library(tmp_path, b_lines):
+    """B: many lines sharing every trigram of the phrase (inserted first); then A: the phrase at 500 s next to a
+    kitchen frame at 501 s."""
+    service, ids, _ = build(tmp_path)
+    with service.store.transaction() as tx:
+        for i in range(b_lines):
+            text = "grandmother sang softly today"
+            tx.execute("INSERT INTO dialogue(asset_id, track_id, kind, seq, start_ms, end_ms, text, norm_text) "
+                       "VALUES (?, ?, 'cue', ?, ?, ?, ?, ?)", (ids["B"], f"{ids['B']}:e2", 100 + i, 100_000 + i * 2_000,
+                                                              101_000 + i * 2_000, text, normalise_for_search(text)))
+        tx.execute("INSERT INTO dialogue(asset_id, track_id, kind, seq, start_ms, end_ms, text, norm_text) "
+                   "VALUES (?, ?, 'cue', 10, 500000, 503000, 'grandmother sang softly', 'grandmother sang softly')",
+                   (ids["A"], f"{ids['A']}:e2"))
+        frame(tx, ids["A"], 10, 501_000, "A kitchen with a radio.")
+    return service, ids
+
+
+@pytest.mark.parametrize("b_lines", [500, 2_100])  # past the 400-candidate cut / past the 2,000-row trigram cut
+def test_fuzzy_dialogue_finds_the_paired_moment_behind_common_term_lines_of_another_asset(tmp_path, b_lines):
+    service, ids = common_phrase_library(tmp_path, b_lines)
+    for match in ("exact", "fuzzy"):
+        block = search(service, "grandmother sang softly", "kitchen", dialogue_match=match)
+        assert [(hit["assetId"], hit["dialogue"]["startMs"], hit["frames"][0]["timeMs"]) for hit in block["results"]] \
+            == [(ids["A"], 500_000, 501_000)], match
+        assert block["status"] == "complete" and block["outcome"] == "matched" and block["notes"] == [], match
+    assert block["results"][0]["dialogue"]["channels"] == ["fuzzy"]
+    # the per-asset look really examines A: its candidates are A's rows, not the first rows of the whole index
+    alone = service.search_dialogue("grandmother sang softly", mode="fuzzy", limit=100, asset_id=ids["A"])
+    assert [r["startMs"] for r in alone["results"]] == [500_000] and alone["status"] == "complete"
+    overall = service.search_dialogue("grandmother sang softly", mode="fuzzy", limit=100)
+    # the scope-wide look is cut and says which limit cut it (the 400-candidate cut was silent before)
+    assert overall["status"] == "partial" and ("candidates_cut" if b_lines == 500 else "common_terms") in overall["notes"]
+
+
+def test_out_of_scope_common_term_lines_never_use_up_the_fuzzy_candidates_of_the_current_scope(tmp_path):
+    service, ids = common_phrase_library(tmp_path, 2_100)
+    with service.store.transaction() as tx:
+        tx.execute("UPDATE files SET error = 'out_of_scope' WHERE asset_id = ?", (ids["B"],))
+    overall = service.search_dialogue("grandmother sang softly", mode="fuzzy", limit=100)
+    assert [r["assetId"] for r in overall["results"]] == [ids["A"]] and overall["status"] == "complete"
+    assert overall["notes"] == []  # B's 2,100 rows were filtered before any trigram or candidate limit
+    block = search(service, "grandmother sang softly", "kitchen", dialogue_match="fuzzy")
+    assert block["status"] == "complete" and block["outcome"] == "matched" and ids["B"] not in json.dumps(block)
+
+
+def test_a_fuzzy_look_still_cut_inside_the_asset_is_partial_never_a_complete_answer(tmp_path, monkeypatch):
+    from qronos_media import search as search_module
+
+    service, ids = common_phrase_library(tmp_path, 2_100)
+    with service.store.transaction() as tx:  # A itself now has more matching rows than the (lowered) trigram limit
+        for i in range(8):
+            tx.execute("INSERT INTO dialogue(asset_id, track_id, kind, seq, start_ms, end_ms, text, norm_text) "
+                       "VALUES (?, ?, 'cue', ?, ?, ?, 'grandmother sang softly today', 'grandmother sang softly today')",
+                       (ids["A"], f"{ids['A']}:e2", 20 + i, 700_000 + i * 2_000, 701_000 + i * 2_000))
+    monkeypatch.setattr(search_module, "ROWS_PER_TRIGRAM", 4)
+    block = search(service, "grandmother sang softly", "kitchen", dialogue_match="fuzzy")
+    assert block["status"] == "partial"
+    assert "dialogue_candidates_cut" in block["notes"] and "dialogue:common_terms" in block["notes"]
+    exact = search(service, "grandmother sang softly", "kitchen")  # the exact route is not affected by fuzzy limits
+    assert exact["status"] == "complete" and [h["dialogue"]["startMs"] for h in exact["results"]] == [500_000]
+
+
 @pytest.mark.parametrize("fields, needle", [
     ({"dialogue": "x" * 301, "visual": "kitchen"}, "dialogue must be"),
     ({"dialogue": "father", "visual": " ".join(["w"] * 17)}, "more than 16 words"),

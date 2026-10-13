@@ -810,13 +810,25 @@ class MediaService:
                         raise BudgetExhausted(found["stoppedBy"])
                     return found
 
+                def cut(found: dict[str, Any]) -> bool:
+                    """The look did not see every candidate: more results than its cap, or a candidate limit inside
+                    the search (search_dialogue's notes, e.g. the fuzzy per-trigram or candidate cut)."""
+                    return bool(found["truncated"] or found["notes"])
+
                 # A bounded look over the whole current scope (it also says whether the dialogue exists elsewhere);
-                # only when it was cut are the assets that have visual evidence searched one by one, in full.
-                if lexical(None, multimodal.MAX_GLOBAL_DIALOGUE)["truncated"]:
+                # when it was cut in any way, every asset that has visual evidence is searched on its own (the
+                # search's candidate limits then apply to that asset alone). A cut that remains is reported.
+                overall = lexical(None, multimodal.MAX_GLOBAL_DIALOGUE)
+                if cut(overall):
                     for asset_id in assets:
                         budget.check()
-                        if lexical(asset_id, multimodal.MAX_DIALOGUE_PER_ASSET)["truncated"]:
-                            notes.append("dialogue_candidates_cut")
+                        found = lexical(asset_id, multimodal.MAX_DIALOGUE_PER_ASSET)
+                        if cut(found):
+                            notes.extend(note for note in ["dialogue_candidates_cut",
+                                                           *(f"dialogue:{n}" for n in found["notes"])]
+                                         if note not in notes)
+                    if not dialogue and "dialogue_candidates_cut" not in notes:
+                        notes.append("dialogue_candidates_cut")  # nothing found by a cut look: absence is unproven
                 if "dialogue" in vectors:
                     found, scan = semantic.semantic_candidates(db, vectors["dialogue"],
                                                                limit=multimodal.MAX_SEMANTIC_DIALOGUE, language=None,
