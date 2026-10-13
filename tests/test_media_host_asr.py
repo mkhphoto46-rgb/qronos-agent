@@ -763,7 +763,8 @@ def test_a_schema_1_store_migrates_once_and_a_newer_one_is_refused_untouched(tmp
     db.close()
     store = MediaStore(path)
     try:
-        assert store.get_meta("schema_version") == "3"  # schema 3 (round 26) migrates a schema-1 file too
+        assert store.get_meta("schema_version") == "4"  # schema 4 (topic segments) migrates a schema-1 file too
+        assert store.db.execute("SELECT count(*) FROM topic_segments").fetchone()[0] == 0
         assert store.db.execute("SELECT text FROM dialogue").fetchone()[0] == "kept line"
         assert store.db.execute("PRAGMA foreign_key_check").fetchall() == []
         with store.transaction() as tx:
@@ -772,10 +773,10 @@ def test_a_schema_1_store_migrates_once_and_a_newer_one_is_refused_untouched(tmp
         assert store.db.execute("SELECT count(*) FROM dialogue_fts WHERE dialogue_fts MATCH 'kept'").fetchone()[0] == 0
     finally:
         store.close()
-    newer = tmp_path / "v4.sqlite3"
+    newer = tmp_path / "v5.sqlite3"
     db = sqlite3.connect(newer)
     db.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
-                     "INSERT INTO meta VALUES ('schema_version', '4');")
+                     "INSERT INTO meta VALUES ('schema_version', '5');")
     db.close()
     before = newer.read_bytes()
     with pytest.raises(StoreTooNew):

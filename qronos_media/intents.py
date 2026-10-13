@@ -1,6 +1,7 @@
 """Deterministic Persian/English media requests for the brain and voice turns (no model, no guess).
 
     «کلید» را در ویدیوهام پیدا کن        در فیلم‌ها دنبال «قطار ساحلی» بگرد (معنایی)
+    در فیلم‌ها صحنه‌ای پیدا کن که موضوعش «خیانت» است    find a scene in my movies about "betrayal" (topic)
     search my videos for "the old key"    find "the train" in my movies
     وضعیت فهرست ویدیوها                     media index status
 
@@ -19,7 +20,7 @@ from qronos_media.product import MAX_QUERY_CHARS
 @dataclass(frozen=True)
 class MediaSearchIntent:
     query: str
-    mode: str  # "exact", "fuzzy" or "semantic"
+    mode: str  # "exact", "fuzzy", "semantic" or "topic"
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ _SEARCH = re.compile(r"(?:\bsearch\b|\bfind\b|\blook for\b|بگرد|جستجو|�
 _STATUS = re.compile(r"(?:\bstatus\b|\bprogress\b|وضعیت|پیشرفت)", re.IGNORECASE)
 _INDEX = re.compile(r"(?:\bindex\b|\bindexing\b|\blibrary\b|فهرست|نمایه|کتابخانه)", re.IGNORECASE)
 _SEMANTIC = re.compile(r"(?:\bsemantic\b|\bsimilar\b|\bmeaning\b|معنایی|مشابه|به معنی)", re.IGNORECASE)
+_TOPIC = re.compile(r"(?:\btopic\b|\babout\b|\bscene\b|موضوع|درباره|دربارهٔ|صحنه‌ای که|صحنه ای که)",
+                    re.IGNORECASE)
 _FUZZY = re.compile(r"(?:\bfuzzy\b|\bapproximate\b|تقریبی)", re.IGNORECASE)
 _MINE = re.compile(r"\bmy\s+(?:videos?|movies?|films?|media)\b", re.IGNORECASE)
 _QUOTED = re.compile(r"[«\"“]([^«»\"“”]{1,1200})[»\"”]")
@@ -56,7 +59,9 @@ def parse_media_intent(text: str) -> MediaIntent | None:
                 phrase = re.sub(r"\s+in\s+my\s+(?:videos?|movies?|films?|media)\b.*$", "", phrase, flags=re.IGNORECASE)
         if phrase is None or not phrase.strip() or len(phrase) > MAX_QUERY_CHARS:
             return None
-        mode = "semantic" if _SEMANTIC.search(text) else "fuzzy" if _FUZZY.search(text) else "exact"
+        outside = _QUOTED.sub(" ", text)  # a cue word inside the quoted phrase is part of the phrase, not the mode
+        mode = ("semantic" if _SEMANTIC.search(text) else "topic" if _TOPIC.search(outside)
+                else "fuzzy" if _FUZZY.search(text) else "exact")
         return MediaSearchIntent(phrase.strip(), mode)
     if _STATUS.search(text) and _INDEX.search(text):
         return MediaStatusIntent()
@@ -86,6 +91,18 @@ def spoken_answer(intent: MediaIntent, result: dict | None) -> str:
         running = (result.get("status") or {}).get("running")
         state = "در حال فهرست‌سازی است" if running else "الان کاری در جریان نیست"
         return f"{assets if assets is not None else 'هنوز هیچ'} ویدیو در فهرست است؛ {state}."
+    if intent.mode == "topic":
+        block = result.get("topic") or {}
+        items = block.get("results") or []
+        exact = (result.get("exact") or {}).get("results") or []
+        if not items:
+            reason = block.get("reason") or block.get("status")
+            return (f"جست‌وجوی موضوعی در دسترس نیست ({reason}); {len(exact)} نتیجهٔ دقیق پیدا شد."
+                    if block.get("status") == "unavailable" else f"صحنهٔ هم‌موضوعی پیدا نشد؛ {len(exact)} نتیجهٔ دقیق.")
+        first = items[0]
+        line = (first.get("evidence") or [{}])[0].get("text") or ""
+        return (f"{len(items)} بخش هم‌موضوع پیدا شد؛ اولی در «{first.get('title') or 'ویدیو'}» از دقیقهٔ "
+                f"{clock(first.get('startMs'))}، با این جمله: «{line[:120]}». امتیاز کالیبره نیست؛ جزئیات در بخش رسانه است.")
     if intent.mode == "semantic":
         block = result.get("semantic") or {}
         items = block.get("results") or []

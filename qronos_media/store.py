@@ -27,6 +27,11 @@ batch with the stage checkpoint and is never searched. ``semantic_windows``,
 the searchable index, is written only in the stage's result+COMPLETED
 transaction, references its track (deleted with it) and keeps the original
 window text and lineage. The schema-2 to 3 step only adds tables.
+
+Schema 4 adds topic retrieval. ``topic_segments`` (qronos_media.topics) holds runs of one track's semantic windows
+with their centroid vector and the exact window keys they are made of; it is written only in the "topics" stage's
+result+COMPLETED transaction and references its asset and track (deleted with them). The schema-3 to 4 step only
+adds a table.
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -149,6 +154,21 @@ CREATE TABLE IF NOT EXISTS semantic_windows (
     PRIMARY KEY (asset_id, window_key)
 );
 CREATE INDEX IF NOT EXISTS semantic_windows_by_track ON semantic_windows(track_id);
+
+CREATE TABLE IF NOT EXISTS topic_segments (
+    asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+    segment_key TEXT NOT NULL,
+    track_id TEXT NOT NULL REFERENCES subtitle_tracks(track_id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    language TEXT,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL,
+    window_keys TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    provenance_json TEXT NOT NULL,
+    PRIMARY KEY (asset_id, segment_key)
+);
+CREATE INDEX IF NOT EXISTS topic_segments_by_track ON topic_segments(track_id);
 
 CREATE TABLE IF NOT EXISTS asr_chunks (
     asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,

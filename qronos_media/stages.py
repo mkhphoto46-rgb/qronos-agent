@@ -30,6 +30,7 @@ from qronos_media.scope import OutOfScope, admit_sidecar
 from qronos_media.probe import ProbeResult, probe
 from qronos_media import asr
 from qronos_media import semantic
+from qronos_media import topics
 from qronos_media.resources import BGE_M3, WHISPER_LARGE_V3_TURBO_Q5_0, ResourceRefused, StageNeeds
 from qronos_media.subtitles import (
     IMAGE_SUBTITLE_CODECS, MAX_SUBTITLE_BYTES, TEXT_SUBTITLE_CODECS, Cue, SubtitleError, decode_subtitle_bytes,
@@ -65,6 +66,8 @@ STAGES: dict[str, StageSpec] = {
         # Model-bearing (bge-m3 on the runtime's CPU memory sidecar). Dialogue that ASR adds later requeues it.
         StageSpec("semantic", semantic.SEMANTIC_VERSION, ("subtitles",), 2,
                   StageNeeds("semantic", disk_bytes=64 * 1024**2, model=BGE_M3)),
+        # Topic segments from the STORED bge-m3 window vectors (qronos_media.topics): no model call, CPU only.
+        StageSpec("topics", topics.TOPICS_VERSION, ("semantic",), 2, StageNeeds("topics")),
         StageSpec("scenes", 1, ("metadata",), 3, StageNeeds("scenes")),
         StageSpec("keyframes", 1, ("scenes",), 3, StageNeeds("keyframes", disk_bytes=256 * 1024**2)),
     )
@@ -84,6 +87,11 @@ PENDING_CAPABILITIES: tuple[dict[str, object], ...] = (
      "reason": "bge-m3 (F16, 1024) windows over subtitle/ASR dialogue, only inside the Qronos runtime with its "
                "memory sidecar running (QRONOS_MEMORY_RUNTIME=1) and bge-m3 installed; scores are uncalibrated "
                "similarities; no real-model run has been accepted."},
+    {"capability": "topic_retrieval", "level": 2, "status": "implemented_unverified",
+     "reason": "Topic search over segments of one track's dialogue grouped by their stored bge-m3 vectors (stage "
+               "'topics', no model call); a query vector needs the memory sidecar. Hits are always backed by indexed "
+               "lines; expansion is pseudo-relevance feedback from those lines, shown as search hints, never facts; "
+               "the rank score uses fixed weights and is uncalibrated. Segments carry no labels or summaries."},
     {"capability": "visual_embeddings", "level": 3, "status": "decision_pending",
      "reason": "No joint image-text embedding backend is specified for Qronos; adding one needs an explicit decision."},
     {"capability": "vision_captions", "level": 4, "status": "pending",
@@ -751,10 +759,12 @@ def _delete_asr(db: sqlite3.Connection, asset_id: str) -> None:
 
 
 def requeue_semantic(db: sqlite3.Connection, asset_id: str) -> None:
-    """The asset's dialogue changed outside the subtitles stage (ASR): its semantic windows are rebuilt."""
-    db.execute("UPDATE stages SET state = 'QUEUED', checkpoint = NULL, error = NULL, note = 'invalidated:dialogue', "
-               "queued_at = ? WHERE asset_id = ? AND stage = 'semantic' AND state != 'RUNNING'",
-               (time.time(), asset_id))
+    """The asset's dialogue changed outside the subtitles stage (ASR): its semantic windows are rebuilt, and so is
+    everything built on them (the topic segments), so nothing searchable outlives the dialogue it came from."""
+    for stage in downstream("semantic"):
+        db.execute("UPDATE stages SET state = 'QUEUED', checkpoint = NULL, error = NULL, "
+                   "note = 'invalidated:dialogue', queued_at = ? WHERE asset_id = ? AND stage = ? "
+                   "AND state != 'RUNNING'", (time.time(), asset_id, stage))
 
 
 def _asr_cleared(asset_id: str) -> Commit:
@@ -827,6 +837,36 @@ def run_semantic(ctx: StageContext) -> Commit:
     return commit
 
 
+# ------------------------------------------------------------------ topics
+
+def run_topics(ctx: StageContext) -> Commit:
+    """Topic segments over the asset's searchable semantic windows (see :mod:`qronos_media.topics`)."""
+    ctx.primary_file()  # the asset's root is admitted now and bound: a revocation stops the work and the commit
+    segments = topics.build_segments(ctx.db, ctx.asset_id, check=ctx.checkpoint_boundary)
+    window_count = sum(len(segment.window_keys) for segment in segments)
+    record = json.dumps(topics.provenance(len(segments), window_count), sort_keys=True)
+
+    def commit(db: sqlite3.Connection) -> None:
+        db.execute("DELETE FROM topic_segments WHERE asset_id = ?", (ctx.asset_id,))
+        db.executemany(
+            "INSERT INTO topic_segments(asset_id, segment_key, track_id, source, language, start_ms, end_ms, "
+            "window_keys, vector, provenance_json) SELECT ?,?,?,?,?,?,?,?,?,? "
+            "WHERE EXISTS (SELECT 1 FROM subtitle_tracks WHERE track_id = ?)",
+            [(ctx.asset_id, s.segment_key, s.track_id, s.source, s.language, s.start_ms, s.end_ms,
+              json.dumps(list(s.window_keys)), s.vector, record, s.track_id) for s in segments])
+
+    return commit
+
+
+def topics_skip_reason(db: sqlite3.Connection, asset_id: str) -> str | None:
+    has_windows = db.execute("SELECT 1 FROM semantic_windows WHERE asset_id = ? LIMIT 1", (asset_id,)).fetchone()
+    return None if has_windows else "no_semantic_windows"
+
+
+def _delete_topics(db: sqlite3.Connection, asset_id: str) -> None:
+    db.execute("DELETE FROM topic_segments WHERE asset_id = ?", (asset_id,))
+
+
 def semantic_skip_reason(db: sqlite3.Connection, asset_id: str) -> str | None:
     has_dialogue = db.execute(
         "SELECT 1 FROM dialogue d JOIN subtitle_tracks t ON t.track_id = d.track_id WHERE d.asset_id = ? "
@@ -836,20 +876,24 @@ def semantic_skip_reason(db: sqlite3.Connection, asset_id: str) -> str | None:
 
 def _delete_semantic(db: sqlite3.Connection, asset_id: str) -> None:
     db.execute("DELETE FROM semantic_windows WHERE asset_id = ?", (asset_id,))
+    _delete_topics(db, asset_id)  # segments never outlive the windows they are made of
 
 
 #: Stages that decide, before any resource is reserved, that an asset needs nothing now (the skip note).
 SKIPS: dict[str, Callable[[sqlite3.Connection, str], object]] = {"asr": asr.skip_reason,
-                                                                  "semantic": semantic_skip_reason}
+                                                                  "semantic": semantic_skip_reason,
+                                                                  "topics": topics_skip_reason}
 #: What a skipped stage removes (rows from an earlier run that no longer apply), in the same transaction.
 SKIP_CLEANUP: dict[str, Callable[[sqlite3.Connection, str], None]] = {"asr": _delete_asr,
-                                                                       "semantic": _delete_semantic}
+                                                                       "semantic": _delete_semantic,
+                                                                       "topics": _delete_topics}
 
 RUNNERS: dict[str, Callable[[StageContext], Commit]] = {
     "metadata": run_metadata,
     "subtitles": run_subtitles,
     "asr": run_asr,
     "semantic": run_semantic,
+    "topics": run_topics,
     "scenes": run_scenes,
     "keyframes": run_keyframes,
 }

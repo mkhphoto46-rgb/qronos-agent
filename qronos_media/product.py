@@ -33,7 +33,7 @@ MAX_QUERY_CHARS = 1200
 MAX_SECRET_CHARS = 256
 MAX_START_MS = 7 * 24 * 3600 * 1000
 MAX_PENDING_APPROVALS = 32
-SEARCH_MODES = ("exact", "fuzzy", "semantic")
+SEARCH_MODES = ("exact", "fuzzy", "semantic", "topic")
 
 #: Operations that only read (allowed while Qronos is paused). Everything else is refused while paused.
 READ_OPS = frozenset({"status", "roots.list", "search", "asset.detail", "capabilities", "decline", "report.preview"})
@@ -158,7 +158,7 @@ class MediaProduct:
             query = _text(data, "query", MAX_QUERY_CHARS)
             mode = data.get("mode", "exact")
             if mode not in SEARCH_MODES:
-                raise MediaOpError("bad_request", "mode must be exact, fuzzy or semantic")
+                raise MediaOpError("bad_request", "mode must be exact, fuzzy, semantic or topic")
             limit = _int(data, "limit", 1, 50, default=20)
             language = _text(data, "language", 16, required=False)
             self._submit(host.query, op, lambda s: _search(s, query, mode, limit, language), done)
@@ -334,6 +334,8 @@ def _ok(result: dict[str, Any], family: str) -> dict[str, Any]:
 def _search(service: Any, query: str, mode: str, limit: int, language: str | None) -> dict[str, Any]:
     if mode == "semantic":
         return {"ok": True, **service.search_semantic(query, limit=limit, language=language)}
+    if mode == "topic":
+        return {"ok": True, **service.search_topics(query, limit=limit, language=language)}
     return {"ok": True, "results": service.search_dialogue(query, mode=mode, limit=limit, language=language)}
 
 

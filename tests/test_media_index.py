@@ -168,10 +168,11 @@ def test_new_sidecar_requeues_only_subtitles_and_replaces_its_text(tmp_path: Pat
     sidecar = library / "Film One.fa.vtt"
     sidecar.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nکاملاً متن تازه\n", encoding="utf-8")
     summary = service.scan()[0]
-    # subtitles and its dependents only (asr, semantic); shot detection and keyframes are not touched
-    assert summary["requeued_stages"] == 3
+    # subtitles and its dependents only (asr, semantic, topics); shot detection and keyframes are not touched
+    assert summary["requeued_stages"] == 4
     assert _states(service, asset) == {"metadata": "COMPLETED", "subtitles": "QUEUED", "asr": "QUEUED",
-                                       "semantic": "QUEUED", "scenes": "COMPLETED", "keyframes": "COMPLETED"}
+                                       "semantic": "QUEUED", "topics": "QUEUED", "scenes": "COMPLETED",
+                                       "keyframes": "COMPLETED"}
     report = service.index(max_seconds=120)
     assert report["completed"] == [f"{asset}/subtitles", f"{asset}/asr"]  # asr: a skip (subtitles present)
     assert service.search_dialogue("نخواستم", mode="exact")["results"] == []

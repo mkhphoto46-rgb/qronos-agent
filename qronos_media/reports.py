@@ -46,6 +46,10 @@ MAX_PDF_TEXT_CHARS = 600
 #: render (4,000 ordinary ~50-character cues fit; 4,000 lines of 600 characters do not). The omitted lines are counted.
 MAX_PDF_DIALOGUE_CHARS = 240_000
 SHORT_KEYFRAMES = 12
+#: Topic segments listed per report (each with its most central indexed lines); the rest are counted.
+REPORT_TOPIC_SEGMENTS = {"short": 10, "full": 200, "evidence": 200, "transcript": 0}
+#: The PDF draws at most this many characters of topic-segment lines (same rule as the dialogue budget).
+MAX_PDF_TOPIC_CHARS = 60_000
 FONT_DIR = Path(__file__).resolve().parent / "fonts"
 FONT_REGISTRY = FONT_DIR / "fonts.json"
 
@@ -54,9 +58,10 @@ SOURCE_FA = {"embedded": "زیرنویس درون فایل", "sidecar": "زیر�
 _STATE_FA = {"COMPLETED": "انجام شد", "QUEUED": "در صف", "RUNNING": "در حال اجرا", "PAUSED": "متوقف",
              "FAILED": "ناموفق", "CANCELLED": "لغو شد", "NOT_QUEUED": "در صف نیست"}
 _STAGE_FA = {"metadata": "مشخصات فایل", "subtitles": "زیرنویس", "asr": "رونویسی گفتار", "semantic": "جستجوی معنایی",
-             "scenes": "تشخیص برش‌ها", "keyframes": "فریم‌های کلیدی"}
+             "topics": "بخش‌های موضوعی", "scenes": "تشخیص برش‌ها", "keyframes": "فریم‌های کلیدی"}
 _CAPABILITY_FA = {"asr": "رونویسی گفتار", "subtitle_asr_fusion": "تطبیق زیرنویس و رونویسی",
-                  "semantic_dialogue": "جستجوی معنایی دیالوگ", "visual_embeddings": "جستجوی تصویری",
+                  "semantic_dialogue": "جستجوی معنایی دیالوگ",
+                  "topic_retrieval": "جست‌وجوی موضوعی (بخش‌های بدون برچسب)", "visual_embeddings": "جستجوی تصویری",
                   "vision_captions": "توصیف تصویر", "ocr": "خواندن متن تصویر (OCR)", "topics": "موضوع‌ها",
                   "speaker_turns": "تشخیص گوینده", "actions_motion": "کنش و حرکت"}
 _CAPABILITY_STATUS_FA = {"pending": "پیاده‌سازی نشده", "deferred": "به تعویق افتاده",
@@ -119,6 +124,17 @@ def _sources(db: sqlite3.Connection, asset_id: str) -> list[dict[str, Any]]:
     return sources
 
 
+def _topic_segments(db: sqlite3.Connection, asset_id: str, limit: int) -> tuple[list[dict[str, Any]], int]:
+    """The asset's indexed topic segments (unlabelled; evidence lines only) and how many exist."""
+    from qronos_media import topics
+
+    try:
+        count = db.execute("SELECT COUNT(*) FROM topic_segments WHERE asset_id = ?", (asset_id,)).fetchone()[0]
+    except sqlite3.OperationalError:  # an index from before schema 4 has no topic segments
+        return [], 0
+    return (topics.asset_segments(db, asset_id, limit=limit) if limit and count else []), count
+
+
 def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[dict[str, str]]:
     """What the reader must know about THIS asset's report, from what was actually indexed."""
     indexed = [s for s in sources if s["status"] == "indexed" and s["cue_count"]]
@@ -138,6 +154,10 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
     if stages.get("scenes", {}).get("state") == "COMPLETED":
         items.append({"code": "shots_not_scenes",
                       "text": "برش‌ها با تغییر تصویر تشخیص داده شده‌اند، نه صحنه‌های معنایی."})
+    if stages.get("topics", {}).get("state") == "COMPLETED":
+        items.append({"code": "topic_segments_unlabelled",
+                      "text": "بخش‌های موضوعی گروه‌بندی جمله‌های یک ترک بر پایهٔ معنای آن‌ها (بردارهای bge-m3) هستند؛ "
+                              "برچسب یا خلاصه ندارند و فقط با خود جمله‌ها نشان داده می‌شوند."})
     items.append({"code": "no_confidence",
                   "text": "هیچ اطمینان کالیبره‌شده‌ای محاسبه نمی‌شود و در این گزارش هم عددی برای اطمینان نیست."})
     items.append({"code": "no_generated_content",
@@ -148,7 +168,7 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
 def _not_available(stages: dict[str, Any]) -> list[dict[str, Any]]:
     """Capabilities this asset does not have: never implemented, or implemented but not completed here."""
     out = []
-    stage_of = {"asr": "asr", "semantic_dialogue": "semantic"}
+    stage_of = {"asr": "asr", "semantic_dialogue": "semantic", "topic_retrieval": "topics"}
     for item in PENDING_CAPABILITIES:
         stage = stage_of.get(str(item["capability"]))
         if item["status"] == "implemented_unverified" and stage \
@@ -188,18 +208,24 @@ def gather(db: sqlite3.Connection, asset_id: str, kind: str = "full") -> dict[st
                   for row in db.execute("SELECT * FROM files WHERE asset_id = ? ORDER BY path", (asset_id,))],
         "levels": level,
         "summary": {"dialogueLines": sum(cue_counts.values()), "dialogueLinesBySource": cue_counts,
-                    "subtitleTracks": len(sources), "scenes": scene_count, "keyframes": keyframe_count},
+                    "subtitleTracks": len(sources), "scenes": scene_count, "keyframes": keyframe_count,
+                    "topicSegments": 0},
         "notAvailable": _not_available(level["stages"]),
         "limitations": _limitations(level["stages"], sources),
     }
     report["subtitleTracks"] = sources
+    segments, segment_count = _topic_segments(db, asset_id, REPORT_TOPIC_SEGMENTS[kind])
+    report["summary"]["topicSegments"] = segment_count
+    if REPORT_TOPIC_SEGMENTS[kind]:
+        report["topicSegments"] = segments
     if kind == "short":
         report["keyframes"] = [{"sceneIndex": f["scene_index"], "timeMs": f["time_ms"]} for f in db.execute(
             "SELECT scene_index, time_ms FROM keyframes WHERE asset_id = ? ORDER BY time_ms LIMIT ?",
             (asset_id, SHORT_KEYFRAMES))]
         report["generated"] = {name: {"available": False, "reason": reason} for name, reason in (
             ("summary", "no summary is generated from the index"),
-            ("topics", "topics are deferred: no brain authority is wired to media"),
+            ("topics", "topic labels are deferred: no brain authority is wired to media; unlabelled topic "
+                       "segments with their indexed lines are under topicSegments"),
             ("importantScenes", "no importance ranking exists; scene boundaries only"),
             ("keyDialogue", "no key-dialogue selection exists; see the transcript report"))}
     if kind in {"full", "evidence"}:
@@ -299,6 +325,14 @@ def to_html(report: dict[str, Any]) -> str:
                      f"<td>{e(track['language'] or 'نامشخص')}</td><td>{e(track['status'])}</td>"
                      f"<td>{e(track['cue_count'])}</td><td dir=\"auto\">{e(track['detail'])}</td></tr>")
     parts.append("</table>")
+    if report.get("topicSegments"):
+        parts.append(f"<h2>بخش‌های موضوعی ({e(report['summary']['topicSegments'])}؛ بدون برچسب)</h2><table>"
+                     "<tr><th>بازه</th><th>منبع</th><th>جمله‌های مرکزی</th></tr>")
+        for segment in report["topicSegments"]:
+            lines = "<br>".join(f"<span dir=\"auto\">{e(line['text'])}</span>" for line in segment["lines"])
+            parts.append(f"<tr><td class=\"ltr\">{e(clock_text(segment['startMs']))} – {e(clock_text(segment['endMs']))}"
+                         f"</td><td>{e(SOURCE_FA.get(segment['source'], segment['source']))}</td><td>{lines}</td></tr>")
+        parts.append("</table>")
     if "keyframes" in report:
         parts.append("<h2>فریم‌های کلیدی (زمان)</h2><ul>")
         parts += [f"<li class=\"ltr\">{e(clock_text(f['timeMs']))}</li>" for f in report["keyframes"]]
@@ -524,6 +558,25 @@ def to_pdf(report: dict[str, Any]) -> bytes:
         else:
             doc.paragraph("فریم کلیدی‌ای نمایه نشده است.")
 
+    if report.get("topicSegments"):
+        segments = report["topicSegments"]
+        doc.heading(f"بخش‌های موضوعی ({report['summary']['topicSegments']}؛ بدون برچسب)")
+        doc.paragraph("هر بخش جمله‌های پیوستهٔ یک ترک است که معنای نزدیک دارند (بردارهای bge-m3)؛ برچسب و خلاصه ساخته "
+                      "نمی‌شود و فقط جمله‌های مرکزی خود بخش آمده است.", size=9)
+        doc.row([("بازه", 42, "rtl"), ("منبع", 24, "rtl"), ("جمله‌های مرکزی", width - 66, "rtl")], bold=True)
+        drawn = drawn_chars = 0
+        for segment in segments:
+            lines = " / ".join(_plain(line["text"], 300) for line in segment["lines"]) or "—"
+            if drawn_chars + len(lines) > MAX_PDF_TOPIC_CHARS:
+                break
+            doc.row([(f"{clock_text(segment['startMs'])}\n{clock_text(segment['endMs'])}", 42, "ltr"),
+                     (SOURCE_FA.get(segment["source"], segment["source"]), 24, "rtl"), (lines, width - 66, "auto")])
+            drawn += 1
+            drawn_chars += len(lines)
+        if report["summary"]["topicSegments"] > drawn:
+            doc.paragraph(f"{report['summary']['topicSegments'] - drawn} بخش دیگر در این PDF نیامده است؛ "
+                          "خروجی JSON همه را دارد.")
+
     if "streams" in report:
         doc.heading("جریان‌های فایل")
         doc.row([("#", 10, "rtl"), ("نوع", 25, "rtl"), ("کدک", 30, "rtl"), ("زبان", 25, "rtl"),
@@ -615,6 +668,10 @@ def preview(report: dict[str, Any]) -> dict[str, Any]:
                            for d in report["dialogue"][:PREVIEW_DIALOGUE_ROWS]]
     if "keyframes" in report:
         out["keyframes"] = report["keyframes"]
+    if report.get("topicSegments"):
+        out["topicSegments"] = [{"startMs": s["startMs"], "endMs": s["endMs"], "source": s["source"],
+                                 "lines": [_plain(line["text"], PREVIEW_TEXT_CHARS) for line in s["lines"]]}
+                                for s in report["topicSegments"][:PREVIEW_TRACKS]]
     if "scenes" in report:
         out["scenes"] = len(report["scenes"])
     return out

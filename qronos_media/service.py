@@ -365,7 +365,6 @@ class MediaService:
         read through a read-only connection; nothing is scanned, hashed or decoded.
         """
         from qronos_media import semantic
-        from qronos_media.resources import BGE_M3
         from qronos_media.search import Budget, BudgetExhausted, _evidence
 
         if not isinstance(query, str) or not query.strip() or len(query) > semantic.MAX_TEXT_CHARS:
@@ -375,33 +374,10 @@ class MediaService:
         exact = self.search_dialogue(query, mode="exact", limit=limit, language=language, asset_id=asset_id)
         block: dict[str, Any] = {"status": "unavailable", "results": [], "scoreNote": semantic.SCORE_NOTE,
                                  "queryScript": semantic.script_of(query)}
-        if self.embedder is None:
-            block["reason"] = "no bge-m3 sidecar capability in this process"
+        vector, reason = self._query_vector(query)
+        if vector is None:
+            block["reason"] = reason
             return {"query": query, "exact": exact, "semantic": block}
-        try:
-            # No owned sidecar now: refused before any reservation. Otherwise ONE generation is captured here.
-            binding = self.embedder.bind()
-        except ResourceRefused as exc:
-            block["reason"] = exc.reason
-            return {"query": query, "exact": exact, "semantic": block}
-        try:
-            lease = self.authority.reserve(f"media:semantic_query:{time.monotonic_ns()}",
-                                           StageNeeds("semantic_query", model=BGE_M3))
-        except ResourceRefused as exc:
-            block["reason"] = exc.reason
-            return {"query": query, "exact": exact, "semantic": block}
-        try:
-            if hasattr(lease, "bind_capability"):
-                lease.bind_capability(binding.capability)
-            vector = self.embedder.embed([query.strip()], timeout=semantic.QUERY_TIMEOUT_SECONDS,
-                                         on_dispatch=getattr(lease, "mark_dispatched", None), binding=binding)[0]
-        except (ResourceRefused, semantic.EmbeddingInvalid) as exc:
-            if getattr(exc, "reason", "") == "embedding_request_failed" and hasattr(lease, "mark_unresolved"):
-                lease.mark_unresolved()
-            block["reason"] = getattr(exc, "reason", "embedding_invalid")
-            return {"query": query, "exact": exact, "semantic": block}
-        finally:
-            self.authority.release(lease)  # the synchronous request has returned: drained
         try:
             db = open_read_only(self.layout.database)
         except FileNotFoundError:
@@ -430,6 +406,76 @@ class MediaService:
         finally:
             db.close()
         return {"query": query, "exact": exact, "semantic": block}
+
+    def _query_vector(self, query: str) -> tuple[bytes | None, str | None]:
+        """ONE bge-m3 query vector through the same authority as indexing (one declared model slot, the captured
+        sidecar generation, dispatch/unresolved evidence), or (None, reason) when it cannot be had now."""
+        from qronos_media import semantic
+        from qronos_media.resources import BGE_M3
+
+        if self.embedder is None:
+            return None, "no bge-m3 sidecar capability in this process"
+        try:
+            # No owned sidecar now: refused before any reservation. Otherwise ONE generation is captured here.
+            binding = self.embedder.bind()
+        except ResourceRefused as exc:
+            return None, exc.reason
+        try:
+            lease = self.authority.reserve(f"media:semantic_query:{time.monotonic_ns()}",
+                                           StageNeeds("semantic_query", model=BGE_M3))
+        except ResourceRefused as exc:
+            return None, exc.reason
+        try:
+            if hasattr(lease, "bind_capability"):
+                lease.bind_capability(binding.capability)
+            vector = self.embedder.embed([query.strip()], timeout=semantic.QUERY_TIMEOUT_SECONDS,
+                                         on_dispatch=getattr(lease, "mark_dispatched", None), binding=binding)[0]
+        except (ResourceRefused, semantic.EmbeddingInvalid) as exc:
+            if getattr(exc, "reason", "") == "embedding_request_failed" and hasattr(lease, "mark_unresolved"):
+                lease.mark_unresolved()
+            return None, getattr(exc, "reason", "embedding_invalid")
+        finally:
+            self.authority.release(lease)  # the synchronous request has returned: drained
+        return vector, None
+
+    def search_topics(self, query: str, *, limit: int = 10, language: str | None = None,
+                      asset_id: str | None = None, budget_seconds: float = 3.0) -> dict[str, Any]:
+        """Exact dialogue first (lexical, unchanged), then evidence-backed topic segments (qronos_media.topics).
+
+        One governed bge-m3 query vector; expansion and reranking use only stored vectors and indexed text, so no
+        further model call is made. Every topic hit carries its actual indexed lines and its score components."""
+        from qronos_media import semantic, topics
+        from qronos_media.search import Budget, BudgetExhausted
+
+        if not isinstance(query, str) or not query.strip() or len(query) > semantic.MAX_TEXT_CHARS:
+            raise MediaRequestError("query must be 1..1200 characters")
+        limit = max(1, min(50, int(limit)))
+        budget_seconds = max(0.2, min(10.0, float(budget_seconds)))
+        exact = self.search_dialogue(query, mode="exact", limit=limit, language=language, asset_id=asset_id)
+        block: dict[str, Any] = {"status": "unavailable", "results": [], "scoreNote": topics.SCORE_NOTE,
+                                 "queryScript": semantic.script_of(query), "expansion": {"applied": False}}
+        vector, reason = self._query_vector(query)
+        if vector is None:
+            block["reason"] = reason
+            return {"query": query, "exact": exact, "topic": block}
+        try:
+            db = open_read_only(self.layout.database)
+        except FileNotFoundError:
+            raise MediaRequestError("the media index is empty") from None
+        budget = Budget(budget_seconds, self._excluded)
+        try:
+            try:
+                found = topics.search_topics(db, query, vector, limit=limit, language=language, asset_id=asset_id,
+                                             check=budget.check)
+                for hit in found["results"]:
+                    row = db.execute("SELECT title FROM assets WHERE asset_id = ?", (hit["assetId"],)).fetchone()
+                    hit["title"] = row["title"] if row else None
+                block.update(found)
+            except BudgetExhausted as exc:
+                block.update({"status": "partial", "stoppedBy": exc.reason})
+        finally:
+            db.close()
+        return {"query": query, "exact": exact, "topic": block}
 
     def search_dialogue(self, query: str, **options: Any) -> dict[str, Any]:
         try:
