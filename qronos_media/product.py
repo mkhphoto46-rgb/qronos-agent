@@ -19,7 +19,7 @@ import re
 import threading
 from typing import Any, Callable
 
-from qronos_media.reports import FORMATS
+from qronos_media.reports import FORMATS, KINDS
 from qronos_media.stages import PENDING_CAPABILITIES, STAGES
 
 ACTION_ID = "qronos.media"
@@ -36,12 +36,12 @@ MAX_PENDING_APPROVALS = 32
 SEARCH_MODES = ("exact", "fuzzy", "semantic")
 
 #: Operations that only read (allowed while Qronos is paused). Everything else is refused while paused.
-READ_OPS = frozenset({"status", "roots.list", "search", "asset.detail", "capabilities", "decline"})
+READ_OPS = frozenset({"status", "roots.list", "search", "asset.detail", "capabilities", "decline", "report.preview"})
 OPS = frozenset({
     "status", "capabilities", "roots.list", "roots.add", "roots.remove", "scan", "index.start", "index.stop",
     "index.pause", "index.resume", "job.retry", "job.reindex", "job.cancel", "job.pause", "job.resume",
-    "asset.priority", "asset.detail", "search", "open.prepare", "report.generate", "report.export", "decide",
-    "decline",
+    "asset.priority", "asset.detail", "search", "open.prepare", "report.preview", "report.generate", "report.export",
+    "decide", "decline",
 })
 
 
@@ -86,7 +86,8 @@ def _stage(data: dict) -> str:
 def capabilities() -> dict[str, Any]:
     """Honest capability levels: implemented-unverified stages, and what is not built (never claimed)."""
     return {"capabilities": [dict(item) for item in PENDING_CAPABILITIES],
-            "stages": {name: {"level": spec.level, "version": spec.version} for name, spec in STAGES.items()}}
+            "stages": {name: {"level": spec.level, "version": spec.version} for name, spec in STAGES.items()},
+            "reports": {"formats": list(FORMATS), "kinds": list(KINDS)}}
 
 
 class MediaProduct:
@@ -161,6 +162,10 @@ class MediaProduct:
             limit = _int(data, "limit", 1, 50, default=20)
             language = _text(data, "language", 16, required=False)
             self._submit(host.query, op, lambda s: _search(s, query, mode, limit, language), done)
+            return
+        if op == "report.preview":
+            asset, kind = _asset(data), _kind(data)
+            self._submit(host.query, op, lambda s: {"ok": True, "preview": s.preview_report(asset, kind=kind)}, done)
             return
         if op == "decline":
             approval_id = self._approval_id(data)
@@ -259,17 +264,13 @@ class MediaProduct:
         return lambda s: _ok(s.prepare_open(asset, start), "open")
 
     def _report_generate(self, data: dict) -> Callable[[Any], dict[str, Any]]:
-        asset, fmt = _asset(data), data.get("format", "json")
-        if fmt not in FORMATS:
-            raise MediaOpError("bad_request", "format must be json, html or csv")
-        return lambda s: {"ok": True, "report": s.generate_report(asset, fmt=fmt)}
+        asset, fmt, kind = _asset(data), _format(data), _kind(data)
+        return lambda s: {"ok": True, "report": s.generate_report(asset, fmt=fmt, kind=kind)}
 
     def _report_export(self, data: dict) -> Callable[[Any], dict[str, Any]]:
-        asset, fmt = _asset(data), data.get("format", "json")
-        if fmt not in FORMATS:
-            raise MediaOpError("bad_request", "format must be json, html or csv")
+        asset, fmt, kind = _asset(data), _format(data), _kind(data)
         destination = _text(data, "destination", MAX_PATH_CHARS)
-        return lambda s: _ok(s.export_report(asset, destination, fmt=fmt), "export")
+        return lambda s: _ok(s.export_report(asset, destination, fmt=fmt, kind=kind), "export")
 
     @staticmethod
     def _decide(service: Any, family: str, approval_id: str, decision: str, secret: str | None) -> dict[str, Any]:
@@ -309,6 +310,20 @@ class MediaProduct:
         return result
 
 
+def _format(data: dict) -> str:
+    fmt = data.get("format", "json")
+    if fmt not in FORMATS:
+        raise MediaOpError("bad_request", f"format must be one of {', '.join(FORMATS)}")
+    return fmt
+
+
+def _kind(data: dict) -> str:
+    kind = data.get("kind", "full")
+    if kind not in KINDS:
+        raise MediaOpError("bad_request", f"kind must be one of {', '.join(KINDS)}")
+    return kind
+
+
 def _ok(result: dict[str, Any], family: str) -> dict[str, Any]:
     out = {"ok": True, **result}
     if result.get("status") == "approval_required":
@@ -332,7 +347,8 @@ def _typed_failure(error: Exception) -> dict[str, Any]:
         return {"ok": False, "code": error.reason}
     name = type(error).__name__
     if name in ("MediaRequestError", "SearchError"):
-        return {"ok": False, "code": "refused", "detail": str(error)[:200]}
+        code = "report_unavailable" if str(error).startswith("report_unavailable") else "refused"
+        return {"ok": False, "code": code, "detail": str(error)[:200]}
     return {"ok": False, "code": "internal", "detail": name}
 
 

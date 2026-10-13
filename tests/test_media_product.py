@@ -158,6 +158,11 @@ def add_and_scan(world, monkeypatch) -> str:
     ({"op": "job.retry", "requestId": "x9", "assetId": "a_" + "0" * 32, "stage": "drop_table"}, "bad_request"),
     ({"op": "open.prepare", "requestId": "y1", "assetId": "a_" + "0" * 32, "startMs": -1}, "bad_request"),
     ({"op": "report.generate", "requestId": "y2", "assetId": "a_" + "0" * 32, "format": "exe"}, "bad_request"),
+    ({"op": "report.generate", "requestId": "y5", "assetId": "a_" + "0" * 32, "format": "pdf", "kind": "summary"},
+     "bad_request"),
+    ({"op": "report.export", "requestId": "y6", "assetId": "a_" + "0" * 32, "format": "pdf", "kind": ["full"],
+      "destination": "C:\\x.pdf"}, "bad_request"),
+    ({"op": "report.preview", "requestId": "y7", "assetId": "a_" + "0" * 32, "kind": "topics"}, "bad_request"),
     ({"op": "decide", "requestId": "y3", "approvalId": "unknown-approval-id", "approved": True}, "stale_approval"),
     ({"op": "decide", "requestId": "y4", "approvalId": "short"}, "bad_request"),
 ])
@@ -319,6 +324,30 @@ def test_reports_generate_with_honest_capabilities_and_export_needs_approval(wor
     assert pending["status"] == "approval_required" and not destination.exists()
     done = ask(world, "decide", "e2", approvalId=pending["approvalId"], approved=True)
     assert done["ok"] and done["status"] == "written" and destination.exists(), done
+
+
+def test_a_pdf_report_is_generated_previewed_and_exported_through_the_same_gate(world, monkeypatch, tmp_path):
+    asset = add_and_scan(world, monkeypatch)
+    assert ask(world, "capabilities", "c1")["reports"] == {"formats": ["json", "html", "csv", "pdf"],
+                                                           "kinds": ["short", "full", "transcript", "evidence"]}
+    made = ask(world, "report.generate", "g1", assetId=asset, format="pdf", kind="transcript")
+    assert made["ok"] and made["report"]["kind"] == "transcript", made
+    assert Path(made["report"]["path"]).read_bytes().startswith(b"%PDF-")
+    world.paused[0] = True  # a preview only reads the index: allowed while paused, like search
+    view = ask(world, "report.preview", "p1", assetId=asset, kind="short")
+    world.paused[0] = False
+    assert view["ok"] and view["preview"]["kind"] == "short" and "limitations" in view["preview"], view
+    allow_everything(monkeypatch, "require_ui_confirmation", read="allow")
+    destination = tmp_path / "out" / "report.pdf"
+    destination.parent.mkdir()
+    pending = ask(world, "report.export", "e1", assetId=asset, destination=str(destination), format="pdf",
+                  kind="full")
+    assert pending["status"] == "approval_required" and not destination.exists(), pending
+    done = ask(world, "decide", "e2", approvalId=pending["approvalId"], approved=True)
+    assert done["ok"] and done["status"] == "written" and done["format"] == "pdf", done
+    assert destination.read_bytes().startswith(b"%PDF-") and done["kind"] == "full"
+    again = ask(world, "decide", "e3", approvalId=pending["approvalId"], approved=True)
+    assert again["ok"] is False and again["code"] == "stale_approval"
 
 
 def test_stop_reaches_the_same_host_and_queued_calls_are_answered(world):

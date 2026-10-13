@@ -38,7 +38,7 @@ from qronos_media.jobs import (
 )
 from qronos_media.paths import UnsafeMediaPath, has_link_component, local_path, owned_child
 from qronos_media.permissions import Approval, MediaPermissionRefused, MediaPermissions, Pending
-from qronos_media.reports import FORMATS, KINDS, gather, levels, render, write_report
+from qronos_media.reports import FORMATS, KINDS, ReportUnavailable, gather, levels, preview, render_bytes, write_report
 from qronos_media.resources import MediaResourceAuthority, ResourceRefused, StageNeeds
 from qronos_media.scope import OUT_OF_SCOPE, RootScope, mark, outside_scope, root_inside_state
 from qronos_media.scan import DEFAULT_MAX_DEPTH, apply, collect, validate_root
@@ -636,6 +636,8 @@ class MediaService:
             written = write_report(self.store.db, asset_id, kind=kind, fmt=fmt, exports_dir=exports)
         except KeyError:
             raise MediaRequestError("unknown asset") from None
+        except ReportUnavailable as exc:
+            raise MediaRequestError(f"report_unavailable: {exc}") from None
         except (ValueError, UnsafeMediaPath) as exc:
             raise MediaRequestError(str(exc)) from None
         reports = sorted((p for p in exports.glob("a_*.*") if p.is_file() and not p.is_symlink()),
@@ -643,6 +645,24 @@ class MediaService:
         for old in reports[MAX_CACHED_REPORTS:]:
             owned_child(exports, old.name).unlink(missing_ok=True)
         return written
+
+    def preview_report(self, asset_id: str, *, kind: str = "full") -> dict[str, Any]:
+        """A bounded view of the same report schema for the desktop (read-only connection, nothing written)."""
+        if kind not in KINDS:
+            raise MediaRequestError(f"kind must be one of {KINDS}")
+        try:
+            checked_asset_id(asset_id)
+            db = open_read_only(self.layout.database)
+        except FileNotFoundError:
+            raise MediaRequestError("the media index is empty") from None
+        except ValueError as exc:
+            raise MediaRequestError(str(exc)) from None
+        try:
+            return preview(gather(db, asset_id, kind))
+        except KeyError:
+            raise MediaRequestError("unknown asset") from None
+        finally:
+            db.close()
 
     def export_report(self, asset_id: str, destination: str, *, fmt: str = "json", kind: str = "full",
                       verify_seconds: float = DEFAULT_VERIFY_SECONDS,
@@ -660,9 +680,11 @@ class MediaService:
             raise MediaRequestError(f"format must be one of {FORMATS}; kind one of {KINDS}")
         target = self._export_target(destination, fmt)
         try:
-            content = render(gather(self.store.db, asset_id, kind), fmt).encode("utf-8")
+            content = render_bytes(gather(self.store.db, asset_id, kind), fmt)
         except KeyError:
             raise MediaRequestError("unknown asset") from None
+        except ReportUnavailable as exc:
+            raise MediaRequestError(f"report_unavailable: {exc}") from None
         digest = hashlib.sha256(content).hexdigest()
         decided = self.permissions.request_export(target, content, digest,
                                                   {"assetId": asset_id, "format": fmt, "kind": kind})

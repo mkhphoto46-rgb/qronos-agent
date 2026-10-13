@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "comment": "Fonts bundled for PDF reports. Third-party font software, NOT Qronos code: each file is the unmodified file of the official release named below, pinned by size and SHA-256 (qronos_media.reports refuses any other bytes, and build_support.runtime_notices attributes these files to the font and ships its licence). Replacing a file is a reviewed change; never edit a hash to match another file.",
+  "family": "Vazirmatn",
+  "version": "33.003",
+  "licence": "OFL-1.1",
+  "licenceFile": "OFL.txt",
+  "copyright": "Copyright 2015 The Vazirmatn Project Authors (https://github.com/rastikerdar/vazirmatn)",
+  "source": {
+    "release": "https://github.com/rastikerdar/vazirmatn/releases/tag/v33.003",
+    "archive": "https://github.com/rastikerdar/vazirmatn/releases/download/v33.003/vazirmatn-v33.003.zip",
+    "archiveBytes": 13047191,
+    "archiveSha256": "0a9afd41967e6f57096a56a181a23f81a2b999b62f1f2a4e4b26736580854fdb"
+  },
+  "files": [
+    {"file": "Vazirmatn-Regular.ttf", "member": "fonts/ttf/Vazirmatn-Regular.ttf", "style": "", "bytes": 122752,
+     "sha256": "b69fd4c680b8f3f225feabcc655a2c585d97627b8f5f5c0f9985e894069f3a56"},
+    {"file": "Vazirmatn-Bold.ttf", "member": "fonts/ttf/Vazirmatn-Bold.ttf", "style": "B", "bytes": 123036,
+     "sha256": "f635fdbea28f265de395ba83b4b1570dcf2f58d13c65469e61903b1c2d2ae723"},
+    {"file": "OFL.txt", "member": "OFL.txt", "style": null, "bytes": 4391,
+     "sha256": "17e355067c8284f47743a1ee3b1ef7ff684ff0601eda357f9353b10b3016ab31"}
+  ]
+}

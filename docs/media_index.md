@@ -31,8 +31,26 @@ returning empty results that look like answers.
 | 4 | Topics | **deferred**: labels would come from a brain model and no specified brain authority is wired to media; none are generated |
 | 5 | Actions and motion | **not supported**: sparse keyframes cannot establish them |
 
-Reports (JSON, HTML, CSV) are built from the index only and always include the
-asset hash, stage versions, pending capabilities and limitations.
+Reports (schema `qronos.media.report/2`; kinds short, full, transcript and
+evidence; formats JSON, HTML, CSV and PDF) are built from the index only: one
+dictionary per request, rendered in the chosen format, with no media read and
+no model call. Every report carries the asset hash and size, every file and
+whether its hash still holds, every stage with its version, state and times,
+each dialogue source (embedded or sidecar subtitles, or the unverified whisper
+transcription with its recorded model, runtime and time), the counts of what is
+indexed, what this asset does not have (never-built capabilities, and
+implemented ones that did not complete here) and limitations computed from
+what was actually indexed. No summary, topic, important-scene ranking, visual
+description or confidence is generated; the short report says so instead.
+
+The PDF is Persian and right to left, drawn with the bundled Vazirmatn 33.003
+(SIL OFL 1.1; `qronos_media/fonts`, pinned by SHA-256 in `fonts.json`, refused
+if different) and shaped by HarfBuzz through fpdf2: Persian labels, timecodes,
+hashes and identifiers in their own left-to-right cells, untrusted subtitle
+text as plain text with bidi controls removed, a header and page number on
+every page. A PDF lists at most 4,000 dialogue lines and 2,000 scenes and
+states how many it left out (JSON and CSV carry them all). HTML stays escaped;
+CSV keeps the formula guard.
 
 Lexical scores are BM25 or a similarity ratio, labelled as such. Results carry
 `"confidence": "uncalibrated"`; nothing here has been benchmarked on real films.
@@ -563,11 +581,13 @@ ONE in-process media host (`qronos_media/product.py`):
 - Transport: the registered `send_runtime_action("qronos.media", {op, requestId, ...})` (bridge stdin), answered by
   `media_result` runtime events with the same `requestId`; `media_progress` events publish index passes. No Rust
   change. The bridge routes the action before its generic pause refusal; the product refuses every non-read
-  operation while Qronos is paused (status, capabilities, roots.list, search, asset.detail and decline still answer).
+  operation while Qronos is paused (status, capabilities, roots.list, search, asset.detail, report.preview and decline still answer).
 - Operations (allow-listed, every field bounded): roots.add / roots.remove / roots.list, scan (then a continuous
   background index), index.start / stop / pause / resume, job.retry / reindex / cancel / pause / resume,
-  asset.priority, asset.detail, search (exact, fuzzy, semantic), open.prepare, report.generate (json, html, csv),
-  report.export, decide / decline.
+  asset.priority, asset.detail, search (exact, fuzzy, semantic), open.prepare, report.preview (a bounded view of
+  the same report; a read, so it also answers while paused), report.generate and report.export (format json,
+  html, csv or pdf; kind short, full, transcript or evidence), decide / decline. A PDF export goes through the
+  same write gate, single-use MEDIA_ACTION approval and typed secret as every export, on the exact PDF bytes.
 - Threads: product calls run on the host's one writer worker, between continuous index passes of at most 20 s each;
   searches run on a separate bounded query thread with read-only SQLite connections (WAL), so search answers while
   indexing. Stop drops queued calls (each is answered `stopped`); close answers everything still queued.
