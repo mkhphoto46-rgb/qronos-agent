@@ -115,6 +115,8 @@ def finalize_scan(staged: list[str], staging: Path, destination: Path) -> dict[s
             probe.verify()
         with Image.open(io.BytesIO(data)) as image:
             source_format = str(image.format or "")
+            if getattr(image, "n_frames", 1) != 1:  # e.g. a feeder's pages in one TIFF: never cut to page one
+                raise ImagingError("not_one_image", "the scanned file holds more than one page")
             if image.width * image.height > MAX_PIXELS:
                 raise ImagingError("too_large", "the image has too many pixels")
             image.load()

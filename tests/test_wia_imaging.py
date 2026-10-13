@@ -114,6 +114,27 @@ def test_anything_but_one_valid_staged_image_writes_nothing(tmp_path, monkeypatc
     assert refused.value.code == code and not destination.exists()
 
 
+def _tiff(path: Path, pages: int) -> Path:
+    first, *rest = [Image.new("RGB", (40, 30), (60 * page, 30, 30)) for page in range(pages)]
+    first.save(path, format="TIFF", save_all=True, append_images=rest)
+    return path
+
+
+def test_a_multi_page_file_is_refused_never_cut_to_its_first_page(tmp_path):
+    staging, staged = _staged(tmp_path, lambda d: _tiff(d / "qronos-scan.tif", 3))  # a feeder's pages in one TIFF
+    with Image.open(staged[0]) as made:
+        assert made.n_frames == 3
+    destination = tmp_path / "page.png"
+    with pytest.raises(ImagingError) as refused:
+        finalize_scan(staged, staging, destination)
+    assert refused.value.code == "not_one_image" and not destination.exists()
+    one = tmp_path / "one"
+    one.mkdir()
+    staging1, staged1 = _staged(one, lambda d: _tiff(d / "qronos-scan.tif", 1))  # the same format, one page
+    saved = finalize_scan(staged1, staging1, tmp_path / "page1.png")
+    assert saved["scannedFormat"] == "TIFF" and saved["format"] == "PNG" and (saved["width"], saved["height"]) == (40, 30)
+
+
 def test_staging_is_removed_only_when_it_is_ours_and_holds_no_link(tmp_path):
     ours = wia.new_staging()
     (ours / "qronos-scan.png").write_bytes(b"x")
