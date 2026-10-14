@@ -90,6 +90,7 @@ class MediaHost:
         embedder: Callable[[], Any] = lambda: None,
         brain: Callable[[], Any] = lambda: None,
         vision: Callable[[], Any] = lambda: None,
+        image_encoder: Callable[[], Any] = lambda: None,
     ) -> None:
         if not is_issued(authority):
             # A DTO, a Boolean, a flag or a home-made object is never a model authority.
@@ -103,6 +104,7 @@ class MediaHost:
         self._embedder = embedder
         self._brain = brain
         self._vision = vision
+        self._image_encoder = image_encoder
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._requests: deque[dict[str, Any]] = deque()
@@ -311,7 +313,7 @@ class MediaHost:
         factory = self._service_factory or MediaService
         self._service = factory(root, tools=self._tools(), authority=self.authority,
                                 permissions=self._permissions(), embedder=self._embedder(),
-                                brain=self._brain(), vision=self._vision())
+                                brain=self._brain(), vision=self._vision(), image_encoder=self._image_encoder())
         return self._service
 
     def _run(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -395,5 +397,15 @@ def build_bridge_media_host(
     def vision() -> Any:
         return shared_vision
 
+    from core.config import CONFIG
+    from qronos_media.image_embeddings import ImageEncoderProvider
+
+    # The declared image encoder over the separately provisioned, pinned files (never downloaded); when they are
+    # absent it reports "image_encoder_not_provisioned" and nothing is loaded.
+    shared_image_encoder = ImageEncoderProvider(CONFIG.paths.runtime_assets)
+
+    def image_encoder() -> Any:
+        return shared_image_encoder
+
     return MediaHost(authority, data_dir=default_data_dir, tools=tools_from_environment, permissions=permissions,
-                     embedder=embedder, brain=brain, vision=vision)
+                     embedder=embedder, brain=brain, vision=vision, image_encoder=image_encoder)

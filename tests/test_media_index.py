@@ -478,7 +478,7 @@ def test_status_lists_pending_capabilities_honestly(tmp_path: Path, base_video: 
     service, _, _ = _indexed(tmp_path, base_video)
     status = service.status()
     pending = {item["capability"]: item["status"] for item in status["pending"]}
-    assert pending["visual_embeddings"] == "decision_pending"
+    assert pending["visual_embeddings"] == "implemented_unverified"  # SigLIP 2 frame vectors (round 79)
     assert pending["actions_motion"] == "not_supported" and pending["asr"] == "implemented_unverified"
     assert pending["semantic_dialogue"] == "implemented_unverified" and pending["topics"] == "implemented_unverified"
     assert status["stages"]["keyframes"] == {"COMPLETED": 1} and status["toolsAvailable"]

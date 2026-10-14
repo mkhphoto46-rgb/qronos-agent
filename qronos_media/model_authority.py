@@ -100,6 +100,28 @@ class ModelLease:
         # The memory-sidecar generation (its immutable lifecycle capability) this slot's work was bound to. Only
         # THAT capability's whole-tree proof frees the slot; a later generation never answers for it.
         self.capability: object | None = None
+        # In-process sessions (served_by "in_process") opened under this lease and not yet closed.
+        self.sessions = 0
+
+    # ---- in-process sessions (qronos_media.image_embeddings)
+
+    def open_session(self) -> None:
+        """Counted before a session is created: a slot with an open session is never freed."""
+        reason = self._authority.yield_reason()
+        with self._lock:
+            if self.closed:
+                raise ResourceRefused("lease_released", self.task_id)
+            if reason is not None:
+                raise ResourceRefused(reason, self.task_id)
+            self.sessions += 1
+        self._authority._event("session_open", self.task_id)
+
+    def close_session(self) -> None:
+        """The session and every reference this module held to it are gone."""
+        with self._lock:
+            self.sessions = max(0, self.sessions - 1)
+        self._authority._event("session_closed", self.task_id)
+        self._authority._after_child(self)
 
     # ---- SpawnObserver (called by run_bounded)
 
@@ -428,6 +450,13 @@ class HostedModelAuthority:
                 if lease.spec.served_by == "brain_runtime":
                     self._reconcile_slot(lease.spec.name)  # usually already unloaded (keep_alive "0" + stop_model)
                 return
+            if lease.spec.served_by == "in_process":
+                # The sessions live in this process: freed once every session opened under the lease is closed.
+                self._reconcile_slot(lease.spec.name)
+                if self._slots.get(lease.spec.name) is lease:
+                    lease.state = "session_open"
+                    self._event("session_open_at_release", lease.task_id, sessions=lease.sessions)
+                return
             self._try_free(lease, teardown=True)
 
     # ---- proof and freeing
@@ -442,6 +471,10 @@ class HostedModelAuthority:
     def _reconcile_slot(self, name: str) -> None:
         slot = self._slots.get(name)
         if slot is None or not slot.closed:
+            return
+        if slot.spec.served_by == "in_process":
+            if slot.sessions == 0:
+                self._free(slot, proof="sessions_closed")
             return
         if slot.spec.served_by == "brain_runtime":
             # Only the bound runtime's own model list decides (qronos_media.vision_gateway.RuntimeResidency). A model
@@ -480,7 +513,10 @@ class HostedModelAuthority:
         if lease.closed:
             with self._lock:
                 if self._slots.get(lease.spec.name) is lease:
-                    self._try_free(lease, teardown=False)
+                    if lease.spec.served_by == "in_process":
+                        self._reconcile_slot(lease.spec.name)
+                    else:
+                        self._try_free(lease, teardown=False)
 
     def _try_free(self, lease: ModelLease, *, teardown: bool) -> bool:
         if lease.outstanding(teardown=teardown):

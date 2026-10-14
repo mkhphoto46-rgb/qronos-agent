@@ -63,7 +63,8 @@ class ModelSpec:
     executable: ModelAsset | None = None   # file-provisioned models (whisper.cpp)
     weights: ModelAsset | None = None
     weight: str = "heavy"           # governor weight: "heavy" (GPU-capable, one owner) or "light" (CPU)
-    served_by: str = "file"         # "file" (a contained child) or "memory_sidecar" (the existing CPU sidecar)
+    served_by: str = "file"         # "file" (a contained child), "memory_sidecar" (the existing CPU sidecar),
+                                    # "brain_runtime" (the runtime's Vision) or "in_process" (CPU sessions here)
     dimension: int = 0              # embedding models: the exact vector length
     companions: tuple[ModelAsset, ...] = ()   # libraries the executable loads, verified with it
     runtime: str = ""               # the pinned runtime build, for provenance
@@ -133,7 +134,33 @@ QWEN3_VL_4B = ModelSpec(
     runtime="the runtime's configured Vision profile (ollama)",
 )
 
-DECLARED_MODELS: tuple[ModelSpec, ...] = (WHISPER_LARGE_V3_TURBO_Q5_0, BGE_M3, QWEN3_VL_4B)
+#: The added IMAGE encoder (qronos_media.image_embeddings): SigLIP 2 base, patch 16, 224 px (google/siglip2-base-patch16-224,
+#: Apache-2.0; revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2), its int8 ONNX image and text towers from
+#: onnx-community/siglip2-base-patch16-224-ONNX at revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4 plus that
+#: revision's SentencePiece model. Sizes and SHA-256 are the publisher's Hugging Face LFS identities. Run in this process
+#: by onnxruntime on the CPU only, never on the GPU; provisioned separately, never downloaded by Qronos or bundled. It
+#: replaces no existing model. RAM is a declared conservative allowance for the two int8 graphs and their sessions
+#: (not measured).
+_SIGLIP2 = ("models", "siglip2-base-patch16-224")
+SIGLIP2_BASE_224_INT8 = ModelSpec(
+    name="siglip2-base-patch16-224 int8 onnx",
+    vram_mb=0,
+    ram_mb=1536,
+    weight="light",
+    served_by="in_process",
+    dimension=768,
+    weights=ModelAsset(_SIGLIP2 + ("vision_model_quantized.onnx",), 94_553_333,
+                       "5f2b401c1a4fc095702a5d45348e17ad46c4f87064085365b43c6e8eaa5c0070"),
+    companions=(
+        ModelAsset(_SIGLIP2 + ("text_model_quantized.onnx",), 283_438_275,
+                   "3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400"),
+        ModelAsset(_SIGLIP2 + ("tokenizer.model",), 4_241_003,
+                   "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"),
+    ),
+    runtime="onnxruntime 1.29.0 CPUExecutionProvider (in process)",
+)
+
+DECLARED_MODELS: tuple[ModelSpec, ...] = (WHISPER_LARGE_V3_TURBO_Q5_0, BGE_M3, QWEN3_VL_4B, SIGLIP2_BASE_224_INT8)
 
 
 def is_declared(model: object) -> bool:

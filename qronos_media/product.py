@@ -379,7 +379,7 @@ def _multimodal(data: dict) -> Callable[[Any], dict[str, Any]]:
         dialogue_match = data.get("dialogueMatch", "exact")
         visual_match = data.get("visualMatch", "lexical")
         if dialogue_match not in multimodal.DIALOGUE_MATCHES or visual_match not in multimodal.VISUAL_MATCHES:
-            raise MediaOpError("bad_request", "dialogueMatch is exact, fuzzy or semantic; visualMatch lexical or semantic")
+            raise MediaOpError("bad_request", "dialogueMatch is exact, fuzzy or semantic; visualMatch lexical, semantic or image")
         if "query" in data:
             raise MediaOpError("bad_request", "send either the two constraints or one query to split, not both")
         limit = _int(data, "limit", 1, 50, default=20)

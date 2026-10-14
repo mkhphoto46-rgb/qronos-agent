@@ -29,7 +29,7 @@ like answers.
 | 2 | Topic search (stage `topics`: segments of one track's dialogue grouped by their stored bge-m3 vectors; evidence-backed hits, selective pseudo-relevance expansion, bounded rerank) | **implemented, unverified**: segments are built without a model call; a query needs the memory sidecar; every hit carries its indexed lines; hints are search hints, not facts; the rank score is uncalibrated; optional Fast-brain query hints (below) only add candidates |
 | 3 | Shot boundaries (`scdet`, chunked and checkpointed) and adaptive keyframes under a cache quota | done |
 | 3 | Cross-language retrieval over generated visual TEXT (stage `visual_semantic`, round 56) | **implemented, unverified**: the fixed bge-m3 text vectors of the stored captions/text read/observations, through the existing memory sidecar lease; never image similarity; uncalibrated; no real-model run accepted |
-| 3 | Visual embeddings | **decision pending**: no joint image–text embedding backend is specified |
+| 3 | Image similarity of the frames themselves (stage `image_embeddings`, round 79, schema 8) | **implemented, unverified**: SigLIP 2 base (Apache-2.0) int8 ONNX image and text towers in one space, in process on the CPU (onnxruntime, already pinned), only inside the runtime and only when its three pinned files are provisioned (never downloaded or bundled); uncalibrated cosines, never an identification; tokenizer parity, quality (Persian included) and timing unmeasured; no real-model run accepted |
 | 4 | Frame captions, text read in the frame, visible observations (stage `visual_evidence`, round 52) | **implemented, unverified**: the runtime's configured Vision profile through the existing brain runtime under the declared Vision model lease, at most 24 stored keyframes per asset; generated, unverified model text with the frame time and SHA-256; searched lexically as a separate channel; no real-model run accepted |
 | 4 | OCR | **pending**: no OCR engine is specified; the Vision model's reading of visible text is model text, not OCR |
 | 5 | Speaker turns | **pending** |
@@ -748,6 +748,64 @@ change requeues it), `MediaService.search_semantic`.
   still decision-pending. Cross-language quality is unmeasured: fixture vectors
   prove contracts only.
 
+## Image similarity: real frame vectors (round 79, schema 8)
+
+- **Encoder (an ADDED model; no existing model changes):** `google/siglip2-base-patch16-224` (SigLIP 2, FixRes 224,
+  Apache-2.0, revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2) as the int8 ONNX export of
+  `onnx-community/siglip2-base-patch16-224-ONNX` at revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4:
+  `vision_model_quantized.onnx` (94,553,333 B), `text_model_quantized.onnx` (283,438,275 B) and `tokenizer.model`
+  (4,241,003 B), each pinned by the publisher's Hugging Face LFS SHA-256 (`qronos_media.resources.SIGLIP2_BASE_224_INT8`,
+  `build_support/runtime_assets.json`: status `missing` until an approved acquisition is re-hashed equal to the pin).
+  The conversion repository states no licence of its own (licence review). Its text tower is multilingual (Gemma
+  tokenizer), so a Persian query has a real path; its quality is unmeasured. The final backend stays benchmark-gated
+  (handoff s48): a labelled `visual` dataset scored by `qronos_media.benchmark retrieval` decides, not this round.
+- **Where the files live:** `<RuntimeAssets>/runtime/models/siglip2-base-patch16-224/` (read-only preflight group
+  `imageSearch`, optional). Qronos never downloads them, the installer never contains them, and nothing else is read:
+  each file is read once into memory, checked by size and SHA-256, and only those verified bytes reach onnxruntime
+  (no path, so no external data or custom-op library can be loaded beside it).
+- **Runtime:** onnxruntime 1.29.0 (already a pinned requirement), `CPUExecutionProvider` only (never GPU or the Azure
+  provider), 2 intra-op threads, 1 inter-op, sequential; numpy and Pillow for preprocessing; a pure-Python SentencePiece
+  reader (BPE by piece score, byte fallback, identity normaliser; anything else is refused). No tokenizers,
+  sentencepiece, torch or transformers package, no remote code, no network.
+- **Resources:** a declared light, CPU-only model (`served_by` `in_process`, VRAM 0, RAM 1536 MB declared, not
+  measured) under the runtime-issued HostedModelAuthority's one slot. Sessions are counted on the lease BEFORE they
+  are created; a slot with a session open is never freed (`session_open`), and the towers drop every reference on
+  close. Only the image tower is opened for indexing, only the text tower for a query. Media's other yield rules apply
+  (foreground turn, Pause, Stop, gaming/creator modes, pressure).
+- **Stage `image_embeddings`** (version 1, after `keyframes`, independent of Vision): each stored keyframe is read
+  through the same verified cache read as Vision (`_frame_bytes`), hashed, and - only if no vector exists for that
+  frame SHA-256 under the CURRENT fingerprint - preprocessed exactly as the pinned processor (bilinear 224x224, rescale
+  1/255, mean/std 0.5, RGB, NCHW float32; JPEG/PNG only, bounded size) and embedded in batches of at most 8. Vectors
+  (unit float32, 768) and the checkpoint are written in one transaction (`image_vector_cache`), so a Pause/Stop/crash
+  resumes without embedding a stored frame again, and an unchanged asset loads no model at all. The commit maps each
+  keyframe to its vector (`image_embeddings`, with provenance: frame SHA-256/bytes/time/scene/ordinal, model,
+  revisions, licence, fingerprint); a replaced or deleted keyframe takes its row with it (FK). Not provisioned /
+  mismatching files: `unavailable:<reason>`, no slot reserved, never COMPLETED; every other stage is unaffected.
+- **Fingerprint:** model, export revision, the three file SHA-256s, the preprocessing and tokenizer versions, image size
+  and token length. Search reads only vectors of the current fingerprint; a stored vector of the wrong length, a
+  non-finite value or a non-unit norm is counted as `corrupt` and never ranked.
+- **Query** (mode `visual`, block `visual.image`, its own status and reason): ONE text-tower vector of the lowercased
+  query (64 tokens, EOS, pad) and a bounded chunked cosine scan (50,000 rows, the search budget; scope and fingerprint
+  filtered in SQL, joined to the keyframe still stored). Each hit carries the frame time, SHA-256, scene/ordinal, the
+  title, the uncalibrated `imageSimilarity`, channel `image`, the dialogue overlapping its time (joined by time only),
+  and the Vision caption of the SAME frame only if one is stored (labelled generated/unverified). Reasons:
+  `image_encoder_unavailable` (no encoder in this process, e.g. the standalone tool), `no_image_vectors` (with the
+  encoder's own state), `image_encoder_not_provisioned` / `_mismatch` / `_asset_refused` / `_contract`,
+  `model_busy` / `session_open` (the slot is indexing), `image_encoder_answer_rejected`. The caption channels
+  (lexical, bge-m3 text) are unchanged and still answer when the image channel cannot.
+- **Multimodal** `visualMatch: "image"`: the lexical caption frames plus the 30 frames of the current scope most similar
+  to the visual constraint by image similarity (rank only, no threshold; `IMAGE_NOTE`), fused by time exactly as
+  before. Without the encoder or its vectors the channel says why, the answer is `partial` with
+  `visual_image_unavailable`, and only caption frames are used. Search-result reports keep the `image` label and
+  similarity; the recheck drops a frame that is no longer embedded under the current fingerprint with that SHA-256.
+- **Surfaces:** the Persian panel shows «شباهت تصویری فریم‌ها (بردار تصویر خود فریم با بردار متن پرسش؛ SigLIP 2،
+  کالیبره‌نشده، نه شناسایی)» as its own list, the multimodal option «شباهت تصویری خود فریم‌ها», and the reasons
+  above in Persian; asset reports add `keyframesImageEmbedded` and the limitation `image_similarity_uncalibrated`;
+  capabilities list `visual_embeddings` as implemented-unverified.
+- **Not proven here:** the real files have not been acquired; the ONNX input/output names, the 768 output, tokenizer
+  parity with the official tokenizer, int8 vs fp32 quality, latency and RAM are pending a real-model run. Fixture
+  sessions prove the contracts only.
+
 ## Multimodal search: dialogue + visual, fused by time (round 63)
 
 `search` with `mode: "multimodal"` (`qronos_media/multimodal.py`, `MediaService.search_multimodal`) answers a request
@@ -756,7 +814,8 @@ line AND a matching frame in the SAME current asset, the frame time inside [line
 It is not an OR of two channels and not "both somewhere in the same file".
 
 - **Two independent constraints:** `dialogue` and `visual` (each 1..300 characters, at most 16 search words),
-  `windowMs` 0..120000 (default 15000), `dialogueMatch` exact | fuzzy | semantic, `visualMatch` lexical | semantic,
+  `windowMs` 0..120000 (default 15000), `dialogueMatch` exact | fuzzy | semantic, `visualMatch` lexical | semantic |
+  image (round 79, above),
   `limit` 1..50. Explicit constraints need no model. Sending only `query` asks for a PROPOSED split (below); a
   request with both forms, one constraint only or out-of-range values is refused as `bad_request`.
 - **Evidence (stored, nothing analysed at query time):** dialogue lines from subtitles/ASR through the same exact or
@@ -780,7 +839,8 @@ It is not an OR of two channels and not "both somewhere in the same file".
 - **Honest states:** `outcome` matched | same_asset_outside_window | different_assets | only_dialogue | only_visual |
   neither; `status` complete | partial (a cap, the budget, or a requested semantic channel that could not run: its
   reason is given and the lexical fusion still answers) | unavailable (`no_visual_evidence`, `no_visual_index`,
-  `no_dialogue`). `absent` says speaker turns, OCR and an image encoder are not built and were not used.
+  `no_dialogue`). `absent` says speaker turns and OCR are not built and, unless `visualMatch` is image, that the image
+  encoder was not used.
 - **A natural request:** `{mode: "multimodal", query}` returns `interpretation`, never results. The person's own
   labels ("dialogue: ... ; visual: ..." / «گفتگو: ... / تصویر: ...») split without any model. Otherwise ONE call to
   the runtime's governed Fast brain (its activity/resource admission, generation binding and foreground rule; no
@@ -868,7 +928,7 @@ ONE in-process media host (`qronos_media/product.py`):
 Done in this chunk (leased): `qronos_media` is in `PRODUCT_PACKAGES` (offline
 policy and release hygiene), collected by `build_runtime`, a project root for
 notices; the bridge hosts the media worker (above); `core/update_stores.py`
-registers `media_index` (schema 7 since the semantic visual channel, reads schema 1, never snapshotted, so an
+registers `media_index` (schema 8 since the frame image vectors, reads schema 1, never snapshotted, so an
 update that changes its format is refused: a release compatibility gate, not
 rollback support).
 
@@ -884,12 +944,15 @@ Still open:
 2. Done as pins (round 37): whisper.cpp v1.9.5 and the LGPL protocol-free
    FFmpeg 9.0.2 are pinned and admitted only when exact; provisioning them into
    `<RuntimeAssets>/runtime/` is a separate step (nothing installed by this code).
-3. OCR, an image encoder (visual embeddings), subtitle/ASR fusion and the other
-   pending capabilities listed by `PENDING_CAPABILITIES`: later chunks, under the
-   same authority (an image encoder is a model-selection/benchmark decision).
-4. Registry: `core/update_stores.py` declares `media_index` version 7 with the
-   schema-7 layout fingerprint (round 56; 6 in round 52; 4 and 5 were repaired in
-   round 49), and the registry node checks it.
+3. OCR, subtitle/ASR fusion and the other pending capabilities listed by
+   `PENDING_CAPABILITIES`: later chunks, under the same authority. The image
+   encoder (round 79) is implemented but its files are not acquired and its
+   quality is benchmark-gated.
+4. Registry: `core/update_stores.py` declares `media_index` version 8 with the
+   schema-8 layout fingerprint (round 79; 7 in round 56; 6 in round 52; 4 and 5
+   were repaired in round 49), and the registry node checks it. Like every format
+   change, an in-place upgrade from a schema-7 build is refused by the updater
+   (`unsupported_migration`) until the media index can be kept as a safe copy.
 5. No real Fast-brain or Vision run of labels, hints or visual evidence has been
    accepted; their quality is unmeasured.
 6. Multimodal search (round 63) fuses only stored dialogue and generated frame

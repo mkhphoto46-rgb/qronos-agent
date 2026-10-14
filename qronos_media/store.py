@@ -49,6 +49,12 @@ Schema 7 adds the semantic visual channel. ``visual_semantic`` maps each describ
 to the ``semantic_cache`` vector of its generated TEXT (bge-m3; never the image); it references its visual row
 (deleted with it) and is written only in the "visual_semantic" stage's result+COMPLETED transaction. The schema-6
 to 7 step only adds a table.
+
+Schema 8 adds REAL frame vectors (qronos_media.image_embeddings: the image tower of the declared encoder over the
+stored keyframe's pixels). image_vector_cache holds one unit float32 vector per (model fingerprint, frame SHA-256),
+written with the stage checkpoint so an interrupted run resumes; image_embeddings maps each stored keyframe to its
+vector by that SHA-256 and fingerprint, references its keyframe (deleted with it) and is written only in the
+"image_embeddings" stage's result+COMPLETED transaction. The schema-7 to 8 step only adds tables.
 """
 from __future__ import annotations
 
@@ -57,7 +63,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -313,6 +319,29 @@ CREATE TABLE IF NOT EXISTS visual_semantic (
     FOREIGN KEY (asset_id, scene_index, ordinal) REFERENCES visual_evidence(asset_id, scene_index, ordinal)
         ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS image_vector_cache (
+    fingerprint TEXT NOT NULL,
+    frame_sha256 TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (fingerprint, frame_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS image_embeddings (
+    asset_id TEXT NOT NULL,
+    scene_index INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    time_ms INTEGER NOT NULL,
+    frame_sha256 TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    PRIMARY KEY (asset_id, scene_index, ordinal),
+    FOREIGN KEY (asset_id, scene_index, ordinal) REFERENCES keyframes(asset_id, scene_index, ordinal)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS image_embeddings_by_fingerprint ON image_embeddings(fingerprint, asset_id);
 
 CREATE TABLE IF NOT EXISTS stages (
     asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,

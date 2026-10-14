@@ -115,6 +115,7 @@ class MediaService:
         embedder: object = None,
         brain: object = None,
         vision: object = None,
+        image_encoder: object = None,
     ) -> None:
         self.layout = MediaLayout(local_path(data_dir))
         if admit_store is not None:
@@ -141,6 +142,8 @@ class MediaService:
         self.brain = brain
         # The runtime's Vision gateway (qronos_media.vision_gateway) or None: visual evidence stays unavailable.
         self.vision = vision
+        # The runtime's image encoder (qronos_media.image_embeddings.ImageEncoderProvider) or None: no image channel.
+        self.image_encoder = image_encoder
         # resultId -> (monotonic time, snapshot): the exact answers this process gave, bounded and expiring.
         self._search_snapshots: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
         self._search_snapshot_lock = threading.Lock()
@@ -149,7 +152,7 @@ class MediaService:
         return StageRunner(self.store, tools=self.tools, authority=self.authority, permissions=self.permissions,
                            cache_dir=self.layout.cache, cache_quota_bytes=self.cache_quota_bytes,
                            excluded=self._excluded, monotonic=self._monotonic, embedder=self.embedder,
-                           brain=self.brain, vision=self.vision)
+                           brain=self.brain, vision=self.vision, image_encoder=self.image_encoder)
 
     def close(self) -> None:
         self.store.close()
@@ -559,7 +562,12 @@ class MediaService:
         then - only when text vectors exist - the semantic channel: ONE governed bge-m3 query vector against the stored
         vectors of that same generated TEXT (never the image), its hits appended after the lexical ones. Each hit
         says its channels, carries its frame time and SHA-256 and the dialogue lines that overlap that time (joined
-        by time, not by meaning). No Vision or other model call is made; no image embedding exists."""
+        by time, not by meaning). No Vision model call is made.
+
+        Separately (``visual.image``, its own status and reason): image similarity - ONE governed text-tower vector of
+        the query against the stored SigLIP 2 IMAGE vectors of the keyframes (qronos_media.image_embeddings). It needs
+        no caption, so it answers for frames Vision never described; when the encoder or its vectors are missing it
+        says so and the caption channels above are unchanged."""
         from qronos_media import semantic, visual_evidence
         from qronos_media.text import normalise_for_search
 
@@ -589,8 +597,10 @@ class MediaService:
                 return {"query": query, "exact": exact, "visual": block}
             if not indexed:
                 block.update({"status": "unavailable", "reason": "no_visual_evidence"})
+                block["image"] = self._image_channel(db, query, limit, asset_id, budget_seconds)
                 return {"query": query, "exact": exact, "visual": block}
             if not tokens:
+                block["image"] = self._image_channel(db, query, limit, asset_id, budget_seconds)
                 return {"query": query, "exact": exact, "visual": block}
             match = " ".join('"' + token.replace('"', '""') + '"' for token in tokens[:16])
             clauses, params = "", [match]
@@ -613,6 +623,7 @@ class MediaService:
             block["semantic"] = self._visual_semantic(db, query, limit, asset_id, budget_seconds, block["results"])
             for hit in block["results"]:
                 hit.pop("rowId", None)
+            block["image"] = self._image_channel(db, query, limit, asset_id, budget_seconds)
         finally:
             db.close()
         return {"query": query, "exact": exact, "visual": block}
@@ -669,6 +680,64 @@ class MediaService:
                         "added": added, "model": visual_evidence.semantic_provenance_model()})
         return channel
 
+    def _image_channel(self, db: sqlite3.Connection, query: str, limit: int, asset_id: str | None,
+                       budget_seconds: float) -> dict[str, Any]:
+        """The image-similarity channel of the visual search: its own status/reason and its own hits."""
+        from qronos_media import image_embeddings
+        from qronos_media.search import Budget, BudgetExhausted
+
+        channel: dict[str, Any] = {"status": "unavailable", "results": [], "method": image_embeddings.METHOD,
+                                   "scoreNote": image_embeddings.SCORE_NOTE}
+        if self.image_encoder is None:
+            channel["reason"] = "image_encoder_unavailable"
+            return channel
+        # In the CURRENT scope (and asset filter) and of the CURRENT fingerprint, before any query vector is asked for.
+        if not image_embeddings.indexed_count(db, asset_id):
+            channel["reason"] = "no_image_vectors"
+            encoder = self.image_encoder.unavailable_reason()
+            channel["encoder"] = encoder or "provisioned"
+            return channel
+        vector, reason = self._image_query_vector(query)  # ONE governed text-tower call
+        if vector is None:
+            channel["reason"] = reason  # the caption channels above still stand
+            return channel
+        try:
+            found, scan = image_embeddings.image_candidates(db, vector, limit=limit, asset_id=asset_id,
+                                                            check=Budget(budget_seconds, self._excluded).check)
+        except BudgetExhausted as exc:
+            channel.update({"status": "partial", "stoppedBy": exc.reason})
+            return channel
+        channel.update({"status": "partial" if scan["truncated"] else "complete",
+                        "results": [image_embeddings.frame_hit(db, item) for item in found],
+                        "scanned": scan["scanned"], "corrupt": scan["corrupt"],
+                        "model": image_embeddings.model_provenance()})
+        return channel
+
+    def _image_query_vector(self, query: str) -> tuple[bytes | None, str | None]:
+        """ONE text-tower vector of the declared image encoder under its declared model slot, or (None, reason)."""
+        from qronos_media import image_embeddings
+        from qronos_media.resources import SIGLIP2_BASE_224_INT8
+
+        if self.image_encoder is None:
+            return None, "image_encoder_unavailable"
+        missing = self.image_encoder.unavailable_reason()
+        if missing is not None:
+            return None, missing
+        try:
+            lease = self.authority.reserve(f"media:image_query:{time.monotonic_ns()}",
+                                           StageNeeds("image_query", model=SIGLIP2_BASE_224_INT8))
+        except ResourceRefused as exc:
+            return None, exc.reason
+        try:
+            with self.image_encoder.open(lease, text=True) as encoder:
+                return encoder.encode_query(query), None
+        except ResourceRefused as exc:
+            return None, exc.reason
+        except (image_embeddings.EncoderOutputInvalid, ValueError):
+            return None, "image_encoder_answer_rejected"
+        finally:
+            self.authority.release(lease)  # every session opened above is closed: the slot is freed
+
     def search_multimodal(self, dialogue: str, visual: str, *, window_ms: int = 15_000, dialogue_match: str = "exact",
                           visual_match: str = "lexical", limit: int = 10, budget_seconds: float = 4.0) -> dict[str, Any]:
         """A dialogue constraint AND a visual constraint, fused by time in the same current asset (qronos_media.multimodal).
@@ -692,8 +761,11 @@ class MediaService:
             "dialogueChannel": {"lexical": "fuzzy" if spec.dialogue_match == "fuzzy" else "exact",
                                 "semantic": {"requested": spec.dialogue_match == "semantic", "status": "not_requested"}},
             "visualChannel": {"lexical": "every word in the generated frame text (Vision model, unverified, not OCR)",
-                              "semantic": {"requested": spec.visual_match == "semantic", "status": "not_requested"}},
-            "absent": {"speakerTurns": "not built", "ocr": "not built", "imageEncoder": "not built (no image similarity)"},
+                              "semantic": {"requested": spec.visual_match == "semantic", "status": "not_requested"},
+                              "image": {"requested": spec.visual_match == "image", "status": "not_requested"}},
+            "absent": {"speakerTurns": "not built", "ocr": "not built",
+                       **({} if spec.visual_match == "image"
+                          else {"imageEncoder": "not used in this search (visualMatch \"image\" uses it)"})},
         }
         try:
             db = open_read_only(self.layout.database)
@@ -739,7 +811,7 @@ class MediaService:
         """The report of ONE held multimodal answer, rechecked NOW: every hit's asset must still be in the current
         scope, carried by a root the Files gate allows now, and its line and frames must still be stored as they were
         (frames by time and SHA-256). Anything else is removed and counted. Nothing is searched again."""
-        from qronos_media import multimodal, search_report
+        from qronos_media import image_embeddings, multimodal, search_report
 
         snap = self._search_snapshot(result_id)
         try:
@@ -778,13 +850,18 @@ class MediaService:
                 stored = any(search_report.held_dialogue_text(r["text"]) == line["text"] for r in texts)
                 frames = []
                 for frame in hit["frames"]:
+                    if "image" in frame["channels"] and not image_embeddings.current_row(
+                            db, asset_id, frame["timeMs"], frame["frameSha256"]):
+                        continue  # no longer embedded as it was (frame changed, re-embedded under another model)
                     rows = db.execute(
                         "SELECT caption, visible_text_json, observations_json FROM visual_evidence WHERE asset_id = ? "
                         "AND time_ms = ? AND frame_sha256 = ? AND status = 'described'",
                         (asset_id, frame["timeMs"], frame["frameSha256"])).fetchall()
                     # The same frame described again says something else: the held text is no longer the index's.
                     held = {key: frame[key] for key in ("caption", "visibleText", "observations")}
-                    if any(search_report.held_frame_text(
+                    if frame["channels"] == ["image"] and held == search_report.held_frame_text(None, [], []):
+                        frames.append(frame)  # image-only, no caption held: the embedding row above is the evidence
+                    elif any(search_report.held_frame_text(
                             r["caption"], json.loads(r["visible_text_json"]) if r["visible_text_json"] else [],
                             json.loads(r["observations_json"]) if r["observations_json"] else []) == held for r in rows):
                         frames.append(frame)
@@ -846,7 +923,7 @@ class MediaService:
 
     def _multimodal_into(self, db: sqlite3.Connection, spec: Any, limit: int, budget_seconds: float,
                          block: dict[str, Any]) -> None:
-        from qronos_media import multimodal, semantic, visual_evidence
+        from qronos_media import image_embeddings, multimodal, semantic, visual_evidence
         from qronos_media.search import Budget, BudgetExhausted, search_dialogue as dialogue_search
 
         scope = multimodal.in_scope
@@ -858,9 +935,25 @@ class MediaService:
             return
         lines_in_scope = db.execute("SELECT COUNT(*) FROM dialogue d WHERE d.kind = 'cue' AND " + scope("d")).fetchone()[0]
         block["scope"] = {"dialogueLines": lines_in_scope, "describedFrames": frames_in_scope}
-        if not frames_in_scope or not lines_in_scope:
-            block.update({"status": "unavailable", "reason": "no_visual_evidence" if not frames_in_scope else "no_dialogue"})
+        image_frames = 0
+        if spec.visual_match == "image":
+            image_frames = image_embeddings.indexed_count(db, None)  # current fingerprint, current scope
+            block["scope"]["imageFrames"] = image_frames
+        if not (frames_in_scope or image_frames) or not lines_in_scope:
+            block.update({"status": "unavailable",
+                          "reason": "no_visual_evidence" if not (frames_in_scope or image_frames) else "no_dialogue"})
             return
+        image_vector: bytes | None = None
+        if spec.visual_match == "image":
+            image_block = block["visualChannel"]["image"]
+            if self.image_encoder is None:
+                image_block.update({"status": "unavailable", "reason": "image_encoder_unavailable"})
+            elif not image_frames:
+                image_block.update({"status": "unavailable", "reason": "no_image_vectors"})
+            else:
+                image_vector, reason = self._image_query_vector(spec.visual)  # ONE governed text-tower call
+                if image_vector is None:
+                    image_block.update({"status": "unavailable", "reason": reason})
         wanted: list[tuple[str, str]] = []
         for channel, table, alias, asked, text in (
                 ("dialogue", "semantic_windows", "w", spec.dialogue_match == "semantic", spec.dialogue),
@@ -927,6 +1020,24 @@ class MediaService:
                         "considered": multimodal.MAX_SEMANTIC_VISUAL, "minCosine": multimodal.MIN_SEMANTIC_COSINE,
                         "matched": len(found), "note": multimodal.SEMANTIC_NOTE,
                         "model": visual_evidence.semantic_provenance_model()})
+                if image_vector is not None:
+                    found, scan = image_embeddings.image_candidates(
+                        db, image_vector, limit=multimodal.MAX_IMAGE_VISUAL, asset_id=None, check=budget.check)
+                    by_frame = {(hit["assetId"], hit["sceneIndex"], hit["ordinal"]): hit for hit in frames}
+                    offset = len(frames)
+                    for position, item in enumerate(found, 1):
+                        hit = by_frame.get((item["assetId"], item["sceneIndex"], item["ordinal"]))
+                        if hit is not None and hit["frameSha256"] == item["frameSha256"]:
+                            hit["channels"].append("image")
+                            hit["imageSimilarity"] = item["similarity"]
+                            continue
+                        hit = image_embeddings.frame_hit(db, item, dialogue=False)
+                        hit["rank"] = offset + position
+                        frames.append(hit)
+                    block["visualChannel"]["image"].update({
+                        "status": "partial" if scan["truncated"] else "complete", "scanned": scan["scanned"],
+                        "corrupt": scan["corrupt"], "considered": multimodal.MAX_IMAGE_VISUAL, "matched": len(found),
+                        "note": multimodal.IMAGE_NOTE, "model": image_embeddings.model_provenance()})
                 assets: list[str] = []
                 for hit in sorted(frames, key=lambda h: h["rank"]):
                     if hit["assetId"] not in assets:
@@ -1026,9 +1137,14 @@ class MediaService:
         unavailable = [name for name in ("dialogue", "visual")
                        if block[f"{name}Channel"]["semantic"]["requested"]
                        and block[f"{name}Channel"]["semantic"]["status"] == "unavailable"]
-        if block["status"] == "complete" and (unavailable or set(notes) - {"results_cut_at_limit"}):
+        image_unavailable = (block["visualChannel"]["image"]["requested"]
+                             and block["visualChannel"]["image"]["status"] == "unavailable")
+        if block["status"] == "complete" and (unavailable or image_unavailable
+                                              or set(notes) - {"results_cut_at_limit"}):
             block["status"] = "partial"
         notes += [f"{name}_semantic_unavailable" for name in unavailable]
+        if image_unavailable:
+            notes.append("visual_image_unavailable")  # only the generated-text frames above were used
 
     def interpret_multimodal(self, query: str) -> dict[str, Any]:
         """A PROPOSED split of one natural request into the dialogue and visual constraints; nothing is searched.

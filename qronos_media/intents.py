@@ -204,8 +204,10 @@ _PARTIAL = {"time_budget": "وقت جست‌وجو تمام شد", "busy": "فه
             "visual_candidates_cut": "همهٔ فریم‌های نامزد بررسی نشد",
             "fusion_assets_cut": "ویدیوهای زیادی فریم هم‌خوان داشتند و فقط بخشی بررسی شد",
             "dialogue_semantic_unavailable": "جست‌وجوی هم‌معنای گفتگو در دسترس نبود",
-            "visual_semantic_unavailable": "جست‌وجوی هم‌معنای تصویر در دسترس نبود"}
-_CHANNEL_FA = {"exact": "دقیق", "fuzzy": "تقریبی", "semantic": "هم‌معنا", "lexical": "هم‌واژه"}
+            "visual_semantic_unavailable": "جست‌وجوی هم‌معنای تصویر در دسترس نبود",
+            "visual_image_unavailable": "شباهت تصویری فریم‌ها در دسترس نبود"}
+_CHANNEL_FA = {"exact": "دقیق", "fuzzy": "تقریبی", "semantic": "هم‌معنا", "lexical": "هم‌واژه",
+               "image": "شباهت تصویری"}
 _UNSAFE = re.compile("[\x00-\x1f\x7f‎‏‪-‮⁦-⁩«»]")
 
 

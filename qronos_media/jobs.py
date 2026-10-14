@@ -359,9 +359,13 @@ class Watch:
 BRAIN_STAGES = frozenset({"topic_labels"})
 #: Stages that need the runtime's configured Vision profile (checked before any reservation).
 VISION_STAGES = frozenset({"visual_evidence"})
+#: Stages that need the runtime's image encoder and its pinned files (checked before any reservation).
+IMAGE_ENCODER_STAGES = frozenset({"image_embeddings"})
 UNAVAILABLE_REASONS = frozenset({
     "requires_qronos_governor", "requires_trusted_model_authority", "gpu_lease_contract_pending",
     "undeclared_model", "model_lease_required", "model_unavailable", "vision_profile_mismatch",
+    "image_encoder_not_provisioned", "image_encoder_mismatch", "image_encoder_asset_refused",
+    "image_encoder_contract",
 })
 
 
@@ -388,7 +392,7 @@ class StageRunner:
                  permissions: MediaPermissions, cache_dir: Path, cache_quota_bytes: int,
                  excluded: tuple[Path, ...] = (), clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic, embedder: object = None,
-                 brain: object = None, vision: object = None) -> None:
+                 brain: object = None, vision: object = None, image_encoder: object = None) -> None:
         self.store = store
         self.db = store.db
         self.tools = tools
@@ -407,6 +411,7 @@ class StageRunner:
         self.embedder = embedder  # the runtime's bge-m3 embedder (semantic stage) or None
         self.brain = brain  # the runtime's governed Fast-brain gateway (topic_labels stage) or None
         self.vision = vision  # the runtime's Vision gateway (visual_evidence stage) or None
+        self.image_encoder = image_encoder  # the runtime's image encoder (image_embeddings stage) or None
 
     def _admit_now(self, path: Path) -> Path:
         """Admit a copy immediately before a decoder opens it: scope, and a fresh gate answer.
@@ -691,6 +696,16 @@ class StageRunner:
                                (f"unavailable:{missing}", asset_id, stage))
                 report.refused.append(f"{key}:{missing}")
                 return "unavailable"
+        if stage in IMAGE_ENCODER_STAGES:
+            # No image encoder in this process (the standalone tool), or its pinned files are not provisioned as
+            # pinned: nothing could run, so no model slot is reserved and the stage is never marked complete.
+            missing = "model_unavailable" if self.image_encoder is None else self.image_encoder.unavailable_reason()
+            if missing is not None:
+                with self.store.transaction() as db:
+                    db.execute("UPDATE stages SET note = ? WHERE asset_id = ? AND stage = ? AND state = 'QUEUED'",
+                               (f"unavailable:{missing}", asset_id, stage))
+                report.refused.append(f"{key}:{missing}")
+                return "unavailable"
         try:
             lease = self.authority.reserve(task, spec.needs)
         except ResourceRefused as exc:
@@ -743,6 +758,7 @@ class StageRunner:
                 sidecar_binding=sidecar_binding,
                 brain=self.brain,
                 vision=self.vision,
+                image_encoder=self.image_encoder,
             )
             try:
                 commit = RUNNERS[stage](ctx)

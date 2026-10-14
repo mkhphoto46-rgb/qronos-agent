@@ -416,7 +416,7 @@ def test_the_product_route_types_multimodal_and_keeps_the_other_modes_unchanged(
     assert split["ok"] and split["interpretation"]["status"] == "proposed" and "multimodal" not in split
     for data, code in (({"dialogue": "father died"}, "bad_request"),                       # one constraint only
                        ({"dialogue": "a", "visual": "b", "windowMs": 10**9}, "bad_request"),
-                       ({"dialogue": "a", "visual": "b", "visualMatch": "image"}, "bad_request"),
+                       ({"dialogue": "a", "visual": "b", "visualMatch": "pixels"}, "bad_request"),
                        ({"dialogue": "a", "visual": "b", "query": "c"}, "bad_request"),
                        ({"dialogue": "!!!", "visual": "kitchen"}, "refused"),
                        ({}, "bad_request")):
@@ -429,4 +429,4 @@ def test_the_product_route_types_multimodal_and_keeps_the_other_modes_unchanged(
     assert visual["exact"] == service.search_dialogue("kitchen", mode="exact", limit=5) and "multimodal" not in visual
     statuses = {item["capability"]: item["status"] for item in capabilities()["capabilities"]}
     assert statuses["multimodal_search"] == "implemented_unverified" and statuses["ocr"] == "pending"
-    assert statuses["speaker_turns"] == "pending" and statuses["visual_embeddings"] == "decision_pending"
+    assert statuses["speaker_turns"] == "pending" and statuses["visual_embeddings"] == "implemented_unverified"

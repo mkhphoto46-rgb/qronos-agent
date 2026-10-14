@@ -62,7 +62,8 @@ SOURCE_FA = {"embedded": "زیرنویس درون فایل", "sidecar": "زیر�
 _STATE_FA = {"COMPLETED": "انجام شد", "QUEUED": "در صف", "RUNNING": "در حال اجرا", "PAUSED": "متوقف",
              "FAILED": "ناموفق", "CANCELLED": "لغو شد", "NOT_QUEUED": "در صف نیست"}
 _STAGE_FA = {"metadata": "مشخصات فایل", "subtitles": "زیرنویس", "asr": "رونویسی گفتار", "semantic": "جستجوی معنایی",
-             "topics": "بخش‌های موضوعی", "scenes": "تشخیص برش‌ها", "keyframes": "فریم‌های کلیدی"}
+             "topics": "بخش‌های موضوعی", "scenes": "تشخیص برش‌ها", "keyframes": "فریم‌های کلیدی",
+             "image_embeddings": "بردار تصویر فریم‌ها"}
 _CAPABILITY_FA = {"asr": "رونویسی گفتار", "subtitle_asr_fusion": "تطبیق زیرنویس و رونویسی",
                   "semantic_dialogue": "جستجوی معنایی دیالوگ",
                   "topic_retrieval": "جست‌وجوی موضوعی (بخش‌های بدون برچسب)", "visual_embeddings": "جستجوی تصویری",
@@ -158,11 +159,23 @@ def _attach_visual(db: sqlite3.Connection, asset_id: str, kind: str, report: dic
     except sqlite3.OperationalError:  # an index from before schema 7
         vectors = 0
     report["summary"]["visualFramesSemanticIndexed"] = int(vectors)
+    report["summary"]["keyframesImageEmbedded"] = _image_vectors(db, asset_id)
     report["summary"].update({"visualFrames": int(total), "visualFramesListed": len(frames),
                               "visualFramesOmitted": int(total) - len(frames), "visualFramesRejected": int(rejected),
                               "visualFramesCap": cap})
     if frames:
         report["visualEvidence"] = frames
+
+
+def _image_vectors(db: sqlite3.Connection, asset_id: str) -> int:
+    """Frame IMAGE vectors of this asset under the current encoder fingerprint (0 before schema 8)."""
+    from qronos_media import image_embeddings
+
+    try:
+        return int(db.execute("SELECT COUNT(*) FROM image_embeddings WHERE asset_id = ? AND fingerprint = ?",
+                              (asset_id, image_embeddings.fingerprint())).fetchone()[0])
+    except sqlite3.OperationalError:
+        return 0
 
 
 def _visual_omission_text(report: dict[str, Any]) -> str:
@@ -177,7 +190,8 @@ def _topic_omission_text(report: dict[str, Any]) -> str:
             f"(سقف {summary['topicSegmentsCap']} بخش برای {KIND_FA[report['kind']]})؛ هیچ خروجی این گزارش آن‌ها را ندارد.")
 
 
-def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]],
+                 image_vectors: int = 0) -> list[dict[str, str]]:
     """What the reader must know about THIS asset's report, from what was actually indexed."""
     indexed = [s for s in sources if s["status"] == "indexed" and s["cue_count"]]
     by_source = {s["source"] for s in indexed}
@@ -213,6 +227,11 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
             and not str(stages.get("visual_semantic", {}).get("note") or "").startswith("skipped"):
         items.append({"code": "visual_semantic_text_only",
                       "text": "جست‌وجوی هم‌معنای تصویری فقط بردارهای bge-m3 از متن تولیدشدهٔ فریم‌ها (توصیف، متن خوانده‌شده، مشاهده‌ها) است، نه شباهت تصویر؛ امتیاز آن کالیبره نشده و دقت آن میان زبان‌ها سنجیده نشده است."})
+    if image_vectors:
+        items.append({"code": "image_similarity_uncalibrated",
+                      "text": "شباهت تصویری فریم‌ها با رمزگذار SigLIP 2 از روی خود پیکسل‌های فریم‌های کلیدی ذخیره‌شده است؛ "
+                              "امتیاز آن شباهت کسینوسی کالیبره‌نشده است، نه احتمال و نه شناسایی، و کیفیت آن (از جمله "
+                              "برای پرسش فارسی) سنجیده نشده است."})
     items.append({"code": "no_confidence",
                   "text": "هیچ اطمینان کالیبره‌شده‌ای محاسبه نمی‌شود و در این گزارش هم عددی برای اطمینان نیست."})
     items.append({"code": "no_generated_content",
@@ -220,15 +239,18 @@ def _limitations(stages: dict[str, Any], sources: list[dict[str, Any]]) -> list[
     return items
 
 
-def _not_available(stages: dict[str, Any]) -> list[dict[str, Any]]:
-    """Capabilities this asset does not have: never implemented, or implemented but not completed here."""
+def _not_available(stages: dict[str, Any], image_vectors: int = 0) -> list[dict[str, Any]]:
+    """Capabilities this asset does not have: never implemented, or implemented but not completed here. Image
+    similarity also needs this asset's own frame vectors (current fingerprint): a completed stage may hold none."""
     out = []
     stage_of = {"asr": "asr", "semantic_dialogue": "semantic", "topic_retrieval": "topics", "topics": "topic_labels",
-                "vision_captions": "visual_evidence", "visual_semantic_text": "visual_semantic"}
+                "vision_captions": "visual_evidence", "visual_semantic_text": "visual_semantic",
+                "visual_embeddings": "image_embeddings"}
     for item in PENDING_CAPABILITIES:
         stage = stage_of.get(str(item["capability"]))
         if item["status"] == "implemented_unverified" and stage \
-                and stages.get(stage, {}).get("state") == "COMPLETED":
+                and stages.get(stage, {}).get("state") == "COMPLETED" \
+                and (item["capability"] != "visual_embeddings" or image_vectors > 0):
             continue
         out.append({"capability": item["capability"], "status": item["status"],
                     "stageState": stages.get(stage, {}).get("state") if stage else None, "reason": item["reason"]})
@@ -266,8 +288,8 @@ def gather(db: sqlite3.Connection, asset_id: str, kind: str = "full") -> dict[st
         "summary": {"dialogueLines": sum(cue_counts.values()), "dialogueLinesBySource": cue_counts,
                     "subtitleTracks": len(sources), "scenes": scene_count, "keyframes": keyframe_count,
                     "topicSegments": 0, "visualFrames": 0},
-        "notAvailable": _not_available(level["stages"]),
-        "limitations": _limitations(level["stages"], sources),
+        "notAvailable": _not_available(level["stages"], _image_vectors(db, asset_id)),
+        "limitations": _limitations(level["stages"], sources, _image_vectors(db, asset_id)),
     }
     report["subtitleTracks"] = sources
     segments, segment_count = _topic_segments(db, asset_id, REPORT_TOPIC_SEGMENTS[kind])

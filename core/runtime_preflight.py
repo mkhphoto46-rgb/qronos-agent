@@ -40,6 +40,12 @@ ASSET_GROUPS = {
         "runtime/chatterbox/models/t3-fa-q4_k.gguf",
         "runtime/chatterbox/models/chatterbox-s3gen-q8_0.gguf",
     ),
+    # Optional: the media library's image search (qronos_media.image_embeddings); never bundled or downloaded.
+    "imageSearch": (
+        "runtime/models/siglip2-base-patch16-224/vision_model_quantized.onnx",
+        "runtime/models/siglip2-base-patch16-224/text_model_quantized.onnx",
+        "runtime/models/siglip2-base-patch16-224/tokenizer.model",
+    ),
 }
 
 

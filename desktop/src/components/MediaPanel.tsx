@@ -10,7 +10,7 @@ import {
 } from "../mediaStore";
 import type {
   MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, MultimodalFrame, MultimodalHit, MultimodalInterpretation,
-  ReportFormat, ReportKind, RuntimeEvent, SearchReportPreview, TopicHit, VisualHit,
+  ImageHit, ReportFormat, ReportKind, RuntimeEvent, SearchReportPreview, TopicHit, VisualHit, VisualMatch,
 } from "../mediaStore";
 
 import "./MediaPanel.css";
@@ -91,9 +91,11 @@ const CAPABILITY_FA: Record<string, string> = {
 };
 
 const MODE_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "معنایی", topic: "موضوعی",
-  visual: "تصویری (متن تولیدشدهٔ فریم‌ها)", multimodal: "ترکیبی (گفتگو + تصویر)" };
+  visual: "تصویری (متن فریم‌ها + شباهت تصویری)", multimodal: "ترکیبی (گفتگو + تصویر)" };
 
 const DIALOGUE_CHANNEL_FA: Record<string, string> = { exact: "دقیق", fuzzy: "تقریبی", semantic: "هم‌معنا (bge-m3)" };
+const VISUAL_CHANNEL_FA: Record<string, string> = { lexical: "هم‌واژه", semantic: "هم‌معنا از روی متن تولیدشده",
+  image: "شباهت تصویری (SigLIP 2)" };
 
 /** Where a frame lies relative to the matching line, in words. */
 export function relationText(frame: Pick<MultimodalFrame, "relation" | "gapMs">): string {
@@ -142,7 +144,7 @@ function MediaPanel(props: MediaPanelProps) {
   const [shownText, setShownText] = useState("");
   const [windowMs, setWindowMs] = useState<number>(15_000);
   const [semanticSaid, setSemanticSaid] = useState(false);
-  const [semanticShown, setSemanticShown] = useState(false);
+  const [shownMatch, setShownMatch] = useState<VisualMatch>("lexical");
   const [interpretation, setInterpretation] = useState<MultimodalInterpretation | null>(null);
   const [searchPreview, setSearchPreview] = useState<SearchReportPreview | null>(null);
   const [brainHints, setBrainHints] = useState(false);
@@ -225,7 +227,7 @@ function MediaPanel(props: MediaPanelProps) {
       setNotice(problem);
       return;
     }
-    const answer = await run("search", multimodalFields(saidText, shownText, windowMs, semanticSaid, semanticShown));
+    const answer = await run("search", multimodalFields(saidText, shownText, windowMs, semanticSaid, shownMatch));
     if (answer) setResult(answer);
   }
 
@@ -333,7 +335,7 @@ function MediaPanel(props: MediaPanelProps) {
           هر دو شرط در همین ویدیو و در فاصلهٔ {Math.round(hit.windowMs / 1000)} ثانیه از هم پیدا شدند:
           گفتگو ({hit.dialogue.channels.map((name) => DIALOGUE_CHANNEL_FA[name] ?? name).join(" + ")})
           {" و "}تصویر ({[...new Set(hit.frames.flatMap((frame) => frame.channels))]
-            .map((name) => (name === "lexical" ? "هم‌واژه" : "هم‌معنا از روی متن تولیدشده")).join(" + ")}).
+            .map((name) => VISUAL_CHANNEL_FA[name] ?? name).join(" + ")}).
         </p>
         <p>
           <small>گفتگو</small> <span className="ltr">{clock(hit.dialogue.startMs)}</span>{" "}
@@ -345,9 +347,12 @@ function MediaPanel(props: MediaPanelProps) {
           {hit.frames.map((frame, i) => (
             <li key={i}>
               <span className="ltr">{clock(frame.timeMs)}</span>{" "}
-              <span className="media-topic-generated" dir="auto">{frame.caption}</span>{" "}
-              <small>({relationText(frame)}؛ توصیف تولیدشده با مدل بینایی از همین فریم، تأییدنشده، نه شباهت تصویر
-                {frame.similarity !== null ? `؛ شباهت متن ≈ ${frame.similarity.toFixed(2)}، کالیبره‌نشده` : ""})</small>{" "}
+              {frame.generated && <><span className="media-topic-generated" dir="auto">{frame.caption}</span>{" "}</>}
+              <small>({relationText(frame)}
+                {frame.generated ? "؛ توصیف تولیدشده با مدل بینایی از همین فریم، تأییدنشده" : ""}
+                {frame.similarity !== null ? `؛ شباهت متن ≈ ${frame.similarity.toFixed(2)}، کالیبره‌نشده` : ""}
+                {frame.imageSimilarity !== null
+                  ? `؛ شباهت تصویری ≈ ${frame.imageSimilarity.toFixed(2)} (SigLIP 2، کالیبره‌نشده، نه شناسایی)` : ""})</small>{" "}
               <small className="ltr" title="SHA-256 همان فریم ذخیره‌شده">{frame.frameSha256.slice(0, 12)}</small>
             </li>
           ))}
@@ -393,6 +398,40 @@ function MediaPanel(props: MediaPanelProps) {
           </ul>
         )}
         <small>دیالوگ بالا فقط به خاطر هم‌زمانی کنار فریم آمده است، نه به خاطر معنا.</small>
+        <div className="media-card-actions">
+          <button type="button" disabled={busy}
+            onClick={() => void run("open.prepare", { assetId: hit.assetId, startMs: Math.max(0, Math.floor(hit.timeMs)) })}>
+            باز کردن در همین لحظه
+          </button>
+        </div>
+      </li>
+    );
+  }
+
+  function imageCard(hit: ImageHit, key: string) {
+    return (
+      <li key={key} className="media-card">
+        <div className="media-card-head">
+          <strong>{hit.title || "ویدیو"}</strong>
+          <span className="ltr">{clock(hit.timeMs)}</span>
+          <span title="شباهت کسینوسی کالیبره‌نشده؛ احتمال، درصد یا شناسایی نیست">≈ {hit.imageSimilarity.toFixed(2)}</span>
+          <small className="ltr" title="SHA-256 همان فریم ذخیره‌شده">{hit.frameSha256.slice(0, 12)}</small>
+        </div>
+        <small>پیداشده با شباهت تصویری خود این فریم ذخیره‌شده (نه از روی توصیف آن).</small>
+        {hit.caption !== null && (
+          <p className="media-topic-generated">
+            <span dir="auto">{hit.caption}</span>{" "}
+            <small>(توصیف تولیدشده با مدل بینایی از همین فریم؛ تأییدنشده)</small>
+          </p>
+        )}
+        {hit.dialogue.length > 0 && (
+          <ul className="media-topic-lines">
+            {hit.dialogue.map((line, i) => (
+              <li key={i}><span className="ltr">{clock(line.startMs)}</span> <span dir="auto">{line.text}</span></li>
+            ))}
+          </ul>
+        )}
+        {hit.dialogue.length > 0 && <small>دیالوگ بالا فقط به خاطر هم‌زمانی کنار فریم آمده است، نه به خاطر معنا.</small>}
         <div className="media-card-actions">
           <button type="button" disabled={busy}
             onClick={() => void run("open.prepare", { assetId: hit.assetId, startMs: Math.max(0, Math.floor(hit.timeMs)) })}>
@@ -546,9 +585,13 @@ function MediaPanel(props: MediaPanelProps) {
             <input type="checkbox" checked={semanticSaid} onChange={(e) => setSemanticSaid(e.target.checked)} />
             گفتگوی هم‌معنا
           </label>
-          <label title="متن تولیدشدهٔ فریم‌ها با bge-m3 هم مقایسه می‌شود؛ نه شباهت تصویر">
-            <input type="checkbox" checked={semanticShown} onChange={(e) => setSemanticShown(e.target.checked)} />
-            تصویر هم‌معنا (از روی متن تولیدشده)
+          <label title="فریم‌ها چطور با شرط تصویر سنجیده شوند؛ هیچ‌کدام احتمال یا شناسایی نیست">
+            تطبیق تصویر
+            <select value={shownMatch} onChange={(e) => setShownMatch(e.target.value as VisualMatch)}>
+              <option value="lexical">هم‌واژه در متن تولیدشدهٔ فریم‌ها</option>
+              <option value="semantic">هم‌معنا از روی متن تولیدشده (bge-m3، نه شباهت تصویر)</option>
+              <option value="image">شباهت تصویری خود فریم‌ها (SigLIP 2، کالیبره‌نشده)</option>
+            </select>
           </label>
         </div>
       )}
@@ -583,6 +626,7 @@ function MediaPanel(props: MediaPanelProps) {
       {topic.note && <p className="media-notice">{topic.note}</p>}
       {visual.note && <p className="media-notice">{visual.note}</p>}
       {visual.semanticNote && <p className="media-notice">{visual.semanticNote}</p>}
+      {visual.imageNote && <p className="media-notice">{visual.imageNote}</p>}
       {multimodal.note && <p className="media-notice">{multimodal.note}</p>}
       {multimodal.channelNotes.map((text, i) => <p key={`mn${i}`} className="media-notice">{text}</p>)}
       {multimodal.hits.length > 0 && <>
@@ -590,7 +634,10 @@ function MediaPanel(props: MediaPanelProps) {
         <ul className="media-results">{multimodal.hits.map((hit, i) => multimodalCard(hit, `m${i}`))}</ul>
       </>}
       {multimodal.answered && (
-        <p className="media-topic-hints">گوینده، OCR و شباهت تصویر هنوز ساخته نشده‌اند و در این جست‌وجو به کار نرفته‌اند.</p>
+        <p className="media-topic-hints">
+          گوینده و OCR هنوز ساخته نشده‌اند و در این جست‌وجو به کار نرفته‌اند.
+          {shownMatch === "image" ? "" : " شباهت تصویری فریم‌ها فقط با گزینهٔ «شباهت تصویری خود فریم‌ها» به کار می‌رود."}
+        </p>
       )}
       {multimodal.resultId && (
         <div className="media-row media-search-report-actions">
@@ -640,6 +687,10 @@ function MediaPanel(props: MediaPanelProps) {
       {visual.hits.length > 0 && <>
         <h4>فریم‌های هم‌خوان (جست‌وجوی واژه‌ای در متن تولیدشدهٔ فریم‌ها، نه شباهت تصویر)</h4>
         <ul className="media-results">{visual.hits.map((hit, i) => visualCard(hit, `v${i}`))}</ul>
+      </>}
+      {visual.imageHits.length > 0 && <>
+        <h4>شباهت تصویری فریم‌ها (بردار تصویر خود فریم با بردار متن پرسش؛ SigLIP 2، کالیبره‌نشده، نه شناسایی)</h4>
+        <ul className="media-results">{visual.imageHits.map((hit, i) => imageCard(hit, `i${i}`))}</ul>
       </>}
       {topic.brainHints.length > 0 && (
         <p className="media-topic-hints">

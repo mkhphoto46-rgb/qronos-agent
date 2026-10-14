@@ -11,7 +11,9 @@ The evidence is what the index already stores, nothing is analysed at query time
   and - only when asked and stored vectors exist - the bge-m3 dialogue windows (``semantic_windows``);
 * visual: the Vision model's GENERATED text about stored keyframes (``visual_evidence``/``visual_fts``: every word of the
   visual constraint must occur), and - only when asked and stored vectors exist - the bge-m3 vectors of that same TEXT
-  (``visual_semantic``; never the image).
+  (``visual_semantic``; never the image), or (``visualMatch`` "image") the SigLIP 2 IMAGE vectors of the stored
+  keyframes' pixels compared with one text vector of the visual constraint (``image_embeddings``; see
+  :mod:`qronos_media.image_embeddings`).
 
 A semantic "match" means "among the :data:`MAX_SEMANTIC_DIALOGUE` / :data:`MAX_SEMANTIC_VISUAL` most similar items of
 the current scope AND at least :data:`MIN_SEMANTIC_COSINE`" (uncalibrated cosine; the floor below which the topic search
@@ -41,9 +43,11 @@ MAX_CONSTRAINT_WORDS = 16
 DEFAULT_WINDOW_MS = 15_000
 MAX_WINDOW_MS = 120_000
 DIALOGUE_MATCHES = ("exact", "fuzzy", "semantic")
-VISUAL_MATCHES = ("lexical", "semantic")
+VISUAL_MATCHES = ("lexical", "semantic", "image")
 MAX_VISUAL_CANDIDATES = 500
 MAX_SEMANTIC_VISUAL = 50
+#: visualMatch "image": the frames of the current scope most similar to the constraint by image similarity (rank only).
+MAX_IMAGE_VISUAL = 30
 MAX_SEMANTIC_DIALOGUE = 100
 MAX_GLOBAL_DIALOGUE = 100
 #: A semantic item below this cosine is not a match (qronos_media.topics.EXPANSION_TRIGGER: "a weak first pass").
@@ -56,6 +60,10 @@ RANK_NOTE = ("ordered by time alignment (smaller gap first), then by each constr
              "not a probability and not a calibrated confidence")
 SEMANTIC_NOTE = ("a semantic match is one of the most similar stored items of the current scope with an uncalibrated "
                  "bge-m3 cosine of at least 0.5 (text only, never the image); it does not prove the meaning matches")
+
+IMAGE_NOTE = ("an image match is one of the stored frames of the current scope whose SigLIP 2 image vector is most similar "
+              "to the constraint's text vector (rank only: an uncalibrated cosine with no threshold); it does not prove "
+              "the frame shows what was asked")
 
 SPLIT_SYSTEM = (
     "You split ONE search request for a private film library into two parts. The request between <<<REQUEST and "

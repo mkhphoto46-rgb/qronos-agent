@@ -127,7 +127,24 @@ export type VisualHit = {
   similarity: number | null;
 };
 
-export type VisualBlock = { hits: VisualHit[]; note: string | null; semanticNote: string | null };
+/** One image-similarity hit (qronos_media/image_embeddings.py): a stored keyframe whose SigLIP 2 IMAGE vector is
+ *  near the query's text vector. An uncalibrated cosine, never an identification; the caption is shown only when the
+ *  Vision model described the SAME frame (generated, unverified). */
+export type ImageHit = {
+  assetId: string;
+  title: string | null;
+  timeMs: number;
+  frameSha256: string;
+  imageSimilarity: number;
+  caption: string | null;
+  dialogue: Array<{ startMs: number; text: string }>;
+};
+
+export type VisualBlock = {
+  hits: VisualHit[]; note: string | null; semanticNote: string | null;
+  /** The separate image channel: its hits and why it did not (fully) answer. */
+  imageHits: ImageHit[]; imageNote: string | null;
+};
 
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -138,7 +155,7 @@ function strings(value: unknown, count: number, size: number): string[] {
 
 /** The visual block of a `search` answer in mode "visual", validated field by field. */
 export function visualBlockOf(result: MediaResult | null): VisualBlock {
-  const empty: VisualBlock = { hits: [], note: null, semanticNote: null };
+  const empty: VisualBlock = { hits: [], note: null, semanticNote: null, imageHits: [], imageNote: null };
   if (!result || !result.ok || typeof result.visual !== "object" || result.visual === null) return empty;
   const block = result.visual as Record<string, unknown>;
   const hits: VisualHit[] = [];
@@ -169,7 +186,29 @@ export function visualBlockOf(result: MediaResult | null): VisualBlock {
       + `${refusalText(typeof channel.reason === "string" ? channel.reason : String(channel.stoppedBy ?? "model_unavailable"))}؛ `
       + "نتیجه‌های واژه‌ای همچنان معتبرند."
     : null;
-  return { hits, note, semanticNote };
+  const image = isRecord(block.image) ? block.image : {};
+  const imageHits: ImageHit[] = [];
+  for (const raw of Array.isArray(image.results) ? image.results.slice(0, 50) : []) {
+    if (!isRecord(raw) || !isAssetId(raw.assetId) || typeof raw.timeMs !== "number" || typeof raw.frameSha256 !== "string"
+      || !SHA256.test(raw.frameSha256) || raw.verified !== false || typeof raw.imageSimilarity !== "number"
+      || !Number.isFinite(raw.imageSimilarity) || !Array.isArray(raw.channels) || !raw.channels.includes("image")) continue;
+    imageHits.push({
+      assetId: raw.assetId, title: typeof raw.title === "string" ? raw.title.slice(0, 300) : null,
+      timeMs: raw.timeMs, frameSha256: raw.frameSha256, imageSimilarity: raw.imageSimilarity,
+      caption: raw.generated === true && typeof raw.caption === "string" ? raw.caption.slice(0, 240) : null,
+      dialogue: (Array.isArray(raw.dialogue) ? raw.dialogue : []).slice(0, 4)
+        .filter((line): line is Record<string, unknown> => isRecord(line) && typeof line.text === "string"
+          && typeof line.startMs === "number")
+        .map((line) => ({ startMs: line.startMs as number, text: String(line.text).slice(0, 600) })),
+    });
+  }
+  let imageNote: string | null = null;
+  if (image.status === "unavailable" || image.status === "partial") {
+    const why = typeof image.reason === "string" ? image.reason : String(image.stoppedBy ?? "image_encoder_unavailable");
+    imageNote = `جست‌وجوی شباهت تصویری فریم‌ها ${image.status === "partial" ? "ناقص ماند" : "در دسترس نبود"}: `
+      + `${refusalText(why)}؛ نتیجه‌های متن تولیدشدهٔ فریم‌ها (اگر باشند) جدا و همچنان معتبرند.`;
+  }
+  return { hits, note, semanticNote, imageHits, imageNote };
 }
 
 /** Bounds of a multimodal request (qronos_media/multimodal.py). */
@@ -183,8 +222,12 @@ export type MultimodalFrame = {
   caption: string;
   visibleText: string[];
   observations: string[];
-  channels: Array<"lexical" | "semantic">;
+  channels: Array<"lexical" | "semantic" | "image">;
   similarity: number | null;
+  /** Uncalibrated SigLIP 2 cosine (image channel only). */
+  imageSimilarity: number | null;
+  /** The caption is the Vision model's generated text of this frame; false for an image-only match without one. */
+  generated: boolean;
   relation: "before" | "during" | "after";
   gapMs: number;
 };
@@ -224,6 +267,7 @@ export const MULTIMODAL_OUTCOME_TEXT: Record<string, string> = {
 };
 
 const DIALOGUE_CHANNELS = new Set(["exact", "fuzzy", "semantic"]);
+const VISUAL_CHANNELS = new Set(["lexical", "semantic", "image"]);
 const RELATIONS = new Set(["before", "during", "after"]);
 
 /** The multimodal block of a `search` answer in mode "multimodal", validated field by field: a hit without its
@@ -243,15 +287,23 @@ export function multimodalBlockOf(result: MediaResult | null): MultimodalBlock {
     const track = isRecord(line.track) ? line.track : {};
     const frames: MultimodalFrame[] = [];
     for (const item of Array.isArray(raw.frames) ? raw.frames.slice(0, 4) : []) {
-      if (!isRecord(item) || typeof item.timeMs !== "number" || typeof item.caption !== "string"
+      const frameChannels = (Array.isArray(item?.channels) ? item.channels : [])
+        .filter((name: unknown): name is "lexical" | "semantic" | "image" => typeof name === "string"
+          && VISUAL_CHANNELS.has(name)).slice(0, 3);
+      const imageOnly = frameChannels.length === 1 && frameChannels[0] === "image";
+      if (!isRecord(item) || typeof item.timeMs !== "number"
+        || !(typeof item.caption === "string" || (imageOnly && item.caption === null))
         || typeof item.frameSha256 !== "string" || !SHA256.test(item.frameSha256) || item.verified !== false
         || typeof item.relation !== "string" || !RELATIONS.has(item.relation) || typeof item.gapMs !== "number") continue;
       frames.push({
-        timeMs: item.timeMs, frameSha256: item.frameSha256, caption: item.caption.slice(0, 240),
+        timeMs: item.timeMs, frameSha256: item.frameSha256,
+        caption: typeof item.caption === "string" ? item.caption.slice(0, 240) : "",
         visibleText: strings(item.visibleText, 8, 120), observations: strings(item.observations, 6, 120),
-        channels: (Array.isArray(item.channels) ? item.channels : [])
-          .filter((name): name is "lexical" | "semantic" => name === "lexical" || name === "semantic").slice(0, 2),
+        channels: frameChannels,
         similarity: typeof item.similarity === "number" && Number.isFinite(item.similarity) ? item.similarity : null,
+        imageSimilarity: typeof item.imageSimilarity === "number" && Number.isFinite(item.imageSimilarity)
+          ? item.imageSimilarity : null,
+        generated: typeof item.caption === "string" && item.caption.length > 0 && item.generated !== false,
         relation: item.relation as MultimodalFrame["relation"], gapMs: Math.max(0, item.gapMs),
       });
     }
@@ -286,6 +338,11 @@ export function multimodalBlockOf(result: MediaResult | null): MultimodalBlock {
     if (semantic.requested === true && semantic.status === "unavailable") {
       channelNotes.push(`جست‌وجوی هم‌معنای ${label} در دسترس نبود: ${refusalText(typeof semantic.reason === "string" ? semantic.reason : "model_unavailable")}؛ فقط تطبیق واژه‌ای به کار رفت.`);
     }
+  }
+  const visualChannel = isRecord(block.visualChannel) ? block.visualChannel : {};
+  const imageChannel = isRecord(visualChannel.image) ? visualChannel.image : {};
+  if (imageChannel.requested === true && imageChannel.status === "unavailable") {
+    channelNotes.push(`شباهت تصویری فریم‌ها در دسترس نبود: ${refusalText(typeof imageChannel.reason === "string" ? imageChannel.reason : "image_encoder_unavailable")}؛ فقط متن تولیدشدهٔ فریم‌ها به کار رفت.`);
   }
   const resultId = typeof block.resultId === "string" && RESULT_ID.test(block.resultId) ? block.resultId : null;
   return { hits, note, channelNotes, answered: true, resultId };
@@ -324,13 +381,18 @@ export function multimodalRequestProblem(dialogue: string, visual: string): stri
   return null;
 }
 
-/** The typed fields of one explicit multimodal search (sent as the `search` op). */
+export type VisualMatch = "lexical" | "semantic" | "image";
+
+/** The typed fields of one explicit multimodal search (sent as the `search` op). `visualMatch` true/false is the older
+ *  semantic/lexical switch; "image" asks for image similarity of the frames' pixels. */
 export function multimodalFields(dialogue: string, visual: string, windowMs: number, semanticDialogue: boolean,
-  semanticVisual: boolean): Record<string, unknown> {
+  visualMatch: boolean | VisualMatch): Record<string, unknown> {
+  const match: VisualMatch = visualMatch === true ? "semantic" : visualMatch === false ? "lexical"
+    : (["lexical", "semantic", "image"] as const).includes(visualMatch) ? visualMatch : "lexical";
   return {
     mode: "multimodal", dialogue: dialogue.trim(), visual: visual.trim(),
     windowMs: (MULTIMODAL_WINDOWS_MS as readonly number[]).includes(windowMs) ? windowMs : 15_000,
-    dialogueMatch: semanticDialogue ? "semantic" : "exact", visualMatch: semanticVisual ? "semantic" : "lexical", limit: 20,
+    dialogueMatch: semanticDialogue ? "semantic" : "exact", visualMatch: match, limit: 20,
   };
 }
 
@@ -500,6 +562,14 @@ export const MEDIA_REFUSAL_TEXT: Record<string, string> = {
   report_unavailable: "ساخت این گزارش در این نصب ممکن نیست (قلم یا کتابخانهٔ PDF با نسخهٔ تعیین‌شده یکی نیست).",
   internal: "خطای داخلی؛ جزئیات در گزارش‌های Qronos است.",
   result_unavailable: "این نتیجهٔ جست‌وجو دیگر نگه داشته نمی‌شود؛ دوباره جست‌وجو کنید و بعد گزارش بگیرید.",
+  image_encoder_unavailable: "رمزگذار تصویر در این اجرا در دسترس نیست (فقط داخل Qronos).",
+  image_encoder_not_provisioned: "فایل‌های رمزگذار تصویر (SigLIP 2) نصب نشده‌اند؛ Qronos آن‌ها را خودش دانلود نمی‌کند.",
+  image_encoder_mismatch: "فایل‌های رمزگذار تصویر با نسخهٔ تعیین‌شده یکی نیستند؛ چیزی اجرا نشد.",
+  image_encoder_asset_refused: "فایل‌های رمزگذار تصویر پیوند یا مسیر ناامن‌اند؛ چیزی اجرا نشد.",
+  image_encoder_contract: "رمزگذار تصویر با قرارداد مورد انتظار (ورودی/خروجی/بُعد) جور نیست؛ چیزی اجرا نشد.",
+  image_encoder_answer_rejected: "پاسخ رمزگذار تصویر معتبر نبود و کنار گذاشته شد.",
+  no_image_vectors: "هنوز برای هیچ فریمی بردار تصویر ساخته نشده است (مرحلهٔ بردار تصویر انجام نشده).",
+  session_open: "رمزگذار تصویر هنوز بسته نشده؛ کمی بعد دوباره امتحان کنید.",
 };
 
 export function refusalText(code: unknown): string {

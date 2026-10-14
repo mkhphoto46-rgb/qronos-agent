@@ -33,7 +33,10 @@ from qronos_media import semantic
 from qronos_media import topics
 from qronos_media import brain_labels
 from qronos_media import visual_evidence
-from qronos_media.resources import BGE_M3, QWEN3_VL_4B, WHISPER_LARGE_V3_TURBO_Q5_0, ResourceRefused, StageNeeds
+from qronos_media import image_embeddings
+from qronos_media.resources import (
+    BGE_M3, QWEN3_VL_4B, SIGLIP2_BASE_224_INT8, WHISPER_LARGE_V3_TURBO_Q5_0, ResourceRefused, StageNeeds,
+)
 from qronos_media.subtitles import (
     IMAGE_SUBTITLE_CODECS, MAX_SUBTITLE_BYTES, TEXT_SUBTITLE_CODECS, Cue, SubtitleError, decode_subtitle_bytes,
     find_sidecars, parse_srt, parse_subtitle_text,
@@ -85,6 +88,11 @@ STAGES: dict[str, StageSpec] = {
         # visual text, never of the image. Re-run whenever visual_evidence is; unchanged texts are cache hits.
         StageSpec("visual_semantic", visual_evidence.VISUAL_SEMANTIC_VERSION, ("visual_evidence",), 5,
                   StageNeeds("visual_semantic", disk_bytes=16 * 1024**2, model=BGE_M3)),
+        # Model-bearing (the declared SigLIP 2 image tower, in process on the CPU; qronos_media.image_embeddings):
+        # vectors of the stored keyframes' PIXELS, independent of Vision captions. Keyframes that change requeue it;
+        # frames whose vector is already stored for the current fingerprint are not embedded again.
+        StageSpec("image_embeddings", image_embeddings.STAGE_VERSION, ("keyframes",), 3,
+                  StageNeeds("image_embeddings", disk_bytes=16 * 1024**2, model=SIGLIP2_BASE_224_INT8)),
     )
 }
 
@@ -109,8 +117,12 @@ PENDING_CAPABILITIES: tuple[dict[str, object], ...] = (
                "the rank score uses fixed weights and is uncalibrated. Segments carry no labels or summaries."},
     {"capability": "visual_semantic_text", "level": 3, "status": "implemented_unverified",
      "reason": "Cross-language bge-m3 retrieval over the stored GENERATED visual text (captions, text read, observations; stage 'visual_semantic'), only inside the Qronos runtime with its memory sidecar; text vectors, never image similarity; scores are uncalibrated; no real-model run has been accepted."},
-    {"capability": "visual_embeddings", "level": 3, "status": "decision_pending",
-     "reason": "No joint image-text embedding backend is specified for Qronos; adding one needs an explicit decision."},
+    {"capability": "visual_embeddings", "level": 3, "status": "implemented_unverified",
+     "reason": "Image similarity: SigLIP 2 base (Apache-2.0; int8 ONNX image and text towers in one space) embeds the PIXELS "
+               "of the stored keyframes (stage 'image_embeddings') and a typed query, run in process by onnxruntime on "
+               "the CPU only inside the Qronos runtime, and only when its three pinned files are provisioned (never "
+               "downloaded or bundled). Scores are uncalibrated cosines, not identifications; tokenizer parity, quality "
+               "(Persian included) and timing are unmeasured; no real-model run has been accepted."},
     {"capability": "vision_captions", "level": 4, "status": "implemented_unverified",
      "reason": "Captions, text read in the frame and visible observations for at most 24 stored keyframes per asset, from the runtime's configured Vision profile (stage 'visual_evidence'), only inside the Qronos runtime under the declared Vision model lease; generated, unverified model text with the frame time and SHA-256, never a fact or an identification; searched lexically as a separate channel; no real-model run has been accepted."},
     {"capability": "ocr", "level": 4, "status": "pending",
@@ -184,6 +196,8 @@ class StageContext:
     brain: object = None
     #: The runtime's Vision gateway (qronos_media.vision_gateway.VisionGateway) or None.
     vision: object = None
+    #: The runtime's image encoder (qronos_media.image_embeddings.ImageEncoderProvider) or None.
+    image_encoder: object = None
 
     def checkpoint_boundary(self) -> None:
         if self.interrupted():
@@ -1188,6 +1202,98 @@ def run_visual_semantic(ctx: StageContext) -> Commit:
     return commit
 
 
+def run_image_embeddings(ctx: StageContext) -> Commit:
+    """Image vectors of the stored keyframes' PIXELS (see qronos_media.image_embeddings); never of a caption."""
+    from qronos_media.model_authority import ModelLease
+
+    lease = ctx.lease()
+    if not isinstance(lease, ModelLease) or lease.spec is not SIGLIP2_BASE_224_INT8:
+        raise ResourceRefused("model_lease_required", "image_embeddings")
+    if ctx.image_encoder is None:
+        raise ResourceRefused("model_unavailable", "no image encoder in this process")
+    ctx.primary_file()  # the asset's root is admitted now and bound: a revocation stops the work and the commit
+    current = image_embeddings.fingerprint()
+    keyframe_dir = owned_child(ctx.cache_dir, "keyframes", checked_asset_id(ctx.asset_id))
+    rows = ctx.db.execute("SELECT scene_index, ordinal, time_ms, path, bytes FROM keyframes WHERE asset_id = ? "
+                          "ORDER BY scene_index, ordinal", (ctx.asset_id,)).fetchall()
+    frames: list[tuple[sqlite3.Row, str, int]] = []
+    for row in rows:  # first pass: which exact frame is stored (the bytes are not kept in memory)
+        ctx.checkpoint_boundary()
+        data = _frame_bytes(keyframe_dir, row)
+        if not isinstance(data, str):
+            frames.append((row, hashlib.sha256(data).hexdigest(), len(data)))
+    digests = sorted({digest for _, digest, _ in frames})
+    present: set[str] = set()
+    for start in range(0, len(digests), 500):
+        part = digests[start:start + 500]
+        present |= {r[0] for r in ctx.db.execute(
+            "SELECT frame_sha256 FROM image_vector_cache WHERE fingerprint = ? AND frame_sha256 IN (%s)"
+            % ",".join("?" for _ in part), [current, *part])}
+    todo: dict[str, sqlite3.Row] = {}
+    for row, digest, _ in frames:
+        if digest not in present:
+            todo.setdefault(digest, row)  # the same frame twice is embedded once
+    pending = list(todo.items())
+    done = 0
+    if pending:  # everything already stored (a resume, an unchanged asset): no model is loaded at all
+        with ctx.image_encoder.open(lease, image=True) as encoder:
+            for start in range(0, len(pending), image_embeddings.IMAGE_BATCH):
+                batch = pending[start:start + image_embeddings.IMAGE_BATCH]
+                ctx.checkpoint_boundary()  # Stop, Pause, deadline, permission, the person's foreground turn
+                ctx.renew()
+                arrays, kept = [], []
+                for digest, row in batch:
+                    data = _frame_bytes(keyframe_dir, row)
+                    if isinstance(data, str) or hashlib.sha256(data).hexdigest() != digest:
+                        continue  # changed since the first pass: never embedded under the old SHA-256
+                    try:
+                        arrays.append(image_embeddings.preprocess_frame(data))
+                    except image_embeddings.FrameUnusable:
+                        continue
+                    kept.append(digest)
+                if not arrays:
+                    continue
+                try:
+                    vectors = encoder.encode_frames(arrays)
+                except image_embeddings.EncoderOutputInvalid as exc:
+                    raise StageFailed(f"image encoder answer rejected: {exc}") from None
+                done += len(kept)
+                cached = [(current, digest, image_embeddings.DIMENSION, vector, time.time())
+                          for digest, vector in zip(kept, vectors)]
+
+                def write(db: sqlite3.Connection, cached: list = cached) -> None:
+                    db.executemany("INSERT OR IGNORE INTO image_vector_cache(fingerprint, frame_sha256, dim, vector, "
+                                   "created_at) VALUES (?,?,?,?,?)", cached)
+
+                ctx.checkpoint = {"embedded": done, "of": len(pending)}
+                ctx.save_checkpoint(ctx.checkpoint, write)  # vectors and checkpoint: one transaction (not searchable yet)
+
+    def commit(db: sqlite3.Connection) -> None:
+        db.execute("DELETE FROM image_embeddings WHERE asset_id = ?", (ctx.asset_id,))
+        # Only frames whose vector exists for the CURRENT fingerprint and whose keyframe row is still the one read.
+        db.executemany(
+            "INSERT INTO image_embeddings(asset_id, scene_index, ordinal, time_ms, frame_sha256, fingerprint, "
+            "provenance_json) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM image_vector_cache WHERE fingerprint = ? "
+            "AND frame_sha256 = ?) AND EXISTS (SELECT 1 FROM keyframes WHERE asset_id = ? AND scene_index = ? "
+            "AND ordinal = ? AND bytes = ?)",
+            [(ctx.asset_id, row["scene_index"], row["ordinal"], row["time_ms"], digest, current,
+              json.dumps(image_embeddings.row_provenance(digest, size, row["time_ms"], row["scene_index"],
+                                                         row["ordinal"]), sort_keys=True),
+              current, digest, ctx.asset_id, row["scene_index"], row["ordinal"], size)
+             for row, digest, size in frames])
+
+    return commit
+
+
+def image_embeddings_skip_reason(db: sqlite3.Connection, asset_id: str) -> str | None:
+    stored = db.execute("SELECT 1 FROM keyframes WHERE asset_id = ? LIMIT 1", (asset_id,)).fetchone()
+    return None if stored else "no_keyframes"
+
+
+def _delete_image_embeddings(db: sqlite3.Connection, asset_id: str) -> None:
+    db.execute("DELETE FROM image_embeddings WHERE asset_id = ?", (asset_id,))
+
+
 def visual_semantic_skip_reason(db: sqlite3.Connection, asset_id: str) -> str | None:
     described = db.execute("SELECT 1 FROM visual_evidence WHERE asset_id = ? AND status = 'described' LIMIT 1",
                            (asset_id,)).fetchone()
@@ -1225,14 +1331,16 @@ SKIPS: dict[str, Callable[[sqlite3.Connection, str], object]] = {"asr": asr.skip
                                                                   "topics": topics_skip_reason,
                                                                   "topic_labels": topic_labels_skip_reason,
                                                                   "visual_evidence": visual_evidence_skip_reason,
-                                                                  "visual_semantic": visual_semantic_skip_reason}
+                                                                  "visual_semantic": visual_semantic_skip_reason,
+                                                                  "image_embeddings": image_embeddings_skip_reason}
 #: What a skipped stage removes (rows from an earlier run that no longer apply), in the same transaction.
 SKIP_CLEANUP: dict[str, Callable[[sqlite3.Connection, str], None]] = {"asr": _delete_asr,
                                                                        "semantic": _delete_semantic,
                                                                        "topics": _delete_topics,
                                                                        "topic_labels": _delete_topic_labels,
                                                                        "visual_evidence": _delete_visual_evidence,
-                                                                       "visual_semantic": _delete_visual_semantic}
+                                                                       "visual_semantic": _delete_visual_semantic,
+                                                                       "image_embeddings": _delete_image_embeddings}
 
 RUNNERS: dict[str, Callable[[StageContext], Commit]] = {
     "metadata": run_metadata,
@@ -1245,4 +1353,5 @@ RUNNERS: dict[str, Callable[[StageContext], Commit]] = {
     "keyframes": run_keyframes,
     "visual_evidence": run_visual_evidence,
     "visual_semantic": run_visual_semantic,
+    "image_embeddings": run_image_embeddings,
 }

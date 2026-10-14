@@ -770,7 +770,7 @@ def test_a_schema_1_store_migrates_once_and_a_newer_one_is_refused_untouched(tmp
     db.close()
     store = MediaStore(path)
     try:
-        assert store.get_meta("schema_version") == "7"  # schema 7 (visual semantic) migrates a schema-1 file too
+        assert store.get_meta("schema_version") == "8"  # schema 8 (frame image vectors) migrates a schema-1 file too
         assert store.db.execute("SELECT count(*) FROM topic_segments").fetchone()[0] == 0
         assert store.db.execute("SELECT count(*) FROM topic_labels").fetchone()[0] == 0
         assert store.db.execute("SELECT count(*) FROM visual_evidence").fetchone()[0] == 0
@@ -783,10 +783,10 @@ def test_a_schema_1_store_migrates_once_and_a_newer_one_is_refused_untouched(tmp
         assert store.db.execute("SELECT count(*) FROM dialogue_fts WHERE dialogue_fts MATCH 'kept'").fetchone()[0] == 0
     finally:
         store.close()
-    newer = tmp_path / "v8.sqlite3"
+    newer = tmp_path / "v9.sqlite3"
     db = sqlite3.connect(newer)
     db.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
-                     "INSERT INTO meta VALUES ('schema_version', '8');")
+                     "INSERT INTO meta VALUES ('schema_version', '9');")
     db.close()
     before = newer.read_bytes()
     with pytest.raises(StoreTooNew):

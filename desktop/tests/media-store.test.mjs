@@ -289,7 +289,8 @@ test("multimodal hits need a dialogue line AND an unverified frame; no-result ou
   const panel = source("../src/components/MediaPanel.tsx");
   assert.match(panel, /نتیجه‌های ترکیبی \(هر کدام با هر دو شرط/);
   assert.match(panel, /پیشنهاد مغز سریع از واژه‌های خود شما \(تولیدشده، تأییدنشده\)/);
-  assert.match(panel, /گوینده، OCR و شباهت تصویر هنوز ساخته نشده‌اند/);
+  assert.match(panel, /گوینده و OCR هنوز ساخته نشده‌اند/);
+  assert.doesNotMatch(panel, /شباهت تصویر هنوز ساخته نشده/);  // image similarity exists now (round 79)
   assert.match(panel, /setResult\(null\);\s*if \(proposal\?\.status === "proposed"\)/);  // a split never searches
 });
 
@@ -343,6 +344,57 @@ test("semantic visual hits say their channel and an uncalibrated text similarity
   const panel = source("../src/components/MediaPanel.tsx");
   assert.match(panel, /نه شباهت تصویر/);
   assert.match(panel, /کالیبره‌نشده/);
+});
+
+test("image-similarity hits are their own channel with an uncalibrated cosine and a reason when unavailable", () => {
+  const asset = "a_" + "6".repeat(32);
+  const sha = "e".repeat(64);
+  const image = { status: "complete", results: [
+    { assetId: asset, timeMs: 5000, frameSha256: sha, channels: ["image"], imageSimilarity: 0.31, caption: null,
+      generated: false, verified: false, dialogue: [{ startMs: 4000, text: "Look at that car." }] },
+    { assetId: asset, timeMs: 6000, frameSha256: sha, channels: ["image"], imageSimilarity: 0.2, caption: "A red car.",
+      generated: true, verified: false },
+    { assetId: asset, timeMs: 7000, frameSha256: sha, channels: ["image"], imageSimilarity: 0.2, verified: true },
+    { assetId: asset, timeMs: 8000, frameSha256: sha, channels: ["lexical"], imageSimilarity: 0.2, verified: false },
+    { assetId: asset, timeMs: 9000, frameSha256: sha, channels: ["image"], imageSimilarity: "high", verified: false },
+  ] };
+  const block = media.visualBlockOf({ requestId: "r1", op: "search", ok: true,
+    visual: { status: "unavailable", reason: "no_visual_evidence", results: [], image } });
+  assert.equal(block.hits.length, 0);
+  assert.equal(block.imageHits.length, 2);
+  assert.equal(block.imageHits[0].caption, null);
+  assert.equal(block.imageHits[0].dialogue[0].text, "Look at that car.");
+  assert.equal(block.imageHits[1].caption, "A red car.");
+  assert.equal(block.imageNote, null);
+  const missing = media.visualBlockOf({ requestId: "r2", op: "search", ok: true, visual: { status: "complete",
+    results: [], image: { status: "unavailable", reason: "image_encoder_not_provisioned", results: [] } } });
+  assert.match(missing.imageNote, /SigLIP 2/);
+  assert.match(missing.imageNote, /خودش دانلود نمی‌کند/);
+  const frame = { timeMs: 62000, frameSha256: sha, caption: null, verified: false, channels: ["image"],
+    imageSimilarity: 0.28, generated: false, relation: "during", gapMs: 0 };
+  const line = { startMs: 60000, endMs: 64000, text: "The sea is calm today.", channels: ["exact"],
+    track: { source: "embedded", language: "eng" } };
+  const mm = media.multimodalBlockOf({ requestId: "r3", op: "search", ok: true, multimodal: { status: "complete",
+    outcome: "matched", results: [
+      { assetId: asset, startMs: 60000, endMs: 64000, dialogue: line, frames: [frame], alignment: { windowMs: 5000 } },
+      { assetId: asset, startMs: 1, endMs: 2, dialogue: line, frames: [{ ...frame, channels: ["lexical"] }] },  // no text
+    ] } });
+  assert.equal(mm.hits.length, 1);
+  assert.deepEqual(plain(mm.hits[0].frames[0].channels), ["image"]);
+  assert.equal(mm.hits[0].frames[0].generated, false);
+  assert.equal(mm.hits[0].frames[0].imageSimilarity, 0.28);
+  const fallback = media.multimodalBlockOf({ requestId: "r4", op: "search", ok: true, multimodal: {
+    status: "partial", outcome: "neither", results: [],
+    visualChannel: { image: { requested: true, status: "unavailable", reason: "image_encoder_unavailable" } } } });
+  assert.match(fallback.channelNotes[0], /فقط متن تولیدشدهٔ فریم‌ها به کار رفت/);
+  assert.deepEqual(plain(media.multimodalFields("sea", "blue", 5000, false, "image")), {
+    mode: "multimodal", dialogue: "sea", visual: "blue", windowMs: 5000, dialogueMatch: "exact",
+    visualMatch: "image", limit: 20 });
+  assert.equal(media.multimodalFields("sea", "blue", 5000, false, "anything").visualMatch, "lexical");
+  const panel = source("../src/components/MediaPanel.tsx");
+  assert.match(panel, /شباهت تصویری فریم‌ها \(بردار تصویر خود فریم با بردار متن پرسش؛ SigLIP 2، کالیبره‌نشده، نه شناسایی\)/);
+  assert.match(panel, /<option value="image">شباهت تصویری خود فریم‌ها \(SigLIP 2، کالیبره‌نشده\)<\/option>/);
+  assert.match(panel, /پیداشده با شباهت تصویری خود این فریم ذخیره‌شده \(نه از روی توصیف آن\)/);
 });
 
 test("the panel uses the registered action transport, clears the secret and starts no runtime itself", () => {
