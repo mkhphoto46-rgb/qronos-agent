@@ -28,7 +28,8 @@ from build_support import install_manifest as ownership
 from build_support import project_licence
 from build_support.runtime_notices import NOTICE_DIRECTORY
 from build_support.build_runtime import verify_manifest
-from build_support.desktop_notices import MANIFEST as NOTICE_MANIFEST, NoticeError, verify_notice_output
+from build_support.desktop_notices import INVENTORY as NOTICE_INVENTORY, MANIFEST as NOTICE_MANIFEST, NoticeError
+from build_support.desktop_notices import load_artwork, verify_notice_output
 from build_support.desktop_prerequisites import (
     DOWNLOAD_PLUGINS,
     PrerequisiteError,
@@ -110,6 +111,17 @@ def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | 
         raise PrerequisiteError(f"The installer does not carry Qronos's own LICENSE and NOTICE: {error}") from error
     if licence["desktop"] != licence["runtime"]:
         raise PrerequisiteError("The installer's desktop and runtime copies of Qronos's LICENSE and NOTICE differ.")
+    # The third-party template icons and logos the app carries are attributed in its desktop notices, exactly.
+    try:
+        expected_artwork = {(entry["path"], entry["sha256"]) for entry in load_artwork().registry["files"]}
+        shipped_inventory = json.loads((notices / NOTICE_INVENTORY).read_text(encoding="utf-8"))
+        shipped_artwork = {(entry["path"], entry["sha256"])
+                           for entry in (shipped_inventory.get("artwork") or {}).get("files", [])}
+    except (NoticeError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise PrerequisiteError(f"The installer's artwork attribution cannot be checked: {error}") from error
+    if shipped_artwork != expected_artwork:
+        raise PrerequisiteError("The installer's desktop notices do not attribute exactly the third-party artwork the "
+                                "app carries (build_support/desktop_artwork.json).")
     runtime_manifest = runtime / "runtime-manifest.json"
     shipped = (root / ownership.FILE_NAME).read_bytes()
     if install_manifest is not None and shipped != install_manifest:
@@ -133,6 +145,7 @@ def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | 
         "desktopNoticeFiles": len(notice_manifest["files"]),
         "projectLicence": {"license": project_licence.SPDX, "files": licence["desktop"],
                            "locations": sorted(licence_folders.values())},
+        "thirdPartyArtworkAttributed": len(shipped_artwork),
     }
 
 

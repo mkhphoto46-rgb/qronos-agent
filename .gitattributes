@@ -2,3 +2,7 @@
 # SHA-256 in build_support/project_licence.py. No end-of-line rewriting on checkout.
 /LICENSE -text
 /NOTICE -text
+# Third-party artwork is pinned by SHA-256 in build_support/desktop_artwork.json: its exact upstream bytes on checkout.
+/desktop/public/*.svg -text
+/desktop/src/assets/*.svg -text
+/desktop/src-tauri/icons/** -text

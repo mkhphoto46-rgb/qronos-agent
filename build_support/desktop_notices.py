@@ -48,6 +48,8 @@ Output (deterministic; no timestamps, no absolute paths):
     licenses/<...>/<version>/upstream/<vendored files>
     qronos/LICENSE, qronos/NOTICE        Qronos's own licence (Apache-2.0, the pinned official
                                          text) and NOTICE, from ``project_licence``
+    artwork/<upstream>-<revision>/...    pinned upstream licence texts of the third-party template
+                                         icons and logos (build_support/desktop_artwork.json)
 
 This is technical notice packaging, not legal clearance for redistribution.
 """
@@ -75,6 +77,10 @@ CARGO_MANIFEST = DESKTOP / "src-tauri" / "Cargo.toml"
 PACKAGE_LOCK = DESKTOP / "package-lock.json"
 EXCEPTIONS_PATH = ROOT / "build_support" / "desktop_notice_exceptions.json"
 UPSTREAM_REGISTRY = ROOT / "build_support" / "desktop_notice_upstream" / "registry.json"
+#: Third-party template artwork (icons, logos) and its pinned upstream licence texts; see load_artwork.
+ARTWORK_REGISTRY = ROOT / "build_support" / "desktop_artwork.json"
+ARTWORK_TEXTS = ROOT / "build_support" / "desktop_artwork" / "texts"
+ARTWORK_FOLDER = "artwork"
 
 #: The installer is built for this target; cargo metadata filters to it.
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
@@ -591,6 +597,93 @@ def _upstream_problem(component: Component, found: list[NoticeFile], notice: Ups
     return None
 
 
+@dataclass(frozen=True)
+class Artwork:
+    """The verified third-party artwork registry and the bytes of its pinned upstream licence texts."""
+
+    registry: dict[str, Any]
+    texts: tuple[tuple[str, bytes], ...]  # (destination in the notice output, exact bytes)
+
+
+def load_artwork(path: Path = ARTWORK_REGISTRY, root: Path = ROOT, texts_root: Path = ARTWORK_TEXTS) -> Artwork:
+    """The template icons and logos the desktop app carries, verified offline (build_support/desktop_artwork.json).
+
+    Every file under the registry's folders must be listed with its exact size and SHA-256 and name the pinned upstream
+    revision it is identical to. Every licence text is the vendored upstream file at its pinned SHA-256, and no other
+    file is vendored. Anything unlisted, changed, missing or extra fails. Nothing here grants or changes a licence."""
+    try:
+        registry = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise NoticeError(f"The artwork registry is unusable: {type(error).__name__}") from None
+    if not isinstance(registry, dict) or registry.get("schema") != 1 \
+            or not all(isinstance(registry.get(key), list) and registry[key] for key in ("folders", "sources", "files")):
+        raise NoticeError("The artwork registry needs schema 1 and non-empty folders, sources and files.")
+    sources: dict[str, dict[str, Any]] = {}
+    texts: list[tuple[str, bytes]] = []
+    for source in registry["sources"]:
+        if not isinstance(source, dict) or not isinstance(source.get("id"), str) or source["id"] in sources \
+                or not re.fullmatch(r"[0-9a-f]{40}", str(source.get("revision"))) \
+                or not str(source.get("repository", "")).startswith("https://github.com/") \
+                or not source.get("licences") or not source.get("licenceEvidence") or not source.get("texts"):
+            raise NoticeError("An artwork source needs a unique id, a GitHub repository, a full revision, its licences, "
+                              "their evidence and licence texts.")
+        sources[source["id"]] = source
+        for text in source["texts"]:
+            data = _contained_file(texts_root, _relative_parts(str(text.get("file", "")))).read_bytes()
+            if len(data) != text.get("bytes") or hashlib.sha256(data).hexdigest() != text.get("sha256"):
+                raise NoticeError(f"Artwork licence text {text.get('file')!r} is not the pinned upstream file.")
+            texts.append((f"{ARTWORK_FOLDER}/{text['file']}", data))
+    vendored = {item.relative_to(texts_root).as_posix() for item in texts_root.rglob("*") if item.is_file()}
+    if vendored != {text["file"] for source in sources.values() for text in source["texts"]}:
+        raise NoticeError("The vendored artwork licence texts differ from the registry.")
+    folders = [_relative_parts(str(folder)) for folder in registry["folders"]]
+    listed: set[str] = set()
+    for entry in registry["files"]:
+        parts = _relative_parts(str(entry.get("path", "")))
+        if not any(parts[:len(folder)] == folder for folder in folders) or "/".join(parts) in listed:
+            raise NoticeError(f"Artwork entry {entry.get('path')!r} is outside the registry folders or listed twice.")
+        if not entry.get("from") or any(origin.get("source") not in sources or not origin.get("sourcePath")
+                                        for origin in entry["from"]) or not entry.get("use"):
+            raise NoticeError(f"Artwork entry {entry.get('path')!r} must name its upstream source path and its use.")
+        data = _contained_file(root, parts).read_bytes()
+        if len(data) != entry.get("bytes") or hashlib.sha256(data).hexdigest() != entry.get("sha256"):
+            raise NoticeError(f"Artwork {entry['path']!r} is not the listed upstream file (size or SHA-256 differs).")
+        listed.add("/".join(parts))
+    present = {item.relative_to(root).as_posix() for folder in folders
+               for item in root.joinpath(*folder).rglob("*") if item.is_file()}
+    if present != listed:
+        raise NoticeError("Files under the artwork folders differ from build_support/desktop_artwork.json: "
+                          + ", ".join(sorted(present ^ listed)))
+    return Artwork(registry, tuple(texts))
+
+
+ARTWORK_NOTE = ("Template icons and logos from the upstream projects named below, byte-identical to the pinned "
+                "revisions. They are not Qronos's own work, are NOT covered by Qronos's Apache-2.0 licence and are not "
+                "relicensed. The names and logos they show may be trademarks of their owners; no trademark right is "
+                "granted by Qronos or by these notices.")
+
+
+def _artwork_text(artwork: Artwork) -> list[str]:
+    """The artwork section of THIRD_PARTY_NOTICES-desktop.txt: every file, its upstream and use, then the licence texts."""
+    sources = {source["id"]: source for source in artwork.registry["sources"]}
+    lines = ["-" * 72, "Third-party artwork in the desktop application (template icons and logos)", ARTWORK_NOTE]
+    for entry in artwork.registry["files"]:
+        origins = "; also ".join(f"{sources[o['source']]['repository']} at {sources[o['source']]['revision']}: "
+                                 f"{o['sourcePath']}" for o in entry["from"])
+        lines.append(f"{entry['path']} ({entry['bytes']} bytes, SHA-256 {entry['sha256']}): identical to {origins}. "
+                     f"Use: {entry['use']}.")
+    data = dict(artwork.texts)
+    for source in artwork.registry["sources"]:
+        lines += ["", f"{source['repository']} at {source['revision']}: {' and '.join(source['licences'])} "
+                      f"({source['licenceEvidence']})"]
+        for text in source["texts"]:
+            path = f"{ARTWORK_FOLDER}/{text['file']}"
+            lines += ["", f"--- {path} ({text['bytes']} bytes, SHA-256 {text['sha256']}) from {source['repository']} "
+                          f"at {source['revision']}: {text['sourcePath']} ---",
+                      data[path].decode("utf-8", errors="replace").rstrip("\n")]
+    return lines + [""]
+
+
 def _unique_components(components: list[Component]) -> list[Component]:
     by_key: dict[tuple[str, str, str], Component] = {}
     for component in components:
@@ -739,8 +832,10 @@ def write_notices(
     private_prefixes: tuple[str, ...],
     upstream: dict[tuple[str, str, str], UpstreamNotice] | None = None,
     project: dict[str, bytes] | None = None,
+    artwork: Artwork | None = None,
 ) -> dict[str, Any]:
-    """``project`` is Qronos's own LICENSE and NOTICE (``project_licence.read()``); a build always passes it."""
+    """``project`` is Qronos's own LICENSE and NOTICE (``project_licence.read()``) and ``artwork`` the verified
+    third-party artwork registry (``load_artwork()``); a build always passes both."""
     upstream = upstream or {}
     planned = _plan(components, files, upstream)
     project_files = {}
@@ -820,6 +915,8 @@ def write_notices(
             text += ["", f"--- {item.path} ({item.role}, {len(item.data)} bytes, SHA-256 {item.sha256}){origin} ---",
                      item.data.decode("utf-8", errors="replace").rstrip("\n")]
         text.append("")
+    if artwork is not None:
+        text += _artwork_text(artwork)
     inventory = {
         "schema": 3,
         "target": target,
@@ -837,12 +934,25 @@ def write_notices(
         "ownerReviewRequired": owner_review,
         "components": records,
     }
+    if artwork is not None:
+        inventory["artwork"] = {
+            "registry": "build_support/desktop_artwork.json",
+            "note": ARTWORK_NOTE,
+            "sources": [{key: source[key] for key in ("id", "repository", "revision", "licences", "licenceEvidence")}
+                        | {"texts": [{"path": f"{ARTWORK_FOLDER}/{text['file']}", "sourcePath": text["sourcePath"],
+                                      "bytes": text["bytes"], "sha256": text["sha256"]} for text in source["texts"]]}
+                        for source in artwork.registry["sources"]],
+            "files": [{key: entry[key] for key in ("path", "bytes", "sha256", "from", "use")}
+                      for entry in artwork.registry["files"]],
+        }
     if project_files:
         inventory["projectOwned"] = {"license": project_licence.SPDX,
                                      "files": [{"path": path, **evidence}
                                                for path, (_, evidence) in sorted(project_files.items())]}
     contents = {item.path: item.data for _, entries in planned for item in entries}
     contents.update({path: data for path, (data, _) in project_files.items()})
+    if artwork is not None:
+        contents.update(dict(artwork.texts))
     _check_destinations(sorted(contents) + [INVENTORY, NOTICE_TEXT, MANIFEST])
     contents[INVENTORY] = (json.dumps(inventory, ensure_ascii=False, indent=1, sort_keys=True) + "\n").encode()
     contents[NOTICE_TEXT] = ("\n".join(text) + "\n").encode("utf-8")
@@ -913,7 +1023,8 @@ def collect_desktop_notices(
         project = project_licence.read(ROOT)
     except project_licence.ProjectLicenceError as error:
         raise NoticeError(f"Qronos's own licence cannot be shipped: {error}") from None
-    return write_notices(components, files, exceptions, out_dir, target, private, upstream, project=project)
+    return write_notices(components, files, exceptions, out_dir, target, private, upstream, project=project,
+                         artwork=load_artwork())
 
 
 def main(argv: list[str] | None = None) -> int:

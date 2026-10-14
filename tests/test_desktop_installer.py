@@ -830,7 +830,8 @@ def test_a_stale_installer_at_the_output_path_is_quarantined_first(tmp_path, mon
 # ------------------------------------------------ the extracted installer
 
 
-def extracted_tree(tmp_path: Path, *, desktop_licence: str = "repo", runtime_licence: str = "repo") -> tuple[Path, dict]:
+def extracted_tree(tmp_path: Path, *, desktop_licence: str = "repo", runtime_licence: str = "repo",
+                   artwork: str = "repo") -> tuple[Path, dict]:
     """A synthetic extracted installer built with the real runtime-manifest and notice writers.
 
     Both carry Qronos's own LICENSE and NOTICE ("repo"); "none" leaves them out, and "other-notice" ships a
@@ -867,7 +868,8 @@ def extracted_tree(tmp_path: Path, *, desktop_licence: str = "repo", runtime_lic
                                   "registry+https://github.com/rust-lang/crates.io-index", "sum", package.resolve())
     files = notices.check_coverage([component], {})
     notices.write_notices([component], files, {}, root / "third-party-notices", notices.WINDOWS_TARGET, (),
-                          project=variants[desktop_licence])
+                          project=variants[desktop_licence],
+                          artwork=notices.load_artwork() if artwork == "repo" else None)
     install_manifest.write(root, install_manifest.payload_files(runtime, root / "third-party-notices",
                                                                 "qronos-desktop"))
     return root, pin
@@ -887,6 +889,15 @@ def test_an_extracted_installer_is_verified_byte_for_byte(tmp_path):
         "bytes": 11358, "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"}
     assert evidence["projectLicence"]["locations"] == ["qronos-runtime/third-party-notices/qronos",
                                                        "third-party-notices/qronos"]
+    assert evidence["thirdPartyArtworkAttributed"] == 19
+
+
+def test_an_installer_whose_notices_do_not_attribute_the_template_artwork_is_refused(tmp_path):
+    # Every manifest is consistent; only the artwork attribution is missing.
+    root, pin = extracted_tree(tmp_path, artwork="none")
+
+    with pytest.raises(PrerequisiteError, match="do not attribute exactly the third-party artwork"):
+        installer_verify.verify_extracted(root, pin)
 
 
 @pytest.mark.parametrize(("desktop", "runtime", "message"), [

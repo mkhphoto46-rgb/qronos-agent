@@ -85,6 +85,13 @@ Output, all relative and deterministic:
   `projectOwned`. The packaged runtime carries the same two files in its
   `third-party-notices/qronos/`, and the installer check requires identical
   copies in both places.
+- `artwork/<upstream>-<revision>/...`: the licence texts of the third-party template icons and logos
+  (`desktop/src-tauri/icons/`, `desktop/public/`, `desktop/src/assets/`), vendored byte-for-byte from their pinned
+  upstream revisions. `build_support/desktop_artwork.json` lists every file under those folders, its exact
+  SHA-256 and the upstream file it is identical to. An unlisted, changed or extra file stops the build. The
+  notices text has an artwork section and the inventory an `artwork` record. The installer check requires that
+  record to name exactly the registered files. This artwork is not Qronos's work and is not covered by its
+  Apache-2.0 licence.
 
 ## Identities, destinations and the output directory
 
