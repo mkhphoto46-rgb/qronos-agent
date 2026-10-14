@@ -205,7 +205,8 @@ _COMMAND = (
     r"bcdedit\s+/(?:set|delete|deletevalue|import)\b|vssadmin\s+(?:delete|resize)\b|wmic\s+\S+\s+(?:call|delete|set)\b|"
     r"schtasks\s+/create\b|netsh\s+(?:advfirewall|firewall|interface|wlan|winsock)\b|"
     # anything fetched and piped into an interpreter (any PowerShell Invoke-* cmdlet, iwr/irm, curl, wget)
-    r"(?:iwr|irm|curl|wget|Invoke-[A-Z][A-Za-z]+)\b[^\n`]*\|\s*(?:iex|Invoke-Expression|sh|bash)\b|"
+    r"(?:iwr|irm|curl|wget|Invoke-[A-Z][A-Za-z]+)\b[^\n`]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?"
+    r"(?:iex|Invoke-Expression|sh|bash)\b|"
     r"(?:iex|Invoke-Expression)\s*[(\$'\"]|powershell(?:\.exe)?\s+-(?:enc|e|c|command)\b|cmd(?:\.exe)?\s+/c\b|"
     rf"chmod\s+\+x\s+{_TARGET}|pip3?\s+install\s+{_TARGET}|npm\s+(?:install|i)\s+{_TARGET}|"
     rf"choco\s+install\s+{_TARGET}|winget\s+install\s+{_TARGET}"
@@ -216,6 +217,15 @@ _COMMAND = (
 _HAND_OVER = r"\b(?:run|running|use|type|typing|execute|enter|try|with|via|then|and)\s+"
 _HIGH_RISK_COMMAND = re.compile(rf"(?:^[ \t>*\-$#]*|`\s*|:\s*|[.!?؟؛]\s+|{_HAND_OVER})(?:{_COMMAND})",
                                 re.IGNORECASE | re.MULTILINE)
+# System administration tools, as broadly as 78ed5dc withheld them, where an answer hands them over: at a line start
+# (also after a list marker or a prompt sign) or opening an inline `code span` - any sudo <command> and any netsh,
+# wmic, bcdedit or vssadmin invocation. Written as typed (lower case), so a sentence that starts "Sudo is a tool ..."
+# or "Netsh can ..." stays prose, and a bare name in a span ("the `netsh` tool") is a mention.
+_ADMIN_AT_START = re.compile(
+    r"(?:^[ \t>*\-$#]*(?:\d{1,3}[.)]\s+)?|`\s*)"
+    r"(?:sudo\s+(?:-\S+\s+)*[a-z][\w.-]*|netsh(?:\.exe)?\s+[^\s`]|wmic(?:\.exe)?\s+[^\s`]|"
+    r"bcdedit(?:\.exe)?(?:\s+[^\s`]|\s*$)|vssadmin(?:\.exe)?(?:\s+[^\s`]|\s*$))",
+    re.MULTILINE)
 # An inline `code span` inside a sentence holding an executable statement ("use `print('x')` here",
 # "add `import os; os.remove(p)`"). A bare name or an empty call ("the `print` function", "`print()`") is a mention.
 _CODE_SPAN = re.compile(r"`([^`\n]{1,400})`")
@@ -277,7 +287,7 @@ def check_answer(text: object) -> CodeFinding | None:
     if any(_STATEMENT.match(span.strip()) and not _EMPTY_CALL.match(span.strip())
            for span in _CODE_SPAN.findall(value)):
         return CodeFinding("output", ActionCategory.CODE_GENERATION, "inline_code_statement")
-    if _HIGH_RISK_COMMAND.search(value):
+    if _HIGH_RISK_COMMAND.search(value) or _ADMIN_AT_START.search(value):
         return CodeFinding("output", ActionCategory.SCRIPT_EXECUTION, "machine_changing_command")
     return None
 
