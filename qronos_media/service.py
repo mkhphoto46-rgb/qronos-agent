@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -765,17 +766,29 @@ class MediaService:
                     continue
                 line, track = hit["dialogue"], hit["dialogue"]["track"]["trackId"]
                 if line["unit"] == "window":
-                    stored = db.execute("SELECT 1 FROM semantic_windows WHERE asset_id = ? AND track_id = ? AND "
-                                        "start_ms = ? AND end_ms = ?", (asset_id, track, line["startMs"],
-                                                                       line["endMs"])).fetchone()
+                    texts = db.execute("SELECT text FROM semantic_windows WHERE asset_id = ? AND track_id = ? AND "
+                                       "start_ms = ? AND end_ms = ?", (asset_id, track, line["startMs"],
+                                                                      line["endMs"])).fetchall()
                 else:
-                    stored = db.execute("SELECT 1 FROM dialogue WHERE asset_id = ? AND track_id = ? AND kind = ? AND "
-                                        "start_ms = ? AND end_ms = ?", (asset_id, track, line["unit"],
-                                                                       line["startMs"], line["endMs"])).fetchone()
-                frames = [frame for frame in hit["frames"] if db.execute(
-                    "SELECT 1 FROM visual_evidence WHERE asset_id = ? AND time_ms = ? AND frame_sha256 = ? "
-                    "AND status = 'described'", (asset_id, frame["timeMs"], frame["frameSha256"])).fetchone()]
-                if stored is None or not frames:
+                    texts = db.execute("SELECT text FROM dialogue WHERE asset_id = ? AND track_id = ? AND kind = ? AND "
+                                       "start_ms = ? AND end_ms = ?", (asset_id, track, line["unit"],
+                                                                      line["startMs"], line["endMs"])).fetchall()
+                # The line must still be stored with the SAME text (a corrected subtitle or a new transcript at the
+                # same times is different evidence), compared through the snapshot's own normalisation.
+                stored = any(search_report.held_dialogue_text(r["text"]) == line["text"] for r in texts)
+                frames = []
+                for frame in hit["frames"]:
+                    rows = db.execute(
+                        "SELECT caption, visible_text_json, observations_json FROM visual_evidence WHERE asset_id = ? "
+                        "AND time_ms = ? AND frame_sha256 = ? AND status = 'described'",
+                        (asset_id, frame["timeMs"], frame["frameSha256"])).fetchall()
+                    # The same frame described again says something else: the held text is no longer the index's.
+                    held = {key: frame[key] for key in ("caption", "visibleText", "observations")}
+                    if any(search_report.held_frame_text(
+                            r["caption"], json.loads(r["visible_text_json"]) if r["visible_text_json"] else [],
+                            json.loads(r["observations_json"]) if r["observations_json"] else []) == held for r in rows):
+                        frames.append(frame)
+                if not stored or not frames:
                     removed["changed"] += 1
                     continue
                 kept.append(dict(hit, frames=frames))

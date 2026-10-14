@@ -47,6 +47,17 @@ def _text(value: Any, limit: int = MAX_TEXT) -> str:
     return _plain(value, limit)
 
 
+def held_dialogue_text(text: Any) -> str:
+    """A line's text exactly as a snapshot holds it (the search keeps 600 characters; then the report form)."""
+    return _text(str(text or "")[:MAX_TEXT])
+
+
+def held_frame_text(caption: Any, visible_text: Any, observations: Any) -> dict[str, Any]:
+    """A frame's generated text exactly as a snapshot holds it (the recheck compares the stored row through this)."""
+    return {"caption": _text(caption, 240), "visibleText": [_text(t, 120) for t in (visible_text or [])[:8]],
+            "observations": [_text(t, 120) for t in (observations or [])[:6]]}
+
+
 def _number(value: Any) -> int | float | None:
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
@@ -73,9 +84,7 @@ def snapshot(answer: dict[str, Any]) -> dict[str, Any]:
             provenance = frame.get("provenance") or {}
             frames.append({
                 "timeMs": int(frame["timeMs"]), "frameSha256": str(frame["frameSha256"]),
-                "caption": _text(frame.get("caption"), 240),
-                "visibleText": [_text(t, 120) for t in (frame.get("visibleText") or [])[:8]],
-                "observations": [_text(t, 120) for t in (frame.get("observations") or [])[:6]],
+                **held_frame_text(frame.get("caption"), frame.get("visibleText"), frame.get("observations")),
                 "channels": _channels(frame.get("channels"), ("lexical", "semantic")),
                 "similarity": _number(frame.get("similarity")), "lexicalScore": _number(frame.get("lexicalScore")),
                 "relation": str(frame.get("relation")), "gapMs": int(frame.get("gapMs") or 0),
@@ -85,7 +94,7 @@ def snapshot(answer: dict[str, Any]) -> dict[str, Any]:
         results.append({
             "assetId": str(hit["assetId"]), "title": _text(hit.get("title"), 300) if hit.get("title") else None,
             "startMs": int(hit["startMs"]), "endMs": int(hit["endMs"]),
-            "dialogue": {"startMs": int(line["startMs"]), "endMs": int(line["endMs"]), "text": _text(line.get("text")),
+            "dialogue": {"startMs": int(line["startMs"]), "endMs": int(line["endMs"]), "text": held_dialogue_text(line.get("text")),
                          "unit": str(line.get("unit")), "channels": _channels(line.get("channels"),
                                                                              ("exact", "fuzzy", "semantic")),
                          "similarity": _number(line.get("similarity")), "lexicalScore": _number(line.get("lexicalScore")),

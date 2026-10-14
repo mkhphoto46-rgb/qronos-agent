@@ -154,3 +154,65 @@ def test_the_product_route_names_only_a_held_result_and_export_needs_the_same_ap
     other = tmp_path / "out" / "denied.json"
     denied = ask(product, "search.report.export", resultId=result_id, destination=str(other), format="json")
     assert denied["code"] == "denied" and not other.exists()
+
+
+# ---------------------------------------------------------------- B1 (Main67): the same rows saying something else
+
+
+def test_a_corrected_line_at_the_same_times_is_changed_evidence_not_the_held_text(tmp_path):
+    service, ids, _ = build(tmp_path)
+    _, result_id = held(service)
+    with service.store.transaction() as tx:  # a corrected subtitle: same track, kind and times, other words
+        tx.execute("UPDATE dialogue SET text = 'Completely different subtitle text.', "
+                   "norm_text = 'completely different subtitle text' WHERE asset_id = ? AND start_ms = 60000",
+                   (ids["A"],))
+    report = service.search_report(result_id)
+    assert report["recheck"] == {"kept": 0, "outOfScope": 0, "permission": 0, "changed": 1}
+    text = json.dumps(report, ensure_ascii=False)
+    assert "My father died last winter." not in text and "Completely different" not in text  # nothing re-searched
+
+
+def test_a_changed_semantic_window_at_the_same_times_is_changed_evidence(tmp_path):
+    service, ids, _ = build(tmp_path)
+    _, result_id = held(service, dialogue_match="semantic")  # A 60 s (exact + window) and A 300 s (window only)
+    units = {hit["dialogue"]["startMs"]: hit["dialogue"]["unit"] for hit in service.search_report(result_id)["results"]}
+    assert units == {60_000: "cue", 300_000: "window"}
+    with service.store.transaction() as tx:
+        tx.execute("UPDATE semantic_windows SET text = 'A different window text.' WHERE asset_id = ? AND start_ms = 300000",
+                   (ids["A"],))
+    report = service.search_report(result_id)
+    assert report["recheck"]["changed"] == 1 and [h["dialogue"]["startMs"] for h in report["results"]] == [60_000]
+
+
+def test_a_frame_described_again_with_the_same_sha_is_dropped_and_an_unchanged_one_is_kept(tmp_path):
+    from tests.test_media_multimodal import frame
+
+    service, ids, _ = build(tmp_path)
+    with service.store.transaction() as tx:  # a second kitchen frame near the 60-64 s line
+        frame(tx, ids["A"], 7, 70_000, "A kitchen sink with dishes.")
+    _, result_id = held(service)
+    assert [f["timeMs"] for f in service.search_report(result_id)["results"][0]["frames"]] == [62_000, 70_000]
+    with service.store.transaction() as tx:  # re-described: same frame SHA-256 and time, other generated words
+        tx.execute("UPDATE visual_evidence SET caption = 'A garage with a car.' WHERE asset_id = ? AND time_ms = 62000",
+                   (ids["A"],))
+    report = service.search_report(result_id)
+    assert report["recheck"] == {"kept": 1, "outOfScope": 0, "permission": 0, "changed": 0}
+    (hit,) = report["results"]
+    assert [f["timeMs"] for f in hit["frames"]] == [70_000]  # only the frame whose text is still the index's
+    text = json.dumps(report, ensure_ascii=False)
+    assert "A small kitchen with a kettle" not in text and "garage" not in text
+    with service.store.transaction() as tx:
+        tx.execute("UPDATE visual_evidence SET observations_json = '[\"a car\"]' WHERE asset_id = ? AND time_ms = 70000",
+                   (ids["A"],))
+    assert service.search_report(result_id)["recheck"] == {"kept": 0, "outOfScope": 0, "permission": 0, "changed": 1}
+
+
+def test_unchanged_text_rewritten_in_place_is_still_the_same_evidence(tmp_path):
+    service, ids, _ = build(tmp_path)
+    _, result_id = held(service)
+    with service.store.transaction() as tx:  # the same words written again (a re-index that changed nothing)
+        tx.execute("UPDATE dialogue SET text = text WHERE asset_id = ?", (ids["A"],))
+        tx.execute("UPDATE visual_evidence SET caption = caption WHERE asset_id = ?", (ids["A"],))
+    report = service.search_report(result_id)
+    assert report["recheck"] == {"kept": 1, "outOfScope": 0, "permission": 0, "changed": 0}
+    assert report["results"][0]["dialogue"]["text"] == "My father died last winter."
