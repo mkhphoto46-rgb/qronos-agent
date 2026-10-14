@@ -1,0 +1,4 @@
+# The project licence and notice ship byte-exact: LICENSE is the official Apache License 2.0 text, pinned by
+# SHA-256 in build_support/project_licence.py. No end-of-line rewriting on checkout.
+/LICENSE -text
+/NOTICE -text

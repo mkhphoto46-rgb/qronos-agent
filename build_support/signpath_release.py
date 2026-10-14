@@ -68,7 +68,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from build_support import authenticode_release as authenticode  # noqa: E402
-from build_support import desktop_installer_verify, release_signing  # noqa: E402
+from build_support import desktop_installer_verify, project_licence, release_signing  # noqa: E402
 from build_support.authenticode_release import AuthenticodeError  # noqa: E402
 from core import local_update  # noqa: E402
 
@@ -80,10 +80,11 @@ BOUND_FIELDS = ("organizationId", "projectSlug", "signingPolicySlug", "artifactC
                 "sourceRepository", "publisherSubject")
 FOUNDATION_PUBLISHER = "SignPath Foundation"  # https://signpath.org/terms.html: the certificate is issued to it
 TEMPLATE = ROOT / "config" / "signpath_release.template.json"
-LICENCE_FILES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING.md")
 #: Eligibility conditions no file in this checkout can show; they are never reported as met.
 EXTERNAL_CONDITIONS = (
-    "the source repository is public and the licence is OSI-approved, with no commercial dual-licensing",
+    "the source repository is public (adopting the Apache-2.0 licence does not publish it)",
+    "SignPath accepts the project's licensing: Apache-2.0 for the project-owned source, no commercial "
+    "dual-licensing, and the third-party components keeping their own terms",
     "the project is already released in the form that is signed, and actively maintained",
     "every team member uses multi-factor authentication for SignPath and the repository",
     "Author, Reviewer and Approver roles are assigned, and every release is approved manually",
@@ -330,9 +331,10 @@ def _artefact(path: Path, root: Path) -> Path:
 def readiness(root: Path = ROOT, config_path: Path | None = None) -> dict[str, Any]:
     """The eligibility gaps this checkout can show. External conditions are listed, never assumed met."""
     gaps: list[str] = []
-    if not any((root / name).is_file() for name in LICENCE_FILES):
-        gaps.append("licence: no licence file at the repository root; choosing an OSI licence is the owner's "
-                    "pending decision (nothing is relicensed by this tool)")
+    try:
+        project_licence.sources(root)  # the adopted Apache-2.0: the exact official LICENSE and a scoped NOTICE
+    except project_licence.ProjectLicenceError as error:
+        gaps.append(f"licence: {error}")
     assets = json.loads((root / "build_support" / "runtime_assets.json").read_text(encoding="utf-8"))["assets"]
     unsettled = sorted({asset["path"] for asset in assets
                         if str(asset.get("licence", "")).startswith(("owner-review-required", "project-owned"))})

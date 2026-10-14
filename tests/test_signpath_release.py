@@ -337,12 +337,26 @@ def test_readiness_reports_this_checkout_as_not_eligible_and_never_assumes_exter
     gaps = " | ".join(found["localGaps"])
     assert found["ready"] is False and found["network"] == "none"
     assert "public roots" in gaps and "config: no SignPath config" in gaps
-    if not any((ROOT / name).is_file() for name in signpath.LICENCE_FILES):
-        assert "owner's pending decision" in gaps
+    # Apache-2.0 is adopted: the exact LICENSE and a scoped NOTICE are present, so no licence gap remains
+    assert not any(gap.startswith("licence:") for gap in found["localGaps"])
     assert "runtime-asset licences" in gaps and "models/openwakeword/melspectrogram.onnx" in gaps
-    assert any("accepted the application" in item for item in found["externalNotVerifiableHere"])
+    external = found["externalNotVerifiableHere"]
+    assert any("accepted the application" in item for item in external)
+    assert any(item.startswith("the source repository is public") for item in external)
+    assert any("Apache-2.0" in item and "own terms" in item for item in external)
     with_template = signpath.readiness(ROOT, signpath.TEMPLATE)
     assert any(gap.startswith("config: SignPath signing is not enabled") for gap in with_template["localGaps"])
+
+
+def test_readiness_reports_a_missing_or_altered_project_licence(tmp_path):
+    root = tmp_path / "checkout"
+    (root / "build_support").mkdir(parents=True)
+    (root / "config").mkdir()
+    for relative in ("build_support/runtime_assets.json", "config/authenticode_public_roots.json", "NOTICE"):
+        (root / relative).write_bytes((ROOT / relative).read_bytes())
+    assert any(gap.startswith("licence: LICENSE is missing") for gap in signpath.readiness(root)["localGaps"])
+    (root / "LICENSE").write_bytes(b"MIT License\n")
+    assert any("not the official Apache License 2.0 text" in gap for gap in signpath.readiness(root)["localGaps"])
 
 
 def test_the_cli_exits_one_while_not_ready_or_not_configured(capsys):

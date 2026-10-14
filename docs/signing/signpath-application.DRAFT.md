@@ -6,7 +6,9 @@
 
 - **Project name:** Qronos
 - **Repository:** `[OWNER: public repository URL]` (currently private; must be public first)
-- **Licence:** `[OWNER: OSI-approved licence chosen]` (none chosen yet). No commercial dual-licensing.
+- **Licence:** Apache-2.0 for the project-owned source (adopted 2026-10-14; `LICENSE` and `NOTICE` at the
+  repository root). No commercial dual-licensing. Third-party components keep their own licences (see
+  `NOTICE`).
 - **Description:** A Persian-first desktop assistant for Windows. Its core runs offline on the user's PC, with
   local speech recognition, voice output and local language models. `[OWNER: confirm or edit]`
 - **Released in the form to be signed:** `[OWNER: URL of the first public release with the NSIS installer]`

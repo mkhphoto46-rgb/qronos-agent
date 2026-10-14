@@ -830,10 +830,17 @@ def test_a_stale_installer_at_the_output_path_is_quarantined_first(tmp_path, mon
 # ------------------------------------------------ the extracted installer
 
 
-def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
-    """A synthetic extracted installer built with the real runtime-manifest and notice writers."""
-    from build_support import build_runtime
+def extracted_tree(tmp_path: Path, *, desktop_licence: str = "repo", runtime_licence: str = "repo") -> tuple[Path, dict]:
+    """A synthetic extracted installer built with the real runtime-manifest and notice writers.
+
+    Both carry Qronos's own LICENSE and NOTICE ("repo"); "none" leaves them out, and "other-notice" ships a
+    different (still valid) NOTICE, with every manifest consistent either way."""
+    from build_support import build_runtime, project_licence
     from build_support import desktop_notices as notices
+
+    licence = project_licence.read()
+    variants = {"repo": licence, "none": None,
+                "other-notice": {**licence, "NOTICE": licence["NOTICE"] + b"Another valid line.\n"}}
 
     root = tmp_path / "x"
     payload = b"MZ stand-in for the pinned WebView2 installer"
@@ -847,6 +854,10 @@ def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
     (runtime / "_internal").mkdir(parents=True)
     (runtime / "qronos-runtime.exe").write_bytes(b"MZ runtime")
     (runtime / "_internal" / "python313.dll").write_bytes(b"MZ python")
+    if variants[runtime_licence] is not None:
+        (runtime / "third-party-notices" / "qronos").mkdir(parents=True)
+        for name, data in variants[runtime_licence].items():
+            (runtime / "third-party-notices" / "qronos" / name).write_bytes(data)
     build_runtime.write_manifest(runtime)
     package = tmp_path / "pkg"
     package.mkdir()
@@ -855,7 +866,8 @@ def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
     component = notices.Component("rust", "demo", "1.0.0", "MIT", None,
                                   "registry+https://github.com/rust-lang/crates.io-index", "sum", package.resolve())
     files = notices.check_coverage([component], {})
-    notices.write_notices([component], files, {}, root / "third-party-notices", notices.WINDOWS_TARGET, ())
+    notices.write_notices([component], files, {}, root / "third-party-notices", notices.WINDOWS_TARGET, (),
+                          project=variants[desktop_licence])
     install_manifest.write(root, install_manifest.payload_files(runtime, root / "third-party-notices",
                                                                 "qronos-desktop"))
     return root, pin
@@ -868,8 +880,27 @@ def test_an_extracted_installer_is_verified_byte_for_byte(tmp_path):
 
     assert evidence["topLevel"] == sorted(installer_verify.EXPECTED_TOP_LEVEL)
     assert evidence["webview2Installer"]["sha256"] == pin["sha256"]
-    assert evidence["runtimeFiles"] == 2 and evidence["desktopNoticeFiles"] >= 3
+    assert evidence["runtimeFiles"] == 4 and evidence["desktopNoticeFiles"] >= 5
     assert evidence["plugins"] == ["MicrosoftEdgeWebView2RuntimeInstallerX64.exe", "System.dll"]
+    assert evidence["projectLicence"]["license"] == "Apache-2.0"
+    assert evidence["projectLicence"]["files"]["LICENSE"] == {
+        "bytes": 11358, "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"}
+    assert evidence["projectLicence"]["locations"] == ["qronos-runtime/third-party-notices/qronos",
+                                                       "third-party-notices/qronos"]
+
+
+@pytest.mark.parametrize(("desktop", "runtime", "message"), [
+    ("none", "repo", "does not carry Qronos's own LICENSE and NOTICE"),
+    ("repo", "none", "does not carry Qronos's own LICENSE and NOTICE"),
+    ("repo", "other-notice", "copies of Qronos's LICENSE and NOTICE differ"),
+])
+def test_an_installer_without_the_project_licence_in_both_distributions_is_refused(tmp_path, desktop, runtime,
+                                                                                    message):
+    # Every manifest is consistent here, so only the licence check can refuse.
+    root, pin = extracted_tree(tmp_path, desktop_licence=desktop, runtime_licence=runtime)
+
+    with pytest.raises(PrerequisiteError, match=message):
+        installer_verify.verify_extracted(root, pin)
 
 
 @pytest.mark.parametrize(("damage", "message"), [
@@ -917,6 +948,8 @@ def test_provenance_states_what_was_and_was_not_verified(tmp_path):
 
     assert record["installer"] == {"fileName": setup.name, "bytes": 12, "sha256": sha256(b"MZ installer"),
                                    "signed": False}
+    assert record["projectLicence"] == extracted["projectLicence"]
+    assert record["projectLicence"]["license"] == "Apache-2.0"
     assert record["backend"]["sourceAsStatedByBuilder"] == "7e12e2b"
     assert record["backend"]["sourceVerifiedFromBundle"] is False
     assert len(record["desktopSource"]["commit"]) == 40

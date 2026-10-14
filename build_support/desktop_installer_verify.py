@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from build_support import install_manifest as ownership
+from build_support import project_licence
+from build_support.runtime_notices import NOTICE_DIRECTORY
 from build_support.build_runtime import verify_manifest
 from build_support.desktop_notices import MANIFEST as NOTICE_MANIFEST, NoticeError, verify_notice_output
 from build_support.desktop_prerequisites import (
@@ -98,6 +100,16 @@ def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | 
         notice_manifest = verify_notice_output(notices)
     except (NoticeError, OSError, ValueError) as error:
         raise PrerequisiteError(f"The installer's third-party-notices do not match their manifest: {error}") from error
+    # Qronos's own licence travels with both distributions: the desktop notices and the packaged runtime.
+    licence_folders = {"desktop": f"third-party-notices/{project_licence.FOLDER}",
+                       "runtime": f"qronos-runtime/{NOTICE_DIRECTORY}/{project_licence.FOLDER}"}
+    try:
+        licence = {where: project_licence.verify_folder(root.joinpath(*folder.split("/")))
+                   for where, folder in licence_folders.items()}
+    except (project_licence.ProjectLicenceError, OSError) as error:
+        raise PrerequisiteError(f"The installer does not carry Qronos's own LICENSE and NOTICE: {error}") from error
+    if licence["desktop"] != licence["runtime"]:
+        raise PrerequisiteError("The installer's desktop and runtime copies of Qronos's LICENSE and NOTICE differ.")
     runtime_manifest = runtime / "runtime-manifest.json"
     shipped = (root / ownership.FILE_NAME).read_bytes()
     if install_manifest is not None and shipped != install_manifest:
@@ -119,6 +131,8 @@ def verify_extracted(root: Path, pin: dict[str, Any], install_manifest: bytes | 
         "runtimeFiles": len(json.loads(runtime_manifest.read_text(encoding="utf-8"))["files"]),
         "desktopNoticeManifestSha256": sha256_file(notices / NOTICE_MANIFEST),
         "desktopNoticeFiles": len(notice_manifest["files"]),
+        "projectLicence": {"license": project_licence.SPDX, "files": licence["desktop"],
+                           "locations": sorted(licence_folders.values())},
     }
 
 
@@ -164,6 +178,7 @@ def provenance_record(*, setup: Path, root: Path, pin: dict[str, Any], extracted
         },
         "desktopNotices": {"manifestSha256": extracted["desktopNoticeManifestSha256"],
                            "files": extracted["desktopNoticeFiles"]},
+        "projectLicence": extracted["projectLicence"],
         "webview2": {"runtimeVersion": pin["runtime"]["version"], "installerSha256": pin["sha256"],
                      "installerBytes": pin["bytes"], "url": pin["url"], "embeddedAt": extracted["webview2Installer"]["path"]},
         "vcredist": None if vcredist_pin is None else {

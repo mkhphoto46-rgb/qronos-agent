@@ -1,0 +1,27 @@
+Qronos
+Copyright 2026 Qronos project contributors
+
+This product includes software developed by the Qronos project. The source
+owned by the Qronos project is licensed under the Apache License, Version 2.0
+(the LICENSE file distributed with this NOTICE).
+
+Third-party software, fonts and data included with or used by Qronos are NOT
+covered by that licence and are not relicensed by it. Each keeps its own
+licence and notices, which are kept and distributed unchanged:
+  - the Vazirmatn fonts in qronos_media/fonts/ (SIL Open Font License 1.1;
+    OFL.txt is kept with them);
+  - the NSIS installer template in desktop/src-tauri/installer-template/,
+    derived from Tauri (Apache-2.0 OR MIT; see its PROVENANCE.md and the
+    upstream licence texts kept there);
+  - upstream licence and notice texts kept verbatim under build_support/
+    (cpython_notice_texts/, desktop_notice_upstream/, runtime_notice_texts/);
+  - the desktop application's third-party components
+    (THIRD_PARTY_NOTICES-desktop.txt and its licenses/ folder) and the
+    packaged runtime's Python, CPython, PyInstaller and Microsoft components
+    (the runtime's third-party-notices/ folder);
+  - runtime assets provisioned separately (speech, voice and wake models,
+    ffmpeg and other tools), under the licence recorded for each asset in
+    build_support/runtime_assets.json and the notices shipped beside it.
+    Some of these are not open source (for example, pretrained wake-word
+    models published under CC BY-NC-SA 4.0); their terms apply whatever
+    licence the Qronos source carries.

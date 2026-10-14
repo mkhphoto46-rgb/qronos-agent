@@ -79,6 +79,12 @@ Output, all relative and deterministic:
   - Each name segment and the version is its own directory level, so
     `@foo/bar` and `foo__bar` cannot collide.
   - Verified upstream files are under `upstream/`.
+- `qronos/LICENSE` and `qronos/NOTICE`: Qronos's own licence, Apache-2.0
+  (`build_support/project_licence.py`). LICENSE must be the official text,
+  byte-for-byte (pinned SHA-256). The inventory records both under
+  `projectOwned`. The packaged runtime carries the same two files in its
+  `third-party-notices/qronos/`, and the installer check requires identical
+  copies in both places.
 
 ## Identities, destinations and the output directory
 

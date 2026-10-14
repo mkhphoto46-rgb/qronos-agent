@@ -2,8 +2,9 @@
 
 Status, 2026-10-14: **readiness only.** Nothing has been applied for, submitted or signed. The installer is
 unsigned, and Qronos has no certificate today. The verified free route found for a publicly trusted signature
-on the NSIS installer is SignPath Foundation, and Qronos does not meet its terms yet (section 2). Nothing here
-is legal advice; licence and terms questions need the owner's own review.
+on the NSIS installer is SignPath Foundation, and Qronos does not meet its terms yet (section 2). The
+project-owned source is now licensed under Apache-2.0 (B1), but the repository is still private and the other
+conditions stay open. Nothing here is legal advice; licence and terms questions need the owner's own review.
 
 What this change adds (all opt-in, offline and fail-closed):
 
@@ -50,7 +51,7 @@ Store has no signing cost, but it is a separate packaging project (section 6).
 
 | # | SignPath Foundation condition (terms.html) | Qronos today | Evidence | Who closes it |
 |---|---|---|---|---|
-| B1 | OSI-approved licence for the project, with no commercial dual-licensing | **Not met.** No licence chosen | `README.en.md` "No licence has been chosen yet"; no root LICENSE file; GitHub `licenseInfo` null | Owner's decision (pending) |
+| B1 | OSI-approved licence for the project, with no commercial dual-licensing | **Met for the project-owned source:** the owner adopted Apache-2.0 (OSI-approved) on 2026-10-14, with no dual-licensing. The third-party components keep their own terms; see B5-B7. Whether SignPath accepts the whole package is still its decision | Root `LICENSE` (the official text, SHA-256 `cfc7749b…3d30`, pinned in `build_support/project_licence.py`); scoped `NOTICE`; README licence sections. GitHub shows the licence only once the repository is public (B2) | Done (source); SignPath's review is external |
 | B2 | Public, verifiable source | **Not met.** The repository is private | `gh repo view`: `isPrivate: true` | Owner |
 | B3 | Already released in the form that is signed, and actively maintained | **Not met.** No release | `gh release list`: empty | Owner |
 | B4 | Verifiable build: GitHub workflow, artifact uploaded as a workflow artifact, all jobs on GitHub-hosted runners | **Not met.** Actions is blocked by billing; release builds run on the owner's machine with local caches | `.github/workflows/*` exist but cannot run; the r73 review-candidate was built on the owner's machine with a reused local Cargo target and locally cached prerequisites | Owner (billing), then the CI template here |
@@ -62,14 +63,15 @@ Store has no signing cost, but it is a separate packaging project (section 6).
 | B10 | Product name and version metadata on signed binaries; uninstall facilities | Likely met (NSIS uninstaller; `tauri.conf.json` product name and version); confirm on the built file | `desktop/src-tauri/tauri.conf.json` | Check at the first real request |
 | B11 | Approval and the certificate are SignPath's to give and revoke | External dependency, not software completion | — | SignPath Foundation |
 
-`python -m build_support.signpath_release readiness` prints the gaps this checkout can show (B1, B7, the
-empty pinned roots, the config) and lists the rest as not verifiable locally. It exits 1 while any is open.
+`python -m build_support.signpath_release readiness` prints the gaps this checkout can show: a missing or
+altered project LICENSE/NOTICE (B1), B7, the empty pinned roots and the config. It lists the rest as not
+verifiable locally, and exits 1 while any is open.
 
-## 3. Owner checklist (in order; nothing here has been done)
+## 3. Owner checklist (in order; only step 1 is done)
 
-1. Decide whether Qronos becomes public open source. If yes, choose an OSI licence (owner's decision; ideally
-   with legal review), add it at the repository root, and check that all project-owned code may be released
-   under it.
+1. Done 2026-10-14: the owner chose public open source and adopted Apache-2.0 for the project-owned source.
+   `LICENSE` and `NOTICE` are at the repository root, and both distributions carry them. Third-party
+   components were not relicensed.
 2. Settle B7: for each `owner-review-required` runtime asset, record the licence that applies or replace the
    asset. Keep non-OSI models out of anything SignPath signs or distributes.
 3. Ask SignPath about B5 and B6 (the Microsoft redistributables, the WebView2 installer, the frozen Python

@@ -46,6 +46,8 @@ Output (deterministic; no timestamps, no absolute paths):
     licenses/rust/<crate>/<version>/<files>
     licenses/npm/[@scope/]<package>/<version>/<files>
     licenses/<...>/<version>/upstream/<vendored files>
+    qronos/LICENSE, qronos/NOTICE        Qronos's own licence (Apache-2.0, the pinned official
+                                         text) and NOTICE, from ``project_licence``
 
 This is technical notice packaging, not legal clearance for redistribution.
 """
@@ -64,6 +66,8 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable
+
+from build_support import project_licence
 
 ROOT = Path(__file__).resolve().parent.parent
 DESKTOP = ROOT / "desktop"
@@ -734,14 +738,27 @@ def write_notices(
     target: str,
     private_prefixes: tuple[str, ...],
     upstream: dict[tuple[str, str, str], UpstreamNotice] | None = None,
+    project: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
+    """``project`` is Qronos's own LICENSE and NOTICE (``project_licence.read()``); a build always passes it."""
     upstream = upstream or {}
     planned = _plan(components, files, upstream)
+    project_files = {}
+    for name, data in sorted((project or {}).items()):
+        try:
+            project_files[f"{project_licence.FOLDER}/{name}"] = (data, project_licence.check(name, data))
+        except project_licence.ProjectLicenceError as error:
+            raise NoticeError(f"Qronos's own licence cannot be shipped: {error}") from None
+    if project is not None and sorted(project) != sorted(project_licence.FILES):
+        raise NoticeError(f"Qronos's own licence files must be exactly {list(project_licence.FILES)}.")
     records = []
     text = [
         "Qronos desktop application - third-party notices",
         "=" * 49,
         f"Target: {target}.",
+        *([f"Qronos itself: the source owned by the Qronos project is licensed under the Apache License, "
+           f"Version 2.0 ({' and '.join(sorted(project_files))}). The components below keep their own licences "
+           "and are not relicensed."] if project_files else []),
         *SCOPE_LIMITS,
         "npm coverage is the production closure of desktop/package-lock.json (no dev dependencies).",
         "Each section names the package, its declared licence expression as published, its source, its "
@@ -820,7 +837,13 @@ def write_notices(
         "ownerReviewRequired": owner_review,
         "components": records,
     }
+    if project_files:
+        inventory["projectOwned"] = {"license": project_licence.SPDX,
+                                     "files": [{"path": path, **evidence}
+                                               for path, (_, evidence) in sorted(project_files.items())]}
     contents = {item.path: item.data for _, entries in planned for item in entries}
+    contents.update({path: data for path, (data, _) in project_files.items()})
+    _check_destinations(sorted(contents) + [INVENTORY, NOTICE_TEXT, MANIFEST])
     contents[INVENTORY] = (json.dumps(inventory, ensure_ascii=False, indent=1, sort_keys=True) + "\n").encode()
     contents[NOTICE_TEXT] = ("\n".join(text) + "\n").encode("utf-8")
     contents[MANIFEST] = (json.dumps({
@@ -886,7 +909,11 @@ def collect_desktop_notices(
     files = check_coverage(components, exceptions, upstream)
     private = (str(ROOT), str(Path.home()), str(node_root.resolve()),
                *{str(component.directory.parent) for component in components if component.ecosystem == "rust"})
-    return write_notices(components, files, exceptions, out_dir, target, private, upstream)
+    try:
+        project = project_licence.read(ROOT)
+    except project_licence.ProjectLicenceError as error:
+        raise NoticeError(f"Qronos's own licence cannot be shipped: {error}") from None
+    return write_notices(components, files, exceptions, out_dir, target, private, upstream, project=project)
 
 
 def main(argv: list[str] | None = None) -> int:

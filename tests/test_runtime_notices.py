@@ -25,6 +25,8 @@ from build_support.runtime_notices import (
 )
 from tests.fixtures.cpython_registry import BUILD, PLATFORM, RegistryBuilder
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 class FakeDistribution:
     """Just the importlib.metadata surface the collector reads."""
@@ -184,7 +186,9 @@ def test_inventory_maps_only_bundled_distributions_and_copies_their_notices(fixt
     assert copied.read_text(encoding="utf-8") == "Example NOTICE text"
     assert (target / "python/cpython-3.13.13/LICENSE.txt").read_text(encoding="utf-8").startswith("Python license text")
     assert (target / "python/pyinstaller-6.0/pyinstaller-6.0.dist-info/licenses/COPYING.txt").is_file()
-    assert {"README.txt", "inventory.json", "python"} == {item.name for item in target.iterdir()}
+    assert {"README.txt", "inventory.json", "python", "qronos"} == {item.name for item in target.iterdir()}
+    assert (target / "qronos" / "LICENSE").read_bytes() == (ROOT / "LICENSE").read_bytes()
+    assert (target / "qronos" / "NOTICE").read_bytes() == (ROOT / "NOTICE").read_bytes()
 
 
 def test_inventory_separates_cpython_microsoft_and_project_owned_pieces(fixture):
@@ -213,7 +217,27 @@ def test_inventory_separates_cpython_microsoft_and_project_owned_pieces(fixture)
     }]
     assert inventory["microsoftRuntime"]["status"] == "review-required"
     assert inventory["projectOwned"]["frozenRoots"] == ["config", "core", "runtime_entry"]
-    assert inventory["projectOwned"]["license"] == "unspecified"
+    assert inventory["projectOwned"]["license"] == "Apache-2.0"
+    assert inventory["projectOwned"]["licenseFiles"] == [
+        {"path": "third-party-notices/qronos/LICENSE", "size": 11358,
+         "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", "kind": "license-text"},
+        {"path": "third-party-notices/qronos/NOTICE", "size": (ROOT / "NOTICE").stat().st_size,
+         "sha256": hashlib.sha256((ROOT / "NOTICE").read_bytes()).hexdigest(), "kind": "auxiliary"},
+    ]
+
+
+@pytest.mark.parametrize("damage", ["missing", "edited", "crlf"])
+def test_the_runtime_is_never_planned_without_the_exact_project_licence(fixture, tmp_path, damage):
+    project = tmp_path / "project"
+    project.mkdir()
+    licence = (ROOT / "LICENSE").read_bytes()
+    (project / "NOTICE").write_bytes((ROOT / "NOTICE").read_bytes())
+    if damage == "edited":
+        (project / "LICENSE").write_bytes(licence.replace(b"Version 2.0", b"Version 2.1", 1))
+    elif damage == "crlf":
+        (project / "LICENSE").write_bytes(licence.replace(b"\n", b"\r\n"))
+    with pytest.raises(NoticeError, match="own licence cannot be shipped"):
+        fixture.plan(project_root=project)
 
 
 def test_bundled_cpython_binary_copies_every_text_of_its_audited_components(fixture):

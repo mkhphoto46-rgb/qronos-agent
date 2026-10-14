@@ -317,4 +317,7 @@ Rules that must not be broken:
 
 ## Licence
 
-No licence has been chosen yet.
+The source owned by the Qronos project is licensed under the Apache License 2.0: see [LICENSE](LICENSE)
+and [NOTICE](NOTICE). Third-party components (bundled libraries, the Vazirmatn fonts, the Tauri-derived
+installer template, and the models and tools provisioned separately) keep their own licences and are not
+relicensed. NOTICE and the third-party notices shipped with the app list them.
