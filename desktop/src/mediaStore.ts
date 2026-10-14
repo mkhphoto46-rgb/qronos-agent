@@ -18,13 +18,14 @@ export type MediaOp =
   | "status" | "capabilities" | "roots.list" | "roots.add" | "roots.remove" | "scan" | "index.start"
   | "index.stop" | "index.pause" | "index.resume" | "job.retry" | "job.reindex" | "job.cancel" | "job.pause"
   | "job.resume" | "asset.priority" | "asset.detail" | "search" | "open.prepare" | "report.preview"
-  | "report.generate" | "report.export" | "decide" | "decline";
+  | "report.generate" | "report.export" | "decide" | "decline" | "search.report.preview" | "search.report.generate"
+  | "search.report.export";
 
 export const MEDIA_OPS: ReadonlySet<string> = new Set<MediaOp>([
   "status", "capabilities", "roots.list", "roots.add", "roots.remove", "scan", "index.start", "index.stop",
   "index.pause", "index.resume", "job.retry", "job.reindex", "job.cancel", "job.pause", "job.resume",
   "asset.priority", "asset.detail", "search", "open.prepare", "report.preview", "report.generate", "report.export",
-  "decide", "decline",
+  "decide", "decline", "search.report.preview", "search.report.generate", "search.report.export",
 ]);
 
 /** One topic hit (qronos_media/topics.py): an indexed dialogue segment, its actual lines and why it ranked. */
@@ -210,6 +211,8 @@ export type MultimodalBlock = {
   /** A requested semantic channel that did not run, per constraint. */
   channelNotes: string[];
   answered: boolean;
+  /** The server-held id of THIS answer: the only thing a search-result report request may name. */
+  resultId: string | null;
 };
 
 export const MULTIMODAL_OUTCOME_TEXT: Record<string, string> = {
@@ -226,7 +229,7 @@ const RELATIONS = new Set(["before", "during", "after"]);
 /** The multimodal block of a `search` answer in mode "multimodal", validated field by field: a hit without its
  *  dialogue line or without a valid, unverified frame is dropped (never a one-modality "result"). */
 export function multimodalBlockOf(result: MediaResult | null): MultimodalBlock {
-  const empty: MultimodalBlock = { hits: [], note: null, channelNotes: [], answered: false };
+  const empty: MultimodalBlock = { hits: [], note: null, channelNotes: [], answered: false, resultId: null };
   if (!result || !result.ok || typeof result.multimodal !== "object" || result.multimodal === null) return empty;
   const block = result.multimodal as Record<string, unknown>;
   const hits: MultimodalHit[] = [];
@@ -284,7 +287,8 @@ export function multimodalBlockOf(result: MediaResult | null): MultimodalBlock {
       channelNotes.push(`جست‌وجوی هم‌معنای ${label} در دسترس نبود: ${refusalText(typeof semantic.reason === "string" ? semantic.reason : "model_unavailable")}؛ فقط تطبیق واژه‌ای به کار رفت.`);
     }
   }
-  return { hits, note, channelNotes, answered: true };
+  const resultId = typeof block.resultId === "string" && RESULT_ID.test(block.resultId) ? block.resultId : null;
+  return { hits, note, channelNotes, answered: true, resultId };
 }
 
 /** A proposed split of one natural request (never results). `generated` marks a Fast-brain proposal (unverified). */
@@ -327,6 +331,47 @@ export function multimodalFields(dialogue: string, visual: string, windowMs: num
     mode: "multimodal", dialogue: dialogue.trim(), visual: visual.trim(),
     windowMs: (MULTIMODAL_WINDOWS_MS as readonly number[]).includes(windowMs) ? windowMs : 15_000,
     dialogueMatch: semanticDialogue ? "semantic" : "exact", visualMatch: semanticVisual ? "semantic" : "lexical", limit: 20,
+  };
+}
+
+const RESULT_ID = /^[A-Za-z0-9_-]{16,64}$/;
+
+/** A bounded preview of a multimodal search-result report (qronos_media/search_report.py), validated. */
+export type SearchReportPreview = {
+  query: { dialogue: string; visual: string; windowMs: number };
+  status: string;
+  searchedAt: string;
+  recheck: { kept: number; outOfScope: number; permission: number; changed: number };
+  results: Array<{ title: string | null; startMs: number; text: string;
+    frames: Array<{ timeMs: number; caption: string; relation: string; gapMs: number }> }>;
+  resultsOmitted: number;
+  limitations: string[];
+};
+
+export function searchReportPreviewOf(result: MediaResult | null): SearchReportPreview | null {
+  if (!result || !result.ok || !isRecord(result.preview) || result.preview.kind !== "search") return null;
+  const p = result.preview;
+  const query = isRecord(p.query) ? p.query : {};
+  const recheck = isRecord(p.recheck) ? p.recheck : {};
+  const results = (Array.isArray(p.results) ? p.results : []).slice(0, 10).filter(isRecord).map((r) => {
+    const line = isRecord(r.dialogue) ? r.dialogue : {};
+    return {
+      title: typeof r.title === "string" ? r.title.slice(0, 300) : null, startMs: finite(line.startMs),
+      text: typeof line.text === "string" ? line.text.slice(0, 300) : "",
+      frames: (Array.isArray(r.frames) ? r.frames : []).slice(0, 4).filter(isRecord)
+        .filter((f) => f.verified === false && typeof f.caption === "string")
+        .map((f) => ({ timeMs: finite(f.timeMs), caption: String(f.caption).slice(0, 240),
+          relation: typeof f.relation === "string" ? f.relation : "", gapMs: finite(f.gapMs) })),
+    };
+  }).filter((r) => r.frames.length > 0 && r.text.length > 0);
+  return {
+    query: { dialogue: typeof query.dialogue === "string" ? query.dialogue.slice(0, 300) : "",
+      visual: typeof query.visual === "string" ? query.visual.slice(0, 300) : "", windowMs: finite(query.windowMs) },
+    status: typeof p.status === "string" ? p.status : "", searchedAt: typeof p.searchedAt === "string" ? p.searchedAt : "",
+    recheck: { kept: finite(recheck.kept), outOfScope: finite(recheck.outOfScope), permission: finite(recheck.permission),
+      changed: finite(recheck.changed) },
+    results, resultsOmitted: finite(p.resultsOmitted),
+    limitations: strings(p.limitations, 12, 600),
   };
 }
 
@@ -454,6 +499,7 @@ export const MEDIA_REFUSAL_TEXT: Record<string, string> = {
   refused: "رد شد.",
   report_unavailable: "ساخت این گزارش در این نصب ممکن نیست (قلم یا کتابخانهٔ PDF با نسخهٔ تعیین‌شده یکی نیست).",
   internal: "خطای داخلی؛ جزئیات در گزارش‌های Qronos است.",
+  result_unavailable: "این نتیجهٔ جست‌وجو دیگر نگه داشته نمی‌شود؛ دوباره جست‌وجو کنید و بعد گزارش بگیرید.",
 };
 
 export function refusalText(code: unknown): string {

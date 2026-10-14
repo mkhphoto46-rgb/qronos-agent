@@ -28,6 +28,7 @@ PROGRESS_EVENT = "media_progress"
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _APPROVAL_ID = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _ASSET_ID = re.compile(r"^a_[0-9a-f]{32}$")
+_RESULT_ID = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 MAX_PATH_CHARS = 4096
 MAX_QUERY_CHARS = 1200
 MAX_SECRET_CHARS = 256
@@ -40,12 +41,13 @@ MULTIMODAL_CAPABILITY = {"capability": "multimodal_search", "level": 3, "status"
                                    "no speaker, OCR or image-encoder evidence."}
 
 #: Operations that only read (allowed while Qronos is paused). Everything else is refused while paused.
-READ_OPS = frozenset({"status", "roots.list", "search", "asset.detail", "capabilities", "decline", "report.preview"})
+READ_OPS = frozenset({"status", "roots.list", "search", "asset.detail", "capabilities", "decline", "report.preview",
+                      "search.report.preview"})
 OPS = frozenset({
     "status", "capabilities", "roots.list", "roots.add", "roots.remove", "scan", "index.start", "index.stop",
     "index.pause", "index.resume", "job.retry", "job.reindex", "job.cancel", "job.pause", "job.resume",
     "asset.priority", "asset.detail", "search", "open.prepare", "report.preview", "report.generate", "report.export",
-    "decide", "decline",
+    "decide", "decline", "search.report.preview", "search.report.generate", "search.report.export",
 })
 
 
@@ -217,6 +219,13 @@ class MediaProduct:
             "open.prepare": self._open_prepare,
             "report.generate": self._report_generate,
             "report.export": self._report_export,
+            # The report of one HELD multimodal answer: only its server-issued resultId is accepted.
+            "search.report.preview": lambda d: (lambda r: lambda s: {"ok": True, "preview": s.preview_search_report(r)})(
+                _result_id(d)),
+            "search.report.generate": lambda d: (lambda r, f: lambda s: {"ok": True, "report": s.generate_search_report(
+                r, fmt=f)})(_result_id(d), _format(d)),
+            "search.report.export": lambda d: (lambda r, f, dest: lambda s: _ok(s.export_search_report(
+                r, dest, fmt=f), "export"))(_result_id(d), _format(d), _text(d, "destination", MAX_PATH_CHARS)),
         }
 
     def _submit(self, method: Callable, op: str, fn: Callable[[Any], dict[str, Any]],
@@ -306,6 +315,7 @@ class MediaProduct:
     def _track(self, op: str, result: dict[str, Any]) -> dict[str, Any]:
         if result.get("status") == "approval_required" and isinstance(result.get("approvalId"), str):
             family = result.pop("_family", None) or {"roots.add": "roots", "report.export": "export",
+                                                      "search.report.export": "export",
                                                       "open.prepare": "open"}.get(op)
             decision = str(result.get("decision", ""))
             if family is not None:
@@ -316,6 +326,13 @@ class MediaProduct:
             result["needsSecret"] = decision == "require_typed_secret"
         result.pop("_family", None)
         return result
+
+
+def _result_id(data: dict) -> str:
+    value = data.get("resultId")
+    if not isinstance(value, str) or not _RESULT_ID.match(value):
+        raise MediaOpError("bad_request", "resultId is malformed")
+    return value
 
 
 def _format(data: dict) -> str:
@@ -383,7 +400,8 @@ def _typed_failure(error: Exception) -> dict[str, Any]:
         return {"ok": False, "code": error.reason}
     name = type(error).__name__
     if name in ("MediaRequestError", "SearchError"):
-        code = "report_unavailable" if str(error).startswith("report_unavailable") else "refused"
+        code = next((word for word in ("report_unavailable", "result_unavailable") if str(error).startswith(word)),
+                    "refused")
         return {"ok": False, "code": code, "detail": str(error)[:200]}
     return {"ok": False, "code": "internal", "detail": name}
 

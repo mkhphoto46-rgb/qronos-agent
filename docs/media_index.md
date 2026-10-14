@@ -806,8 +806,24 @@ It is not an OR of two channels and not "both somewhere in the same file".
   line with its time, the frame's generated/unverified text and where it lies relative to the line, partial and
   unavailable states and no-result outcomes; it carries no path and makes no image, speaker or OCR claim. Opening
   stays the panel's approved «باز کردن در همین لحظه».
-- **Not done:** no speaker, OCR or image-encoder evidence; no report view or export of search results; no human
-  audio/STT/TTS test of the voice route (fixture transcripts drive the same handler); quality is unmeasured
+- **Search-result report (round 70, `qronos_media/search_report.py`):** every multimodal answer that is not
+  `unavailable` carries a `resultId`. The service keeps a whitelisted, bounded snapshot of THAT answer in memory
+  (at most 8, 30 minutes; 50 results x 4 frames; no path, frame provenance reduced to model/prompt/SHA fields).
+  `search.report.preview` / `search.report.generate` / `search.report.export` accept only that `resultId` (plus a
+  format and, for export, a destination); client hits are never read. Before rendering, each held hit is rechecked
+  NOW: its asset in the current scope, a root the Files gate allows now, its line (or semantic window) and frames
+  still stored with the same times and frame SHA-256; anything else is removed and counted (`recheck`). Nothing is
+  searched again, no model runs, no media file is read or re-hashed (the report says so). The report keeps the
+  query, both channels per hit, the alignment, the frame text as generated/unverified, the rank note, the partial
+  and semantic notes and the limitations; JSON, CSV (formula-guarded, BOM), HTML (escaped, strict CSP) and PDF (the
+  asset reports' `_Pdf` with the pinned Vazirmatn/HarfBuzz), at most 8 MiB. `generate` writes into Qronos's own
+  exports folder (`search-*.<fmt>`, pruned like asset reports); `export` goes through the same CREATE_OR_EDIT_FILE
+  gate and single-use approval as asset exports, writes exactly the approved bytes to a new file in a non-linked
+  folder and never overwrites. An unknown, expired or evicted `resultId` is `result_unavailable` with no side effect.
+  The panel shows «پیش‌نمایش گزارش همین نتیجه‌ها», «ساخت گزارش نتیجه‌ها» and «خروجی گرفتن از گزارش نتیجه‌ها» under a
+  multimodal answer.
+- **Not done:** no speaker, OCR or image-encoder evidence; a held result does not survive a restart of the media host
+  (search again); no human audio/STT/TTS test of the voice route (fixture transcripts drive the same handler); quality is unmeasured
   (synthetic fixtures prove the contract).
 
 ## Product route (round 32)
@@ -821,7 +837,8 @@ ONE in-process media host (`qronos_media/product.py`):
   operation while Qronos is paused (status, capabilities, roots.list, search, asset.detail, report.preview and decline still answer).
 - Operations (allow-listed, every field bounded): roots.add / roots.remove / roots.list, scan (then a continuous
   background index), index.start / stop / pause / resume, job.retry / reindex / cancel / pause / resume,
-  asset.priority, asset.detail, search (exact, fuzzy, semantic, topic, visual, multimodal), open.prepare, report.preview (a bounded view of
+  asset.priority, asset.detail, search (exact, fuzzy, semantic, topic, visual, multimodal), search.report.preview /
+  generate / export (one held multimodal result), open.prepare, report.preview (a bounded view of
   the same report; a read, so it also answers while paused), report.generate and report.export (format json,
   html, csv or pdf; kind short, full, transcript or evidence), decide / decline. A PDF export goes through the
   same write gate, single-use MEDIA_ACTION approval and typed secret as every export, on the exact PDF bytes.

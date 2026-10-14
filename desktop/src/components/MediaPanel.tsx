@@ -6,11 +6,11 @@ import { listen } from "@tauri-apps/api/event";
 import {
   approvalOf, createMediaClient, exportDestinationProblem, interpretationOf, isAssetId, multimodalBlockOf,
   multimodalFields, multimodalRequestProblem, MULTIMODAL_MAX_CONSTRAINT_CHARS, MULTIMODAL_WINDOWS_MS, refusalText,
-  REPORT_FORMATS, REPORT_KIND_TEXT, REPORT_KINDS, topicBlockOf, visualBlockOf,
+  REPORT_FORMATS, REPORT_KIND_TEXT, REPORT_KINDS, searchReportPreviewOf, topicBlockOf, visualBlockOf,
 } from "../mediaStore";
 import type {
   MediaApproval, MediaClient, MediaOp, MediaResult, MediaTransport, MultimodalFrame, MultimodalHit, MultimodalInterpretation,
-  ReportFormat, ReportKind, RuntimeEvent, TopicHit, VisualHit,
+  ReportFormat, ReportKind, RuntimeEvent, SearchReportPreview, TopicHit, VisualHit,
 } from "../mediaStore";
 
 import "./MediaPanel.css";
@@ -144,6 +144,7 @@ function MediaPanel(props: MediaPanelProps) {
   const [semanticSaid, setSemanticSaid] = useState(false);
   const [semanticShown, setSemanticShown] = useState(false);
   const [interpretation, setInterpretation] = useState<MultimodalInterpretation | null>(null);
+  const [searchPreview, setSearchPreview] = useState<SearchReportPreview | null>(null);
   const [brainHints, setBrainHints] = useState(false);
   const [result, setResult] = useState<MediaResult | null>(null);
   const [approval, setApproval] = useState<MediaApproval | null>(null);
@@ -196,6 +197,7 @@ function MediaPanel(props: MediaPanelProps) {
       setSecret("");
       setApproval(null);
       setPreview(null);
+      setSearchPreview(null);
       return;
     }
     void refresh();
@@ -253,6 +255,27 @@ function MediaPanel(props: MediaPanelProps) {
       ? { query: text, mode, limit: 20, brainHints: true }
       : { query: text, mode, limit: 20 });
     if (answer) setResult(answer);
+  }
+
+  // The report of the CURRENT multimodal answer: only its server-held resultId is sent, never the hits themselves.
+  async function previewSearchReport(resultId: string) {
+    const answer = await run("search.report.preview", { resultId });
+    setSearchPreview(searchReportPreviewOf(answer));
+  }
+
+  async function generateSearchReport(resultId: string) {
+    const answer = await run("search.report.generate", { resultId, format: reportFormat });
+    const report = answer?.ok ? (answer.report as Record<string, unknown> | undefined) : undefined;
+    if (report) setNotice(`گزارش نتیجه‌های جست‌وجو (${reportFormat}) ساخته شد: ${String(report.path)}`);
+  }
+
+  async function exportSearchReport(resultId: string) {
+    const problem = exportDestinationProblem(destination, reportFormat);
+    if (problem) {
+      setNotice(problem);
+      return;
+    }
+    await run("search.report.export", { resultId, destination: destination.trim(), format: reportFormat });
   }
 
   async function decide(approved: boolean) {
@@ -568,6 +591,51 @@ function MediaPanel(props: MediaPanelProps) {
       </>}
       {multimodal.answered && (
         <p className="media-topic-hints">گوینده، OCR و شباهت تصویر هنوز ساخته نشده‌اند و در این جست‌وجو به کار نرفته‌اند.</p>
+      )}
+      {multimodal.resultId && (
+        <div className="media-row media-search-report-actions">
+          <button type="button" disabled={busy} onClick={() => void previewSearchReport(multimodal.resultId as string)}>
+            پیش‌نمایش گزارش همین نتیجه‌ها
+          </button>
+          <button type="button" disabled={busy} onClick={() => void generateSearchReport(multimodal.resultId as string)}>
+            ساخت گزارش نتیجه‌ها ({reportFormat})
+          </button>
+          <button type="button" disabled={busy || !destination.trim()}
+            onClick={() => void exportSearchReport(multimodal.resultId as string)}>
+            خروجی گرفتن از گزارش نتیجه‌ها
+          </button>
+        </div>
+      )}
+      {searchPreview && (
+        <section className="media-report-preview" aria-label="پیش‌نمایش گزارش نتیجه‌های جست‌وجو">
+          <div className="media-card-head">
+            <strong>گزارش نتیجه‌های جست‌وجوی ترکیبی</strong>
+            <button type="button" onClick={() => setSearchPreview(null)}>بستن</button>
+          </div>
+          <p>
+            گفتگو «<span dir="auto">{searchPreview.query.dialogue}</span>» و تصویر «<span dir="auto">{searchPreview.query.visual}</span>»
+            {" — "}فاصلهٔ {Math.round(searchPreview.query.windowMs / 1000)} ثانیه — وضعیت {searchPreview.status}
+          </p>
+          <p>
+            بررسی دوباره پیش از گزارش: {searchPreview.recheck.kept} نتیجه ماند؛ {searchPreview.recheck.outOfScope} خارج از محدوده،
+            {" "}{searchPreview.recheck.permission} بدون اجازهٔ خواندن، {searchPreview.recheck.changed} با شواهد تغییرکرده حذف شد.
+          </p>
+          <ul className="media-report-lines">
+            {searchPreview.results.map((hit, i) => (
+              <li key={i}>
+                <span className="ltr">{clock(hit.startMs)}</span> <span dir="auto">{hit.title || "ویدیو"}</span>:{" "}
+                <span dir="auto">{hit.text}</span>
+                {hit.frames.map((frame, j) => (
+                  <small key={j}> — فریم <span className="ltr">{clock(frame.timeMs)}</span>{" "}
+                    (توصیف تولیدشده، تأییدنشده): <span dir="auto">{frame.caption}</span></small>
+                ))}
+              </li>
+            ))}
+          </ul>
+          {searchPreview.resultsOmitted > 0 && <p>{searchPreview.resultsOmitted} نتیجهٔ دیگر در گزارش کامل هست.</p>}
+          <h4>محدودیت‌ها</h4>
+          <ul>{searchPreview.limitations.map((text, i) => <li key={i}>{text}</li>)}</ul>
+        </section>
       )}
       {visual.hits.length > 0 && <>
         <h4>فریم‌های هم‌خوان (جست‌وجوی واژه‌ای در متن تولیدشدهٔ فریم‌ها، نه شباهت تصویر)</h4>

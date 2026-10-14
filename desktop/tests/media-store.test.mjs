@@ -293,6 +293,39 @@ test("multimodal hits need a dialogue line AND an unverified frame; no-result ou
   assert.match(panel, /setResult\(null\);\s*if \(proposal\?\.status === "proposed"\)/);  // a split never searches
 });
 
+test("a search-result report names only the server-held resultId and its preview keeps frames unverified", () => {
+  for (const op of ["search.report.preview", "search.report.generate", "search.report.export"]) assert.ok(media.MEDIA_OPS.has(op));
+  const held = media.multimodalBlockOf({ requestId: "r1", op: "search", ok: true,
+    multimodal: { status: "complete", outcome: "neither", results: [], resultId: "Ab_-0123456789abcdefXYZ" } });
+  assert.equal(held.resultId, "Ab_-0123456789abcdefXYZ");
+  const forged = media.multimodalBlockOf({ requestId: "r2", op: "search", ok: true,
+    multimodal: { status: "complete", results: [], resultId: "../../x" } });
+  assert.equal(forged.resultId, null);
+  const preview = media.searchReportPreviewOf({ requestId: "r3", op: "search.report.preview", ok: true, preview: {
+    kind: "search", status: "partial", searchedAt: "2026-10-14T00:00:00+00:00",
+    query: { dialogue: "father died", visual: "kitchen", windowMs: 15000 },
+    recheck: { kept: 1, outOfScope: 2, permission: 0, changed: 1 },
+    results: [
+      { title: "Harbour", dialogue: { startMs: 60000, text: "My father died." },
+        frames: [{ timeMs: 62000, caption: "A kitchen.", relation: "during", gapMs: 0, verified: false },
+                 { timeMs: 63000, caption: "claims verified", relation: "during", gapMs: 0, verified: true }] },
+      { title: "NoFrame", dialogue: { startMs: 1, text: "x" }, frames: [] },
+    ],
+    resultsOmitted: 0, limitations: ["این گزارش از نتیجهٔ ذخیره‌شدهٔ همین جست‌وجو ساخته شده است", 7] } });
+  assert.equal(preview.results.length, 1);
+  assert.deepEqual(plain(preview.results[0].frames.map((f) => f.caption)), ["A kitchen."]);
+  assert.deepEqual(plain(preview.recheck), { kept: 1, outOfScope: 2, permission: 0, changed: 1 });
+  assert.equal(preview.limitations.length, 1);
+  assert.equal(media.searchReportPreviewOf({ requestId: "r4", op: "report.preview", ok: true, preview: { kind: "full" } }), null);
+  assert.match(media.refusalText("result_unavailable"), /دوباره جست‌وجو کنید/);
+  const panel = source("../src/components/MediaPanel.tsx");
+  assert.match(panel, /run\("search\.report\.preview", \{ resultId \}\)/);
+  assert.match(panel, /run\("search\.report\.generate", \{ resultId, format: reportFormat \}\)/);
+  assert.match(panel, /run\("search\.report\.export", \{ resultId, destination: destination\.trim\(\), format: reportFormat \}\)/);
+  assert.match(panel, /پیش‌نمایش گزارش همین نتیجه‌ها/);
+  assert.match(panel, /\(توصیف تولیدشده، تأییدنشده\)/);
+});
+
 test("semantic visual hits say their channel and an uncalibrated text similarity; a missing model is a note", () => {
   const asset = "a_" + "4".repeat(32);
   const sha = "c".repeat(64);

@@ -21,13 +21,16 @@ Qronos-owned state, pruned to the newest :data:`MAX_CACHED_REPORTS`.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import sqlite3
+import threading
 import time
 from typing import Any, Callable
 
@@ -53,6 +56,9 @@ DEFAULT_VERIFY_SECONDS = 30.0
 MAX_VERIFY_SECONDS = 600.0
 MAX_CACHED_REPORTS = 50
 _PLAYERS = {"mpv": "--start={seconds}", "vlc": "--start-time={seconds}"}
+#: Server-side snapshots of multimodal answers a report may be composed from (qronos_media.search_report).
+MAX_SEARCH_SNAPSHOTS = 8
+SEARCH_SNAPSHOT_SECONDS = 1800.0
 
 
 class MediaRequestError(ValueError):
@@ -134,6 +140,9 @@ class MediaService:
         self.brain = brain
         # The runtime's Vision gateway (qronos_media.vision_gateway) or None: visual evidence stays unavailable.
         self.vision = vision
+        # resultId -> (monotonic time, snapshot): the exact answers this process gave, bounded and expiring.
+        self._search_snapshots: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+        self._search_snapshot_lock = threading.Lock()
 
     def _runner(self) -> StageRunner:
         return StageRunner(self.store, tools=self.tools, authority=self.authority, permissions=self.permissions,
@@ -694,7 +703,133 @@ class MediaService:
         finally:
             db.set_progress_handler(None, 0)
             db.close()
-        return {"query": spec.as_json(), "multimodal": block}
+        answer = {"query": spec.as_json(), "multimodal": block}
+        if block["status"] != "unavailable":
+            block["resultId"] = self._keep_search_snapshot(answer)
+        return answer
+
+    # ------------------------------------------------- search-result reports (qronos_media.search_report)
+
+    def _keep_search_snapshot(self, answer: dict[str, Any]) -> str:
+        from qronos_media import search_report
+
+        kept = search_report.snapshot(answer)
+        result_id = secrets.token_urlsafe(18)
+        now = self._monotonic()
+        with self._search_snapshot_lock:
+            self._search_snapshots[result_id] = (now, kept)
+            while len(self._search_snapshots) > MAX_SEARCH_SNAPSHOTS:
+                self._search_snapshots.popitem(last=False)
+        return result_id
+
+    def _search_snapshot(self, result_id: str) -> dict[str, Any]:
+        if not isinstance(result_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", result_id):
+            raise MediaRequestError("result_unavailable: the result id is malformed")
+        with self._search_snapshot_lock:
+            held = self._search_snapshots.get(result_id)
+            if held is not None and self._monotonic() - held[0] > SEARCH_SNAPSHOT_SECONDS:
+                self._search_snapshots.pop(result_id, None)
+                held = None
+        if held is None:
+            raise MediaRequestError("result_unavailable: this search result is no longer held; search again")
+        return held[1]
+
+    def search_report(self, result_id: str) -> dict[str, Any]:
+        """The report of ONE held multimodal answer, rechecked NOW: every hit's asset must still be in the current
+        scope, carried by a root the Files gate allows now, and its line and frames must still be stored as they were
+        (frames by time and SHA-256). Anything else is removed and counted. Nothing is searched again."""
+        from qronos_media import multimodal, search_report
+
+        snap = self._search_snapshot(result_id)
+        try:
+            db = open_read_only(self.layout.database)
+        except FileNotFoundError:
+            raise MediaRequestError("the media index is empty") from None
+        removed = {"outOfScope": 0, "permission": 0, "changed": 0}
+        kept, sha_by_asset, allowed_by_asset = [], {}, {}
+        try:
+            for hit in snap["results"]:
+                asset_id = hit["assetId"]
+                row = db.execute("SELECT a.sha256 FROM assets a WHERE a.asset_id = ? AND " + multimodal.in_scope("a"),
+                                 (asset_id,)).fetchone()
+                if row is None:
+                    removed["outOfScope"] += 1
+                    continue
+                if asset_id not in allowed_by_asset:
+                    roots = {int(r[0]) for r in db.execute(
+                        "SELECT DISTINCT root_id FROM files WHERE asset_id = ? AND status = 'present'", (asset_id,))}
+                    allowed, _ = self._allowed_roots_now(roots)
+                    allowed_by_asset[asset_id] = not roots or bool(roots & allowed)
+                if not allowed_by_asset[asset_id]:
+                    removed["permission"] += 1
+                    continue
+                line, track = hit["dialogue"], hit["dialogue"]["track"]["trackId"]
+                if line["unit"] == "window":
+                    stored = db.execute("SELECT 1 FROM semantic_windows WHERE asset_id = ? AND track_id = ? AND "
+                                        "start_ms = ? AND end_ms = ?", (asset_id, track, line["startMs"],
+                                                                       line["endMs"])).fetchone()
+                else:
+                    stored = db.execute("SELECT 1 FROM dialogue WHERE asset_id = ? AND track_id = ? AND kind = ? AND "
+                                        "start_ms = ? AND end_ms = ?", (asset_id, track, line["unit"],
+                                                                       line["startMs"], line["endMs"])).fetchone()
+                frames = [frame for frame in hit["frames"] if db.execute(
+                    "SELECT 1 FROM visual_evidence WHERE asset_id = ? AND time_ms = ? AND frame_sha256 = ? "
+                    "AND status = 'described'", (asset_id, frame["timeMs"], frame["frameSha256"])).fetchone()]
+                if stored is None or not frames:
+                    removed["changed"] += 1
+                    continue
+                kept.append(dict(hit, frames=frames))
+                sha_by_asset[asset_id] = row["sha256"]
+        finally:
+            db.close()
+        return search_report.compose(snap, kept, removed, sha_by_asset)
+
+    def preview_search_report(self, result_id: str) -> dict[str, Any]:
+        from qronos_media import search_report
+
+        return search_report.preview(self.search_report(result_id))
+
+    def generate_search_report(self, result_id: str, *, fmt: str = "json") -> dict[str, Any]:
+        """Write the report into Qronos's own exports folder (as generate_report does for an asset)."""
+        from datetime import datetime, timezone
+
+        content = self._search_report_bytes(result_id, fmt)
+        exports = owned_child(self.layout.root, "exports")
+        exports.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = owned_child(exports, f"search-{stamp}.{fmt}")
+        with open(target, "xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        reports = sorted((p for p in exports.glob("search-*.*") if p.is_file() and not p.is_symlink()),
+                         key=lambda item: item.stat().st_mtime_ns, reverse=True)
+        for old in reports[MAX_CACHED_REPORTS:]:
+            owned_child(exports, old.name).unlink(missing_ok=True)
+        return {"path": str(target), "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content),
+                "format": fmt, "kind": "search"}
+
+    def export_search_report(self, result_id: str, destination: str, *, fmt: str = "json") -> dict[str, Any]:
+        """Write the report to a user-chosen new file through the same CREATE_OR_EDIT_FILE gate as asset reports.
+        The bytes the gate decides on are the bytes written; no media copy is verified because the report claims
+        nothing about the files beyond the index (it says so)."""
+        target = self._export_target(destination, fmt)
+        content = self._search_report_bytes(result_id, fmt)
+        digest = hashlib.sha256(content).hexdigest()
+        decided = self.permissions.request_export(target, content, digest, {"kind": "search", "format": fmt})
+        if isinstance(decided, Pending):
+            return _pending_json(decided)
+        return self._write_export(target, content, digest, fmt, "search", decided)
+
+    def _search_report_bytes(self, result_id: str, fmt: str) -> bytes:
+        from qronos_media import search_report
+
+        if fmt not in search_report.SEARCH_REPORT_FORMATS:
+            raise MediaRequestError(f"format must be one of {search_report.SEARCH_REPORT_FORMATS}")
+        try:
+            return search_report.render_bytes(self.search_report(result_id), fmt)
+        except ReportUnavailable as exc:
+            raise MediaRequestError(f"report_unavailable: {exc}") from None
 
     def _multimodal_into(self, db: sqlite3.Connection, spec: Any, limit: int, budget_seconds: float,
                          block: dict[str, Any]) -> None:
@@ -1187,6 +1322,8 @@ class MediaService:
         content = payload["content"]
         if hashlib.sha256(content).hexdigest() != payload["sha256"]:
             raise MediaRequestError("prepared report content does not match its approved hash")
+        if payload.get("kind") == "search":  # a search-result report: exactly the approved bytes, nothing verified
+            return self._write_export(target, content, payload["sha256"], payload["format"], "search", approval)
         return self._verified_write(payload["assetId"], target, content, payload["sha256"], payload["format"],
                                     payload["kind"], approval, verify_seconds, cancelled)
 

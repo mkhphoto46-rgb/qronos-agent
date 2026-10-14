@@ -478,13 +478,13 @@ class _Pdf:
 
     FAMILY = "Vazirmatn"
 
-    def __init__(self, report: dict[str, Any]) -> None:
+    def __init__(self, report: dict[str, Any], *, title: str | None = None, subject: str | None = None) -> None:
         try:
             from fpdf import FPDF
         except ImportError:
             raise ReportUnavailable("the PDF library is not installed") from None
         fonts = pinned_fonts()
-        title = KIND_FA[report["kind"]]
+        title = title or KIND_FA[report["kind"]]  # the search-result report names itself (search_report)
         outer = self
 
         class Document(FPDF):
@@ -515,7 +515,7 @@ class _Pdf:
         generated = datetime.fromisoformat(report["generatedAt"])
         self.pdf.set_creation_date(generated)
         self.pdf.set_lang("fa")
-        self.pdf.set_title(f"{title} — {report['asset']['assetId']}")
+        self.pdf.set_title(f"{title} — {subject or report['asset']['assetId']}")
         self.pdf.set_creator("Qronos media index")
         self.pdf.set_producer("Qronos (fpdf2, HarfBuzz)")
         self.pdf.add_page()
