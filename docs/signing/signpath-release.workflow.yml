@@ -1,0 +1,201 @@
+# TEMPLATE - NOT ENABLED. GitHub runs workflows only from .github/workflows, so this file is inert here.
+#
+# The proposed SignPath Foundation release pipeline for Qronos (docs/signing/free-code-signing.md). Do not copy it
+# into .github/workflows until every owner step in that document's checklist is done: an OSI licence chosen by the
+# owner, a public repository, GitHub Actions available, SignPath's acceptance, MFA and roles, the reviewed
+# SignPath Foundation root pinned in config/authenticode_public_roots.json, and these committed in a reviewed
+# change: config/signpath_release.json (from config/signpath_release.template.json, "enabled": true,
+# "authenticodeConfig": ".cache/signing/authenticode.json") and config/signpath_foundation_signer.cer (the
+# reviewed public signing certificate, DER).
+#
+# Fail-closed by construction:
+# - It is started by hand only (workflow_dispatch). No push, pull request or schedule triggers it.
+# - All jobs run on GitHub-hosted runners (SignPath's open-source requirement).
+# - Every action is pinned to the full commit SHA of the release named beside it (resolved from the upstream
+#   repository, 2026-10-14). The input names were checked against each action.yml at that commit.
+# - The SignPath ids come only from config/signpath_release.json, read through signpath_release.load_config:
+#   a missing, disabled or placeholder config stops the run before anything is uploaded or submitted.
+# - A SignPath Approver approves every request by hand. The returned file then has to pass the repository's
+#   own verifier. This workflow publishes nothing and creates no release.
+# - The API token is read only from the repository secret SIGNPATH_API_TOKEN (the config's apiTokenSecretName).
+
+name: SignPath Release (template, not enabled)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signpath-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the unsigned installer (GitHub-hosted)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write       # GitHub artifact attestation (Sigstore): provenance only, not Windows trust
+      attestations: write
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    env:
+      RUSTUP_TOOLCHAIN: "1.98.1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14.8"
+      - name: Install pinned runtime and packaging dependencies
+        run: |
+          python -m pip install -r requirements.txt -r requirements-build.txt
+          python -m pip check
+      - name: The SignPath config must be present and enabled before anything is built
+        run: python -c "import sys; from pathlib import Path; from build_support import signpath_release as s; s.load_config(Path(sys.argv[1]).resolve())" config/signpath_release.json
+      - name: Build and verify the standalone backend
+        run: |
+          python -m build_support.build_runtime --destination runtime/package
+          python -m build_support.build_runtime --verify runtime/package/qronos-runtime
+      - name: Fetch the pinned WebView2 and VC++ installers (build_desktop verifies size, SHA-256 and signer)
+        shell: bash
+        run: |
+          for pin in webview2:wv2 vcredist:vcredist; do
+            name="${pin%%:*}"; folder=".cache/${pin##*:}"; mkdir -p "$folder"
+            url=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['url'], end='')" "build_support/${name}_prerequisite.json")
+            file=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['fileName'], end='')" "build_support/${name}_prerequisite.json")
+            curl --fail --location --proto '=https' --output "$folder/$file" "$url"
+          done
+      - name: Prepare Tauri's NSIS tools at their pinned SHA-1 (docs/offline-windows-installer.md, step 7)
+        shell: bash
+        run: |
+          T=$(cygpath -m "$RUNNER_TEMP"); L=$(cygpath -m "$LOCALAPPDATA")
+          pin() { python -c "import sys; from build_support import desktop_prerequisites as d; print(getattr(d, sys.argv[1]), end='')" "$1"; }
+          nsis_url=$(pin NSIS_URL); nsis_sha1=$(pin NSIS_SHA1)
+          utils_url=$(pin NSIS_TAURI_UTILS_URL); utils_sha1=$(pin NSIS_TAURI_UTILS_SHA1)
+          curl --fail --location --proto '=https' --output "$T/nsis.zip" "$nsis_url"
+          curl --fail --location --proto '=https' --output "$T/nsis_tauri_utils.dll" "$utils_url"
+          python -c "import hashlib, sys; bad = [p for p, h in zip(sys.argv[1::2], sys.argv[2::2]) if hashlib.sha1(open(p, 'rb').read()).hexdigest().upper() != h]; sys.exit(f'SHA-1 mismatch: {bad}' if bad else 0)" "$T/nsis.zip" "$nsis_sha1" "$T/nsis_tauri_utils.dll" "$utils_sha1"
+          mkdir -p "$L/tauri"
+          python -m zipfile -e "$T/nsis.zip" "$L/tauri"
+          mv "$L/tauri/nsis-3.11" "$L/tauri/NSIS"
+          mkdir -p "$L/tauri/NSIS/Plugins/x86-unicode/additional"
+          cp "$T/nsis_tauri_utils.dll" "$L/tauri/NSIS/Plugins/x86-unicode/additional/nsis_tauri_utils.dll"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install the pinned Rust toolchain, the locked frontend and the locked crates
+        shell: bash
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          (cd desktop && npm ci --no-audit --no-fund)
+          (cd desktop/src-tauri && cargo fetch --locked)
+      - name: Build the unsigned NSIS installer from this clean commit (Cargo runs offline)
+        shell: bash
+        run: |
+          T=$(cygpath -m "$RUNNER_TEMP")
+          python -m build_support.build_desktop --backend runtime/package/qronos-runtime --work-root "$T/qd" \
+            --backend-source "$GITHUB_SHA" --purpose review-candidate
+      - name: Prepare the signing request (a record of what may be signed; it submits nothing)
+        shell: bash
+        run: |
+          T=$(cygpath -m "$RUNNER_TEMP"); W=$(cygpath -m "$GITHUB_WORKSPACE")
+          build=$(ls -d "$T"/qd/b-*)
+          mkdir -p "$T/request"
+          python -m build_support.signpath_release prepare --config "$W/config/signpath_release.json" \
+            --artifact "$build"/qronos-desktop_*_x64-setup.exe --build-provenance "$build/installer-provenance.json" \
+            --out "$T/request"
+          cp "$build"/qronos-desktop_*_x64-setup.exe "$build/installer-provenance.json" "$T/request/"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/request/qronos-desktop_*_x64-setup.exe
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2 (SignPath needs v4 or later)
+        with:
+          name: qronos-unsigned
+          path: ${{ runner.temp }}/request/
+          if-no-files-found: error
+
+  sign:
+    name: Submit to SignPath (a SignPath Approver approves by hand)
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14.8"
+      - id: config
+        name: Read the SignPath ids from the validated config
+        shell: bash
+        run: |
+          python -m pip install -r requirements.txt
+          python -c "import os, sys; from pathlib import Path; from build_support import signpath_release as s; c = s.load_config(Path(sys.argv[1]).resolve()); open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8', newline='\n').write(''.join(f'{k}={c[k]}\n' for k in ('organizationId', 'projectSlug', 'signingPolicySlug', 'artifactConfigurationSlug')))" config/signpath_release.json
+      - uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092  # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ steps.config.outputs.organizationId }}
+          project-slug: ${{ steps.config.outputs.projectSlug }}
+          signing-policy-slug: ${{ steps.config.outputs.signingPolicySlug }}
+          artifact-configuration-slug: ${{ steps.config.outputs.artifactConfigurationSlug }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: "18000"
+          output-artifact-directory: signed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: qronos-signpath-returned
+          path: signed/
+          if-no-files-found: error
+
+  verify:
+    name: Verify the returned installer with the repository's own gate
+    needs: sign
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14.8"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: qronos-unsigned
+          path: ${{ runner.temp }}/unsigned
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: qronos-signpath-returned
+          path: ${{ runner.temp }}/signed
+      - name: Write this runner's Authenticode verification config (in the ignored .cache; nothing is signed)
+        shell: bash
+        env:
+          # The time stamp service SignPath used, read from the first signed file at review. verify does not
+          # contact it; the Authenticode config format requires it.
+          TIMESTAMP_URL: "<owner: the RFC 3161 time-stamp URL recorded at review>"
+        run: |
+          python -m pip install -r requirements.txt
+          mkdir -p .cache/signing
+          python -c "import hashlib, json, os, sys; from pathlib import Path; from build_support import authenticode_release as a; tools = sorted(a.program_files_x86().glob('Windows Kits/10/bin/10.*/x64/signtool.exe'), key=lambda p: tuple(int(x) for x in p.parts[-3].split('.'))); cer = Path('config/signpath_foundation_signer.cer').resolve(); Path('.cache/signing/authenticode.json').write_text(json.dumps({'schema': 1, 'signtool': str(tools[-1]), 'certificate': str(cer), 'thumbprintSha1': hashlib.sha1(cer.read_bytes()).hexdigest().upper(), 'timestampUrl': os.environ['TIMESTAMP_URL']}), encoding='utf-8')"
+      - name: The returned file must be the submitted installer plus a pinned, time-stamped SignPath Foundation signature
+        shell: bash
+        run: |
+          T=$(cygpath -m "$RUNNER_TEMP"); W=$(cygpath -m "$GITHUB_WORKSPACE")
+          python -m build_support.signpath_release check --config "$W/config/signpath_release.json"
+          python -m build_support.signpath_release verify --config "$W/config/signpath_release.json" \
+            --request "$T"/unsigned/qronos-desktop_*_x64-setup.exe.signpath-request.json \
+            --unsigned "$T"/unsigned/qronos-desktop_*_x64-setup.exe \
+            --signed "$T"/signed/qronos-desktop_*_x64-setup.exe
