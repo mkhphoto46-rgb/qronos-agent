@@ -217,14 +217,20 @@ _COMMAND = (
 _HAND_OVER = r"\b(?:run|running|use|type|typing|execute|enter|try|with|via|then|and)\s+"
 _HIGH_RISK_COMMAND = re.compile(rf"(?:^[ \t>*\-$#]*|`\s*|:\s*|[.!?؟؛]\s+|{_HAND_OVER})(?:{_COMMAND})",
                                 re.IGNORECASE | re.MULTILINE)
-# System administration tools, as broadly as 78ed5dc withheld them, where an answer hands them over: at a line start
-# (also after a list marker or a prompt sign) or opening an inline `code span` - any sudo <command> and any netsh,
-# wmic, bcdedit or vssadmin invocation. Written as typed (lower case), so a sentence that starts "Sudo is a tool ..."
-# or "Netsh can ..." stays prose, and a bare name in a span ("the `netsh` tool") is a mention.
+# System administration tools where an answer hands them over: at a line start (also after a list marker or a prompt
+# sign) or opening an inline `code span`.
+# - sudo <command>: sudo is case-sensitive where it exists, so only "sudo" as typed ("Sudo is a tool ..." is prose);
+# - any netsh, wmic, bcdedit or vssadmin invocation in ANY letter case (Windows runs "NETSH INT IP RESET" or "Wmic
+#   process ... delete" exactly as typed, and 78ed5dc's line-start rule matched them case-insensitively). A sentence
+#   that explains the tool is told apart by the word after the name ("Netsh can ...", "WMIC is ...", "Bcdedit edits
+#   ..."), never by its letter case; a bare name in a span ("the `netsh` tool") has no argument and is a mention.
+_EXPLAINS_TOOL = (r"(?:lets|allows|helps|shows|displays|configures|manages|controls|provides|reports|edits|changes|"
+                  r"sets|lists|offers|supports|needs|requires|runs|belongs)\b")
+_ADMIN_ARGUMENT = rf"\s+(?!{_NOT_A_TARGET}|{_EXPLAINS_TOOL})[^\s`]"
 _ADMIN_AT_START = re.compile(
     r"(?:^[ \t>*\-$#]*(?:\d{1,3}[.)]\s+)?|`\s*)"
-    r"(?:sudo\s+(?:-\S+\s+)*[a-z][\w.-]*|netsh(?:\.exe)?\s+[^\s`]|wmic(?:\.exe)?\s+[^\s`]|"
-    r"bcdedit(?:\.exe)?(?:\s+[^\s`]|\s*$)|vssadmin(?:\.exe)?(?:\s+[^\s`]|\s*$))",
+    r"(?:sudo\s+(?:-\S+\s+)*[a-z][\w.-]*|"
+    rf"(?i:(?:netsh|wmic)(?:\.exe)?{_ADMIN_ARGUMENT}|(?:bcdedit|vssadmin)(?:\.exe)?(?:{_ADMIN_ARGUMENT}|\s*$)))",
     re.MULTILINE)
 # An inline `code span` inside a sentence holding an executable statement ("use `print('x')` here",
 # "add `import os; os.remove(p)`"). A bare name or an empty call ("the `print` function", "`print()`") is a mention.

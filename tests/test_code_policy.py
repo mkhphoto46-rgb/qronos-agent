@@ -429,3 +429,46 @@ def test_r1_r2_answers_never_leave_the_orchestrator_or_the_phone(name):
     sent = runtime_services(runtime).remote_chat([{"role": "user", "content": B1_QUESTION}])
     assert sent == code_policy.OUTPUT_REFUSAL_FA and text not in sent
     assert [(r.category, r.outcome) for r in audit.records()] == [("script_execution", "refused")] * 2
+
+
+# ------------------------------------------------------------------ R3 (Media76): Windows admin tools in any letter
+# case (Windows runs them as typed); prose is told apart by the word after the name, never by its case
+
+R3 = {
+    "netsh_capitalised": "Netsh int ip reset",
+    "netsh_upper": "NETSH INT IP RESET",
+    "wmic_upper": "WMIC process where name='notepad.exe' delete",
+    "wmic_capitalised": "Wmic process where name='notepad.exe' delete",
+    "netsh_code_span": "Fix it with `Netsh int ip reset`.",
+}
+R3_PROSE = [
+    "Netsh can show the current firewall rules.", "WMIC is deprecated in newer Windows versions.",
+    "NETSH is a command-line tool.", "Wmic lets you query system information.", "Bcdedit edits the boot store.",
+    "The `Netsh` tool configures networking.", "`WMIC` is old.", "Sudo is a tool that runs a command as another user.",
+]
+
+
+@pytest.mark.parametrize("name", sorted(R3))
+def test_r3_admin_commands_in_any_case_are_withheld(name):
+    finding = code_policy.check_answer(R3[name])
+    assert finding is not None and finding.rule == "machine_changing_command", (name, finding)
+
+
+@pytest.mark.parametrize("text", R3_PROSE)
+def test_r3_explanations_in_any_case_still_pass(text):
+    assert code_policy.check_answer(text) is None, text
+
+
+@pytest.mark.parametrize("name", sorted(R3))
+def test_r3_answers_never_leave_the_orchestrator_or_the_phone(name):
+    from core.link_runtime import runtime_services
+
+    text = R3[name]
+    brain, audit = Brain(text), ActionAuditLog(path=None)
+    (result,) = guarded_orchestrator(brain, audit.record_verdict).execute_plan(plan_of(B1_QUESTION))
+    assert brain.calls[-1] == B1_QUESTION and result.output == code_policy.OUTPUT_REFUSAL_FA
+    runtime = SimpleNamespace(runtime_paused=False, is_busy=False, _code_policy_audit=audit.record_verdict,
+                              orchestrator=SimpleNamespace(answer_chat_only=lambda messages: text))
+    sent = runtime_services(runtime).remote_chat([{"role": "user", "content": B1_QUESTION}])
+    assert sent == code_policy.OUTPUT_REFUSAL_FA and text not in sent
+    assert [(r.category, r.outcome) for r in audit.records()] == [("script_execution", "refused")] * 2
