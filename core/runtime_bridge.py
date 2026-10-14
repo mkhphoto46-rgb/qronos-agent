@@ -1722,13 +1722,12 @@ class QronosRuntime:
 
     def _run_media_intent(self, intent: Any) -> str:
         """Run a brain/voice media request through the SAME typed product operation; a short Persian answer."""
-        from qronos_media.intents import MediaSearchIntent, spoken_answer
+        from qronos_media.intents import media_request, spoken_answer
 
         request_id = f"brain_{uuid.uuid4().hex[:16]}"
-        if isinstance(intent, MediaSearchIntent):
-            data = {"op": "search", "requestId": request_id, "query": intent.query, "mode": intent.mode, "limit": 10}
-        else:
-            data = {"op": "status", "requestId": request_id}
+        data = media_request(intent, request_id)
+        if data is None:  # a clarification question: nothing is asked of the product, nothing is searched
+            return spoken_answer(intent, None)
         answered: dict[str, Any] = {}
         done = threading.Event()
 

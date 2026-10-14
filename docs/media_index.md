@@ -792,8 +792,23 @@ It is not an OR of two channels and not "both somewhere in the same file".
   split button; each card says that both constraints were found in that video within the window, which channels
   matched, the line, and each frame with «فریم ... ثانیه پیش از/پس از این جمله است» or «هم‌زمان», as generated,
   unverified text, never image similarity. No-result outcomes, partial answers and unavailable channels are notes.
-- **Not done:** no speaker, OCR or image-encoder evidence; no voice/brain intent for this mode (the typed desktop
-  route only); no report view of search results; quality is unmeasured (synthetic fixtures prove the contract).
+- **Brain/voice (round 69):** `qronos_media/intents.py` reaches this mode from a chat turn or a voice transcript
+  only through labelled, quoted parts: «در ویدیوهام بگرد: گفتگو «...» و تصویر «...»» or `search my videos for
+  dialogue "..." and visual "..."` (labels: گفتگو/گفت‌وگو/دیالوگ/جمله, dialogue/saying/says/line; تصویر,
+  visual/showing/shows/image/picture), with an optional «در فاصلهٔ N ثانیه» / `within N seconds` (at most 120 s),
+  «معنایی»/semantic (both channels by meaning) and «تقریبی»/fuzzy (fuzzy dialogue). `media_request` builds the
+  same typed `search` request as the panel. A visual part alone, two parts of one kind, a window over 120 s, a
+  constraint the search refuses, or «ترکیبی»/multimodal without both parts is answered with a question and nothing
+  is searched. «ترکیبی»/multimodal with ONE quoted natural request asks only for the proposed split; the answer
+  says it is a proposal (generated/unverified when from the Fast brain, which is busy during the person's own turn)
+  and gives the labelled sentence to say to confirm; nothing is searched from it. A dialogue-labelled phrase alone,
+  and every older request, stays the dialogue/topic/status grammar. The Persian answer names both channels, the
+  line with its time, the frame's generated/unverified text and where it lies relative to the line, partial and
+  unavailable states and no-result outcomes; it carries no path and makes no image, speaker or OCR claim. Opening
+  stays the panel's approved «باز کردن در همین لحظه».
+- **Not done:** no speaker, OCR or image-encoder evidence; no report view or export of search results; no human
+  audio/STT/TTS test of the voice route (fixture transcripts drive the same handler); quality is unmeasured
+  (synthetic fixtures prove the contract).
 
 ## Product route (round 32)
 
@@ -820,8 +835,9 @@ ONE in-process media host (`qronos_media/product.py`):
   trusted application catalog (mpv or VLC, `core.computer_executor.trusted_media_players`); the OPEN_APPLICATION gate
   decides; `core.computer_executor.open_media_at_time` builds the exact argv (player, start option, the verified
   file) with no shell and no caller arguments. Decision time re-verifies again: a replaced copy launches nothing.
-- Brain/voice: `qronos_media/intents.py` recognises quoted Persian/English library searches and index status
-  deterministically (never a guess) and runs the SAME operations; the answer is a short Persian sentence.
+- Brain/voice: `qronos_media/intents.py` recognises quoted Persian/English library searches, labelled multimodal
+  requests and index status deterministically (never a guess; missing or ambiguous parts get a question) and runs
+  the SAME operations (`media_request`); the answer is a short Persian sentence.
 - Desktop: `desktop/src/mediaStore.ts` (validated events, requestId matching, stale/late answers dropped, the secret
   sent once and never stored) and `components/MediaPanel.tsx` / `MediaDrawer.tsx` (Persian), mounted in App.tsx
   beside the queue and history drawers (509204f), with the round-30 repair (own MEDIA_ACTION approval kind
@@ -860,8 +876,8 @@ Still open:
 5. No real Fast-brain or Vision run of labels, hints or visual evidence has been
    accepted; their quality is unmeasured.
 6. Multimodal search (round 63) fuses only stored dialogue and generated frame
-   text; no real archive run, split or fusion quality has been measured, and it has
-   no voice/brain intent yet.
+   text; no real archive run, split or fusion quality has been measured. Its
+   brain/voice route (round 69) is proven with fixture transcripts only.
 
 ## Tests
 
