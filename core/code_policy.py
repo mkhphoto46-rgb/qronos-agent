@@ -186,14 +186,45 @@ _CODE_LINE = re.compile(
     # a lowercase return / a call standing alone on its line (os.listdir('.'), main()): code, not a sentence
     r"return\b.*$|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\(.*\)\s*$|[a-z_]\w*\([^()]*\)\s*$"
     r")")
-_HIGH_RISK_COMMAND = re.compile(
-    r"^\s*(?:sudo\s|rm\s+-[a-z]*[rf]|del\s+/[a-z]|rmdir\s+/s|format\s+[a-z]:|Remove-Item\b|Set-ExecutionPolicy\b|"
-    r"reg\s+(?:add|delete|import)\b|bcdedit\b|vssadmin\b|wmic\b|schtasks\s+/create|netsh\b|"
+# What a command acts on: a path-like target (quote, $var, ~, *, drive, ./ or a slash), or one word that ends the
+# clause ("pip install requests", "rm -rf node_modules"). "rm -rf is dangerous" or "Remove-Item is the cmdlet that
+# deletes items" explain a command in words: a mention, not a command to run.
+_TARGET = r"(?:-\w+\s+)*(?:[\"'$~*]|[A-Za-z]:|\.{0,2}[\\/]|\S*[\\/]|[\w.+-]+(?=\s*(?:$|[`'\";.!?،؛)])))"
+# One command that changes the machine, with what it acts on.
+_COMMAND = (
+    r"sudo\s+(?:-\S+\s+)*(?:rm|apt|apt-get|dnf|yum|pacman|chmod|chown|mv|cp|dd|mkfs|systemctl|sh|bash|tee|pip3?|npm)\b|"
+    rf"rm\s+-[a-z]*[rf][a-z]*\s+{_TARGET}|del\s+(?:/[a-z]+\s+)+{_TARGET}|(?:rmdir|rd)\s+/s\b|format\s+[a-z]:|"
+    rf"Remove-Item\s+{_TARGET}|Set-ExecutionPolicy\s+{_TARGET}|reg\s+(?:add|delete|import)\s+{_TARGET}|"
+    r"bcdedit\s+/(?:set|delete|deletevalue|import)\b|vssadmin\s+(?:delete|resize)\b|wmic\s+\S+\s+(?:call|delete|set)\b|"
+    r"schtasks\s+/create\b|netsh\s+(?:advfirewall|firewall|interface|wlan|winsock)\b|"
     # anything fetched and piped into an interpreter (any PowerShell Invoke-* cmdlet, iwr/irm, curl, wget)
-    r"(?:iwr|irm|curl|wget|Invoke-[A-Z][A-Za-z]+)\b.*\|\s*(?:iex|Invoke-Expression|sh|bash)\b|"
-    r"(?:iex|Invoke-Expression)\b|powershell(?:\.exe)?\s+-(?:enc|e|c|command)\b|cmd(?:\.exe)?\s+/c\b|"
-    r"chmod\s+\+x\b|pip3?\s+install\b|npm\s+(?:install|i)\b|choco\s+install\b|winget\s+install\b)",
-    re.IGNORECASE | re.MULTILINE)
+    r"(?:iwr|irm|curl|wget|Invoke-[A-Z][A-Za-z]+)\b[^\n`]*\|\s*(?:iex|Invoke-Expression|sh|bash)\b|"
+    r"(?:iex|Invoke-Expression)\s*[(\$'\"]|powershell(?:\.exe)?\s+-(?:enc|e|c|command)\b|cmd(?:\.exe)?\s+/c\b|"
+    rf"chmod\s+\+x\s+{_TARGET}|pip3?\s+install\s+{_TARGET}|npm\s+(?:install|i)\s+{_TARGET}|"
+    rf"choco\s+install\s+{_TARGET}|winget\s+install\s+{_TARGET}"
+)
+# ... where an answer hands it over to be run: at a line start (also after a list marker or a prompt sign), inside an
+# inline `code span`, after a colon ("Run this: ...") or at the start of a sentence.
+_HIGH_RISK_COMMAND = re.compile(rf"(?:^[ \t>*\-$#]*|`\s*|:\s*|[.!?؟؛]\s+)(?:{_COMMAND})",
+                                re.IGNORECASE | re.MULTILINE)
+# One generated statement standing alone on its line is code even without a second line: an import, a call, a
+# definition header, a declaration, a "x; y" chain, a preprocessor/script header or an SQL statement. Line kinds that
+# prose also uses ("return to ...", "else:", "if it is cold:", "Get-Together") stay two-line-only (contains_code).
+_STATEMENT = re.compile(
+    r"^(?:"
+    r"import\s+[\w.]+(?:\s+as\s+\w+)?\s*;?\s*$|from\s+[\w.]+\s+import\s+[\w*, ]+\s*$|"
+    r"(?:async\s+)?def\s+\w+\s*\(.*\)\s*(?:->.*)?:.*$|class\s+\w+(?:\(.*\))?\s*:\s*$|"
+    r"(?:print|printf|console\.log|System\.out\.println|echo|puts|Write-Host|Write-Output)\s*\(.*\)\s*;?\s*$|"
+    r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\(.*\)\s*;?\s*$|[a-z_]\w*\([^()]*\)\s*;?\s*$|"
+    r"(?:const|var)\s+\w+\s*=\s*.+$|let\s+\w+\s*=.+;\s*$|\$[A-Za-z_]\w*\s*=\s*[^$\n]+$|"
+    r"[A-Za-z_][\w.\[\]]*\s*(?:=|\+=|-=)\s*[^=].*;\s*$|"
+    r"#include\s*[<\"]|<\?php|<script\b|@echo\s+off\s*$|#!/|"
+    r"(?:SELECT\s.+\sFROM\s|INSERT\s+INTO\s|UPDATE\s+\w+\s+SET\s|DELETE\s+FROM\s|CREATE\s+(?:TABLE|INDEX)\s|"
+    r"DROP\s+(?:TABLE|DATABASE)\s)|"
+    r"(?:import\s+[\w.]+|from\s+[\w.]+\s+import\s+[\w*, ]+|[A-Za-z_][\w.]*\(.*?\)|"
+    r"[A-Za-z_][\w.\[\]]*\s*=\s*[^;]*[(\"'][^;]*)\s*;\s*\S.*$"
+    r")")
+_LIST_MARKER = re.compile(r"^(?:[-*•]|\d{1,3}[.)])\s+")
 
 
 def _lines(text: str) -> list[str]:
@@ -228,6 +259,8 @@ def check_answer(text: object) -> CodeFinding | None:
         return CodeFinding("output", ActionCategory.CODE_GENERATION, "fenced_block")
     if contains_code(value):
         return CodeFinding("output", ActionCategory.CODE_GENERATION, "code_lines")
+    if any(_STATEMENT.match(_LIST_MARKER.sub("", line)) for line in _lines(value)):
+        return CodeFinding("output", ActionCategory.CODE_GENERATION, "single_code_line")
     if _HIGH_RISK_COMMAND.search(value):
         return CodeFinding("output", ActionCategory.SCRIPT_EXECUTION, "machine_changing_command")
     return None
