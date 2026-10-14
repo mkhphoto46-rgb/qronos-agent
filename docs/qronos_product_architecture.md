@@ -262,8 +262,11 @@ Qronos must never:
   scan for vulnerable targets, or assist an unauthorized intrusion.
 - Change its own security policy to grant itself more authority.
 - Execute open-ended elevated shell commands proposed by a model.
-- Generate, analyze, explain, modify, or execute source code, scripts, macros,
-  exploit logic, or executable instructions inside the Qronos runtime.
+- Generate, modify, or execute source code, scripts, macros, exploit logic, or
+  executable instructions inside the Qronos runtime. Read-only analysis of code
+  the person provides (explaining or reviewing it) is permitted: that is the
+  installed runtime policy (docs/qronos_voice_output.md, "Security and ownership
+  boundaries"; security/permissions.py CODE_ANALYSIS is AUTO_ALLOW).
 - Create, edit, or delete Windows Registry keys or values.
 - Change boot configuration, firmware, recovery, antivirus, firewall, UAC, or
   access-control settings.
@@ -284,7 +287,8 @@ installed product requires independent layers:
    set.
 2. Deny reading, creating, editing, uploading, or executing source-code and
    script targets in the Action Broker, regardless of model output or approval.
-3. Reject code-generation, code-analysis, exploit, and script requests before
+3. Reject code-generation, code-modification, exploit, and script-execution
+   requests (read-only analysis passes) before
    they reach either Brain, using a deterministic Content Policy Gate.
 4. Inspect generated text before display or tool use and replace blocked output
    with a clear refusal event in the audit log.
@@ -297,6 +301,19 @@ promise perfect semantic detection under every phrasing. The enforceable hard
 guarantee is that the runtime has no code execution capability and that the
 Action Broker always rejects categorized code operations. Textual code refusal
 requires the layered gates above and must be measured before production release.
+
+Current implementation of layers 3 and 4 (core/code_policy.py): deterministic
+Persian/English patterns, not a semantic classifier. The input check runs at the
+start of `Orchestrator.execute_plan` (desktop text and voice turns, the approved
+screen question, queued conversations) and in the paired phone's `remote_chat`,
+before any resource admission or model call. The output check replaces a
+generated answer that holds a fenced code block, two consecutive code-like lines
+or one machine-changing command before it is recorded, shown, sent or spoken. The
+decision and its audit record (category, channel, stage, rule and length, never
+the text) come from `security.gate` and the permission engine. Internal data
+calls that use `answer_chat_only` directly (for example the media labels and
+split proposals) are not passed through it. Its red-team measurement (layer 5)
+is still owed.
 
 ## External Intrusion Response
 

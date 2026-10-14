@@ -1,0 +1,256 @@
+"""
+The chat's code boundary: requests and answers checked deterministically around the Brains.
+
+The installed runtime policy (docs/qronos_voice_output.md, "Security and ownership
+boundaries"; security/permissions.py) is:
+
+    read-only code analysis is permitted          CODE_ANALYSIS     AUTO_ALLOW
+    code generation is forbidden                  CODE_GENERATION   FORBIDDEN
+    code modification is forbidden                CODE_MODIFICATION FORBIDDEN
+    arbitrary script execution is forbidden       SCRIPT_EXECUTION  FORBIDDEN
+
+This module does not decide that policy; it only says which category a chat
+request or a generated answer falls into. The decision, and its typed audit
+record, come from ``security.gate.evaluate`` - the same gate every action uses.
+
+Two layers, both pattern-based and model-free:
+
+    INPUT   a request that asks Qronos to write, change or run code is refused
+            before any Brain is asked (no model call, no resource admission).
+            Asking what a piece of code does, or to explain or review it, is
+            analysis and passes.
+
+    OUTPUT  a generated answer that contains code - a fenced block, two or more
+            consecutive code-like lines, or one shell command that changes the
+            machine - is replaced by a refusal before it is recorded, shown or
+            spoken. An answer that explains code in words passes.
+
+These are deterministic patterns, not a semantic classifier: a request can be
+phrased in a way the input patterns do not list, which is why the output layer
+exists. Neither layer executes anything; the runtime has no code-execution
+capability in its chat path. Internal model tasks that must return data (for
+example the media labels and split proposals, which use their own
+``answer_chat_only`` calls) are not passed through here.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from security.permissions import ActionCategory
+
+MAX_CHECKED_CHARS = 20_000
+
+INPUT_REFUSAL_FA = (
+    "کرونوس کد نمی‌نویسد، تغییر نمی‌دهد و اجرا نمی‌کند. اگر کدی دارید، می‌توانم فقط توضیح بدهم که "
+    "چه کار می‌کند یا آن را بررسی کنم."
+)
+OUTPUT_REFUSAL_FA = (
+    "پاسخ آماده‌شده کد داشت، پس نمایش داده و خوانده نشد؛ کرونوس کد نمی‌نویسد. اگر بخواهید، همین موضوع را "
+    "با کلمات توضیح می‌دهم."
+)
+
+
+@dataclass(frozen=True)
+class CodeFinding:
+    """What a request asks for, or what an answer contains; ``rule`` names the pattern (never the text)."""
+
+    stage: str  # "input" | "output"
+    category: ActionCategory
+    rule: str
+
+    @property
+    def message(self) -> str:
+        return INPUT_REFUSAL_FA if self.stage == "input" else OUTPUT_REFUSAL_FA
+
+
+# ------------------------------------------------------------------ input (the person's request)
+
+_LANG = (r"(?:python|javascript|typescript|java|kotlin|c\#|c\+\+|csharp|golang|rust|ruby|php|perl|powershell|"
+         r"bash|zsh|shell|batch|vba|vbscript|sql|html|css|lua|matlab|autohotkey|node\.?js)")
+_NOUN = (r"(?:code(?!\s+of\s+conduct)|scripts?|snippets?|macros?|functions?|methods?|regex(?:es)?|"
+         r"regular\s+expressions?|one-liners?|source\s+code)")
+_LANG_NOUN = r"(?:program|programs|command|commands|query|queries|app|application|class|loop)"
+_FILLER = (r"(?:me|us|a|an|the|some|this|that|these|those|my|our|your|small|simple|short|quick|full|complete|"
+           r"working|new|basic|little|following|above|below|" + _LANG + r")")
+_GEN_VERB = r"(?:write|create|generate|make|build|produce|draft|implement|give\s+me|show\s+me|need|want)"
+_MOD_VERB = (r"(?:fix|refactor|rewrite|re-write|modify|change|edit|optimi[sz]e|update|convert|port|translate|patch|"
+             r"debug|complete|finish|extend|improve)")
+_EXEC_VERB = r"(?:run|execute|eval|exec)"
+
+
+def _verb_object(verb: str, nouns: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"\b{verb}\b(?:\s+{_FILLER}){{0,4}}\s+(?:(?:{_LANG}\s+(?:{nouns}|{_LANG_NOUN}))|{nouns})\b",
+        re.IGNORECASE)
+
+
+_EN_RULES: tuple[tuple[str, ActionCategory, re.Pattern[str]], ...] = (
+    ("en_generate", ActionCategory.CODE_GENERATION, _verb_object(_GEN_VERB, _NOUN)),
+    ("en_code_verb", ActionCategory.CODE_GENERATION,
+     re.compile(r"\b(?:can|could|would|will|please)\s+you\s+code\b|\bcode\s+(?:me|up)\b", re.IGNORECASE)),
+    ("en_how_to_code", ActionCategory.CODE_GENERATION,
+     re.compile(rf"\bhow\s+(?:do|can|would|should)\s+(?:i|you|we)\s+(?:write|code|implement|program)\b"
+                rf"[^.?!\n]{{0,80}}\b(?:in|using|with)\s+{_LANG}\b", re.IGNORECASE)),
+    ("en_modify", ActionCategory.CODE_MODIFICATION, _verb_object(_MOD_VERB, _NOUN)),
+    ("en_modify_in", ActionCategory.CODE_MODIFICATION,
+     re.compile(rf"\b{_MOD_VERB}\b[^.?!\n]{{0,40}}\b(?:in|of)\s+(?:my|this|the|that|our)\s+(?:{_LANG}\s+)?"
+                r"(?:code|script|function|program|macro)\b", re.IGNORECASE)),
+    ("en_execute", ActionCategory.SCRIPT_EXECUTION, _verb_object(_EXEC_VERB, _NOUN)),
+    ("en_execute_file", ActionCategory.SCRIPT_EXECUTION,
+     re.compile(r"\b(?:run|execute)\b[^\n]{0,60}\.(?:py|ps1|psm1|bat|cmd|sh|js|vbs|ahk)\b", re.IGNORECASE)),
+)
+
+_FA_LANG = (r"(?:پایتون|جاوا\s?اسکریپت|جاوا|تایپ\s?اسکریپت|سی‌شارپ|سی\s?شارپ|سی\s?پلاس\s?پلاس|پاورشل|"
+            r"پاور\s?شل|بش|پی\s?اچ\s?پی|اس\s?کیو\s?ال|python|javascript|powershell|bash|sql)")
+# «کد» is also a postal/national/discount/verification code: those are not program code.
+_FA_CODE = (r"(?:کد(?!\s*(?:پستی|ملی|تخفیف|رهگیری|پیگیری|اقتصادی|شناسایی|تأیید|تایید|فعال‌سازی|فعالسازی|"
+            r"امنیتی|ورود|پیامکی|معرف|رنگ|کالا|شعبه|سفارش|مالیاتی|بانکی|شهر|کشور))|کدی|کدش|اسکریپت|ماکرو|"
+            # «برنامه» (also a plan/schedule) and «تابع»/«دستور» count only with a programming language;
+            # a language name alone («یک شعر دربارهٔ پایتون بنویس») is a topic, not code.
+            r"(?:برنامه|برنامه‌ای|تابع|تابعی|دستور|دستورات|فرمان|کوئری)\s+(?:به\s+زبان\s+)?" + _FA_LANG + r")")
+_FA_GEN = (r"(?:بنویس|بنویسی|بنویسید|بنویسش|بساز|بسازی|بسازید|تولید\s?کن|ایجاد\s?کن|پیاده[‌\s]?سازی\s?کن|"
+           r"کد\s?بزن|نوشتن)")
+_FA_MOD = (r"(?:اصلاح\s?کن|درست\s?کن|درستش\s?کن|بازنویسی\s?کن|تغییر\s?بده|ویرایش\s?کن|بهینه\s?کن|تبدیل\s?کن|"
+           r"ریفکتور|دیباگ\s?کن|باگش\s?را\s?بگیر|کامل\s?کن|کاملش\s?کن)")
+_FA_EXEC = r"(?:اجرا\s?کن|اجراش\s?کن|اجرا\s?بکن|ران\s?کن)"
+
+
+def _fa_pair(verbs: str) -> re.Pattern[str]:
+    # Persian puts the object first ("یک اسکریپت پایتون بنویس که ..."); the clause must not end between them.
+    return re.compile(rf"{_FA_CODE}[^.!؟?\n]{{0,60}}?{verbs}|{verbs}[^.!؟?\n]{{0,25}}?{_FA_CODE}")
+
+
+_FA_RULES: tuple[tuple[str, ActionCategory, re.Pattern[str]], ...] = (
+    ("fa_generate", ActionCategory.CODE_GENERATION, _fa_pair(_FA_GEN)),
+    ("fa_modify", ActionCategory.CODE_MODIFICATION, _fa_pair(_FA_MOD)),
+    ("fa_execute", ActionCategory.SCRIPT_EXECUTION, _fa_pair(_FA_EXEC)),
+)
+
+# A request that carries code (pasted) and TELLS Qronos to do something with it other than understanding it.
+# English verbs count only as an instruction (sentence start, or after please/can you ...): "what does this
+# change?" is a question about the code, "change it to ..." is a request to modify it. Persian forms are imperative.
+_ASK = r"(?:^|[.!?:;\n]\s*|\b(?:please|pls|can\s+you|could\s+you|would\s+you|will\s+you|now|then|and)\s+)"
+_WITH_CODE_RULES: tuple[tuple[str, ActionCategory, re.Pattern[str]], ...] = (
+    ("pasted_execute", ActionCategory.SCRIPT_EXECUTION,
+     re.compile(rf"{_ASK}(?:run|execute|eval)\b|اجرا\s?کن|اجراش\s?کن|ران\s?کن", re.IGNORECASE | re.MULTILINE)),
+    ("pasted_generate", ActionCategory.CODE_GENERATION,
+     re.compile(rf"{_ASK}(?:write|implement|extend|finish|generate)\b|بنویس|کامل\s?کن|اضافه\s?کن|ادامه\s?بده",
+                re.IGNORECASE | re.MULTILINE)),
+    ("pasted_modify", ActionCategory.CODE_MODIFICATION,
+     re.compile(rf"{_ASK}{_MOD_VERB}\b|{_FA_MOD}", re.IGNORECASE | re.MULTILINE)),
+)
+
+
+def check_request(text: object) -> CodeFinding | None:
+    """The forbidden category a chat request asks for, or None (analysis and everything else pass)."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    value = text[:MAX_CHECKED_CHARS]
+    if contains_code(value):
+        prose = _strip_code(value)
+        for rule, category, pattern in _WITH_CODE_RULES:
+            if pattern.search(prose):
+                return CodeFinding("input", category, rule)
+    else:
+        prose = value
+    for rule, category, pattern in (*_EN_RULES, *_FA_RULES):
+        if pattern.search(prose):
+            return CodeFinding("input", category, rule)
+    return None
+
+
+# ------------------------------------------------------------------ output (a generated answer)
+
+_FENCE = re.compile(r"^[ \t]*(?:```|~~~)", re.MULTILINE)
+_CODE_LINE = re.compile(
+    r"^(?:"
+    r"(?:async\s+)?def\s+\w+\s*\(.*\)\s*(?:->.*)?:\s*$|class\s+\w+(?:\(.*\))?\s*:\s*$|"
+    r"import\s+[\w.]+(?:\s+as\s+\w+)?\s*;?\s*$|from\s+[\w.]+\s+import\s+[\w*, ]+\s*$|"
+    # "let x = 2" alone is also how arithmetic is written: only with a statement's semicolon.
+    r"(?:export\s+)?(?:async\s+)?function\s*\w*\s*\(.*\)\s*\{?\s*$|(?:const|var)\s+\w+\s*=\s*.+$|let\s+\w+\s*=.+;\s*$|"
+    r"#include\s*[<\"]|(?:public|private|protected|static)\s+[\w<>\[\],\s]+\s+\w+\s*\(.*\)\s*\{?\s*$|"
+    r"(?:console\.log|System\.out\.println|printf|print|echo|puts|Write-Host|Write-Output)\s*\(.*\)\s*;?\s*$|"
+    r"\$[A-Za-z_]\w*\s*=\s*[^$\n]+$|"  # a PowerShell/PHP assignment; "$x = 2$" (inline math) is not one
+    r"(?:Get|Set|New|Remove|Invoke|Start|Stop|Add|Copy|Move|Rename)-[A-Z][A-Za-z]+\b.*$|"
+    r"(?:SELECT\s.+\sFROM\s|INSERT\s+INTO\s|UPDATE\s+\w+\s+SET\s|DELETE\s+FROM\s|CREATE\s+(?:TABLE|INDEX)\s|"
+    r"DROP\s+(?:TABLE|DATABASE)\s).*$|"
+    r"<\?php|<script\b.*$|@echo\s+off\s*$|#!/.*$|"
+    r"(?:if|for|while|switch|catch)\s*\(.*\)\s*\{?\s*$|"
+    r"for\s+\w+(?:\s*,\s*\w+)*\s+in\s+[^:\n]+:\s*$|"
+    r"(?:if|elif|while)\s+[^:\n]*(?:==|!=|<=|>=|\bnot\b|\bin\b|\bis\b|\bTrue\b|\bFalse\b)[^:\n]*:\s*$|"
+    r"(?:else|try|finally)\s*:\s*$|\}\s*(?:else\b.*)?\{?\s*$|\};?\s*$|return\b.*;\s*$|"
+    r"[A-Za-z_][\w.\[\]]*\s*(?:=|\+=|-=)\s*[^=].*;\s*$|[A-Za-z_][\w.]*\(.*\)\s*;\s*$|"
+    # a lowercase return / a call standing alone on its line (os.listdir('.'), main()): code, not a sentence
+    r"return\b.*$|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\(.*\)\s*$|[a-z_]\w*\([^()]*\)\s*$"
+    r")")
+_HIGH_RISK_COMMAND = re.compile(
+    r"^\s*(?:sudo\s|rm\s+-[a-z]*[rf]|del\s+/[a-z]|rmdir\s+/s|format\s+[a-z]:|Remove-Item\b|Set-ExecutionPolicy\b|"
+    r"reg\s+(?:add|delete|import)\b|bcdedit\b|vssadmin\b|wmic\b|schtasks\s+/create|netsh\b|"
+    # anything fetched and piped into an interpreter (any PowerShell Invoke-* cmdlet, iwr/irm, curl, wget)
+    r"(?:iwr|irm|curl|wget|Invoke-[A-Z][A-Za-z]+)\b.*\|\s*(?:iex|Invoke-Expression|sh|bash)\b|"
+    r"(?:iex|Invoke-Expression)\b|powershell(?:\.exe)?\s+-(?:enc|e|c|command)\b|cmd(?:\.exe)?\s+/c\b|"
+    r"chmod\s+\+x\b|pip3?\s+install\b|npm\s+(?:install|i)\b|choco\s+install\b|winget\s+install\b)",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip().lstrip(">").strip() for line in text.splitlines() if line.strip()]
+
+
+def _strip_code(text: str) -> str:
+    """The request without its fenced blocks and code-like lines (what the person wrote around the code)."""
+    without_fences = re.sub(r"(?:```|~~~).*?(?:```|~~~|\Z)", " ", text, flags=re.DOTALL)
+    return "\n".join(line for line in without_fences.splitlines() if not _CODE_LINE.match(line.strip()))
+
+
+def contains_code(text: str) -> bool:
+    """A fenced block, or two consecutive code-like lines (non-empty lines, indentation ignored)."""
+    if _FENCE.search(text):
+        return True
+    previous = False
+    for line in _lines(text):
+        current = bool(_CODE_LINE.match(line))
+        if current and previous:
+            return True
+        previous = current
+    return False
+
+
+def check_answer(text: object) -> CodeFinding | None:
+    """Whether a generated chat answer contains code that must not be shown or spoken."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    value = text[:MAX_CHECKED_CHARS]
+    if _FENCE.search(value):
+        return CodeFinding("output", ActionCategory.CODE_GENERATION, "fenced_block")
+    if contains_code(value):
+        return CodeFinding("output", ActionCategory.CODE_GENERATION, "code_lines")
+    if _HIGH_RISK_COMMAND.search(value):
+        return CodeFinding("output", ActionCategory.SCRIPT_EXECUTION, "machine_changing_command")
+    return None
+
+
+# ------------------------------------------------------------------ the decision (the existing gate)
+
+def refused(finding: CodeFinding, *, channel: str, chars: int, audit: Callable[[Any], None] | None) -> bool:
+    """Ask the action gate about ``finding``; True when it is refused (the gate records it in ``audit``).
+
+    The audit record names the channel, the stage and the rule, and the length of the text: never the text.
+    """
+    from core.actions import ActionRequest
+    from security import gate
+
+    request = ActionRequest(
+        category=finding.category,
+        target=f"{channel} chat",
+        summary=f"{finding.stage} refused by the code policy ({finding.rule}; {int(chars)} characters, text not kept)",
+        parameters={"channel": channel, "stage": finding.stage, "rule": finding.rule},
+    )
+    try:
+        verdict = gate.evaluate(request, audit=audit)
+    except Exception:  # noqa: BLE001 - an unanswerable gate never lets code through
+        return True
+    return not verdict.allowed

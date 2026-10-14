@@ -3683,6 +3683,19 @@ class QronosRuntime:
 
         if self.orchestrator is None:
             self.orchestrator = Orchestrator()
+            self.orchestrator.code_policy_audit = self._code_policy_audit
+
+    def _code_policy_audit(self, verdict: Any) -> None:
+        """Record one code-policy refusal (core/code_policy.py) in the action audit trail.
+
+        The record carries the category, the channel, the stage and the rule, never the text. A trail that
+        cannot be written must not let the refused code through: the refusal stands and a warning says so.
+        """
+        try:
+            audit, _ = self._history_records()
+            audit.record_verdict(verdict)
+        except Exception as exc:  # noqa: BLE001 - auditing must not undo a refusal
+            self._notify("runtime_warning", "warning", f"Could not audit a code-policy refusal: {type(exc).__name__}")
 
     # ------------------------------------------------------------ device link
 
@@ -6509,6 +6522,7 @@ class QronosRuntime:
 
         if self.orchestrator is None:
             orchestrator = Orchestrator()
+            orchestrator.code_policy_audit = self._code_policy_audit
             # Public web access requires the browser adapter. Legacy direct
             # HTTP research is intentionally unavailable in production.
             orchestrator.workers.register(

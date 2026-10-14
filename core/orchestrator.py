@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -238,6 +239,10 @@ class Orchestrator:
         # the current worker/router behavior.
         self.compute_estimator = ComputeEstimator()
 
+        # Where the chat's code-policy refusals are recorded (security.gate's audit sink; the runtime
+        # passes its action audit trail). None falls back to the gate's default sink.
+        self.code_policy_audit = None
+
         # Warm-model ownership must survive across turns.  The global resource
         # ledger is process-local, so a model preloaded by the PowerShell helper
         # (or kept alive by Ollama after a previous turn) has to be adopted by
@@ -270,6 +275,17 @@ class Orchestrator:
 
         results: list[StepResult] = []
 
+        # The chat's code boundary (core/code_policy.py, security.gate): a request to write, change or run code
+        # is answered with the refusal before ANY step runs - no resource admission, no model call.
+        from core import code_policy
+
+        for step in plan.steps:
+            finding = code_policy.check_request(step.description)
+            if finding is not None and code_policy.refused(
+                finding, channel="desktop", chars=len(step.description or ""), audit=self.code_policy_audit,
+            ):
+                return [StepResult(order=step.order, success=True, output=finding.message)]
+
         for step in plan.steps:
             # Adopt any configured Fast/Heavy model that is already resident
             # before pressure classification.  This prevents a Qronos-owned
@@ -294,6 +310,14 @@ class Orchestrator:
                 ),
                 priority=priority,
             )
+
+            if result.success:
+                # A generated answer that contains code is replaced before anyone records, shows or speaks it.
+                finding = code_policy.check_answer(result.output)
+                if finding is not None and code_policy.refused(
+                    finding, channel="desktop", chars=len(result.output or ""), audit=self.code_policy_audit,
+                ):
+                    result = dataclasses.replace(result, output=finding.message)
 
             results.append(
                 result

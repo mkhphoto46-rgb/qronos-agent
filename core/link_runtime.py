@@ -293,7 +293,17 @@ def runtime_services(runtime: Any) -> LinkServices:
     """
 
     def remote_chat(messages: list[dict[str, str]]) -> str:
+        from core import code_policy
+
         _refuse_if_busy(runtime)
+        # The chat's code boundary (core/code_policy.py), the same as the desktop's: a request to write, change
+        # or run code is refused before the Brain is asked, and an answer containing code is never sent (or
+        # spoken by the phone's voice turn, which speaks this answer).
+        audit = getattr(runtime, "_code_policy_audit", None)
+        asked = next((str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"), "")
+        finding = code_policy.check_request(asked)
+        if finding is not None and code_policy.refused(finding, channel="phone", chars=len(asked), audit=audit):
+            return finding.message
         orchestrator = getattr(runtime, "orchestrator", None)
 
         if orchestrator is None:
@@ -307,10 +317,14 @@ def runtime_services(runtime: Any) -> LinkServices:
             raise LinkOperationError("not_configured", "Remote questions are not available on this build.")
 
         try:
-            return str(answer(brain_messages(messages)))
+            text = str(answer(brain_messages(messages)))
         except RuntimeError as exc:
             # Admission refused (resources or activity): say busy, never queue.
             raise LinkOperationError("busy", "Qronos is busy on the computer. Try again shortly.") from exc
+        finding = code_policy.check_answer(text)
+        if finding is not None and code_policy.refused(finding, channel="phone", chars=len(text), audit=audit):
+            return finding.message
+        return text
 
     def transcribe(wav_path: Path, language: str) -> str:
         _refuse_if_busy(runtime)
