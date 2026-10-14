@@ -103,6 +103,10 @@ class SettingDefinition:
     minimum: float | None = None
     maximum: float | None = None
     choices: tuple[Any, ...] | None = None
+    # Extra checks of the value's FORM only (it raises InvalidSettingValue). It
+    # also runs when the store is loaded, so it must never depend on the disk:
+    # a value that stops being usable later is judged where it is used.
+    validator: Callable[[Any], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.key.strip():
@@ -159,7 +163,50 @@ class SettingDefinition:
                 f"{self.key} must be at most {self.maximum}."
             )
 
+        if self.validator is not None:
+            self.validator(value)
+
         return value
+
+
+#: Telegram's own download folder (the Telegram download workflow verifies the
+#: new file there and never searches elsewhere).
+TELEGRAM_DOWNLOAD_FOLDER = "workflows.telegram_download_folder"
+MAX_FOLDER_CHARS = 1024
+
+
+def folder_form_problem(value: str) -> str | None:
+    """Why ``value`` cannot name a local folder, by its form alone ("" = not set).
+
+    The same rules as a Library storage root (core/storage_locations.py):
+    no control characters, no UNC/device path, an absolute path on a drive
+    letter, no ``..`` part. Whether it exists, is a folder, is local and is not
+    a link is checked where it is used, because those answers change.
+    """
+    from pathlib import PureWindowsPath
+
+    from core.path_safety import has_control_characters, is_absolute_local, is_network_or_device_path
+
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > MAX_FOLDER_CHARS:
+        return "too_long"
+    if has_control_characters(text):
+        return "invalid_characters"
+    if is_network_or_device_path(text):
+        return "network_or_device"
+    if not is_absolute_local(text):
+        return "relative"
+    if ".." in PureWindowsPath(text).parts or ".." in Path(text).parts:
+        return "relative"
+    return None
+
+
+def _local_folder_form(value: Any) -> None:
+    problem = folder_form_problem(value)
+    if problem is not None:
+        raise InvalidSettingValue(f"{TELEGRAM_DOWNLOAD_FOLDER} is not a usable local folder ({problem}).")
 
 
 class SettingsService:
@@ -443,5 +490,16 @@ DEFAULT_DEFINITIONS: tuple[SettingDefinition, ...] = (
             "Let paired phones reach Qronos on this network. Off until "
             "the user turns it on."
         ),
+    ),
+    SettingDefinition(
+        key=TELEGRAM_DOWNLOAD_FOLDER,
+        default="",
+        description=(
+            "The exact local folder Telegram Desktop saves downloads into "
+            "(Telegram's own download setting). Empty until the user sets "
+            "it; Qronos never guesses it, and the Telegram download "
+            "workflow stays unavailable without it."
+        ),
+        validator=_local_folder_form,
     ),
 )

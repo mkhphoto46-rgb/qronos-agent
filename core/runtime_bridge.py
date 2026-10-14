@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 import re
 import sys
 import threading
@@ -90,7 +91,13 @@ from core.model_registry import MODELS
 from core.openwakeword_engine import OpenWakeWordEngine
 from core.orchestrator import Orchestrator
 from core.spoken_normalizer import normalise_spoken_text
-from core.settings_service import DEFAULT_DEFINITIONS, DEFAULT_SETTINGS_PATH, SettingsService
+from core.settings_service import (
+    DEFAULT_DEFINITIONS,
+    DEFAULT_SETTINGS_PATH,
+    TELEGRAM_DOWNLOAD_FOLDER,
+    SettingsService,
+    folder_form_problem,
+)
 from core.screen_capture import (
     Capture,
     CaptureRefused,
@@ -1326,20 +1333,70 @@ class RuntimeEvent:
     message: str
 
 
-def _telegram_download_folder() -> Path | None:
-    """The exact folder Telegram saves into, when configured.
+def _telegram_download_folder(configured: object = "") -> tuple[Path | None, str]:
+    """The exact folder Telegram saves into, and whether it is usable now.
 
     Telegram decides where a download is saved; Qronos verifies it there and
-    never searches elsewhere. The folder is an explicit, absolute, existing
-    destination, shown in the download approval; Qronos never guesses it.
+    never searches elsewhere. The folder is the person's own setting
+    (``workflows.telegram_download_folder``, Settings > General), or the older
+    explicit ``QRONOS_TELEGRAM_DOWNLOAD_FOLDER`` when the setting is empty;
+    Qronos never guesses it. It must be an existing local folder that is not a
+    link, judged by the Library's storage-root rules (core/storage_locations.py).
+    Returns ``(folder, "ready")`` or ``(None, code)``.
     """
-    value = os.environ.get("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", "").strip()
+    from core.path_safety import drive_status, is_link_or_reparse_point
+
+    value = configured.strip() if isinstance(configured, str) else ""
     if not value:
-        return None
-    folder = Path(value)
-    if not folder.is_absolute() or not folder.is_dir():
-        return None
-    return folder
+        value = os.environ.get("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", "").strip()
+    if not value:
+        return None, "not_configured"
+    problem = folder_form_problem(value)
+    if problem is not None:
+        return None, problem
+    drive = drive_status(value)
+    if drive == "remote":
+        return None, "network_drive"
+    if drive == "unknown":
+        return None, "drive_unknown"
+    folder = Path(os.path.normpath(value))
+    if any(is_link_or_reparse_point(part) for part in (folder, *folder.parents)):
+        return None, "link"
+    try:
+        info = os.lstat(folder)
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError:
+        return None, "unreadable"
+    if not stat.S_ISDIR(info.st_mode):
+        return None, "not_directory"
+    return folder, "ready"
+
+
+_TELEGRAM_FOLDER_FA = {
+    "missing": "پوشهٔ دانلود تلگرام که در تنظیمات آمده پیدا نشد.",
+    "not_directory": "مسیری که برای دانلود تلگرام در تنظیمات آمده پوشه نیست.",
+    "link": (
+        "پوشهٔ دانلود تلگرام یک پیوند (link یا junction) است یا از یک پیوند می‌گذرد؛ "
+        "کرونوس از مسیر پیوندی استفاده نمی‌کند."
+    ),
+    "network_drive": "پوشهٔ دانلود تلگرام روی درایو شبکه است؛ فقط پوشهٔ محلی پذیرفته می‌شود.",
+    "network_or_device": "پوشهٔ دانلود تلگرام مسیر شبکه یا دستگاه است؛ فقط پوشهٔ محلی پذیرفته می‌شود.",
+    "drive_unknown": "محلی بودن درایو پوشهٔ دانلود تلگرام معلوم نیست؛ فقط پوشهٔ محلی پذیرفته می‌شود.",
+}
+
+
+def _telegram_folder_refusal(state: str) -> str:
+    """The Persian prerequisite answer before any Telegram approval (never the path itself)."""
+    if state == "not_configured":
+        reason = "پوشهٔ دانلود تلگرام هنوز تعیین نشده است."
+    else:
+        reason = _TELEGRAM_FOLDER_FA.get(state, "پوشهٔ دانلود تلگرام که در تنظیمات آمده معتبر نیست.")
+    return (
+        f"{reason} در «تنظیمات ← عمومی ← پوشهٔ دانلود تلگرام» همان پوشهٔ محلی‌ای را بنویسید که "
+        "تلگرام دسکتاپ فایل‌ها را در آن ذخیره می‌کند؛ کرونوس آن را حدس نمی‌زند. "
+        "کاری در تلگرام انجام نشد."
+    )
 
 
 def _text_event_message(
@@ -3769,11 +3826,9 @@ class QronosRuntime:
         def telegram_workflow() -> TelegramDownloadWorkflow:
             self._ensure_computer_runtime()
             executor = self.computer_executor
-            folder = _telegram_download_folder()
+            folder, state = self._telegram_folder()
             if folder is None:
-                raise WorkflowRefused(
-                    "Telegram's download folder is not configured (QRONOS_TELEGRAM_DOWNLOAD_FOLDER)."
-                )
+                raise WorkflowRefused(f"Telegram's download folder is not usable ({state}).")
 
             def target():
                 from core.computer_executor import get_app_spec
@@ -3894,15 +3949,25 @@ class QronosRuntime:
         self._finish_text_file_action(request_id=request_id, response=reply, started_at=started_at)
         return True
 
+    def _telegram_folder(self) -> tuple[Path | None, str]:
+        """Telegram's download folder from the CURRENT settings (reloaded with them), checked now."""
+        settings = getattr(self, "settings", None)
+        try:
+            configured = settings.get(TELEGRAM_DOWNLOAD_FOLDER) if settings is not None else ""
+        except Exception:  # noqa: BLE001 - an unreadable setting is "not set", never a guess
+            configured = ""
+        return _telegram_download_folder(configured)
+
     def _begin_text_app_workflow(self, text: str, request_id: str, started_at: float) -> bool:
         """Route a Telegram-download or print request to its approval flow."""
-        from core.app_workflow_intents import parse_workflow_intent
+        from core.app_workflow_intents import TelegramDownloadIntent, parse_workflow_intent
         from core.browser_research import plan_navigation
 
         if self._begin_text_elevated_action(text, request_id, started_at):
             return True
 
-        if parse_workflow_intent(text) is None and plan_navigation(text) is None:
+        intent = parse_workflow_intent(text)
+        if intent is None and plan_navigation(text) is None:
             return False
         if self._computer_actions.stopped_since_turn_start():
             self._finish_text_file_action(
@@ -3911,6 +3976,17 @@ class QronosRuntime:
                 started_at=started_at,
             )
             return True
+        if isinstance(intent, TelegramDownloadIntent):
+            # A missing prerequisite is said BEFORE the first approval: no prompt the
+            # workflow could only refuse afterwards, and nothing touches Telegram.
+            _, state = self._telegram_folder()
+            if state != "ready":
+                self._finish_text_file_action(
+                    request_id=request_id,
+                    response=_telegram_folder_refusal(state),
+                    started_at=started_at,
+                )
+                return True
         reply = self._ensure_app_workflows().try_begin(text, request_id)
         if reply is None:
             return False

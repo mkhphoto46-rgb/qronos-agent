@@ -19,6 +19,7 @@ from core.app_workflow import SideEffectJournal
 from core.app_workflow_runtime import APP_WORKFLOW_DECISION_ACTION, AppWorkflowCoordinator
 from core.print_workflow import PrintWorkflow
 from core.runtime_bridge import QronosRuntime, handle_action
+from core.settings_service import DEFAULT_DEFINITIONS, TELEGRAM_DOWNLOAD_FOLDER, SettingsService
 from core.task_router import TaskRouter
 from core.telegram_workflow import LocalDownloadFolder, TelegramDownloadWorkflow
 from test_file_control_text_bridge import _FakeHistory
@@ -38,6 +39,9 @@ class BridgeHarness:
         runtime.action_audit = ActionAuditLog(path=None)
         folder = tmp_path / "Telegram downloads"
         folder.mkdir()
+        # The person's own setting names Telegram's folder (an in-memory store; nothing guessed).
+        runtime.settings = SettingsService(DEFAULT_DEFINITIONS, path=None)
+        runtime.settings.set(TELEGRAM_DOWNLOAD_FOLDER, str(folder))
         self.telegram_ui = FakeTelegram({"window": window()}, folder)
         journal = SideEffectJournal(tmp_path / "side-effects.json")
         telegram = TelegramDownloadWorkflow(self.telegram_ui, binder=self.telegram_ui.binder, journal=journal,
@@ -79,7 +83,9 @@ class BridgeHarness:
 
 
 @pytest.fixture
-def h(tmp_path):
+def h(tmp_path, monkeypatch):
+    # The drive is classified by a fake: no GetDriveTypeW call is made.
+    monkeypatch.setattr("core.path_safety.windows_drive_type", lambda anchor: 3)
     return BridgeHarness(tmp_path)
 
 
@@ -214,13 +220,16 @@ def test_production_wiring_checks_the_profile_secret_with_the_shared_lockout(tem
 def test_the_telegram_destination_is_only_an_explicit_existing_absolute_folder(tmp_path, monkeypatch):
     from core.runtime_bridge import _telegram_download_folder
 
+    monkeypatch.setattr("core.path_safety.windows_drive_type", lambda anchor: 3)  # fake: no native query
     monkeypatch.delenv("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", raising=False)
-    assert _telegram_download_folder() is None, "never guessed"
-    for value in ("relative\\downloads", str(tmp_path / "missing"), "   "):
+    assert _telegram_download_folder() == (None, "not_configured"), "never guessed"
+    for value, state in (("relative\\downloads", "relative"), (str(tmp_path / "missing"), "missing"),
+                         ("   ", "not_configured")):
         monkeypatch.setenv("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", value)
-        assert _telegram_download_folder() is None, value
+        assert _telegram_download_folder() == (None, state), value
+    # The older explicit environment variable still works when the setting is empty.
     monkeypatch.setenv("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", str(tmp_path))
-    assert _telegram_download_folder() == tmp_path
+    assert _telegram_download_folder() == (tmp_path, "ready")
 
 
 def test_production_wiring_uses_one_durable_journal_under_the_qronos_state_root(temporary_data_root):

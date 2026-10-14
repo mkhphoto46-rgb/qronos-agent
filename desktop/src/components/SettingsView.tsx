@@ -34,7 +34,9 @@ import {
 
 import type { DeviceLinkController } from "../deviceLink";
 import DeviceLinkPanel from "./DeviceLinkPanel";
+import TelegramFolderSetting from "./TelegramFolderSetting";
 import UpdatePanel from "./UpdatePanel";
+import { TELEGRAM_FOLDER_KEY } from "../telegramFolder";
 import { createUpdateClient } from "../updateStore";
 
 import "./SettingsView.css";
@@ -75,7 +77,7 @@ type SectionDefinition = {
 };
 
 const sections: SectionDefinition[] = [
-  { id: "general", group: "GENERAL", label: "عمومی", english: "General", icon: "01", keywords: ["theme", "language", "startup", "update", "ظاهر", "زبان", "شروع"] },
+  { id: "general", group: "GENERAL", label: "عمومی", english: "General", icon: "01", keywords: ["theme", "language", "startup", "update", "telegram", "download", "ظاهر", "زبان", "شروع", "تلگرام", "دانلود"] },
   { id: "hotkeys", group: "GENERAL", label: "کلیدهای میانبر", english: "Hotkeys & Shortcuts", icon: "02", keywords: ["hotkey", "shortcut", "keyboard", "کلید", "میانبر", "کیبورد"] },
   { id: "voice", group: "QRONOS", label: "صدا و Wake Word", english: "Voice & Wake Word", icon: "03", keywords: ["voice", "wake", "microphone", "speaker", "output", "sensitivity", "صدا", "میکروفون", "خروجی", "حساسیت"] },
   { id: "behavior", group: "QRONOS", label: "رفتار و شخصی‌سازی", english: "Behavior", icon: "04", keywords: ["response", "thinking", "instructions", "پاسخ", "رفتار", "دستور"] },
@@ -598,6 +600,19 @@ function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: Setting
     return true;
   };
 
+  // Telegram's download folder: the backend validates and persists it, then the running runtime reloads its
+  // settings so the next Telegram request is checked against the saved folder (nothing is browsed or guessed).
+  const saveTelegramFolder = async (value: string) => {
+    await setSetting(TELEGRAM_FOLDER_KEY, value);
+    let appliedNow = false;
+    try {
+      appliedNow = await reloadVoiceSettingsInRuntime();
+    } catch {
+      appliedNow = false;
+    }
+    showToast(appliedNow ? "پوشهٔ دانلود تلگرام ذخیره شد." : "ذخیره شد؛ با اجرای بعدی Qronos اعمال می‌شود.");
+  };
+
   const applyVoiceSetting = async (
     key: string,
     value: SettingValue,
@@ -840,7 +855,14 @@ function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: Setting
           />
         </SettingRow>
       </SettingGroup>
-      <SettingGroup title="ABOUT QRONOS" index="04">
+      <SettingGroup title="TELEGRAM DOWNLOADS" index="04">
+        <TelegramFolderSetting
+          saved={typeof settingsState.values[TELEGRAM_FOLDER_KEY] === "string" ? String(settingsState.values[TELEGRAM_FOLDER_KEY]) : ""}
+          onSave={saveTelegramFolder}
+          disabled={settingsState.loading || settingsState.writeBlocked}
+        />
+      </SettingGroup>
+      <SettingGroup title="ABOUT QRONOS" index="05">
         <div className="settings-about-card">
           <div><span>QRONOS</span><strong>STANDARD EDITION</strong><small>VERSION 0.1.0 • DEVELOPMENT BUILD</small></div>
           <button type="button" onClick={() => showToast("بررسی نسخه در Backend آینده فعال می‌شود.")}>CHECK FOR UPDATES</button>
