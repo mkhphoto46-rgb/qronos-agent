@@ -186,10 +186,17 @@ _CODE_LINE = re.compile(
     # a lowercase return / a call standing alone on its line (os.listdir('.'), main()): code, not a sentence
     r"return\b.*$|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\(.*\)\s*$|[a-z_]\w*\([^()]*\)\s*$"
     r")")
-# What a command acts on: a path-like target (quote, $var, ~, *, drive, ./ or a slash), or one word that ends the
-# clause ("pip install requests", "rm -rf node_modules"). "rm -rf is dangerous" or "Remove-Item is the cmdlet that
-# deletes items" explain a command in words: a mention, not a command to run.
-_TARGET = r"(?:-\w+\s+)*(?:[\"'$~*]|[A-Za-z]:|\.{0,2}[\\/]|\S*[\\/]|[\w.+-]+(?=\s*(?:$|[`'\";.!?،؛)])))"
+# What a command acts on: a path-like target (quote, $var, ~, *, drive, ./ or a slash) or an ordinary word naming the
+# thing ("pip install requests", "rm -rf node_modules and reinstall"). A word that explains the command instead ("rm
+# -rf is dangerous", "Remove-Item is the cmdlet that deletes items", "rm -rf deletes everything") is not a target:
+# that sentence is an explanation in words, not a command to run.
+_NOT_A_TARGET = (r"(?:is|are|was|were|be|been|being|can|cannot|could|will|would|should|may|might|must|does|do|did|"
+                 r"has|have|had|deletes?|removes?|erases?|wipes?|means?|works?|command|commands|flag|flags|option|"
+                 r"options|switch|and|or|but|nor|to|on|in|of|for|from|with|without|by|at|as|into|the|a|an|this|that|"
+                 r"these|those|it|its|if|when|unless|only|because|since|so|then|than|here|there|carefully|again|"
+                 r"first|now|alone|itself|anywhere|everything|nothing)\b")
+_TARGET = (r"(?:-\w+\s+)*(?:[\"'$~*]|[A-Za-z]:|\.{0,2}[\\/]|\S*[\\/]|"
+           rf"(?!{_NOT_A_TARGET})[\w.+-]*[A-Za-z_][\w.+-]*)")
 # One command that changes the machine, with what it acts on.
 _COMMAND = (
     r"sudo\s+(?:-\S+\s+)*(?:rm|apt|apt-get|dnf|yum|pacman|chmod|chown|mv|cp|dd|mkfs|systemctl|sh|bash|tee|pip3?|npm)\b|"
@@ -204,9 +211,15 @@ _COMMAND = (
     rf"choco\s+install\s+{_TARGET}|winget\s+install\s+{_TARGET}"
 )
 # ... where an answer hands it over to be run: at a line start (also after a list marker or a prompt sign), inside an
-# inline `code span`, after a colon ("Run this: ...") or at the start of a sentence.
-_HIGH_RISK_COMMAND = re.compile(rf"(?:^[ \t>*\-$#]*|`\s*|:\s*|[.!?؟؛]\s+)(?:{_COMMAND})",
+# inline `code span`, after a colon ("Run this: ...") or at the start of a sentence, or right after a word that hands
+# it over in the middle of a clause ("delete it with rm -rf old", "then run pip install x").
+_HAND_OVER = r"\b(?:run|running|use|type|typing|execute|enter|try|with|via|then|and)\s+"
+_HIGH_RISK_COMMAND = re.compile(rf"(?:^[ \t>*\-$#]*|`\s*|:\s*|[.!?؟؛]\s+|{_HAND_OVER})(?:{_COMMAND})",
                                 re.IGNORECASE | re.MULTILINE)
+# An inline `code span` inside a sentence holding an executable statement ("use `print('x')` here",
+# "add `import os; os.remove(p)`"). A bare name or an empty call ("the `print` function", "`print()`") is a mention.
+_CODE_SPAN = re.compile(r"`([^`\n]{1,400})`")
+_EMPTY_CALL = re.compile(r"^[A-Za-z_][\w.]*\(\s*\)\s*;?$")
 # One generated statement standing alone on its line is code even without a second line: an import, a call, a
 # definition header, a declaration, a "x; y" chain, a preprocessor/script header or an SQL statement. Line kinds that
 # prose also uses ("return to ...", "else:", "if it is cold:", "Get-Together") stay two-line-only (contains_code).
@@ -261,6 +274,9 @@ def check_answer(text: object) -> CodeFinding | None:
         return CodeFinding("output", ActionCategory.CODE_GENERATION, "code_lines")
     if any(_STATEMENT.match(_LIST_MARKER.sub("", line)) for line in _lines(value)):
         return CodeFinding("output", ActionCategory.CODE_GENERATION, "single_code_line")
+    if any(_STATEMENT.match(span.strip()) and not _EMPTY_CALL.match(span.strip())
+           for span in _CODE_SPAN.findall(value)):
+        return CodeFinding("output", ActionCategory.CODE_GENERATION, "inline_code_statement")
     if _HIGH_RISK_COMMAND.search(value):
         return CodeFinding("output", ActionCategory.SCRIPT_EXECUTION, "machine_changing_command")
     return None

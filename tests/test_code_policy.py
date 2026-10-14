@@ -330,3 +330,58 @@ def test_b1_answers_are_not_shown_recorded_or_spoken(name, tmp_path):
     assert spoken == [code_policy.OUTPUT_REFUSAL_FA]
     tts = "".join(runtime.voice_output.calls)
     assert tts and raw not in tts and raw not in json.dumps(voice_events, ensure_ascii=False)
+
+
+# ------------------------------------------------------------------ B1 follow-up: an ordinary-word target mid-clause,
+# and an executable statement inside an inline `code span`
+
+B1_FOLLOWUP = {
+    "word_target_mid_clause": ("rm -rf node_modules and reinstall", "machine_changing_command", "node_modules"),
+    "handed_over_mid_sentence": ("Delete it with rm -rf node_modules first.", "machine_changing_command",
+                                 "node_modules"),
+    "inline_call_span": ("use `print('x')` here", "inline_code_statement", "print('x')"),
+    "inline_chain_span": ("Add `import os; os.remove(p)` to the top.", "inline_code_statement", "os.remove"),
+}
+FOLLOWUP_MENTIONS = [
+    "Be careful with rm -rf because it cannot be undone.", "Using rm -rf carelessly is risky.",
+    "rm -rf deletes everything.", "The rm -rf command deletes recursively.", "Type rm -rf only if you are sure.",
+    "The `print` function writes text to the screen.", "`print()` writes text to the screen.",
+    "Use the `os` module for paths.", "Keep `x = 5` in mind and add 3.", "The `Remove-Item` cmdlet deletes items.",
+]
+
+
+@pytest.mark.parametrize("name", sorted(B1_FOLLOWUP))
+def test_b1_followup_variants_are_withheld(name):
+    text, rule, _ = B1_FOLLOWUP[name]
+    finding = code_policy.check_answer(text)
+    assert finding is not None and finding.rule == rule, (name, finding)
+
+
+@pytest.mark.parametrize("text", FOLLOWUP_MENTIONS)
+def test_b1_followup_mentions_still_pass(text):
+    assert code_policy.check_answer(text) is None, text
+
+
+@pytest.mark.parametrize("name", sorted(B1_FOLLOWUP))
+def test_b1_followup_variants_never_reach_any_output(name, tmp_path):
+    from core.link_runtime import runtime_services
+
+    text, _, raw = B1_FOLLOWUP[name]
+    assert code_policy.check_request(B1_QUESTION) is None  # admitted: the Brain is asked, the output layer decides
+    brain, audit = Brain(text), ActionAuditLog(path=None)
+    (result,) = guarded_orchestrator(brain, audit.record_verdict).execute_plan(plan_of(B1_QUESTION))
+    assert brain.calls[-1] == B1_QUESTION and result.output == code_policy.OUTPUT_REFUSAL_FA
+    runtime = SimpleNamespace(runtime_paused=False, is_busy=False, _code_policy_audit=audit.record_verdict,
+                              orchestrator=SimpleNamespace(answer_chat_only=lambda messages: text))
+    sent = runtime_services(runtime).remote_chat([{"role": "user", "content": B1_QUESTION}])
+    assert sent == code_policy.OUTPUT_REFUSAL_FA and raw not in sent
+    assert [r.outcome for r in audit.records()] == ["refused", "refused"]
+    text_rt, events = text_runtime(Brain(text))
+    text_rt.run_text_turn(B1_QUESTION, "req-b1f")
+    assert [json.loads(m) for e, _, m in events if e == "text_response"][-1]["text"] == code_policy.OUTPUT_REFUSAL_FA
+    assert raw not in json.dumps(events, ensure_ascii=False)
+    assert all(raw not in m.text for m in text_rt.conversation_history.messages)
+    voice_rt, voice_events, spoken = voice_turn("پایتون چیست؟", Brain(text), tmp_path)
+    tts = "".join(voice_rt.voice_output.calls)
+    assert spoken == [code_policy.OUTPUT_REFUSAL_FA] and tts and raw not in tts
+    assert raw not in json.dumps(voice_events, ensure_ascii=False)
