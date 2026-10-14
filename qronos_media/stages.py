@@ -1236,37 +1236,42 @@ def run_image_embeddings(ctx: StageContext) -> Commit:
     pending = list(todo.items())
     done = 0
     if pending:  # everything already stored (a resume, an unchanged asset): no model is loaded at all
-        with ctx.image_encoder.open(lease, image=True) as encoder:
-            for start in range(0, len(pending), image_embeddings.IMAGE_BATCH):
-                batch = pending[start:start + image_embeddings.IMAGE_BATCH]
-                ctx.checkpoint_boundary()  # Stop, Pause, deadline, permission, the person's foreground turn
-                ctx.renew()
-                arrays, kept = [], []
-                for digest, row in batch:
-                    data = _frame_bytes(keyframe_dir, row)
-                    if isinstance(data, str) or hashlib.sha256(data).hexdigest() != digest:
-                        continue  # changed since the first pass: never embedded under the old SHA-256
-                    try:
-                        arrays.append(image_embeddings.preprocess_frame(data))
-                    except image_embeddings.FrameUnusable:
+        try:
+            with ctx.image_encoder.open(lease, image=True) as encoder:
+                for start in range(0, len(pending), image_embeddings.IMAGE_BATCH):
+                    batch = pending[start:start + image_embeddings.IMAGE_BATCH]
+                    ctx.checkpoint_boundary()  # Stop, Pause, deadline, permission, the person's foreground turn
+                    ctx.renew()
+                    arrays, kept = [], []
+                    for digest, row in batch:
+                        data = _frame_bytes(keyframe_dir, row)
+                        if isinstance(data, str) or hashlib.sha256(data).hexdigest() != digest:
+                            continue  # changed since the first pass: never embedded under the old SHA-256
+                        try:
+                            arrays.append(image_embeddings.preprocess_frame(data))
+                        except image_embeddings.FrameUnusable:
+                            continue
+                        kept.append(digest)
+                    if not arrays:
                         continue
-                    kept.append(digest)
-                if not arrays:
-                    continue
-                try:
-                    vectors = encoder.encode_frames(arrays)
-                except image_embeddings.EncoderOutputInvalid as exc:
-                    raise StageFailed(f"image encoder answer rejected: {exc}") from None
-                done += len(kept)
-                cached = [(current, digest, image_embeddings.DIMENSION, vector, time.time())
-                          for digest, vector in zip(kept, vectors)]
+                    try:
+                        vectors = encoder.encode_frames(arrays)
+                    except image_embeddings.EncoderOutputInvalid as exc:
+                        raise StageFailed(f"image encoder answer rejected: {exc}") from None
+                    done += len(kept)
+                    cached = [(current, digest, image_embeddings.DIMENSION, vector, time.time())
+                              for digest, vector in zip(kept, vectors)]
 
-                def write(db: sqlite3.Connection, cached: list = cached) -> None:
-                    db.executemany("INSERT OR IGNORE INTO image_vector_cache(fingerprint, frame_sha256, dim, vector, "
-                                   "created_at) VALUES (?,?,?,?,?)", cached)
+                    def write(db: sqlite3.Connection, cached: list = cached) -> None:
+                        db.executemany("INSERT OR IGNORE INTO image_vector_cache(fingerprint, frame_sha256, dim, vector, "
+                                       "created_at) VALUES (?,?,?,?,?)", cached)
 
-                ctx.checkpoint = {"embedded": done, "of": len(pending)}
-                ctx.save_checkpoint(ctx.checkpoint, write)  # vectors and checkpoint: one transaction (not searchable yet)
+                    ctx.checkpoint = {"embedded": done, "of": len(pending)}
+                    ctx.save_checkpoint(ctx.checkpoint, write)  # vectors and checkpoint: one transaction (not searchable yet)
+        except image_embeddings.EncoderRuntimeFailed as failed:
+            # The runtime failed: the row ends FAILED and the runner carries on; no vector of this run is
+            # committed (the lease and its sessions are already closed by the provider).
+            raise StageFailed(f"image encoder failed: {failed.kind}") from None
 
     def commit(db: sqlite3.Connection) -> None:
         db.execute("DELETE FROM image_embeddings WHERE asset_id = ?", (ctx.asset_id,))

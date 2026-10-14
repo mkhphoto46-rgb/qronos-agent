@@ -102,6 +102,33 @@ class FrameUnusable(ValueError):
     """The stored frame is not an image this encoder accepts."""
 
 
+class EncoderRuntimeFailed(RuntimeError):
+    """The runtime itself failed (onnxruntime's own exception classes, which derive from Exception only, or a
+    MemoryError while reading the pinned bytes or allocating). One module-owned reason, no traceback or path."""
+
+    reason = "image_encoder_failed"
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(f"{self.reason}: {kind}")
+        self.kind = kind
+
+
+#: Failures that keep their own meaning across the runtime boundary (typed refusals, rejected answers, a refused
+#: tokenizer or frame, and a ValueError, which callers already treat as a rejected answer).
+_OWN_FAILURES = (ResourceRefused, EncoderOutputInvalid, EncoderRuntimeFailed, ValueError)
+
+
+def _runtime(call: Callable[..., Any], *args: Any) -> Any:
+    """``call(*args)`` at the runtime boundary: any other Exception (MemoryError included) becomes
+    EncoderRuntimeFailed. KeyboardInterrupt and SystemExit are not Exceptions and pass through untouched."""
+    try:
+        return call(*args)
+    except _OWN_FAILURES:
+        raise
+    except Exception as error:  # noqa: BLE001 - onnxruntime's pybind classes derive from Exception only
+        raise EncoderRuntimeFailed(type(error).__name__) from None
+
+
 def fingerprint(spec: ModelSpec = SIGLIP2_BASE_224_INT8) -> str:
     """Which exact vector space a stored vector belongs to (no I/O; derived from the declaration)."""
     assets = [spec.weights, *spec.companions]
@@ -452,12 +479,12 @@ class FrameEncoder:
             raise EncoderUnavailable("image_encoder_contract", "the image tower is not open")
         if not 1 <= len(frames) <= IMAGE_BATCH:
             raise ValueError(f"1..{IMAGE_BATCH} frames per call")
-        batch = np.stack(frames).astype(np.float32, copy=False)
+        batch = _runtime(lambda: np.stack(frames).astype(np.float32, copy=False))
         if batch.shape[1:] != (3, IMAGE_SIZE, IMAGE_SIZE):
             raise ValueError("frames must be preprocessed [3, 224, 224]")
         vectors: list[bytes] = []
         for index in range(len(frames)):
-            output = self._vision.run([OUTPUT], {VISION_INPUT: batch[index:index + 1]})[0]
+            output = _runtime(self._vision.run, [OUTPUT], {VISION_INPUT: batch[index:index + 1]})[0]
             vectors += _normalised_rows(output, 1)
         return vectors
 
@@ -471,7 +498,7 @@ class FrameEncoder:
         feeds = {TEXT_INPUT: ids}
         if TEXT_OPTIONAL_MASK in self._text_feeds:
             feeds[TEXT_OPTIONAL_MASK] = np.ones_like(ids)  # the model was trained without a mask: attend to all
-        return _normalised_rows(self._text.run([OUTPUT], feeds)[0], 1)[0]
+        return _normalised_rows(_runtime(self._text.run, [OUTPUT], feeds)[0], 1)[0]
 
 
 class ImageEncoderProvider:
@@ -512,17 +539,17 @@ class ImageEncoderProvider:
         try:
             vision = text_session = tokenizer = None
             if image:
-                vision = self._factory(self._read(self.root, self.spec.weights), "vision")
+                vision = _runtime(self._factory, _runtime(self._read, self.root, self.spec.weights), "vision")
                 sessions.append(vision)
             if text:
                 text_asset, tokenizer_asset = self.spec.companions
                 try:
-                    tokenizer = SentencePieceBpe(self._read(self.root, tokenizer_asset))
+                    tokenizer = _runtime(SentencePieceBpe, _runtime(self._read, self.root, tokenizer_asset))
                 except TokenizerInvalid as exc:
                     raise EncoderUnavailable("image_encoder_contract", f"tokenizer: {exc}") from None
-                text_session = self._factory(self._read(self.root, text_asset), "text")
+                text_session = _runtime(self._factory, _runtime(self._read, self.root, text_asset), "text")
                 sessions.append(text_session)
-            encoder = FrameEncoder(vision, text_session, tokenizer)
+            encoder = _runtime(FrameEncoder, vision, text_session, tokenizer)
             del vision, text_session, tokenizer
             yield encoder
         finally:
@@ -557,8 +584,10 @@ def image_candidates(db: sqlite3.Connection, query_vector: bytes, *, limit: int,
                      check: Callable[[], None], assets: set[str] | None = None) -> tuple[list[dict], dict]:
     """Top frames by cosine of their stored IMAGE vectors; bounded chunked scan, current fingerprint and scope in SQL.
 
-    The keyframe must still have the vector's frame SHA-256 recorded at embedding time (the row is joined to its
-    keyframe). A stored vector that is not a finite unit vector of DIMENSION values is counted as corrupt and skipped.
+    The row is joined to its keyframe by KEY (scene, ordinal); the frame SHA-256 returned is the one recorded at
+    embedding time. A keyframes re-run deletes the old rows (FK cascade); a same-size change of a stored keyframe
+    file is not seen here until this stage runs again. A stored vector that is not a finite unit vector of DIMENSION
+    values is counted as corrupt and skipped.
     """
     import heapq
 

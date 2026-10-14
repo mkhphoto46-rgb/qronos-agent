@@ -735,6 +735,8 @@ class MediaService:
             return None, exc.reason
         except (image_embeddings.EncoderOutputInvalid, ValueError):
             return None, "image_encoder_answer_rejected"
+        except image_embeddings.EncoderRuntimeFailed as failed:
+            return None, failed.reason  # the runtime failed: the caption and dialogue answers above still stand
         finally:
             self.authority.release(lease)  # every session opened above is closed: the slot is freed
 
