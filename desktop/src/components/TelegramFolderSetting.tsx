@@ -37,7 +37,7 @@ export default function TelegramFolderSetting({ saved, onSave, disabled = false 
       <div className="settings-row-copy">
         <strong>پوشهٔ دانلود تلگرام</strong>
         <span>
-          همان پوشه‌ای که تلگرام دسکتاپ فایل‌ها را در آن ذخیره می‌کند (در تلگرام: تنظیمات ← پیشرفته ← مسیر
+          همان پوشه‌ای که برنامهٔ تلگرام فایل‌ها را در آن ذخیره می‌کند (در تلگرام: تنظیمات ← پیشرفته ← مسیر
           دانلود). کرونوس آن را حدس نمی‌زند و فقط همین پوشه را بررسی می‌کند؛ فقط پوشهٔ محلی، بدون پیوند.
         </span>
         <small role="status">{error ?? telegramFolderStatus(saved)}</small>
@@ -48,7 +48,7 @@ export default function TelegramFolderSetting({ saved, onSave, disabled = false 
           dir="ltr"
           value={draft}
           maxLength={MAX_FOLDER_CHARS}
-          placeholder="D:\Downloads\Telegram Desktop"
+          placeholder="D:\Downloads\Telegram"
           aria-label="پوشهٔ دانلود تلگرام"
           disabled={disabled || saving}
           onChange={(event) => setDraft(event.target.value)}

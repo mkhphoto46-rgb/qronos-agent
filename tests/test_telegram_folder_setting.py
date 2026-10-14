@@ -62,7 +62,7 @@ def test_a_stored_folder_survives_reload_even_while_it_is_missing_but_a_malforme
 # ------------------------------------------------------------------ the check at use time
 
 def test_the_folder_is_checked_now_by_the_library_storage_rules(tmp_path, monkeypatch):
-    folder = tmp_path / "Telegram Desktop"
+    folder = tmp_path / "Telegram"
     folder.mkdir()
     a_file = tmp_path / "file.txt"
     a_file.write_text("x", encoding="utf-8")
@@ -133,7 +133,7 @@ def test_a_missing_folder_is_said_before_any_approval_then_the_saved_setting_app
     assert "پوشهٔ دانلود تلگرام هنوز تعیین نشده است" in answer["text"]
     assert "تنظیمات ← عمومی ← پوشهٔ دانلود تلگرام" in answer["text"] and "کاری در تلگرام انجام نشد" in answer["text"]
 
-    folder = tmp_path / "Telegram Desktop"
+    folder = tmp_path / "Telegram"
     folder.mkdir()
     # The settings service process writes the file; the desktop then asks the runtime to reload.
     SettingsService(DEFAULT_DEFINITIONS, path=settings_path).set(TELEGRAM_DOWNLOAD_FOLDER, str(folder))

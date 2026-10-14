@@ -1,7 +1,7 @@
 /**
  * Telegram's download folder setting (`workflows.telegram_download_folder`, core/settings_service.py).
  *
- * The person types the exact local folder Telegram Desktop saves downloads into; Qronos never guesses it. This
+ * The person types the exact local folder the Telegram app saves downloads into; Qronos never guesses it. This
  * module only mirrors the backend's FORM rules so a mistake is explained before saving; the backend validates the
  * value again, and the runtime checks the folder itself (exists, local, not a link) before every Telegram approval.
  * No runtime imports, so it runs in tests as is.
@@ -23,7 +23,7 @@ export function telegramFolderProblem(value: string): string | null {
     return "مسیر شبکه یا دستگاه پذیرفته نمی‌شود؛ فقط یک پوشهٔ محلی.";
   }
   if (!DRIVE_ABSOLUTE.test(text) || text.split(/[\\/]+/).includes("..")) {
-    return "مسیر کامل یک پوشهٔ محلی را بنویسید، مثلاً D:\\Downloads\\Telegram Desktop";
+    return "مسیر کامل یک پوشهٔ محلی را بنویسید، مثلاً D:\\Downloads\\Telegram";
   }
   return null;
 }

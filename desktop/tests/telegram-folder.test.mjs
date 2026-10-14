@@ -33,7 +33,7 @@ test("the key is the backend's setting and an empty value clears it", () => {
 });
 
 test("only an absolute local drive path is offered for saving (the backend checks again)", () => {
-  for (const good of ["D:\\Downloads\\Telegram Desktop", "C:/Users/me/Downloads", "e:\\x"]) {
+  for (const good of ["D:\\Downloads\\Telegram", "C:/Data/Downloads", "e:\\x"]) {
     assert.equal(folder.telegramFolderProblem(good), null, good);
   }
   const bad = {

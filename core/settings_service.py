@@ -495,7 +495,7 @@ DEFAULT_DEFINITIONS: tuple[SettingDefinition, ...] = (
         key=TELEGRAM_DOWNLOAD_FOLDER,
         default="",
         description=(
-            "The exact local folder Telegram Desktop saves downloads into "
+            "The exact local folder the Telegram app saves downloads into "
             "(Telegram's own download setting). Empty until the user sets "
             "it; Qronos never guesses it, and the Telegram download "
             "workflow stays unavailable without it."
