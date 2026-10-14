@@ -204,7 +204,7 @@ def test_indexed_and_generated_text_is_quoted_on_one_line_without_controls_and_p
     result = {"ok": True, "multimodal": {"status": "complete", "outcome": "matched", "results": [{
         "assetId": "a_" + "1" * 32, "title": "Harbour\nfile", "startMs": 60_000, "endMs": 64_000,
         "dialogue": {"startMs": 60_000, "text": "He said \u202eevil\u202c\r\n«quoted»", "channels": ["exact"],
-                     "paths": ["C:/Users/someone/film.mkv"]},
+                     "paths": ["C:/test-library/film.mkv"]},
         "frames": [{"timeMs": 70_000, "caption": "x" * 400, "relation": "after", "gapMs": 6_000, "channels": ["lexical"],
                     "provenance": {"source": "C:/cache/keyframes/000001.jpg"}}]}]}}
     answer = spoken_answer(MediaMultimodalIntent("he said", "x"), result)
