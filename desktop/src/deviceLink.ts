@@ -9,9 +9,13 @@
  * closed. It is never logged or stored. The request goes through the typed
  * link_pair_open command, which binds it to this window; the reply arrives
  * only on this window's own qronos://link-pairing event, never on the
- * broadcast runtime-event channel. Remote (outside the home network)
- * access stays off until the link's WAN gate is accepted; the page can only
- * switch a device's remote access off.
+ * broadcast runtime-event channel.
+ *
+ * Remote (outside the home network) access is the PC owner's explicit choice: a global switch saved only at this
+ * PC, a relay the owner configures (no default endpoint), and a finite per-phone grant. Each WAN change carries a
+ * tracking nonce (not authority); only a link_operation_result with the same nonce AND action finishes it. Without
+ * an answer in 10 s the outcome is shown as unknown, the status is read ONCE, and the change is never resent.
+ * Switching a phone's remote access off and revoking are always available.
  */
 
 export const LINK_ACTIONS = {
@@ -21,10 +25,15 @@ export const LINK_ACTIONS = {
   pairCancel: "qronos.link_pair_cancel",
   revoke: "qronos.link_revoke",
   remote: "qronos.link_remote",
+  relaySet: "qronos.link_relay_set",
   securityReset: "qronos.link_security_reset",
 } as const;
 
-export const LINK_EVENTS = new Set(["link_status", "link_devices", "link_error"]);
+export const LINK_EVENTS = new Set(["link_status", "link_devices", "link_error", "link_operation_result"]);
+/** How long a WAN change waits for its own result before its outcome is unknown. */
+export const OPERATION_TIMEOUT_MS = 10_000;
+const MAX_CA_PEM = 16 * 1024;
+const MAX_REMOTE_DAYS = 365;
 /** The desktop host delivers a pairing reply only to the window that asked, here. */
 export const LINK_PAIRING_EVENT = "qronos://link-pairing";
 
@@ -41,6 +50,15 @@ export type LinkSecurity = {
   quarantined: boolean;
 };
 
+/** Non-secret facts about the configured relay (never the CA text or a path). */
+export type LinkRelay = {
+  configured: boolean;
+  host: string | null;
+  port: number | null;
+  tlsName: string | null;
+  pinnedCa: boolean;
+};
+
 export type LinkStatus = {
   enabled: boolean;
   running: boolean;
@@ -49,7 +67,24 @@ export type LinkStatus = {
   remoteUnavailable: string | null;
   pairingOpen: boolean;
   security: LinkSecurity;
+  /** null when the runtime does not report a relay (older status). */
+  relay: LinkRelay | null;
 };
+
+function parseRelay(value: unknown): LinkRelay | null | undefined {
+  if (value === undefined) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const r = value as Record<string, unknown>;
+  const text = (v: unknown) => v === null || (typeof v === "string" && v.length <= 253);
+  if (
+    typeof r.configured !== "boolean" || typeof r.pinnedCa !== "boolean" || !text(r.host) || !text(r.tlsName) ||
+    !(r.port === null || (typeof r.port === "number" && Number.isInteger(r.port) && r.port > 0 && r.port < 65536))
+  ) {
+    return undefined;
+  }
+  return { configured: r.configured, host: r.host as string | null, port: r.port as number | null,
+           tlsName: r.tlsName as string | null, pinnedCa: r.pinnedCa };
+}
 
 function parseSecurity(value: unknown): LinkSecurity | null {
   if (value === undefined) return { ready: false, contained: false, quarantined: false };
@@ -80,6 +115,9 @@ export type DeviceLinkView = {
   waitingForPairing: boolean;
   savingEnabled: boolean;
   error: string | null;
+  /** The WAN change waiting for its result, if any. */
+  operation?: LinkOperation | null;
+  savingRemote?: boolean;
 };
 
 function parseObject(message: string): Record<string, unknown> | null {
@@ -98,9 +136,11 @@ const finite = (value: unknown): value is number => typeof value === "number" &&
 export function parseLinkStatus(message: string): LinkStatus | null {
   const r = parseObject(message);
   const security = r === null ? null : parseSecurity(r.security);
+  const relay = r === null ? undefined : parseRelay(r.relay);
   if (
     r === null ||
     security === null ||
+    relay === undefined ||
     typeof r.enabled !== "boolean" ||
     typeof r.running !== "boolean" ||
     typeof r.remote_active !== "boolean" ||
@@ -118,19 +158,35 @@ export function parseLinkStatus(message: string): LinkStatus | null {
     remoteUnavailable: r.remote_unavailable as string | null,
     pairingOpen: r.pairing_open,
     security,
+    relay,
   };
 }
 
 const REMOTE_TEXT: Record<string, string> = {
+  remote_access_off: "دسترسی از بیرون خانه خاموش است؛ فقط از همین رایانه روشن می‌شود.",
+  no_relay_configured: "دسترسی از بیرون خانه روشن است اما هنوز رله‌ای تنظیم نشده است.",
+  relay_settings_unreadable: "تنظیم رله خوانده نشد؛ دسترسی از بیرون خانه بسته می‌ماند.",
   security_quarantined: "پایشگر امنیتی اتصال را قرنطینه کرده است.",
   security_contained: "پایشگر امنیتی دسترسی از بیرون خانه را بسته است.",
   security_monitor_not_ready: "پایشگر امنیتی آماده نیست؛ دسترسی از بیرون خانه بسته می‌ماند.",
 };
 
-/** Why access from outside the home network is unavailable, in Persian. */
+/** The state of access from outside the home network, in Persian; never a claim that a phone is reachable. */
 export function remoteText(status: LinkStatus | null): string {
+  if (status?.remoteActive) return "اتصال به رله برای دسترسی از بیرون خانه فعال شده است؛ رسیدن گوشی هنوز آزموده نشده است.";
   const reason = status?.remoteUnavailable ?? null;
-  return (reason !== null && REMOTE_TEXT[reason]) || "دسترسی از بیرون خانه در این نسخه فعال نیست.";
+  return (reason !== null && REMOTE_TEXT[reason]) || "دسترسی از بیرون خانه در دسترس نیست.";
+}
+
+/** One WAN change's acknowledgment: the bridge's actual commit or refusal for that nonce. */
+export function parseLinkOperationResult(message: string):
+  { requestNonce: string; action: string; status: "applied" | "refused"; code: string | null } | null {
+  const r = parseObject(message);
+  if (r === null || typeof r.requestNonce !== "string" || !NONCE.test(r.requestNonce)) return null;
+  if (typeof r.action !== "string" || r.action.length > 64) return null;
+  if (r.status !== "applied" && r.status !== "refused") return null;
+  if (!(r.code === undefined || r.code === null || (typeof r.code === "string" && r.code.length <= 32))) return null;
+  return { requestNonce: r.requestNonce, action: r.action, status: r.status, code: (r.code as string | undefined) ?? null };
 }
 
 export function parseLinkDevices(message: string): LinkDevice[] | null {
@@ -191,6 +247,15 @@ const ERROR_TEXT: Record<string, string> = {
   not_running: "اتصال گوشی روشن نیست. ابتدا آن را روشن کنید.",
   unknown_device: "این دستگاه پیدا نشد؛ فهرست را تازه کنید.",
   remote_unavailable: "دسترسی از بیرون خانه هنوز در این نسخه فعال نیست.",
+  remote_access_off: "ابتدا دسترسی از بیرون خانه را در همین رایانه روشن کنید.",
+  relay_not_configured: "ابتدا رله را تنظیم کنید.",
+  relay_settings_unreadable: "تنظیم رله خوانده نشد؛ آن را دوباره ذخیره کنید.",
+  relay_invalid: "نشانی، درگاه یا گواهی رله معتبر نبود؛ چیزی ذخیره نشد.",
+  device_revoked: "دسترسی این دستگاه لغو شده است.",
+  security_quarantined: "پایشگر امنیتی اتصال را قرنطینه کرده است.",
+  security_contained: "پایشگر امنیتی دسترسی از بیرون خانه را بسته است.",
+  security_monitor_not_ready: "پایشگر امنیتی آماده نیست.",
+  outcome_unknown: "معلوم نیست این تغییر انجام شد یا نه؛ وضعیت دوباره خوانده شد. پیش از تکرار، آن را ببینید.",
   failed: "این کار انجام نشد. دوباره امتحان کنید.",
 };
 
@@ -227,7 +292,18 @@ export type DeviceLinkDeps = {
   nonce: () => string;
   now: () => number; // seconds
   onError: (error: unknown) => void;
+  /** Save link.remote_access_enabled at this PC and apply it (A's settings path). Optional until wired. */
+  saveRemoteEnabled?: (enabled: boolean) => Promise<void>;
+  setTimer?: (callback: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 };
+
+/** A WAN change waiting for its own acknowledgment. */
+export type LinkOperation = { action: string; state: "pending" };
+
+export type RelayRequest = { host: string; port: number; serverName?: string; caPem?: string };
+
+const HOST = /^[A-Za-z0-9.:\-\[\]]{1,253}$/;
 
 export class DeviceLinkController {
   private status: LinkStatus | null = null;
@@ -236,10 +312,13 @@ export class DeviceLinkController {
   private pendingNonce: string | null = null;
   private pendingName = "";
   private savingEnabled = false;
+  private savingRemote = false;
   private error: string | null = null;
+  private operation: { action: string; nonce: string; timer: unknown } | null = null;
   private listeners = new Set<() => void>();
   private view: DeviceLinkView = {
     status: null, devices: [], pairing: null, waitingForPairing: false, savingEnabled: false, error: null,
+    operation: null, savingRemote: false,
   };
 
   constructor(private readonly deps: DeviceLinkDeps) {}
@@ -259,6 +338,8 @@ export class DeviceLinkController {
       waitingForPairing: this.pendingNonce !== null,
       savingEnabled: this.savingEnabled,
       error: this.error,
+      operation: this.operation === null ? null : { action: this.operation.action, state: "pending" },
+      savingRemote: this.savingRemote,
     };
     for (const listener of this.listeners) listener();
   }
@@ -368,6 +449,99 @@ export class DeviceLinkController {
     return this.send(LINK_ACTIONS.remote, { deviceId, enabled: false });
   };
 
+  // ---------------------------------------------------------------- WAN (owner opt-in, relay, per-phone grant)
+
+  /** Save the global switch for access from outside the home network, at this PC only. */
+  setRemoteEnabled = async (enabled: boolean): Promise<void> => {
+    if (this.savingRemote) return;
+    const save = this.deps.saveRemoteEnabled;
+    if (save === undefined) {
+      this.error = "این تنظیم هنوز در این صفحه در دسترس نیست.";
+      this.publish();
+      return;
+    }
+    this.savingRemote = true;
+    this.error = null;
+    this.publish();
+    try {
+      await save(enabled);
+    } catch (error) {
+      this.error = "تنظیم ذخیره نشد؛ دسترسی از بیرون خانه تغییر نکرد.";
+      this.deps.onError(error);
+    } finally {
+      this.savingRemote = false;
+      this.publish();
+    }
+    await this.refresh();
+  };
+
+  relaySet = (request: RelayRequest): Promise<boolean> => {
+    const { host, port, serverName, caPem } = request;
+    if (
+      typeof host !== "string" || !HOST.test(host) ||
+      typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535 ||
+      !(serverName === undefined || (typeof serverName === "string" && HOST.test(serverName))) ||
+      !(caPem === undefined || (typeof caPem === "string" && caPem.length > 0 && caPem.length <= MAX_CA_PEM))
+    ) {
+      this.error = linkErrorText("relay_invalid");
+      this.publish();
+      return Promise.resolve(false);
+    }
+    const data: Record<string, unknown> = { host, port };
+    if (serverName !== undefined) data.serverName = serverName;
+    if (caPem !== undefined) data.caPem = caPem;
+    return this.startOperation(LINK_ACTIONS.relaySet, data);
+  };
+
+  relayClear = (): Promise<boolean> => this.startOperation(LINK_ACTIONS.relaySet, { clear: true });
+
+  /** Remote access for one listed, unrevoked phone for a finite number of days (1..365). */
+  remoteOn = (deviceId: string, days: number): Promise<boolean> => {
+    const listed = this.devices.some((device) => device.deviceId === deviceId && device.status !== "revoked");
+    if (!listed || !Number.isInteger(days) || days < 1 || days > MAX_REMOTE_DAYS) return Promise.resolve(false);
+    return this.startOperation(LINK_ACTIONS.remote, { deviceId, enabled: true, days });
+  };
+
+  private async startOperation(action: string, data: Record<string, unknown>): Promise<boolean> {
+    if (this.operation !== null) return false;  // one WAN change at a time
+    const nonce = this.deps.nonce();
+    if (!NONCE.test(nonce)) throw new Error("bad nonce source");
+    const setTimer = this.deps.setTimer ?? ((callback: () => void, ms: number) => globalThis.setTimeout(callback, ms));
+    const operation = { action, nonce, timer: null as unknown };
+    this.operation = operation;
+    this.error = null;
+    operation.timer = setTimer(() => this.operationTimedOut(operation), OPERATION_TIMEOUT_MS);
+    this.publish();
+    const sent = await this.send(action, { ...data, requestNonce: nonce });
+    if (!sent && this.operation === operation) this.finishOperation();
+    return sent;
+  }
+
+  private finishOperation(): void {
+    if (this.operation === null) return;
+    const clearTimer = this.deps.clearTimer ?? ((handle: unknown) => globalThis.clearTimeout(handle as number));
+    clearTimer(this.operation.timer);
+    this.operation = null;
+  }
+
+  /** No answer in time: the outcome is unknown; read the state ONCE and never resend the change. */
+  private operationTimedOut(operation: { action: string; nonce: string }): void {
+    if (this.operation !== operation) return;
+    this.operation = null;
+    this.error = linkErrorText("outcome_unknown");
+    this.publish();
+    void this.send(LINK_ACTIONS.status);
+  }
+
+  /** Only the result for the pending change's own nonce AND action finishes it; anything else is ignored. */
+  operationResultArrived(result: { requestNonce: string; action: string; status: "applied" | "refused"; code: string | null }): void {
+    const pending = this.operation;
+    if (pending === null || result.requestNonce !== pending.nonce || result.action !== pending.action) return;
+    this.finishOperation();
+    this.error = result.status === "refused" ? linkErrorText(result.code ?? "failed") : null;
+    this.publish();
+  }
+
   statusArrived(status: LinkStatus): void {
     this.status = status;
     if (!status.running || (!status.pairingOpen && this.pairing !== null)) {
@@ -414,8 +588,10 @@ export function createDeviceLinkController(
   onError: (error: unknown) => void,
   random: (bytes: Uint8Array) => Uint8Array = (bytes) => crypto.getRandomValues(bytes),
   now: () => number = () => Date.now() / 1000,
+  saveRemoteEnabled?: (enabled: boolean) => Promise<void>,
 ): DeviceLinkController {
   return new DeviceLinkController({
+    ...(saveRemoteEnabled === undefined ? {} : { saveRemoteEnabled }),
     send: async (actionId, data) => {
       await invoke("send_runtime_action", { actionId, data });
     },
@@ -448,6 +624,11 @@ export function applyDeviceLinkEvent(controller: DeviceLinkController, eventType
     case "link_error": {
       const error = parseLinkError(message);
       if (error !== null) controller.errorArrived(error);
+      return true;
+    }
+    case "link_operation_result": {
+      const result = parseLinkOperationResult(message);
+      if (result !== null) controller.operationResultArrived(result);
       return true;
     }
     default:

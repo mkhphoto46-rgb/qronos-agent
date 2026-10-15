@@ -270,11 +270,11 @@ function mountPanel() {
     "../deviceLink": link,
     "./DeviceLinkPanel.css": {},
   });
-  return (view, enabled, handlers = {}) => {
+  return (view, enabled, handlers = {}, extra = {}) => {
     index = 0;
     const noop = () => {};
     return exports.default({
-      view, enabled,
+      ...extra, view, enabled,
       onSetEnabled: handlers.setEnabled ?? noop, onRefresh: noop,
       onOpenPairing: handlers.open ?? noop, onCancelPairing: handlers.cancel ?? noop,
       onRevoke: handlers.revoke ?? noop, onRemoteOff: handlers.remoteOff ?? noop,
@@ -310,7 +310,7 @@ test("the panel explains in Persian that phones can only ask, and that remote is
   const all = text(tree);
   assert.ok(all.includes("اتصال گوشی"));
   assert.ok(all.includes("هیچ فایلی باز، حذف یا چاپ نمی‌شود"));
-  assert.ok(all.includes("دسترسی از بیرون خانه در این نسخه فعال نیست"));
+  assert.ok(all.includes("دسترسی از بیرون خانه خاموش است"));
   const off = text(mountPanel()(baseView({ status: null }), false));
   assert.ok(off.includes("خاموش است"));
 });
@@ -388,4 +388,145 @@ test("App routes link events, never logs the pairing event, and the Settings pag
     assert.ok(!/localStorage|sessionStorage|console\./.test(source), `${file} never stores or logs a code`);
     assert.ok(!/fetch\(|XMLHttpRequest|WebSocket/.test(source), `${file} makes no network request`);
   }
+});
+
+// ------------------------------------------------------------ WAN (C87): relay, per-device grant, correlation
+
+const RELAY = { configured: true, host: "relay.example.test", port: 443, tlsName: "relay.example.test", pinnedCa: true };
+
+function wanHarness({ saveRemote = true } = {}) {
+  const sent = [];
+  const savedRemote = [];
+  const timers = [];
+  let counter = 0;
+  const controller = new link.DeviceLinkController({
+    send: async (actionId, data) => { sent.push({ actionId, data }); },
+    requestPairing: async () => {},
+    saveEnabled: async () => {},
+    ...(saveRemote ? { saveRemoteEnabled: async (enabled) => { savedRemote.push(enabled); } } : {}),
+    nonce: () => `nonce${String(++counter).padStart(16, "0")}`,
+    now: () => 1000,
+    onError: () => {},
+    setTimer: (callback, ms) => { timers.push({ callback, ms, cleared: false }); return timers.length - 1; },
+    clearTimer: (handle) => { timers[handle].cleared = true; },
+  });
+  const emit = (type, message) => link.applyDeviceLinkEvent(controller, type, message);
+  emit("link_devices", JSON.stringify([device(ID_A), device(ID_B, { status: "revoked" })]));
+  return { controller, sent, savedRemote, timers, emit, view: () => controller.getSnapshot() };
+}
+
+const result = (requestNonce, action, status, code) =>
+  JSON.stringify({ requestNonce, action, status, ...(code ? { code } : {}) });
+
+const PEM = "-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----\n";
+
+test("status carries non-secret relay facts; a malformed relay block makes the status invalid", () => {
+  assert.deepEqual(plain(link.parseLinkStatus(statusMessage({ relay: RELAY })).relay), RELAY);
+  assert.equal(link.parseLinkStatus(statusMessage()).relay, null, "older status without relay");
+  for (const bad of [{ ...RELAY, port: "443" }, { ...RELAY, pinnedCa: "yes" }, { ...RELAY, host: 5 }, []]) {
+    assert.equal(link.parseLinkStatus(statusMessage({ relay: bad })), null);
+  }
+});
+
+test("relaySet, relayClear and remoteOn send exact payloads with a tracking nonce", async () => {
+  const h = wanHarness();
+  await h.controller.relaySet({ host: "relay.example.test", port: 443, serverName: "r.example.test", caPem: PEM });
+  h.emit("link_operation_result", result(h.sent[0].data.requestNonce, "qronos.link_relay_set", "applied"));
+  await h.controller.relayClear();
+  h.emit("link_operation_result", result(h.sent[1].data.requestNonce, "qronos.link_relay_set", "applied"));
+  await h.controller.remoteOn(ID_A, 30);
+  assert.deepEqual(plain(h.sent), [
+    { actionId: "qronos.link_relay_set", data: { host: "relay.example.test", port: 443, serverName: "r.example.test",
+      caPem: PEM, requestNonce: "nonce0000000000000001" } },
+    { actionId: "qronos.link_relay_set", data: { clear: true, requestNonce: "nonce0000000000000002" } },
+    { actionId: "qronos.link_remote", data: { deviceId: ID_A, enabled: true, days: 30, requestNonce: "nonce0000000000000003" } },
+  ]);
+});
+
+test("invalid relay or grant requests send nothing", async () => {
+  const h = wanHarness();
+  for (const bad of [{ host: "", port: 443 }, { host: "https://x.test", port: 443 }, { host: "x.test/p", port: 443 },
+    { host: "x.test", port: 0 }, { host: "x.test", port: 1.5 }, { host: "x.test", port: 443, caPem: "x".repeat(16385) }]) {
+    assert.equal(await h.controller.relaySet(bad), false, JSON.stringify(bad).slice(0, 60));
+  }
+  assert.equal(await h.controller.remoteOn("9999999999999999", 30), false, "not listed");
+  assert.equal(await h.controller.remoteOn(ID_B, 30), false, "revoked");
+  for (const days of [0, 366, 1.5]) assert.equal(await h.controller.remoteOn(ID_A, days), false);
+  assert.equal(h.sent.length, 0);
+});
+
+test("only the matching nonce AND action finishes an operation; stale, duplicate and view events do not", async () => {
+  const h = wanHarness();
+  await h.controller.relaySet({ host: "relay.example.test", port: 443 });
+  const nonce = h.sent[0].data.requestNonce;
+  assert.equal(h.view().operation.state, "pending");
+  h.emit("link_status", statusMessage({ relay: RELAY }));
+  h.emit("link_devices", JSON.stringify([device(ID_A)]));
+  h.emit("link_operation_result", result(nonce, "qronos.link_remote", "applied"));
+  h.emit("link_operation_result", result("othernonce0000000000", "qronos.link_relay_set", "applied"));
+  assert.equal(h.view().operation.state, "pending", "view updates and mismatches never finish it");
+  assert.equal(await h.controller.relayClear(), false, "one WAN operation at a time");
+  h.emit("link_operation_result", result(nonce, "qronos.link_relay_set", "refused", "relay_invalid"));
+  assert.equal(h.view().operation, null);
+  assert.ok(h.view().error.includes("رله"));
+  assert.ok(h.timers[0].cleared);
+  h.emit("link_operation_result", result(nonce, "qronos.link_relay_set", "applied"));
+  assert.ok(h.view().error.includes("رله"), "a duplicate acknowledgment changes nothing");
+});
+
+test("no answer in 10 s is an unknown outcome with ONE read-only refresh and no replay", async () => {
+  const h = wanHarness();
+  await h.controller.remoteOn(ID_A, 7);
+  assert.equal(h.timers[0].ms, 10000);
+  h.timers[0].callback();
+  assert.equal(h.view().operation, null);
+  assert.ok(h.view().error.includes("معلوم نیست"));
+  assert.deepEqual(plain(h.sent.map((item) => item.actionId)), ["qronos.link_remote", "qronos.link_status"]);
+  h.emit("link_operation_result", result(h.sent[0].data.requestNonce, "qronos.link_remote", "applied"));
+  assert.deepEqual(plain(h.sent.map((item) => item.actionId)), ["qronos.link_remote", "qronos.link_status"], "never resent");
+});
+
+test("the global opt-in is saved only through its own callback, and refused without it", async () => {
+  const h = wanHarness();
+  await h.controller.setRemoteEnabled(true);
+  assert.deepEqual(h.savedRemote, [true]);
+  assert.equal(h.sent.at(-1).actionId, "qronos.link_status");
+  const without = wanHarness({ saveRemote: false });
+  await without.controller.setRemoteEnabled(true);
+  assert.ok(without.view().error);
+});
+
+test("the factory keeps random at position 4 and the clock at 5; a sixth optional callback saves the opt-in", async () => {
+  const calls = [];
+  const saved = [];
+  const controller = link.createDeviceLinkController(
+    async (command, args) => { calls.push({ command, args }); }, async () => {}, () => {},
+    (bytes) => bytes.fill(171), () => 1000, async (enabled) => { saved.push(enabled); },
+  );
+  await controller.setRemoteEnabled(false);
+  assert.deepEqual(saved, [false]);
+  await controller.openPairing("x");
+  assert.deepEqual(plain(calls.at(-1)), { command: "link_pair_open", args: { requestNonce: "ab".repeat(16), name: "x" } });
+});
+
+test("the panel offers the opt-in, relay form and finite grants only when wired, never claiming WAN is live", () => {
+  const render = mountPanel();
+  const view = baseView({ status: link.parseLinkStatus(statusMessage({ relay: RELAY })),
+    devices: link.parseLinkDevices(JSON.stringify([device(ID_A), device(ID_B, { remote_enabled: true, remote_expires_at: 2000000 })])) });
+  const old = text(render(view, true));
+  assert.ok(!old.includes("رله:") && !old.includes("اجازه از بیرون"), "nothing new without the new props");
+  const calls = [];
+  const tree = render(view, true, {}, {
+    remoteEnabled: false, onSetRemoteEnabled: (v) => calls.push(["opt", v]), onRelaySet: (v) => calls.push(["set", v]),
+    onRelayClear: () => calls.push(["clear"]), onRemoteOn: (id, days) => calls.push(["on", id, days]),
+  });
+  const all = text(tree);
+  assert.ok(all.includes("relay.example.test") && all.includes("گواهی"));
+  assert.ok(all.includes("دسترسی از بیرون خانه خاموش است"));
+  assert.ok(!all.includes("برقرار است"));
+  const grant = findAll(tree, (n) => n.type === "button" && text(n).includes("۳۰ روز"));
+  assert.equal(grant.length, 1, "only the active device without remote access can be granted");
+  grant[0].props.onClick();
+  assert.deepEqual(calls, [["on", ID_A, 30]]);
+  assert.ok(all.includes("تا "), "a granted device shows its end");
 });

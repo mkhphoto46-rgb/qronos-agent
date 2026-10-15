@@ -80,3 +80,20 @@
   display: flex;
   gap: 8px;
 }
+
+.device-link-remote {
+  border-top: 1px solid rgba(127, 127, 127, 0.3);
+  margin-top: 12px;
+  padding-top: 8px;
+}
+
+.device-link-relay-form {
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+}
+
+.device-link-relay-form textarea {
+  min-height: 6em;
+  font-family: monospace;
+}

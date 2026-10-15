@@ -31,8 +31,11 @@ local questions use the same answer-only path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import ssl
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,6 +48,7 @@ from core.link_capability import LinkScope
 from core.link_devices import (
     DEFAULT_DEVICE_PATH,
     DeviceRecord,
+    DeviceStatus,
     DeviceRegistry,
     DeviceStoreBusy,
     DeviceStoreCorrupt,
@@ -65,6 +69,7 @@ from core.link_tunnel import (
     RelayDialler,
     RelayEndpoint,
     connect_relay,
+    MAX_CA_BYTES,
 )
 
 
@@ -135,6 +140,91 @@ def save_relay_endpoint(path: Path, endpoint: RelayEndpoint | None) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+# ------------------------------------------------------- WAN configuration
+
+
+class LinkWanRefused(Exception):
+    """A desktop WAN request that was refused, with a typed code and no request contents."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+RELAY_REQUEST_KEYS = frozenset({"host", "port", "serverName", "caPem", "requestNonce"})
+RELAY_CA_FOLDER = "link_relay_ca"
+MAX_REMOTE_DAYS = 365
+_PEM_CERTIFICATES = re.compile(
+    r"\s*(?:-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+?-----END CERTIFICATE-----\s*)+"
+)
+
+
+def _certificate_pem(value: Any) -> str:
+    """Bounded PEM text holding only CERTIFICATE blocks that the TLS stack can load; never a path or a key."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise LinkWanRefused("invalid_request")
+
+    if len(value.encode("utf-8")) > MAX_CA_BYTES or not value.isascii():
+        raise LinkWanRefused("relay_invalid")
+
+    if not _PEM_CERTIFICATES.fullmatch(value):
+        raise LinkWanRefused("relay_invalid")
+
+    try:
+        context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cadata=value)
+    except (ssl.SSLError, ValueError):
+        raise LinkWanRefused("relay_invalid") from None
+
+    if context.cert_store_stats().get("x509", 0) < 1:
+        raise LinkWanRefused("relay_invalid")
+
+    return value
+
+
+def relay_endpoint_from_request(data: Any, data_dir: Path) -> RelayEndpoint:
+    """
+    The relay a desktop request names, validated completely BEFORE anything is written.
+
+    ``data`` is ``{host, port, serverName?, caPem?, requestNonce?}`` (the nonce is the bridge's tracking id and is
+    not used here). A CA is accepted only as bounded certificate PEM text and is stored content-addressed under
+    ``<data_dir>/link_relay_ca/<sha256>.pem``, so an existing, different CA file is never overwritten.
+    """
+
+    if not isinstance(data, dict) or not set(data) <= RELAY_REQUEST_KEYS or "host" not in data or "port" not in data:
+        raise LinkWanRefused("invalid_request")
+
+    host, port, server_name = data["host"], data["port"], data.get("serverName")
+
+    if not isinstance(host, str) or not 0 < len(host) <= 253 or type(port) is not int:
+        raise LinkWanRefused("invalid_request")
+
+    if server_name is not None and (not isinstance(server_name, str) or len(server_name) > 253):
+        raise LinkWanRefused("invalid_request")
+
+    try:
+        RelayEndpoint(host=host, port=port, server_name=server_name)  # host/port/name rules, nothing written
+    except RelayConfigError:
+        raise LinkWanRefused("relay_invalid") from None
+
+    ca_file = None
+
+    if data.get("caPem") is not None:
+        pem = _certificate_pem(data["caPem"])
+        folder = Path(data_dir) / RELAY_CA_FOLDER
+        target = folder / f"{hashlib.sha256(pem.encode('ascii')).hexdigest()}.pem"
+
+        if not target.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(pem, encoding="ascii")
+            os.replace(temporary, target)
+
+        ca_file = str(target)
+
+    return RelayEndpoint(host=host, port=port, server_name=server_name, ca_file=ca_file)
 
 
 # ------------------------------------------------------------------ settings
@@ -431,6 +521,7 @@ class LinkRuntime:
             ),
             "pairing_open": self.pairing is not None and self.pairing.is_open,
             "security": self.monitor.status(),
+            "relay": self._relay_summary(),
         }
 
     def devices(self) -> list[DeviceView]:
@@ -623,6 +714,81 @@ class LinkRuntime:
         return DeviceView.of(record, self.clock())
 
     # ---------------------------------------------------------------- relay
+
+    def configure_relay(self, data: Any, data_dir: Path | None = None) -> bool:
+        """
+        Save the relay a desktop request names (validated first; see ``relay_endpoint_from_request``).
+
+        Refused while the Security Monitor holds the link quarantined. Saving while remote access is off only
+        stores it: ``start`` dials a relay only when ``remote_access_enabled``. Returns whether the link runs.
+        """
+
+        if self.settings.relay_path is None:
+            raise LinkWanRefused("failed")
+
+        if self.monitor.status().get("quarantined"):
+            raise LinkWanRefused("security_quarantined")
+
+        folder = Path(data_dir) if data_dir is not None else Path(self.settings.relay_path).parent
+        return self.set_relay_endpoint(relay_endpoint_from_request(data, folder))
+
+    def clear_relay(self) -> bool:
+        """Forget the relay; always allowed (also with remote off or quarantined)."""
+
+        if self.settings.relay_path is None:
+            raise LinkWanRefused("failed")
+
+        return self.set_relay_endpoint(None)
+
+    def grant_remote(self, device_id: str, days: Any) -> DeviceView:
+        """
+        Remote access for one paired phone for ``days`` (an int, 1..365), only when the PC owner switched
+        remote access on, a relay is configured, the Security Monitor admits remote use and the phone is not
+        revoked. Switching it off (``set_remote_access(id, False)``) and revoking stay always available.
+        """
+
+        if type(days) is not int or not 1 <= days <= MAX_REMOTE_DAYS:
+            raise LinkWanRefused("invalid_request")
+
+        if not self.settings.remote_access_enabled:
+            raise LinkWanRefused("remote_access_off")
+
+        admission = self.monitor.remote_admission()
+
+        if not admission.allowed:
+            raise LinkWanRefused(str(admission.reason or "security_refused")[:32])
+
+        try:
+            relay = self._configured_relay()
+        except RelayConfigError:
+            raise LinkWanRefused("relay_settings_unreadable") from None
+
+        if relay is None:
+            raise LinkWanRefused("relay_not_configured")
+
+        record = self.registry.get(device_id)
+
+        if record is None:
+            raise LinkWanRefused("unknown_device")
+
+        if record.status is DeviceStatus.REVOKED:
+            raise LinkWanRefused("device_revoked")
+
+        return self.set_remote_access(device_id, True, float(days))
+
+    def _relay_summary(self) -> dict[str, Any]:
+        """Non-secret facts about the configured relay for the desktop; no CA text or path."""
+
+        try:
+            relay = self._configured_relay()
+        except RelayConfigError:
+            relay = None
+
+        if relay is None:
+            return {"configured": False, "host": None, "port": None, "tlsName": None, "pinnedCa": False}
+
+        return {"configured": True, "host": relay.host, "port": relay.port, "tlsName": relay.tls_name,
+                "pinnedCa": relay.ca_file is not None}
 
     def relay_endpoint(self) -> RelayEndpoint | None:
         return self._configured_relay()

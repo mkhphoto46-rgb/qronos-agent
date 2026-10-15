@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { remoteText } from "../deviceLink";
-import type { DeviceLinkView, LinkDevice, LinkStatus } from "../deviceLink";
+import type { DeviceLinkView, LinkDevice, LinkStatus, RelayRequest } from "../deviceLink";
 import { encodeQr, qrSvgPath } from "../qrCode";
 
 import "./DeviceLinkPanel.css";
@@ -19,7 +19,16 @@ type Props = {
   onTick: () => void;
   onDismissError: () => void;
   onClose: () => void;
+  // Access from outside the home network (optional until the Settings page wires them).
+  remoteEnabled?: boolean;
+  onSetRemoteEnabled?: (enabled: boolean) => void;
+  onRelaySet?: (request: RelayRequest) => void;
+  onRelayClear?: () => void;
+  onRemoteOn?: (deviceId: string, days: number) => void;
 };
+
+const GRANT_DAYS = [7, 30] as const;
+const PERSIAN_DIGITS = (value: number) => String(value).replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
 
 const STATUS_TEXT: Record<LinkDevice["status"], string> = {
   pending: "در انتظار جفت شدن",
@@ -47,14 +56,23 @@ function when(seconds: number | null): string {
  * The pairing code holds the new phone's key. It is drawn here from memory,
  * never as text, and disappears on cancel, expiry or leaving the page.
  * Revoking asks once more before it is sent. Access from outside the home
- * network is not offered in this version.
+ * network is shown only when the Settings page passes its callbacks: the
+ * owner's switch, a relay the owner enters (no default), and a finite grant
+ * per phone. Nothing here claims that a phone can actually reach the PC.
  */
 export default function DeviceLinkPanel(props: Props) {
   const { view, enabled } = props;
   const [name, setName] = useState("");
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [relayHost, setRelayHost] = useState("");
+  const [relayPort, setRelayPort] = useState("443");
+  const [relayName, setRelayName] = useState("");
+  const [relayCa, setRelayCa] = useState("");
   const pairing = view.pairing;
+  const wan = props.onSetRemoteEnabled !== undefined || props.onRelaySet !== undefined || props.onRemoteOn !== undefined;
+  const busy = view.operation != null;
+  const relay = view.status?.relay ?? null;
 
   useEffect(() => {
     props.onRefresh();
@@ -101,6 +119,67 @@ export default function DeviceLinkPanel(props: Props) {
       </label>
       <p className="device-link-status" role="status">{statusLine(enabled, view.status)}</p>
       <p className="device-link-note">{remoteText(view.status)}</p>
+
+      {wan && (
+        <div className="device-link-remote">
+          <h3>دسترسی از بیرون خانه</h3>
+          {props.onSetRemoteEnabled && (
+            <label className="device-link-switch">
+              <input
+                type="checkbox"
+                checked={props.remoteEnabled === true}
+                disabled={view.savingRemote === true}
+                onChange={(event) => props.onSetRemoteEnabled?.(event.target.checked)}
+              />
+              <span>اجازهٔ دسترسی گوشی‌های جفت‌شده از بیرون خانه از راه رله (فقط از همین رایانه)</span>
+            </label>
+          )}
+          <p className="device-link-relay">
+            {relay?.configured
+              ? `رله: ${relay.host}:${relay.port}${relay.pinnedCa ? " (گواهی سنجاق‌شده)" : " (گواهی با اعتماد سیستم)"}`
+              : "رله‌ای تنظیم نشده است."}
+          </p>
+          {busy && <p className="device-link-status" role="status">در حال اعمال تغییر...</p>}
+          {props.onRelaySet && (
+            <form
+              className="device-link-relay-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const request: RelayRequest = { host: relayHost.trim(), port: Number(relayPort) };
+                if (relayName.trim()) request.serverName = relayName.trim();
+                if (relayCa.trim()) request.caPem = relayCa;
+                props.onRelaySet?.(request);
+              }}
+            >
+              <label>
+                نشانی رله
+                <input type="text" dir="ltr" value={relayHost} maxLength={253} autoComplete="off"
+                  onChange={(event) => setRelayHost(event.target.value)} />
+              </label>
+              <label>
+                درگاه
+                <input type="number" dir="ltr" min={1} max={65535} value={relayPort}
+                  onChange={(event) => setRelayPort(event.target.value)} />
+              </label>
+              <label>
+                نام گواهی (اختیاری)
+                <input type="text" dir="ltr" value={relayName} maxLength={253} autoComplete="off"
+                  onChange={(event) => setRelayName(event.target.value)} />
+              </label>
+              <label>
+                گواهی مرجع رله، PEM (اختیاری؛ فقط گواهی، هرگز کلید)
+                <textarea dir="ltr" value={relayCa} maxLength={16384} onChange={(event) => setRelayCa(event.target.value)} />
+              </label>
+              <button type="submit" className="file-approval-button" disabled={busy}>ذخیرهٔ رله</button>
+              {relay?.configured && props.onRelayClear && (
+                <button type="button" className="file-approval-button" disabled={busy} onClick={props.onRelayClear}>
+                  حذف رله
+                </button>
+              )}
+            </form>
+          )}
+        </div>
+      )}
 
       {view.status !== null && (view.status.security.quarantined || view.status.security.contained) && (
         <div className="device-link-security" role="alert">
@@ -193,8 +272,21 @@ export default function DeviceLinkPanel(props: Props) {
                 <strong dir="auto">{device.name || "بدون نام"}</strong>
                 <span>{STATUS_TEXT[device.status]}</span>
                 <small>آخرین اتصال: {when(device.lastSeenAt)}</small>
-                {device.remoteEnabled && <small>دسترسی از بیرون خانه: روشن</small>}
+                {device.remoteEnabled && (
+                  <small>دسترسی از بیرون خانه: روشن تا {when(device.remoteExpiresAt)}</small>
+                )}
               </div>
+              {props.onRemoteOn && device.status === "active" && !device.remoteEnabled && GRANT_DAYS.map((days) => (
+                <button
+                  key={days}
+                  type="button"
+                  className="file-approval-button"
+                  disabled={props.remoteEnabled !== true || busy}
+                  onClick={() => props.onRemoteOn?.(device.deviceId, days)}
+                >
+                  اجازه از بیرون خانه برای {PERSIAN_DIGITS(days)} روز
+                </button>
+              ))}
               {device.remoteEnabled && device.status !== "revoked" && (
                 <button type="button" className="file-approval-button" onClick={() => props.onRemoteOff(device.deviceId)}>
                   قطع دسترسی از بیرون
