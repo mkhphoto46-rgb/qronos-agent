@@ -83,14 +83,16 @@ classifier before optional TFLite conversion failed.
 ## Current Verified Repository State
 
 - Active development branch: `feature/qronos-wake-word-model`.
-- Qronos model files exist locally under `models/wake_word/`:
-  - `qronos.onnx`
-  - `qronos.onnx.data`
-  - `qronos_recommended_settings.json`
-- The ONNX model loads successfully with ONNX Runtime on CPU.
-- Model input: `[1, 16, 96]`, float tensor.
-- Model output: `[1, 1]`, sigmoid score.
-- `OpenWakeWordEngine` starts and stops successfully with the real model.
+- The custom wake head is NOT present: `models/wake_word/qronos.onnx` and
+  `qronos.onnx.data` are absent from this machine and from E: (targeted
+  search 2026-10-16), were never in Git, and are `missing` in
+  `build_support/runtime_assets.json`. They are owner-supplied files; the
+  wake word cannot work until the owner provides them. Only
+  `models/wake_word/qronos_recommended_settings.json` is present.
+- Recorded earlier on the training machine (historical, not reproducible here
+  without those files): the ONNX model loaded with ONNX Runtime on CPU, input
+  `[1, 16, 96]` float tensor, output `[1, 1]` sigmoid score, and
+  `OpenWakeWordEngine` started and stopped with it.
 - The configured detection threshold is `0.660167`.
 - The complete local test suite passes: 131 tests.
 - Wake-word model files are ignored by the current `.gitignore` and therefore

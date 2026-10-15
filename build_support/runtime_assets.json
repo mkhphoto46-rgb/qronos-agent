@@ -310,25 +310,31 @@
     {
       "path": "runtime/models/siglip2-base-patch16-224/vision_model_quantized.onnx",
       "feature": "imageSearch",
-      "status": "missing",
+      "status": "verified",
+      "bytes": 94553333,
+      "sha256": "5f2b401c1a4fc095702a5d45348e17ad46c4f87064085365b43c6e8eaa5c0070",
       "source": "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/vision_model_quantized.onnx",
-      "evidence": "not present on this machine or E: (checked 2026-10-14). The publisher's Hugging Face LFS identity is 94553333 bytes, sha256 5f2b401c1a4fc095702a5d45348e17ad46c4f87064085365b43c6e8eaa5c0070 (pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8); it becomes 'verified' only after an approved acquisition is re-hashed equal to it.",
+      "evidence": "the publisher's Hugging Face LFS identity at the immutable revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4 (onnx-community/siglip2-base-patch16-224-ONNX) is 94553333 bytes, sha256 5f2b401c1a4fc095702a5d45348e17ad46c4f87064085365b43c6e8eaa5c0070, also pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8; the approved round-80 acquisition from that revision, cached at E:/qronos-image-r79/assets/models/siglip2-base-patch16-224, was re-hashed equal to it (2026-10-16). Image-retrieval quality is not measured.",
       "licence": "owner-review-required: base model google/siglip2-base-patch16-224 is Apache-2.0 (publisher card, revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2); the onnx-community conversion states no licence of its own"
     },
     {
       "path": "runtime/models/siglip2-base-patch16-224/text_model_quantized.onnx",
       "feature": "imageSearch",
-      "status": "missing",
+      "status": "verified",
+      "bytes": 283438275,
+      "sha256": "3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400",
       "source": "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/text_model_quantized.onnx",
-      "evidence": "not present on this machine or E: (checked 2026-10-14). The publisher's Hugging Face LFS identity is 283438275 bytes, sha256 3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400 (pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8); it becomes 'verified' only after an approved acquisition is re-hashed equal to it.",
+      "evidence": "the publisher's Hugging Face LFS identity at the immutable revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4 (onnx-community/siglip2-base-patch16-224-ONNX) is 283438275 bytes, sha256 3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400, also pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8; the approved round-80 acquisition from that revision, cached at E:/qronos-image-r79/assets/models/siglip2-base-patch16-224, was re-hashed equal to it (2026-10-16). Image-retrieval quality is not measured.",
       "licence": "owner-review-required: base model google/siglip2-base-patch16-224 is Apache-2.0 (publisher card, revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2); the onnx-community conversion states no licence of its own"
     },
     {
       "path": "runtime/models/siglip2-base-patch16-224/tokenizer.model",
       "feature": "imageSearch",
-      "status": "missing",
+      "status": "verified",
+      "bytes": 4241003,
+      "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
       "source": "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/tokenizer.model",
-      "evidence": "not present on this machine or E: (checked 2026-10-14). The publisher's Hugging Face LFS identity is 4241003 bytes, sha256 61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2 (pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8); it becomes 'verified' only after an approved acquisition is re-hashed equal to it.",
+      "evidence": "the publisher's Hugging Face LFS identity at the immutable revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4 (onnx-community/siglip2-base-patch16-224-ONNX) is 4241003 bytes, sha256 61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2, also pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8; the approved round-80 acquisition from that revision, cached at E:/qronos-image-r79/assets/models/siglip2-base-patch16-224, was re-hashed equal to it (2026-10-16). Image-retrieval quality is not measured.",
       "licence": "owner-review-required: base model google/siglip2-base-patch16-224 is Apache-2.0 (publisher card, revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2); the onnx-community conversion states no licence of its own"
     }
   ]
