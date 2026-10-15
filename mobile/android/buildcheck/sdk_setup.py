@@ -12,8 +12,9 @@ owner accepts it, if they decide to, by answering sdkmanager's own prompt (step 
         Unpacks the verified command-line tools into <sdk root>/cmdline-tools/latest and runs
         `sdkmanager --sdk_root=<sdk root> --licenses` interactively: the OWNER reads and answers.
     python mobile/android/buildcheck/sdk_setup.py install --java-home <JDK 17+>
-        `sdkmanager --sdk_root=<sdk root> "platforms;android-36" "build-tools;36.0.0"`, then checks that both are
-        present at the pinned revisions. sdkmanager refuses this until the licence was accepted.
+        `sdkmanager --sdk_root=<sdk root> "platforms;android-36" "build-tools;36.0.0"`, then FAILS unless each
+        installed source.properties has exactly one Pkg.Revision equal to the pin (revision agreement only; it does
+        not prove the bytes of every installed file). sdkmanager refuses this until the licence was accepted.
 
 The build itself (Root names it separately) then runs with ANDROID_HOME set for that one process only:
     ANDROID_HOME=<sdk root> mobile/android/gradlew -p mobile/android :app:assembleDebug
@@ -103,9 +104,36 @@ def install(java_home: Path) -> int:
     code = subprocess.call(command + list(INSTALL), env=env)
     if code:
         return code
-    found = {name: (SDK_ROOT.joinpath(*name.split(";")) / "source.properties").is_file() for name in INSTALL}
-    print(json.dumps(found))
-    return 0 if all(found.values()) else 1
+    # sdkmanager resolves a package path to whatever revision the repository offers NOW; the installed revision
+    # must be the pinned one. This checks revision agreement only, not the bytes of every installed file.
+    found = {name: installed_revision(name) for name in INSTALL}
+    agreed = {name: found[name] is not None and _revision(found[name]) == _revision(PINS["packages"][name]["revision"])
+              for name in INSTALL}
+    print(json.dumps({"pinned": {name: PINS["packages"][name]["revision"] for name in INSTALL},
+                      "installed": found, "agreed": agreed}))
+    return 0 if all(agreed.values()) else 1
+
+
+def _revision(text: str) -> tuple[int, ...] | None:
+    """A dotted numeric revision with trailing zero parts dropped ("36" == "36.0.0"); anything else is None."""
+    parts = text.strip().split(".")
+    if not 1 <= len(parts) <= 4 or not all(part.isdigit() for part in parts):
+        return None
+    numbers = [int(part) for part in parts]
+    while len(numbers) > 1 and numbers[-1] == 0:
+        numbers.pop()
+    return tuple(numbers)
+
+
+def installed_revision(name: str) -> str | None:
+    """Pkg.Revision of an installed package's source.properties; None if missing, unreadable or malformed."""
+    path = SDK_ROOT.joinpath(*name.split(";")) / "source.properties"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    values = [line.split("=", 1)[1].strip() for line in lines if line.strip().startswith("Pkg.Revision=")]
+    return values[0] if len(values) == 1 and _revision(values[0]) is not None else None
 
 
 def main(argv: list[str] | None = None) -> int:

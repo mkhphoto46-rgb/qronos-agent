@@ -89,6 +89,11 @@ Its steps are:
 3. `licences` (the owner answers sdkmanager's prompt);
 4. `install`.
 
+`install` fails unless each installed `source.properties` reports exactly the
+pinned `Pkg.Revision`. sdkmanager resolves package paths to the current
+revision, so this catches a drifted package. It proves revision agreement
+only, not the byte identity of every installed SDK file.
+
 Then, with `ANDROID_HOME` set for that one command:
 `mobile/android/gradlew -p mobile/android :app:assembleDebug`.
 
