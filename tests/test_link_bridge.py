@@ -338,15 +338,20 @@ def test_a_persian_name_with_a_zero_width_non_joiner_is_accepted(bridge):
     assert bridge.last("link_devices")[0]["name"] == name
 
 
-def test_remote_access_cannot_be_switched_on_or_a_relay_set_before_the_wan_gate(bridge, tmp_path):
+def test_remote_access_stays_refused_while_the_explicit_remote_setting_is_off(bridge, tmp_path):
+    # The explicit, default-off link.remote_access_enabled replaces the hardcoded gate; the refusals stay.
     bridge.enable()
     bridge.runtime.start_device_link()
     _, device_id = bridge.pair()
-    bridge.action("qronos.link_remote", {"deviceId": device_id, "enabled": True})
-    assert bridge.last("link_error") == {"action": "qronos.link_remote", "code": "remote_unavailable"}
-    bridge.action("qronos.link_relay_set", {"host": "relay.example", "port": 443})
-    assert bridge.last("link_error") == {"action": "qronos.link_relay_set", "code": "remote_unavailable"}
+    assert bridge.runtime.settings.get("link.remote_access_enabled") is False
+    bridge.action("qronos.link_remote", {"deviceId": device_id, "enabled": True})  # no days, no nonce
+    assert bridge.last("link_error") == {"action": "qronos.link_remote", "code": "invalid_request"}
+    bridge.action("qronos.link_remote", {"deviceId": device_id, "enabled": True, "days": 30, "requestNonce": NONCE})
+    assert bridge.last("link_error") == {"action": "qronos.link_remote", "code": "remote_access_off"}
+    bridge.action("qronos.link_relay_set", {"host": "relay.example", "port": 443})  # no nonce: not a WAN request
+    assert bridge.last("link_error") == {"action": "qronos.link_relay_set", "code": "invalid_request"}
     assert not (bridge.root / "link_relay.json").exists()
+    assert bridge.last("link_devices")[0]["remote_enabled"] is False
     bridge.action("qronos.link_remote", {"deviceId": device_id, "enabled": False})
     assert bridge.last("link_devices")[0]["remote_enabled"] is False
 
@@ -408,3 +413,250 @@ def test_the_monitor_keeps_its_state_in_this_profile_and_status_reports_it(bridg
     assert link.settings.incident_path == bridge.logs / "link_incidents.jsonl"
     # Remote stays off: the WAN path is not enabled from this runtime yet.
     assert bridge.last("link_status")["remote_active"] is False
+
+
+# ------------------------------------------------------------ WAN wiring (A90; fakes only, no socket/endpoint/keys)
+
+
+DEVICE = "0123456789abcdef"
+REVOKED = "fedcba9876543210"
+WAN_NONCE = "w" * 32
+RELAY_SET = "qronos.link_relay_set"
+REMOTE = "qronos.link_remote"
+REVOKE = "qronos.link_revoke"
+
+
+class FakeMonitor:
+    def __init__(self) -> None:
+        self.remote_allowed = True
+        self.quarantined = False
+
+    def remote_admission(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(allowed=self.remote_allowed, reason=None if self.remote_allowed else "quarantined")
+
+    def status(self) -> dict:
+        return {"quarantined": self.quarantined}
+
+
+class FakeLink:
+    """Stands in for C's LinkRuntime: records every mutation; never dials, listens or keeps keys."""
+
+    running = False
+
+    def __init__(self) -> None:
+        self.monitor = FakeMonitor()
+        self.relay = None
+        self.calls: list[tuple] = []
+
+    def status(self) -> dict:
+        return {"running": False, "remote_active": False}
+
+    def devices(self) -> list:
+        return []
+
+    def relay_endpoint(self):
+        return self.relay
+
+    def set_relay_endpoint(self, endpoint) -> bool:
+        self.calls.append(("relay", endpoint))
+        self.relay = endpoint
+        return False
+
+    def set_remote_access(self, device_id, enabled, days=None):
+        from core.link_devices import UnknownDevice
+
+        if device_id not in (DEVICE, REVOKED):
+            raise UnknownDevice(device_id)
+        if device_id == REVOKED and enabled:
+            raise ValueError("revoked device")
+        self.calls.append(("remote", device_id, enabled, days))
+
+    def revoke(self, device_id) -> None:
+        from core.link_devices import UnknownDevice
+
+        if device_id not in (DEVICE, REVOKED):
+            raise UnknownDevice(device_id)
+        self.calls.append(("revoke", device_id))
+
+    def stop(self) -> None:
+        return None
+
+
+@pytest.fixture
+def wan(bridge, monkeypatch):
+    """The real bridge with a fake link and a stand-in for C's relay_endpoint_from_request."""
+    import core.link_runtime as link_runtime
+
+    seen: list = []
+
+    def endpoint_from_request(data, data_dir):
+        seen.append((dict(data), data_dir))
+        if data.get("host") != "relay.example":
+            raise ValueError("relay_invalid")
+        return ("endpoint", data["host"], data["port"])
+
+    monkeypatch.setattr(link_runtime, "relay_endpoint_from_request", endpoint_from_request, raising=False)
+    link = FakeLink()
+    bridge.runtime._link_runtime = link
+    bridge.link = link
+    bridge.helper_calls = seen
+    return bridge
+
+
+def _acks(bridge) -> list[dict]:
+    return [json.loads(message) for name, message in bridge.events if name == "link_operation_result"]
+
+
+def _remote_on(bridge, device=DEVICE, days=30, nonce=WAN_NONCE) -> None:
+    bridge.action(REMOTE, {"deviceId": device, "enabled": True, "days": days, "requestNonce": nonce})
+
+
+@pytest.mark.parametrize("data, code", [
+    ({"host": "https://relay.example", "port": 443, "requestNonce": WAN_NONCE}, "relay_invalid"),
+    ({"host": "relay.example/path", "port": 443, "requestNonce": WAN_NONCE}, "relay_invalid"),
+    ({"host": "relay.example", "port": True, "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"host": "relay.example", "port": "443", "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"host": "relay.example", "port": 0, "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"host": "relay.example", "port": 70000, "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"host": "relay.example", "port": 443, "caFile": "C:/ca.pem", "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"host": "relay.example", "port": 443, "caPem": 5, "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"host": "relay.example", "port": 443, "caPem": "x" * (16 * 1024 + 1), "requestNonce": WAN_NONCE},
+     "invalid_request"),
+    ({"host": "relay.example", "port": 443, "serverName": 7, "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"host": "relay.example", "port": 443}, "invalid_request"),
+    ({"host": "relay.example", "port": 443, "requestNonce": "short"}, "invalid_request"),
+    ({"clear": True}, "invalid_request"),
+    ({"clear": False, "requestNonce": WAN_NONCE}, "invalid_request"),
+    ({"clear": True, "host": "relay.example", "requestNonce": WAN_NONCE}, "invalid_request"),
+])
+def test_wan_relay_saved_while_off_and_rejected_inputs_do_not_mutate(wan, data, code):
+    # Saved while the global remote setting is OFF: stored through C's helper, never dialled.
+    wan.action(RELAY_SET, {"host": "relay.example", "port": 443, "serverName": "relay.example",
+                           "requestNonce": WAN_NONCE})
+    assert wan.link.calls == [("relay", ("endpoint", "relay.example", 443))]
+    assert wan.helper_calls[0][0] == {"host": "relay.example", "port": 443, "serverName": "relay.example"}
+    assert _acks(wan)[-1] == {"requestNonce": WAN_NONCE, "action": RELAY_SET, "status": "applied"}
+    assert wan.runtime._link_runtime_settings().remote_access_enabled is False
+    assert wan.runtime.settings.get("link.remote_access_enabled") is False
+
+    # A rejected request changes nothing: the saved endpoint stays.
+    wan.events.clear()
+    wan.action(RELAY_SET, data)
+    assert wan.link.calls == [("relay", ("endpoint", "relay.example", 443))]
+    assert wan.last("link_error") == {"action": RELAY_SET, "code": code}
+    if data.get("requestNonce") == WAN_NONCE:
+        assert _acks(wan) == [{"requestNonce": WAN_NONCE, "action": RELAY_SET, "status": "refused", "code": code}]
+    else:
+        assert _acks(wan) == []
+
+    # A quarantined link refuses a new endpoint; an explicit clear is allowed even with remote off.
+    wan.link.monitor.quarantined = True
+    wan.action(RELAY_SET, {"host": "relay.example", "port": 444, "requestNonce": WAN_NONCE})
+    assert wan.last("link_error") == {"action": RELAY_SET, "code": "quarantined"}
+    wan.action(RELAY_SET, {"clear": True, "requestNonce": WAN_NONCE})
+    assert wan.link.calls[-1] == ("relay", None)
+    assert _acks(wan)[-1] == {"requestNonce": WAN_NONCE, "action": RELAY_SET, "status": "applied"}
+
+
+def test_wan_remote_grant_requires_opt_in_relay_and_security_and_nonrevoked_device(wan):
+    def refused(code: str) -> None:
+        assert wan.last("link_error") == {"action": REMOTE, "code": code}
+        assert _acks(wan)[-1] == {"requestNonce": WAN_NONCE, "action": REMOTE, "status": "refused", "code": code}
+        assert not [call for call in wan.link.calls if call[0] == "remote"]
+
+    _remote_on(wan)
+    refused("remote_access_off")  # global setting off (default)
+    wan.runtime.settings.set("link.remote_access_enabled", True)
+    _remote_on(wan)
+    refused("remote_access_off")  # still off: the local link itself is off
+    wan.enable()
+    _remote_on(wan)
+    refused("relay_not_configured")
+    wan.link.relay = ("endpoint", "relay.example", 443)
+    wan.link.monitor.remote_allowed = False
+    _remote_on(wan)
+    refused("quarantined")
+    wan.link.monitor.remote_allowed = True
+    _remote_on(wan, device=REVOKED)
+    refused("device_revoked")
+    _remote_on(wan, device="aaaaaaaaaaaaaaaa")
+    refused("unknown_device")
+    for days in (0, 366, True, 30.0, None, "30"):
+        _remote_on(wan, days=days)
+        refused("invalid_request")
+
+    _remote_on(wan, days=30)
+    assert wan.link.calls == [("remote", DEVICE, True, 30)]
+    assert _acks(wan)[-1] == {"requestNonce": WAN_NONCE, "action": REMOTE, "status": "applied"}
+    assert wan.last("link_status") is not None  # the existing view refresh still follows
+
+
+def test_wan_operation_ack_correlates_and_revoke_off_remain_available(wan):
+    # Remote off and quarantined: switching a phone off and revoking it still work, old callers included.
+    wan.link.monitor.remote_allowed = False
+    wan.link.monitor.quarantined = True
+    wan.action(REMOTE, {"deviceId": DEVICE, "enabled": False})
+    wan.action(REVOKE, {"deviceId": DEVICE})
+    assert wan.link.calls == [("remote", DEVICE, False, None), ("revoke", DEVICE)]
+    assert _acks(wan) == []  # no nonce: legacy behaviour, view events only
+    assert wan.last("link_error") is None
+
+    other = "x" * 32
+    wan.action(REMOTE, {"deviceId": DEVICE, "enabled": False, "requestNonce": WAN_NONCE})
+    wan.action(REVOKE, {"deviceId": DEVICE, "requestNonce": other})
+    assert _acks(wan) == [{"requestNonce": WAN_NONCE, "action": REMOTE, "status": "applied"},
+                          {"requestNonce": other, "action": REVOKE, "status": "applied"}]
+    wan.action(REVOKE, {"deviceId": "aaaaaaaaaaaaaaaa", "requestNonce": other})
+    assert _acks(wan)[-1] == {"requestNonce": other, "action": REVOKE, "status": "refused", "code": "unknown_device"}
+    assert wan.last("link_error") == {"action": REVOKE, "code": "unknown_device"}
+
+    # An unsafe nonce is never echoed; a mutation with one is refused before acting.
+    before = list(wan.link.calls)
+    wan.events.clear()
+    wan.action(REVOKE, {"deviceId": DEVICE, "requestNonce": "<script>"})
+    assert wan.link.calls == before and _acks(wan) == []
+    assert wan.last("link_error") == {"action": REVOKE, "code": "invalid_request"}
+    # Every acknowledgement holds only the tracking fields: no endpoint, PEM, key or exception text.
+    for ack in _acks(wan):
+        assert set(ack) <= {"requestNonce", "action", "status", "code"}
+
+
+def test_wan_opt_in_defaults_off_and_reloads_local_link(bridge):
+    from core.settings_service import InvalidSettingValue
+
+    runtime = bridge.runtime
+    assert runtime.settings.get("link.remote_access_enabled") is False
+    assert runtime._link_runtime_settings().remote_access_enabled is False
+    with pytest.raises(InvalidSettingValue):
+        runtime.settings.set("link.remote_access_enabled", "yes")
+    runtime.settings.set("link.remote_access_enabled", True)
+    assert runtime._link_runtime_settings().remote_access_enabled is False  # the local link is off
+    bridge.enable()
+    assert runtime._link_runtime_settings().remote_access_enabled is True
+
+    class Restartable(FakeLink):
+        def __init__(self, settings) -> None:
+            super().__init__()
+            self.settings = settings
+            self.stops = 0
+
+        def stop(self) -> None:
+            self.stops += 1
+
+        def start(self) -> bool:
+            return False
+
+    runtime.settings.set("link.remote_access_enabled", False)
+    link = Restartable(runtime._link_runtime_settings())
+    runtime._link_runtime = link
+    runtime.settings.set("link.remote_access_enabled", True)
+    runtime.apply_device_link_settings()  # the existing reload path restarts the link on this change
+    assert link.stops == 1 and link.settings.remote_access_enabled is True
+    runtime.apply_device_link_settings()  # unchanged: no restart
+    assert link.stops == 1
+    # No link action can switch the global setting.
+    bridge.action("qronos.link_relay_set", {"clear": True, "requestNonce": WAN_NONCE})
+    bridge.action("qronos.link_remote", {"deviceId": DEVICE, "enabled": False})
+    assert runtime.settings.get("link.remote_access_enabled") is True

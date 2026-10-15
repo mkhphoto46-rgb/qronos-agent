@@ -335,6 +335,16 @@ function App() {
       (error) => {
         console.error("[Qronos Device Link] request not confirmed:", error);
       },
+      undefined, // random: the controller's default
+      undefined, // clock: the controller's default
+      // The global "access from outside" opt-in, through the same local settings save and reload.
+      async (enabled) => {
+        await setSetting("link.remote_access_enabled", enabled);
+        const status = await invoke<{ running: boolean }>("get_runtime_status");
+        if (status.running) {
+          await invoke("send_runtime_action", { actionId: "qronos.settings_reload" });
+        }
+      },
     );
   }
 

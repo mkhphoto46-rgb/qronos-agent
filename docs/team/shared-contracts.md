@@ -30,6 +30,33 @@ Spawning (`start_runtime`) is never "ready". The person sees only fixed Persian 
 error, one attempt at a time. It only checks, starts or pings the runtime: it never replays a user action and never
 starts inference or a microphone. Late results of an older attempt, or of a disposed view, are ignored.
 
+## Device Link WAN wiring (A90 with C; approved interface 2026-10-16)
+
+- Setting `link.remote_access_enabled` (bool, default false), changed only at this PC through the settings
+  save/reload. It is effective only with `link.enabled`; `_link_runtime_settings` passes their conjunction.
+- `qronos.link_relay_set`:
+  - set is `{host, port, serverName?, caPem?, requestNonce}`, with exact keys and bounded types: host and serverName
+    at most 253 characters, port an int 1..65535, caPem at most 16 KiB of UTF-8, and never a CA path or key;
+  - clear is `{clear: true, requestNonce}`;
+  - C's `relay_endpoint_from_request(data, data_dir)` validates the request and stages it before any save;
+  - saving while remote access is off is stored, never dialled;
+  - a quarantined link refuses a new endpoint; clearing is always allowed.
+- `qronos.link_remote`:
+  - on is `{deviceId, enabled: true, days: int 1..365, requestNonce}`. It needs the setting, a configured relay,
+    `monitor.remote_admission().allowed` and an unrevoked device;
+  - off is `{deviceId, enabled: false, requestNonce?}` and is always allowed;
+  - `qronos.link_revoke` is `{deviceId, requestNonce?}`;
+  - older callers without a nonce are unchanged.
+- `link_operation_result`:
+  - `{requestNonce, action, status: "applied" | "refused", code?}` is emitted once per mutation that carried a safe
+    nonce, after the actual commit or refusal;
+  - the nonce correlates; it grants nothing;
+  - codes: invalid_request, relay_invalid, quarantined, remote_access_off, relay_not_configured, device_revoked,
+    unknown_device, failed;
+  - `link_status`/`link_devices` only refresh the view, and `link_error` stays as before.
+- Not done by this wiring: deployment, a relay operator or certificate, a live remote enable, or real-phone LAN/WAN
+  acceptance.
+
 ## ApprovalLedger (`core/approval_ledger.py`)
 
 These are single-use identities for prompts that wait on a person (screen read, Paint, file actions):

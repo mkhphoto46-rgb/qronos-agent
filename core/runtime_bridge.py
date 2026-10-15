@@ -3703,11 +3703,15 @@ class QronosRuntime:
         """The link's switches and files, read now (tests move CONFIG's roots)."""
         from core.link_runtime import LinkRuntimeSettings
 
+        link_enabled = self.settings.get("link.enabled") is True
+
         return LinkRuntimeSettings(
-            link_enabled=self.settings.get("link.enabled") is True,
-            # Off until the Link worker's WAN gate is accepted: no relay is
-            # dialled and no phone outside this network is served.
-            remote_access_enabled=False,
+            link_enabled=link_enabled,
+            # The person's explicit, default-off opt-in at this PC, effective only
+            # with the local link on. Off: no relay is dialled and no phone outside
+            # this network is served. No phone and no link action can change it.
+            remote_access_enabled=link_enabled
+            and self.settings.get("link.remote_access_enabled") is True,
             device_path=Path(CONFIG.paths.data) / "link_devices.json",
             audit_path=Path(CONFIG.paths.logs) / "link_audit.jsonl",
             relay_path=Path(CONFIG.paths.data) / "link_relay.json",
@@ -10675,15 +10679,22 @@ class LinkRequestError(Exception):
 
 
 _LINK_REQUEST_NONCE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+#: The acknowledgement of one nonce-correlated link mutation. The nonce is a tracking ID, never authority.
+LINK_OPERATION_RESULT_EVENT = "link_operation_result"
+_LINK_RELAY_FIELDS = frozenset({"host", "port", "serverName", "caPem"})
+_LINK_HOST_MAX_CHARS = 253
+_LINK_CA_PEM_MAX_BYTES = 16 * 1024
+_LINK_REMOTE_MAX_DAYS = 365
 _LINK_DEVICE_ID = re.compile(r"^[0-9a-f]{16}$")
 _LINK_ACTION_KEYS = {
     LINK_STATUS_ACTION: frozenset(),
     LINK_DEVICES_ACTION: frozenset(),
     LINK_PAIR_OPEN_ACTION: frozenset({"requestNonce", "name"}),
     LINK_PAIR_CANCEL_ACTION: frozenset(),
-    LINK_REVOKE_ACTION: frozenset({"deviceId"}),
-    LINK_REMOTE_ACTION: frozenset({"deviceId", "enabled", "days"}),
-    LINK_RELAY_SET_ACTION: None,  # refused whole until the WAN gate is accepted
+    LINK_REVOKE_ACTION: frozenset({"deviceId", "requestNonce"}),
+    LINK_REMOTE_ACTION: frozenset({"deviceId", "enabled", "days", "requestNonce"}),
+    # {host, port, serverName?, caPem?, requestNonce} or {clear: true, requestNonce}
+    LINK_RELAY_SET_ACTION: _LINK_RELAY_FIELDS | {"clear", "requestNonce"},
     LINK_SECURITY_RESET_ACTION: frozenset(),
 }
 
@@ -10700,6 +10711,134 @@ def _link_request(action_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise LinkRequestError("invalid_request")
 
     return data
+
+
+def _link_operation_nonce(data: dict[str, Any]) -> str | None:
+    """The optional tracking nonce of a link mutation, in the existing safe form; never echoed when unsafe."""
+    if "requestNonce" not in data:
+        return None
+
+    nonce = data["requestNonce"]
+
+    if type(nonce) is not str or not _LINK_REQUEST_NONCE.match(nonce):
+        raise LinkRequestError("invalid_request")
+
+    return nonce
+
+
+def _link_bounded_text(value: Any, limit: int) -> str:
+    if type(value) is not str or not 0 < len(value) <= limit:
+        raise LinkRequestError("invalid_request")
+
+    return value
+
+
+def _link_relay_request(data: dict[str, Any]) -> dict[str, Any] | None:
+    """The exact relay request: its endpoint fields (validated again by the Link's helper), or None to clear."""
+    if "clear" in data:
+        if set(data) != {"clear", "requestNonce"} or data["clear"] is not True:
+            raise LinkRequestError("invalid_request")
+        return None
+
+    if not {"host", "port", "requestNonce"} <= set(data) <= _LINK_RELAY_FIELDS | {"requestNonce"}:
+        raise LinkRequestError("invalid_request")
+
+    _link_bounded_text(data["host"], _LINK_HOST_MAX_CHARS)
+    port = data["port"]
+
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise LinkRequestError("invalid_request")
+
+    if "serverName" in data:
+        _link_bounded_text(data["serverName"], _LINK_HOST_MAX_CHARS)
+
+    if "caPem" in data:
+        ca_pem = data["caPem"]
+        if type(ca_pem) is not str or not 0 < len(ca_pem.encode("utf-8")) <= _LINK_CA_PEM_MAX_BYTES:
+            raise LinkRequestError("invalid_request")
+
+    return {key: data[key] for key in ("host", "port", "serverName", "caPem") if key in data}
+
+
+def _link_set_relay(runtime: QronosRuntime, link: Any, data: dict[str, Any]) -> None:
+    request = _link_relay_request(data)
+
+    if request is None:
+        # Clearing is always allowed, with remote access off or a quarantined link too.
+        link.set_relay_endpoint(None)
+        return
+
+    if link.monitor.status().get("quarantined") is True:
+        raise LinkRequestError("quarantined")
+
+    from core import link_runtime as link_module
+    from core.link_tunnel import RelayConfigError
+
+    try:
+        # The Link's own validation (host/port/TLS name, CERTIFICATE-only CA, safe staged save) before
+        # anything is stored. Saving never dials: the relay is used only with remote access switched on.
+        endpoint = link_module.relay_endpoint_from_request(request, Path(CONFIG.paths.data))
+    except (ValueError, TypeError, RelayConfigError):
+        raise LinkRequestError("relay_invalid") from None
+
+    link.set_relay_endpoint(endpoint)
+
+
+def _link_set_remote(runtime: QronosRuntime, link: Any, data: dict[str, Any], nonce: str | None) -> None:
+    device_id = _link_device_id(data)
+    enabled = data.get("enabled")
+    days = data.get("days")
+
+    if type(enabled) is not bool:
+        raise LinkRequestError("invalid_request")
+
+    if not enabled:
+        # Switching a phone off is always allowed (remote off or quarantined too); old callers send no nonce.
+        if days is not None:
+            raise LinkRequestError("invalid_request")
+        link.set_remote_access(device_id, False)
+        return
+
+    if nonce is None or type(days) is not int or not 1 <= days <= _LINK_REMOTE_MAX_DAYS:
+        raise LinkRequestError("invalid_request")
+
+    if not runtime._link_runtime_settings().remote_access_enabled:
+        raise LinkRequestError("remote_access_off")
+
+    try:
+        relay = link.relay_endpoint()
+    except Exception:  # noqa: BLE001 - an unreadable relay file is not a configured relay
+        relay = None
+
+    if relay is None:
+        raise LinkRequestError("relay_not_configured")
+
+    if not link.monitor.remote_admission().allowed:
+        raise LinkRequestError("quarantined")
+
+    from core.link_devices import UnknownDevice
+
+    try:
+        link.set_remote_access(device_id, True, days)
+    except UnknownDevice:
+        raise LinkRequestError("unknown_device") from None
+    except ValueError:
+        # The registry refuses a revoked device (and never accepts a past expiry).
+        raise LinkRequestError("device_revoked") from None
+
+
+def _link_acknowledge(runtime: QronosRuntime, nonce: str | None, action_id: str, code: str | None = None) -> None:
+    """The actual outcome of one nonce-correlated mutation: tracking fields only, never PEM, keys or exceptions."""
+    if nonce is None:
+        return
+
+    result: dict[str, Any] = {"requestNonce": nonce, "action": action_id,
+                              "status": "applied" if code is None else "refused"}
+
+    if code is not None:
+        result["code"] = code
+
+    runtime._notify(LINK_OPERATION_RESULT_EVENT, "ready" if code is None else "warning", json.dumps(result))
 
 
 def _link_device_id(data: dict[str, Any]) -> str:
@@ -10748,12 +10887,22 @@ def handle_link_action(
     refusal is a typed ``link_error`` carrying a code, never the payload or an
     exception's text. The pairing URI holds the new phone's key: it is sent
     once, tagged with the requesting window's nonce, and never logged or kept.
+
+    Relay set/clear and remote on/off/revoke may carry a ``requestNonce`` (required
+    for the new WAN mutations). It only correlates: their actual outcome is
+    acknowledged once as ``link_operation_result``; the legacy ``link_error`` and the
+    status/devices republish stay as they were.
     """
+    nonce: str | None = None
+
     try:
         data = _link_request(action_id, payload)
 
-        if action_id == LINK_RELAY_SET_ACTION:
-            raise LinkRequestError("remote_unavailable")
+        if action_id in (LINK_RELAY_SET_ACTION, LINK_REMOTE_ACTION, LINK_REVOKE_ACTION):
+            nonce = _link_operation_nonce(data)
+
+        if action_id == LINK_RELAY_SET_ACTION and nonce is None:
+            raise LinkRequestError("invalid_request")
 
         link = runtime._device_link()
 
@@ -10776,18 +10925,9 @@ def handle_link_action(
             # Works with the link off too: a lost phone is revoked at once.
             link.revoke(_link_device_id(data))
         elif action_id == LINK_REMOTE_ACTION:
-            device_id = _link_device_id(data)
-            enabled = data.get("enabled")
-            days = data.get("days")
-
-            if type(enabled) is not bool or days is not None:
-                raise LinkRequestError("invalid_request")
-
-            if enabled:
-                # Remote access needs the WAN gate; switching it off is always allowed.
-                raise LinkRequestError("remote_unavailable")
-
-            link.set_remote_access(device_id, False)
+            _link_set_remote(runtime, link, data, nonce)
+        elif action_id == LINK_RELAY_SET_ACTION:
+            _link_set_relay(runtime, link, data)
         elif action_id == LINK_SECURITY_RESET_ACTION:
             # The person at this PC clears the monitor's latches. Only this
             # desktop action reaches it; nothing on the link can. A link that
@@ -10798,15 +10938,18 @@ def handle_link_action(
             link.reset_security()
     except LinkRequestError as refused:
         runtime._notify("link_error", "warning", json.dumps({"action": action_id, "code": refused.code}))
+        _link_acknowledge(runtime, nonce, action_id, refused.code)
         return
     except Exception as exc:  # noqa: BLE001 - typed for the desktop, details stay here
         from core.link_devices import UnknownDevice
 
         code = "unknown_device" if isinstance(exc, UnknownDevice) else "failed"
         runtime._notify("link_error", "warning", json.dumps({"action": action_id, "code": code}))
+        _link_acknowledge(runtime, nonce, action_id, code)
         return
 
     runtime._publish_link_status()
+    _link_acknowledge(runtime, nonce, action_id)
 
 
 def handle_text_message(

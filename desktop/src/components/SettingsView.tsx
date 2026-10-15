@@ -1517,6 +1517,11 @@ function SettingsView({ phase, onClose, onOpenPermissions, deviceLink }: Setting
       onCancelPairing={() => void deviceLink.cancelPairing()}
       onRevoke={(deviceId) => void deviceLink.revoke(deviceId)}
       onRemoteOff={(deviceId) => void deviceLink.remoteOff(deviceId)}
+      remoteEnabled={settingsState.values["link.remote_access_enabled"] === true}
+      onSetRemoteEnabled={(enabled) => void deviceLink.setRemoteEnabled(enabled)}
+      onRelaySet={(relay) => void deviceLink.relaySet(relay)}
+      onRelayClear={() => void deviceLink.relayClear()}
+      onRemoteOn={(deviceId, days) => void deviceLink.remoteOn(deviceId, days)}
       onResetSecurity={() => void deviceLink.resetSecurity()}
       onTick={deviceLink.tick}
       onDismissError={deviceLink.dismissError}
