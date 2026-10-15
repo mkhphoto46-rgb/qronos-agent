@@ -137,6 +137,14 @@ NETWORK_EXCEPTIONS = {
         "Opt-in outbound Device Link relay dialler to a user-configured relay; carries only "
         "end-to-end TLS-PSK link traffic; no content fetch or inference.",
     ),
+    # Root-reviewed 2026-10-16 (A101): part of the existing default-off paired Device Link relay boundary, not a
+    # new internet grant.
+    "core.link_runtime": (
+        {"ssl"},
+        "Relay CA parsing only: ssl.create_default_context(cadata=<bounded certificate-only PEM text>) and "
+        "cert_store_stats() in _certificate_pem; no socket, client, requests or dial in this module "
+        "(dialling stays in core.link_tunnel).",
+    ),
 }
 # Approved exceptions whose module has not landed yet. Remove once it exists.
 PENDING_EXCEPTIONS: set[str] = set()
@@ -338,7 +346,7 @@ def test_every_network_exception_is_exact_and_justified():
         assert len(why) > 30, module
     # Device Link is the only internet exception; the sidecars are loopback-only.
     assert {m for m, (f, _) in NETWORK_EXCEPTIONS.items() if "ssl" in f} == {
-        "core.link_client", "core.link_server", "core.link_transport", "core.link_tunnel",
+        "core.link_client", "core.link_server", "core.link_transport", "core.link_tunnel", "core.link_runtime",
     }
     assert PENDING_EXCEPTIONS <= set(NETWORK_EXCEPTIONS)
 

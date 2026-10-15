@@ -318,6 +318,8 @@ def test_reason_is_fixed_vocabulary_and_first_cancellation_wins():
 
 
 def test_cancel_interrupts_bootstrap_lock_wait_without_starting_any_process(monkeypatch):
+    # The start below is faked; auto-start is set here so the test does not depend on the parent environment.
+    monkeypatch.setenv(ollama_controller.OLLAMA_AUTO_START_ENV, "1")
     lock = threading.Lock()
     lock.acquire()
     monkeypatch.setattr(ollama_controller, "_BOOTSTRAP_LOCK", lock)
@@ -343,6 +345,8 @@ def test_cancel_interrupts_bootstrap_lock_wait_without_starting_any_process(monk
 
 
 def test_cancel_interrupts_bootstrap_poll_wait_with_fake_process(monkeypatch):
+    # The start below is faked; auto-start is set here so the test does not depend on the parent environment.
+    monkeypatch.setenv(ollama_controller.OLLAMA_AUTO_START_ENV, "1")
     controller = OllamaController()
     monkeypatch.setattr(controller, "_probe", Mock(return_value=False))
     monkeypatch.setattr(controller, "_resolve_local_executable", lambda: "synthetic-local-executable")

@@ -51,7 +51,7 @@ bundles no model assets, so the review installer above is unaffected.
   or the benchmark child.
 - It ran with `QRONOS_RUN_LIVE_DEVICE_TESTS=0`, so the live-device nodes skip.
 - Result: exit 1. 6594 passed, 26 failed, 111 skipped, 1577 subtests passed, in 551 s.
-- The failures are **not yet resolved**. They have five causes:
+- The failures had five causes:
   - **7, the artwork check:** the checkout's working copy of `desktop/public/tauri.svg` has CRLF line endings
     instead of the committed LF bytes.
   - **14, PDF reports:** the pinned `fpdf2==2.8.9` is missing from the fixture environment.
@@ -63,11 +63,20 @@ bundles no model assets, so the review installer above is unaffected.
     reviewed exception.
 - The full list is in the A100 report, a working record outside the repository.
 
+**Repairs:**
+- **A101 (4 of the 26):** each of the 3 Ollama tests now sets auto-start itself; its start stays faked and the
+  guards are unchanged. The network policy gains an exact `core.link_runtime -> {ssl}` entry for relay CA parsing.
+  - Focused check: 5 nodes, run with `QRONOS_OLLAMA_AUTO_START=0` in the parent environment.
+  - Result: exit 0, 5 passed.
+  - No product code changed.
+- **C101 (the other 22):** the artwork, PDF and stale-asset repairs are **pending** until Root confirms them.
+- The broad gate has not been rerun after these repairs.
+
 **Desktop:**
 - `npm test`: exit 0, 183 of 183 passed across the 12 node unit-test files (A100). They ran on byte-identical
   desktop sources.
 - TypeScript typecheck, Vite build and the Rust release build: compiled by the C95 installer build on `1755aa52`.
-- `cargo test` (74 Rust tests) has not been run. Those tests start child processes and were not side-effect audited.
+- Rust unit tests (C99): 72 passed and 2 ignored, using the local Rust 1.98.0. CI pins 1.98.1.
 
 **Android:**
 - The Gradle linkcore vector tests are reused; the linkcore tree is unchanged.
@@ -79,8 +88,8 @@ bundles no model assets, so the review installer above is unaffected.
 
 ## Not verified (explicit limits)
 
-- **Open failures:** the 26 broad-gate failures above.
-- **Excluded tests:** the 13 excluded Python files and the Rust unit tests.
+- **Open failures:** the 22 broad-gate failures C101 is repairing, pending Root's confirmation.
+- **Excluded tests:** the 13 excluded Python files. The 2 ignored Rust tests did not run.
 - **Deferred:** human and live tests on the PC, phone, GPU, microphone, devices and user archives.
 - **Provisioning:** runtime model assets are provisioned separately and are not bundled.
 - **External:**
