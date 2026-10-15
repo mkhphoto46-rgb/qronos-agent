@@ -29,10 +29,14 @@ Each PR is based on the one before it. All of them are open; none is merged to `
 **Product freeze:** `1755aa52`. The fresh unsigned review installer was built from this commit and passed a static
 peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.py`.
 
-**Pending publication:** `27c424a` (C97). It corrects the runtime asset registry
-(`build_support/runtime_assets.json`, which registers the cached SigLIP 2 files as verified) and
-`docs/qronos_project_context.md`. It is not yet in a PR. It changes no Python, desktop or Rust code. The installer
-bundles no model assets, so the review installer above is unaffected.
+**Composed after the freeze** (`2d92e8b`, integrated by Root):
+- C97 `27c424a`: the runtime asset registry (`build_support/runtime_assets.json`) registers the cached SigLIP 2
+  files as verified. It also corrects `docs/qronos_project_context.md`.
+- A0 and A101: this document, plus the test fixture and network inventory repairs.
+- C98, C99 and C101: the delivery-gates doc, the Rust receipt and one test.
+- Product Python, TypeScript and Rust code is unchanged from `1755aa52`. The only packaged change is the asset
+  registry JSON.
+- The installer bundles no model weights.
 
 ## Ownership
 
@@ -69,14 +73,21 @@ bundles no model assets, so the review installer above is unaffected.
   - Focused check: 5 nodes, run with `QRONOS_OLLAMA_AUTO_START=0` in the parent environment.
   - Result: exit 0, 5 passed.
   - No product code changed.
-- **C101 (the other 22):** the artwork, PDF and stale-asset repairs are **pending** until Root confirms them.
-- The broad gate has not been rerun after these repairs.
+- **C101 (the other 22):** focused follow-up, 22 passed (accepted by Root).
+- Root causes resolved:
+  - the checkout's `tauri.svg` was restored to the committed 2599-byte blob (no source change);
+  - the pinned PDF dependencies were installed in the fixture environment;
+  - the image-embedding test now expects the verified SigLIP 2 entries with exactly the publisher pins.
+- The pinned `defusedxml`: C102 completes its notice metadata only.
+- All 26 originally failed node IDs are covered by these focused follow-ups (A101 also ran one extra policy check).
+  The 26 failures above remain the record of A100.
+- The broad gate has **not** been rerun, so there is no broad or full pass claim.
 
 **Desktop:**
 - `npm test`: exit 0, 183 of 183 passed across the 12 node unit-test files (A100). They ran on byte-identical
   desktop sources.
 - TypeScript typecheck, Vite build and the Rust release build: compiled by the C95 installer build on `1755aa52`.
-- Rust unit tests (C99): 72 passed and 2 ignored, using the local Rust 1.98.0. CI pins 1.98.1.
+- Rust unit tests (C99): 72 passed, 0 failed, 2 ignored, using the local Rust 1.98.0. CI pins 1.98.1.
 
 **Android:**
 - The Gradle linkcore vector tests are reused; the linkcore tree is unchanged.
@@ -88,10 +99,15 @@ bundles no model assets, so the review installer above is unaffected.
 
 ## Not verified (explicit limits)
 
-- **Open failures:** the 22 broad-gate failures C101 is repairing, pending Root's confirmation.
-- **Excluded tests:** the 13 excluded Python files. The 2 ignored Rust tests did not run.
+- **No broad-gate rerun:** the gate has not been rerun since A100; the fixes were checked by focused nodes only.
+- **Excluded tests:** the 13 excluded Python files and the live-device nodes. The 2 ignored Rust tests did not run.
 - **Deferred:** human and live tests on the PC, phone, GPU, microphone, devices and user archives.
-- **Provisioning:** runtime model assets are provisioned separately and are not bundled.
+- **Provisioning:**
+  - Runtime model assets are provisioned separately and are not bundled.
+  - In the registry: the 3 SigLIP 2 files are verified against publisher hashes, the 2 wake assets are missing,
+    and the 2 voice assets are unverified.
+  - C100: the original wake model was not found in the authoritative sources or the targeted local locations. No
+    generic replacement was substituted.
 - **External:**
   - no genuine Authenticode signing, reviewed trusted root, update key or signing receipt;
   - the relay is not deployed;
@@ -101,5 +117,9 @@ bundles no model assets, so the review installer above is unaffected.
 
 ## This document
 
-This is a docs-only commit on top of `27c424a`. The tests and builds above ran on `27c424a` (Python) and `1755aa52`
-(desktop and installer). A docs-only change does not invalidate them.
+The latest update is a docs-only commit on top of the composed `2d92e8b`. The tests and builds above ran on:
+- `27c424a`: the Python broad gate;
+- A101, C101 and C99: their own focused follow-up checks;
+- `1755aa52`: the desktop and installer builds.
+
+A docs-only change does not invalidate them.
