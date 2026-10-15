@@ -1,0 +1,14 @@
+.runtime-connection { position: fixed; top: 60px; left: 20px; z-index: 110; max-width: min(360px, calc(100vw - 40px)); display: flex; align-items: center; gap: 10px; border: 1px solid #446374; border-radius: 16px; background: #0c1726ed; color: #c9e4f0; padding: 7px 14px; font: inherit; font-size: 13px; line-height: 1.7; }
+.runtime-connection-text { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.runtime-connection-dot { width: 8px; height: 8px; border-radius: 50%; background: #6fb6d8; flex: none; }
+.runtime-connection-connecting .runtime-connection-dot { animation: runtime-connection-pulse 1.4s ease-in-out infinite; }
+.runtime-connection-ready { opacity: .78; }
+.runtime-connection-ready .runtime-connection-dot { background: #6fd8a4; }
+.runtime-connection-failed, .runtime-connection-degraded { color: #ffdb91; border-color: #956d31; }
+.runtime-connection-failed .runtime-connection-dot, .runtime-connection-degraded .runtime-connection-dot { background: #ffb44d; }
+.runtime-connection-detail { color: #a9bccb; flex-basis: 100%; }
+.runtime-connection button { background: #152b40; border: 1px solid #496276; border-radius: 8px; color: #d7ebf8; padding: 4px 11px; cursor: pointer; flex: none; }
+.runtime-connection button:disabled { opacity: .6; cursor: default; }
+@keyframes runtime-connection-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .runtime-connection-connecting .runtime-connection-dot { animation: none; } }
+@media (max-width: 600px) { .runtime-connection { top: 50px; left: 10px; max-width: calc(100vw - 20px); } }

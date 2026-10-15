@@ -56,6 +56,13 @@ import LibraryView from "./components/LibraryView";
 import PermissionsView from "./components/PermissionsView";
 import SettingsView from "./components/SettingsView";
 import SetupStatus from "./components/SetupStatus";
+import RuntimeConnectionStatus from "./components/RuntimeConnectionStatus";
+import {
+  createRuntimeConnection,
+  RUNTIME_CONNECTION_INITIAL,
+  type RuntimeConnection,
+  type RuntimeConnectionView,
+} from "./runtimeConnection";
 import { setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
@@ -303,6 +310,14 @@ function App() {
   }
 
   const workflowApproval = workflowApprovalRef.current;
+
+  // The local runtime's connection state (connecting / ready / failed / degraded) and its one safe retry.
+  const [runtimeConnection, setRuntimeConnection] =
+    useState<RuntimeConnectionView>(RUNTIME_CONNECTION_INITIAL);
+  const runtimeConnectionRef = useRef<RuntimeConnection | null>(null);
+  const retryRuntimeConnection = useCallback(() => {
+    runtimeConnectionRef.current?.retry();
+  }, []);
 
   // The Device Link page: one controller, fed by link_* runtime events.
   const deviceLinkRef = useRef<DeviceLinkController | null>(null);
@@ -1360,6 +1375,46 @@ function App() {
       | (() => void)
       | undefined;
 
+    // Only the first check sends the existing idempotent Wake start to an already running runtime (a new runtime
+    // starts Wake itself on runtime_ready). A retry only re-checks, starts or pings the runtime.
+    let wakeOnRunning = true;
+    const connection = createRuntimeConnection({
+      probe: async () => {
+        const status = await invoke<{ running: boolean }>(
+          "get_runtime_status",
+        );
+        const firstCheck = wakeOnRunning;
+        wakeOnRunning = false;
+
+        if (!status.running) {
+          await invoke("start_runtime");
+          return "spawned";
+        }
+
+        if (firstCheck) {
+          // A runtime that was already alive may have emitted runtime_ready before this effect subscribed.
+          await invoke("send_runtime_action", {
+            actionId: "qronos.wake_listener_start",
+          }).catch((error) => {
+            console.error(
+              "[Qronos Wake Word] startup failed:",
+              error,
+            );
+          });
+        }
+        return "running";
+      },
+      ping: async () => {
+        await invoke("ping_runtime");
+      },
+      onChange: (view) => {
+        if (!disposed) {
+          setRuntimeConnection(view);
+        }
+      },
+    });
+    runtimeConnectionRef.current = connection;
+
     const connectRuntimeActions = async () => {
       type RuntimeEvent = {
         eventType: string;
@@ -1391,6 +1446,9 @@ function App() {
                 event.payload,
               );
             }
+
+            // runtime_ready / runtime_pong / runtime_error / runtime_stopping update the visible connection state.
+            connection.handleEvent(event.payload.eventType);
 
             // Screen/Paint prompts, their revocation and the end of the
             // runtime that asked them. Never blocks this handler.
@@ -1959,42 +2017,9 @@ function App() {
           },
         );
 
-      const ensureWakeRuntime =
-        async () => {
-          const status =
-            await invoke<RuntimeStatus>(
-              "get_runtime_status",
-            );
-
-          if (!status.running) {
-            await invoke<RuntimeStatus>(
-              "start_runtime",
-            );
-
-            // The newly spawned runtime will start Wake when it emits
-            // runtime_ready. Do not race startup by sending the action here.
-            return;
-          }
-
-          // A runtime that was already alive may have emitted runtime_ready
-          // before this React effect subscribed. Start Wake directly in that
-          // case. The backend start operation is idempotent.
-          await invoke(
-            "send_runtime_action",
-            {
-              actionId:
-                "qronos.wake_listener_start",
-            },
-          );
-        };
-
-      void ensureWakeRuntime()
-        .catch((error) => {
-          console.error(
-            "[Qronos Wake Word] startup failed:",
-            error,
-          );
-        });
+      // Startup is visible: connecting until the bridge answers (runtime_ready or runtime_pong), failed with a
+      // safe Persian message and a retry otherwise. A spawned process alone is not "ready".
+      void connection.start();
 
       const handleRuntimeAction = async (
         event: Event,
@@ -2089,6 +2114,10 @@ function App() {
 
     return () => {
       disposed = true;
+      connection.dispose();
+      if (runtimeConnectionRef.current === connection) {
+        runtimeConnectionRef.current = null;
+      }
       removeWindowListener?.();
       unlistenRuntime?.();
     };
@@ -2483,6 +2512,10 @@ function App() {
 
       <RightTelemetryPanel />
       <SetupStatus />
+      <RuntimeConnectionStatus
+        view={runtimeConnection}
+        onRetry={retryRuntimeConnection}
+      />
 
       {/* The Smart Queue: queued requests, their progress and outcomes,
           with hold/pause/resume/cancel. Its hold is the queue's own and is
