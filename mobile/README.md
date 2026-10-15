@@ -66,9 +66,31 @@ Protocol core, on any machine with JDK 17+ and Gradle 9.1+:
 gradle -p mobile/android -Pqronos.withApp=false :linkcore:test
 ```
 
-The app, through Gradle, needs the Android SDK (platform 36, build-tools 36)
-and a `local.properties` with `sdk.dir`, then `gradle -p mobile/android
-:app:assembleDebug`.
+The Gradle wrapper is committed and pinned: Gradle 9.8.1, with
+`distributionSha256Sum` equal to the official
+`gradle-9.8.1-bin.zip.sha256`, and `gradle-wrapper.jar` equal to the official
+`gradle-9.8.1-wrapper.jar.sha256`. It needs only a JDK 17+ (`JAVA_HOME`):
+`mobile/android/gradlew -p mobile/android ...`.
+
+The app, through the standard Gradle build, needs the Android SDK packages
+pinned in `android/buildcheck/sdk-packages.json`:
+
+- `platforms;android-36`;
+- `build-tools;36.0.0` (the default of AGP 9.4.1);
+- `cmdline-tools` for sdkmanager.
+
+They go in a private SDK folder (`E:/qronos-toolchains/android-sdk`), with no
+global PATH change. They are under the **Android SDK License Agreement**, which
+only the owner may accept. `android/buildcheck/sdk_setup.py` never accepts it.
+Its steps are:
+
+1. `plan`;
+2. `fetch` (official archives, size and SHA-1 checked);
+3. `licences` (the owner answers sdkmanager's prompt);
+4. `install`.
+
+Then, with `ANDROID_HOME` set for that one command:
+`mobile/android/gradlew -p mobile/android :app:assembleDebug`.
 
 Without the SDK, as evidence (every tool open-source, no licence to accept;
 the list and versions are in the script's docstring):
@@ -79,8 +101,8 @@ python mobile/android/buildcheck/check_without_sdk.py --jdk <jdk> --kotlinc <kot
 ```
 
 It produces an **unsigned** APK, which cannot be installed. Signing,
-installing and distributing are separate steps that have not been taken. No Gradle wrapper jar is committed; run `gradle wrapper`
-once to create one. The app is unsigned; signing and distribution are separate,
+installing and distributing are separate steps that have not been taken. It is evidence,
+not a replacement for the standard Gradle APK. The app is unsigned; signing and distribution are separate,
 unauthorised steps.
 
 Interop check (needs the core compiled, its test classes, kotlin-stdlib,

@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "comment": "The Android SDK packages the standard Gradle build of mobile/android needs (AGP 9.4.1: compileSdk 36; its DEFAULT_BUILD_TOOLS_REVISION is 36.0.0, read from com.android.builder.core.ToolsRevisionUtils in builder-9.4.1.jar). Archive URLs, sizes and SHA-1 values are copied from Google's official repository metadata. Every package is under the Android SDK License Agreement, which only the owner may accept (sdkmanager --licenses). Nothing here accepts it.",
+ "repositoryMetadata": {
+  "url": "https://dl.google.com/android/repository/repository2-3.xml",
+  "readOn": "2026-10-15",
+  "sha256AtRead": "237eefe28e55619d3e63d730f8994cc1ae6d9c171096f07a6c147297145787e6"
+ },
+ "licence": {
+  "id": "android-sdk-license",
+  "source": "repository2-3.xml <license id=\"android-sdk-license\">, also shown by sdkmanager --licenses",
+  "textSha256": "1f8729233617b193fd619213792ae16a41b95d2bbbf525dfe66998252ba68b16",
+  "textChars": 16962,
+  "status": "NOT ACCEPTED: pending the owner's decision"
+ },
+ "sdkRoot": "E:/qronos-toolchains/android-sdk",
+ "archiveCache": "E:/qronos-toolchains/android-sdk-archives",
+ "packages": {
+  "cmdline-tools;latest": {
+   "revision": "23.0",
+   "displayName": "Android SDK Command-line Tools (latest)",
+   "url": "https://dl.google.com/android/repository/commandlinetools-win-16111833_latest.zip",
+   "size": 154957218,
+   "sha1": "57d04f2d75eb8e8fffc5000a987e5de4b5a63e9d",
+   "use": "sdkmanager: the owner accepts the licence with it and it installs the two packages below"
+  },
+  "platforms;android-36": {
+   "revision": "2",
+   "displayName": "Android SDK Platform 36",
+   "url": "https://dl.google.com/android/repository/platform-36_r02.zip",
+   "size": 65878410,
+   "sha1": "2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576"
+  },
+  "build-tools;36.0.0": {
+   "revision": "36.0.0",
+   "displayName": "Android SDK Build-Tools 36",
+   "url": "https://dl.google.com/android/repository/build-tools_r36_windows.zip",
+   "size": 58699878,
+   "sha1": "f16ccffd34de8790dede813a6c7d8e2c11a27b50"
+  }
+ }
+}
