@@ -1,8 +1,8 @@
 """
 The phone app's contract with the PC, checked from the PC's side.
 
-The Android app cannot be built here (no Android SDK; see mobile/README.md),
-so what can be checked without it is checked here, against the sources:
+These checks need no Android SDK or Gradle run (the standard build is
+documented in mobile/README.md), so they hold against the sources alone:
 
     the protocol vectors the phone's tests read are exactly what the PC's
     Python code produces, and every case agrees with the PC's own parser;
@@ -17,6 +17,7 @@ the two sides from drifting apart without anyone compiling the phone.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unittest
@@ -185,17 +186,29 @@ class TestPhoneConstantsMatchThePc(unittest.TestCase):
         self.assertNotIn("psk_ke)", tls.replace("psk_dhe_ke)", ""))
 
 
+#: The one binary allowed under mobile/: the official Gradle 9.8.1 wrapper jar, pinned by its published SHA-256.
+GRADLE_WRAPPER = ("mobile/android/gradle/wrapper/gradle-wrapper.jar",
+                  "3b8a25775a69158b5ad2b1d17a80a88dc7b40a352a73eb27d06c612a7ce68e98")
+
+
 class TestNothingHeavyInTheApp(unittest.TestCase):
     def test_no_model_or_binary_files_are_committed_under_mobile(self) -> None:
         forbidden = {".onnx", ".gguf", ".bin", ".tflite", ".pt", ".apk", ".aab", ".jar", ".so", ".keystore", ".jks"}
-        offenders = [
-            path.relative_to(ROOT).as_posix()
+        found = [
+            path
             for path in MOBILE.rglob("*")
             if path.is_file()
             and "build" not in path.relative_to(MOBILE).parts
             and ".gradle" not in path.relative_to(MOBILE).parts
             and path.suffix.lower() in forbidden
         ]
+        wrapper_path, wrapper_sha256 = GRADLE_WRAPPER
+        offenders = []
+        for path in found:
+            relative = path.relative_to(ROOT).as_posix()
+            if relative == wrapper_path and hashlib.sha256(path.read_bytes()).hexdigest() == wrapper_sha256:
+                continue  # exactly the pinned official wrapper; any other bytes there are an offender
+            offenders.append(relative)
 
         self.assertEqual(offenders, [])
 
