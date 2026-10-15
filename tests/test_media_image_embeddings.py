@@ -355,8 +355,9 @@ def test_the_declared_encoder_is_a_separate_cpu_model_with_the_publisher_pins():
     entries = {e["path"]: e for e in registry["assets"]}
     for asset in (spec.weights, *spec.companions):
         entry = entries["runtime/" + "/".join(asset.parts)]
-        # Not acquired: no identity is claimed until an approved acquisition is re-hashed equal to the pin.
-        assert entry["status"] == "missing" and "sha256" not in entry and asset.sha256 in entry["evidence"]
+        # Verified only as the immutable publisher identity, which is exactly the pin (C97 registered it).
+        assert entry["status"] == "verified" and (entry["bytes"], entry["sha256"]) == (asset.size, asset.sha256)
+        assert asset.sha256 in entry["evidence"]
         assert ie.ONNX_REVISION in entry["source"] and "owner-review-required" in entry["licence"]
     assert ie.fingerprint().startswith("siglip2-b16-224-int8:") and ie.fingerprint() == ie.fingerprint(spec)
 
