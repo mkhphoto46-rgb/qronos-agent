@@ -55,8 +55,8 @@ Assets are never bundled. They live under `<LocalAppData>/Qronos/RuntimeAssets` 
 | Voice assets identity | unverified | owner / Track C | provide a publisher identity (size and SHA-256) or accept them as unverified |
 | Genuine signing | none: no certificate, provider, trust root, update key or same-artifact signing receipt. Free-signing preparation is in `docs/signing` | owner | choose a provider and certificate; then one signing receipt on the exact artifact |
 | Publication | the GitHub repository is private; no worker has authority to publish | owner | decide visibility and release |
-| CI | hosted Actions billing is unresolved; CI runs `cargo check --locked --all-targets` with 1.98.1 but no `cargo test` | owner (billing), Root | restore billing; Rust tests: see below |
-| Rust 1.98.1 | not installed locally; local evidence is 1.98.0 | Root / owner | approve installing the pinned toolchain, or accept 1.98.0 evidence as local only |
+| CI | hosted Actions billing is unresolved; CI runs `cargo check --locked --all-targets` with 1.98.1 but no `cargo test` | owner (billing), Root | restore billing; the Rust unit tests passed locally on 1.98.0 (see below) |
+| Rust 1.98.1 | not installed locally; the local unit-test pass (72/0/2 ignored) is on 1.98.0 | Root / owner | approve installing the pinned toolchain for a CI-equal run, or accept the 1.98.0 evidence as local only |
 | Device Link relay | no operator, host, TLS certificate or deployment authority; WAN is default off | owner | name the operator and host; then a deployment review |
 | Human and device tests | deferred: real-phone LAN/WAN, clean-Windows install/upgrade/uninstall, voice quality and resource use | owner (human tester) | schedule them on the exact artifacts above |
 
@@ -79,24 +79,22 @@ Classified from source:
 - **Real runtime, never by default**: `service_ipc::tests::frozen_closed_services_use_private_transport_with_isolated_profile`
   is `#[ignore]` and needs `QRONOS_TEST_BUNDLED_RUNTIME_DIRECTORY`. Do not pass `--ignored` or `--include-ignored`.
 
-Proposed, in `desktop/src-tauri`, in two steps. None has been run.
+Run once on 2026-10-16 (C99), at source `6fda950`, in `desktop/src-tauri`, with a 900 s timeout:
 
-1. Pure only, no child process:
+```
+cargo +stable test --locked --offline --release --lib --target-dir E:/qronos-release-r45/t -- --test-threads=1
+```
 
-   ```
-   cargo test --locked --offline --lib -- --skip runtime::job::tests --skip runtime::lifecycle::tests::reader
-     --skip runtime::stop_proof_tests --skip runtime::service_ipc::tests
-     --skip runtime::runtime_input_tests::an_owned_child_that_never_reads_cannot_hold_commands_or_its_stop
-     --skip runtime::runtime_input_tests::stop_and_app_exit_are_bounded_by_an_owned_child_that_never_reads
-   ```
-
-2. Controlled fixtures. Set `QRONOS_TEST_PYTHON=<project .venv python>` first; never leave it unset. Then run:
-
-   ```
-   cargo test --locked --offline --lib -- runtime::job::tests runtime::lifecycle::tests::reader
-     runtime::stop_proof_tests runtime::service_ipc::tests runtime::runtime_input_tests::an_owned_child
-     runtime::runtime_input_tests::stop_and_app_exit --test-threads=1
-   ```
-
-Use `--offline` with the existing Cargo download cache. Pass the toolchain explicitly (`+1.98.0` locally); a CI-equal
-run needs 1.98.1, which is not installed. The ignored frozen-runtime test stays ignored.
+- Environment:
+  - `QRONOS_TEST_PYTHON` was the project `.venv` Python 3.13.13; there was no PATH fallback.
+  - `QRONOS_RUN_LIVE_DEVICE_TESTS=0`.
+  - `QRONOS_TEST_BUNDLED_RUNTIME_DIRECTORY` was unset.
+  - TEMP, TMP, APPDATA, LOCALAPPDATA and the profile pointed to a fresh isolated workspace.
+  - `RUSTUP_HOME` and `CARGO_HOME` were explicit, and `RUSTUP_AUTO_INSTALL=0`.
+- Result: **exit 0. 72 passed, 0 failed, 2 ignored** (74 in total).
+  - The 2 ignored are the `#[ignore]` no-read helper, which runs only as its own test's child, and the frozen-runtime
+    test.
+  - The release build reused the C95 cache: 1 m 16 s compile, then 16.6 s of tests.
+  - Nothing was downloaded, and the fixture temp folder was empty afterwards.
+- Limit: this is local `stable` = rustc/cargo **1.98.0** evidence. It is not the CI pin 1.98.1, which is not
+  installed, and it is not a CI run.
