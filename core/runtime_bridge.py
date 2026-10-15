@@ -10685,6 +10685,22 @@ _LINK_RELAY_FIELDS = frozenset({"host", "port", "serverName", "caPem"})
 _LINK_HOST_MAX_CHARS = 253
 _LINK_CA_PEM_MAX_BYTES = 16 * 1024
 _LINK_REMOTE_MAX_DAYS = 365
+_LINK_SAFE_CODE = re.compile(r"^[a-z_]{1,32}$")
+_LINK_ACKNOWLEDGED_ACTIONS = (LINK_RELAY_SET_ACTION, LINK_REMOTE_ACTION, LINK_REVOKE_ACTION)
+
+
+def _link_tracking_nonce(action_id: str, payload: dict[str, Any]) -> str | None:
+    """A well-formed tracking nonce of a relay/remote/revoke request, read before its shape is judged.
+
+    So a malformed request still gets its correlated refusal. An unsafe value yields None and is never echoed;
+    the nonce grants nothing."""
+    if action_id not in _LINK_ACKNOWLEDGED_ACTIONS:
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    nonce = data.get("requestNonce")
+    return nonce if type(nonce) is str and _LINK_REQUEST_NONCE.match(nonce) else None
 _LINK_DEVICE_ID = re.compile(r"^[0-9a-f]{16}$")
 _LINK_ACTION_KEYS = {
     LINK_STATUS_ACTION: frozenset(),
@@ -10778,6 +10794,10 @@ def _link_set_relay(runtime: QronosRuntime, link: Any, data: dict[str, Any]) -> 
         # The Link's own validation (host/port/TLS name, CERTIFICATE-only CA, safe staged save) before
         # anything is stored. Saving never dials: the relay is used only with remote access switched on.
         endpoint = link_module.relay_endpoint_from_request(request, Path(CONFIG.paths.data))
+    except link_module.LinkWanRefused as refused:
+        # Only the helper's typed code crosses over (never the request or exception text).
+        code = refused.code if type(refused.code) is str and _LINK_SAFE_CODE.match(refused.code) else "relay_invalid"
+        raise LinkRequestError(code) from None
     except (ValueError, TypeError, RelayConfigError):
         raise LinkRequestError("relay_invalid") from None
 
@@ -10893,12 +10913,13 @@ def handle_link_action(
     acknowledged once as ``link_operation_result``; the legacy ``link_error`` and the
     status/devices republish stay as they were.
     """
-    nonce: str | None = None
+    # Only relay/remote/revoke are acknowledged; pairing keeps its own nonce on its private channel.
+    nonce: str | None = _link_tracking_nonce(action_id, payload)
 
     try:
         data = _link_request(action_id, payload)
 
-        if action_id in (LINK_RELAY_SET_ACTION, LINK_REMOTE_ACTION, LINK_REVOKE_ACTION):
+        if action_id in _LINK_ACKNOWLEDGED_ACTIONS:
             nonce = _link_operation_nonce(data)
 
         if action_id == LINK_RELAY_SET_ACTION and nonce is None:
@@ -10907,9 +10928,9 @@ def handle_link_action(
         link = runtime._device_link()
 
         if action_id == LINK_PAIR_OPEN_ACTION:
-            nonce = data.get("requestNonce")
+            pairing_nonce = data.get("requestNonce")
 
-            if type(nonce) is not str or not _LINK_REQUEST_NONCE.match(nonce):
+            if type(pairing_nonce) is not str or not _LINK_REQUEST_NONCE.match(pairing_nonce):
                 raise LinkRequestError("invalid_request")
 
             name = _link_device_name(data)
@@ -10918,7 +10939,7 @@ def handle_link_action(
                 raise LinkRequestError("not_running")
 
             uri = link.open_pairing(name)
-            runtime._notify("link_pairing", "ready", json.dumps({"requestNonce": nonce, "uri": uri}))
+            runtime._notify("link_pairing", "ready", json.dumps({"requestNonce": pairing_nonce, "uri": uri}))
         elif action_id == LINK_PAIR_CANCEL_ACTION:
             link.cancel_pairing()
         elif action_id == LINK_REVOKE_ACTION:
