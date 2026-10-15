@@ -87,7 +87,7 @@ def _inert_registry(text: str, counts: dict[str, int] | None, log: dict[str, int
 # tests/test_installer_template.py pins them. Probes record the actual counts in transforms.json.
 SCRIPT_REGISTRY = {"WriteRegStr": 12, "WriteRegDWORD": 3, "ReadRegStr": 15, "ReadRegDWORD": 0, "DeleteRegKey": 7,
                    "DeleteRegValue": 2, "EnumRegKey": 1}
-HOOK_REGISTRY = {"webview2-offline.nsh": {"ReadRegStr": 3},
+HOOK_REGISTRY = {"webview2-offline.nsh": {"ReadRegStr": 3, "ReadRegDWORD": 4},
                  # the update transaction's metadata snapshot and restore (macros: each command once in the text)
                  "qronos-update-transaction.nsh": {"ReadRegStr": 1, "ReadRegDWORD": 1, "WriteRegStr": 1,
                                                    "WriteRegDWORD": 1, "DeleteRegValue": 2}}

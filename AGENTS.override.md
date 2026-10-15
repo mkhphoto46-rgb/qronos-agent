@@ -41,9 +41,10 @@ For consequential proposals, use this sequence when applicable:
 
 ## Agent orchestration
 
-- Delegate substantive implementation and investigation work in this repository to actual Claude Opus 5.5 high-effort terminal agents. Codex coordinates the work, reviews the results, and integrates them.
+- Delegate substantive implementation and investigation work in this repository to exactly two actual Claude Opus 5.5 medium-effort terminal agents. Codex coordinates the work, reviews the results, and integrates them.
 - Reuse already-authorized Opus workers when their context suits the task, instead of starting new ones.
-- Stay within the number of workers the user currently authorizes. At the time this rule was recorded, that is up to three Opus 5.5 workers plus one Sol worker for checks and integration.
+- Workers execute only the package ordered by the orchestrator. Every test, build and benchmark requires an exact command and time limit assigned by the orchestrator; workers must not choose or repeat checks on their own.
+- Stay within the number of workers the user currently authorizes. The current authorization is exactly two Opus 5.5 workers; no additional agents.
 - If the exact Opus 5.5 model or its terminal CLI is unavailable, report that limitation. Never present another model or agent as Opus.
 - This rule applies to this repository only. It is not a global Codex setting and does not govern unrelated projects.
 

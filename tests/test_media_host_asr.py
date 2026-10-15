@@ -485,7 +485,10 @@ def test_the_standalone_tool_never_transcribes_and_other_stages_carry_on(tmp_pat
 
 
 def test_unprovisioned_whisper_assets_are_model_unavailable_with_zero_spawns(tmp_path, runners, monkeypatch):
-    monkeypatch.setattr(asr, "locate_whisper", _real_locate)  # the real check, on an unprovisioned folder
+    # Run the actual verifier on the fixture's unprovisioned folder. Replacing
+    # global CONFIG can leak into lazy imports used by later product tests.
+    monkeypatch.setattr(asr, "locate_whisper",
+                        lambda runtime_assets, spec=WHISPER_LARGE_V3_TURBO_Q5_0: _real_locate(runners["assets"], spec))
     authority, _ = make_authority(tmp_path)
     service, asset_id, video = prepared_service(tmp_path, authority, audio_ms=25_000, origin_ms=0, audio_start_ms=0)
     report = service.index(max_seconds=60, max_stages=5)

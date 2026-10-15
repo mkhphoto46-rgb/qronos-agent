@@ -136,7 +136,7 @@ def add_and_scan(world, monkeypatch) -> str:
         status = ask(world, "status", f"st{time.monotonic_ns()}")["status"]
         if (status.get("store") or {}).get("assets") and not status["running"] and not status["queued"]:
             break
-        assert time.monotonic() < deadline, status
+        assert time.monotonic() < deadline, json.dumps(status, ensure_ascii=False)
         time.sleep(0.05)
     return seed_dialogue(world)
 

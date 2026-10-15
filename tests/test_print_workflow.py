@@ -222,7 +222,7 @@ def test_options_the_handler_cannot_apply_are_refused_not_ignored(setup, options
 def test_files_that_cannot_be_printed_safely_are_refused(setup, tmp_path):
     workflow, _, submitter, document, *_ = setup
     with pytest.raises(WorkflowRefused, match="absolute"):
-        workflow.prepare(PrintRequest(os.path.relpath(document), "Office Laser"))
+        workflow.prepare(PrintRequest(document.name, "Office Laser"))
     script = tmp_path / "run.bat"
     script.write_text("echo hi", encoding="utf-8")
     with pytest.raises(WorkflowRefused, match="file type"):

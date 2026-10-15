@@ -203,12 +203,19 @@ def guarded_connect(delegate):
     return connect
 
 
-def _alias_modules(nodeid: str | None):
+def _alias_modules(nodeid: str | None, primitive_ids=None):
     for loaded_name, loaded in list(sys.modules.items()):
         if loaded is None:
             continue
         if loaded_name == "core" or loaded_name.startswith("core."):
             yield loaded
+            continue
+        # Only a module holding one of the exact primitives can need a patch.
+        # Filter by identity before resolving its file; keep path containment
+        # and the explicit node exemptions for every possible alias candidate.
+        if primitive_ids is not None and not any(
+            id(value) in primitive_ids for value in vars(loaded).values()
+        ):
             continue
         file = getattr(loaded, "__file__", None)
         if file and nodeid not in REAL_ALIAS_EXEMPT_NODES:
@@ -221,15 +228,22 @@ def _alias_modules(nodeid: str | None):
 
 def install_live_device_boundary(monkeypatch: pytest.MonkeyPatch, nodeid: str | None = None) -> None:
     """Replace every listed real device primitive with a stand-in that refuses."""
+    replacements = {}
     for module, name, what in LIVE_DEVICE_FUNCTIONS:
         real = getattr(module, name)
         if getattr(real, "live_device_stand_in", None):
             continue
         stand_in = _blocked(what)
-        for loaded in _alias_modules(nodeid):
-            for attribute, value in list(vars(loaded).items()):
-                if value is real:
-                    monkeypatch.setattr(loaded, attribute, stand_in)
+        replacements.setdefault(id(real), (real, stand_in))
+
+    # Resolve module paths once per boundary installation. Resolving every
+    # loaded module for every primitive caused thousands of repeated Windows
+    # filesystem lookups per test. Preserve identity matching and exemptions.
+    for loaded in _alias_modules(nodeid, replacements):
+        for attribute, value in list(vars(loaded).items()):
+            replacement = replacements.get(id(value))
+            if replacement is not None and value is replacement[0]:
+                monkeypatch.setattr(loaded, attribute, replacement[1])
 
     monkeypatch.setattr(subprocess, "Popen", guarded_popen_class(subprocess.Popen))
     monkeypatch.setattr(socket.socket, "connect", guarded_connect(socket.socket.connect))

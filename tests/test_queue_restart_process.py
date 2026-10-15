@@ -26,6 +26,7 @@ from tests.test_runtime_bridge_process import (
     REPLY_TIMEOUT,
     STARTUP_TIMEOUT,
     BridgeProcess,
+    private_profile_has_local_appdata,
 )
 
 

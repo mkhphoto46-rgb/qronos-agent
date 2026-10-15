@@ -119,7 +119,8 @@ def prepared(tmp_path: Path, auth, sidecar: FakeSidecar | None, cues=CUES_EN, *,
                            permissions=permissions or FakePermissions(), embedder=embedder)
     service.add_root(str(library), kind="folder", max_depth=2)
     service.scan()
-    service.index(max_seconds=30, max_stages=0)
+    indexed = service.index(max_seconds=30, max_stages=0)
+    assert indexed["hashed"] == 1, json.dumps(indexed, ensure_ascii=False)
     asset_id = service.store.db.execute("SELECT asset_id FROM assets").fetchone()[0]
     with service.store.transaction() as tx:
         tx.execute("INSERT INTO subtitle_tracks(track_id, asset_id, source, stream_index, language, status, cue_count) "

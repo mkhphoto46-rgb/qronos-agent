@@ -127,7 +127,9 @@ def make_video(target: Path, *, embedded_srt: Path | None = None, sub_language: 
     argv += ["-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a"]
     if embedded_srt is not None:
         argv += ["-map", "3:s", "-c:s", "srt", "-metadata:s:s:0", f"language={sub_language}"]
-    argv += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"]
+    # PCM has no encoder priming delay: the fixture's authored timestamp
+    # assertions must not depend on a particular AAC encoder/muxer build.
+    argv += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]
     if rates[0] != rates[1]:
         argv += ["-fps_mode", "vfr"]
     if start_offset:
