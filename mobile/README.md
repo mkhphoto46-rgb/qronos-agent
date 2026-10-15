@@ -77,22 +77,29 @@ pinned in `android/buildcheck/sdk-packages.json`:
 
 - `platforms;android-36`;
 - `build-tools;36.0.0` (the default of AGP 9.4.1);
-- `cmdline-tools` for sdkmanager.
+- `cmdline-tools` (pinned and fetched, but NOT used: its 23.0 `sdkmanager` is a
+  shim that downloads an unpinned Android CLI).
 
 They go in a private SDK folder (`E:/qronos-toolchains/android-sdk`), with no
 global PATH change. They are under the **Android SDK License Agreement**, which
-only the owner may accept. `android/buildcheck/sdk_setup.py` never accepts it.
-Its steps are:
+only the owner may accept. Its steps are:
 
 1. `plan`;
 2. `fetch` (official archives, size and SHA-1 checked);
-3. `licences` (the owner answers sdkmanager's prompt);
-4. `install`.
+3. `licences` (shows the licence ID, terms URL and pinned text hash; runs
+   nothing);
+4. `install --accept-android-sdk-license`, only with the owner's approval.
 
-`install` fails unless each installed `source.properties` reports exactly the
-pinned `Pkg.Revision`. sdkmanager resolves package paths to the current
-revision, so this catches a drifted package. It proves revision agreement
-only, not the byte identity of every installed SDK file.
+`install` runs no sdkmanager. It checks every package before writing anything:
+- the archive is the pinned one;
+- every entry is under the expected root, with no absolute path, `..` or link;
+- a package already present at another revision is not overwritten.
+
+It then unpacks the verified archives into `platforms/android-36` and
+`build-tools/36.0.0`. It fails unless each installed `source.properties`
+reports exactly the pinned `Pkg.Revision`. That proves revision agreement only,
+not the byte identity of every installed SDK file. No `licenses/` marker is
+written.
 
 Then, with `ANDROID_HOME` set for that one command:
 `mobile/android/gradlew -p mobile/android :app:assembleDebug`.
