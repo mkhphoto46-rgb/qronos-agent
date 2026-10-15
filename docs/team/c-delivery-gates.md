@@ -17,13 +17,16 @@ policy. Writer: Track C. Status as of 2026-10-16.
 
 These are distinct. Do not mix their identities.
 
-- **Desktop installer**, built from product source `1755aa52`. It is UNSIGNED and a review candidate only.
+- **Previous accepted desktop installer**, built from product source `1755aa52`. It is UNSIGNED and a review
+  candidate only.
   - File: `qronos-desktop_0.1.0_x64-setup.exe`, 318,605,942 B, sha256 `425cdf19…52c2`.
   - Location: `E:/qronos-release-ac-2026-10-16/delivery-1755aa52`, with its provenance, install manifest and
     notices.
   - It is accurate for `1755aa52` only.
 - **Asset registry source**, `27c424a` (on `91551fa`). It changes `build_support/runtime_assets.json`, which is a
-  packaged input, so the `1755aa52` installer does NOT contain it. A matching build is a separate, later decision.
+  packaged input, so the `1755aa52` installer does NOT contain it.
+- **Next matching installer**: built only from the final frozen source that Root admits. Its identity is the hash in
+  its own delivery receipt; no hash is stated here in advance.
 - **Android APK**, the standard debug build from source `53dd571`.
   - File: `qronos-remote-0.1.0-debug.apk`, 4,022,723 B, sha256 `d0f006b4…9af8`.
   - It is signed with the Android **debug** key only, which is not release signing.
@@ -36,12 +39,16 @@ Assets are never bundled. They live under `<LocalAppData>/Qronos/RuntimeAssets` 
 
 - **SigLIP 2 image search** (3 files): **verified** in the registry (`27c424a`), equal to the publisher's Hugging Face
   identity at revision `ba1f3b08`.
-  - Staged copies: `E:/qronos-delivery/ac-2026-10-16/RuntimeAssets`. That folder is supplemental. It holds ONLY these
-    three files, and the checker reports the other 31 registry entries as missing there.
+  - Staged copies (approved): `E:/qronos-delivery/ac-2026-10-16/RuntimeAssets`. That folder is supplemental. It holds
+    ONLY these three exact files, and the checker reports the other 31 registry entries as missing there.
   - Image-retrieval quality is not measured.
 - **Custom wake head** `models/wake_word/qronos.onnx` and `.data`: **missing**.
-  - They are not on this machine or E:, and were never in Git. The owner must supply them; without them the wake word
-    cannot work.
+  - Not found in the targeted locations and sources (C96, C100). This was not a search of every folder on E:.
+  - They were never committed (git-ignored). The private GitHub repository has no release or export of them, and no
+    public copy or published identity exists.
+  - They were trained on Colab/Molab; the original export and the training config are not recorded, so the original
+    cannot be reproduced.
+  - The owner must supply them; without them the wake word cannot work.
 - **Voice (speech synthesis)** `crispasr.exe` and `t3-fa-q4_k.gguf`: **unverified**. No published identity matches
   the local files, so the registry holds no hash for them.
 - **Registry totals**: 30 verified, 2 unverified, 2 missing.
@@ -54,11 +61,22 @@ Assets are never bundled. They live under `<LocalAppData>/Qronos/RuntimeAssets` 
 | Custom wake head | missing | owner | supply both files and their origin; register them as `unverified` unless an authoritative identity exists |
 | Voice assets identity | unverified | owner / Track C | provide a publisher identity (size and SHA-256) or accept them as unverified |
 | Genuine signing | none: no certificate, provider, trust root, update key or same-artifact signing receipt. Free-signing preparation is in `docs/signing` | owner | choose a provider and certificate; then one signing receipt on the exact artifact |
-| Publication | the GitHub repository is private; no worker has authority to publish | owner | decide visibility and release |
+| Publication | public visibility or a provider release: the GitHub repository is private and no worker may make it public or release it. Root-authorised PR pushes are separate | owner | decide visibility and release |
 | CI | hosted Actions billing is unresolved; CI runs `cargo check --locked --all-targets` with 1.98.1 but no `cargo test` | owner (billing), Root | restore billing; the Rust unit tests passed locally on 1.98.0 (see below) |
 | Rust 1.98.1 | not installed locally; the local unit-test pass (72/0/2 ignored) is on 1.98.0 | Root / owner | approve installing the pinned toolchain for a CI-equal run, or accept the 1.98.0 evidence as local only |
 | Device Link relay | no operator, host, TLS certificate or deployment authority; WAN is default off | owner | name the operator and host; then a deployment review |
 | Human and device tests | deferred: real-phone LAN/WAN, clean-Windows install/upgrade/uninstall, voice quality and resource use | owner (human tester) | schedule them on the exact artifacts above |
+
+## Test evidence
+
+- **Broad Python gate (A100, at `27c424a`)**: 6594 passed, 26 failed, 111 skipped, 1577 subtests passed.
+  - All 26 failures are covered by focused checks: A101 (5 nodes, for 4 failures) and C101 (the other 22 nodes).
+    Both exited 0.
+  - The broad gate has **not** been rerun after these repairs.
+- **Fixture PDF dependencies**: the project `.venv` now holds the `requirements.txt` pins fpdf2 2.8.9,
+  fonttools 4.66.1, uharfbuzz 0.56.3 and defusedxml 0.7.1 (C101, C102).
+- **Node**: `npm test` passed 183 of 183 (A100).
+- **Rust**: 72 passed and 2 ignored on local 1.98.0 (C99, below).
 
 ## Rust tests (`desktop/src-tauri`, 74 `#[test]`)
 
