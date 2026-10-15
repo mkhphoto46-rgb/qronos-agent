@@ -33,7 +33,13 @@ android {
         resources {
             // BouncyCastle's jars each carry the same multi-release OSGi
             // manifest; one copy is enough and none is needed at run time.
-            excludes += setOf("META-INF/versions/9/OSGI-INF/MANIFEST.MF")
+            excludes += setOf(
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "META-INF/versions/17/OSGI-INF/MANIFEST.MF",
+            )
+            // bcprov, bcutil and bctls 1.86 each ship the same licence text
+            // (byte-identical META-INF/LICENSE.md); keep exactly one copy in the APK.
+            pickFirsts += setOf("META-INF/LICENSE.md")
         }
     }
 }
