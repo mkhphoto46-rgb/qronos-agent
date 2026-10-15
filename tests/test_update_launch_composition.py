@@ -68,7 +68,9 @@ def test_store_services_are_not_fenced_twice_they_are_refused_by_their_writer_ad
     monkeypatch.setattr(instance_ownership, "update_fence_exists", lambda fence=None: True)
     for service in runtime_entry.STORE_SERVICES:
         assert runtime_entry._refuse_during_update(service) is None  # startup_admission.enter decides for these
-    assert "if update_in_progress(fence):" in _source("core/store_admission.py")  # admit_writer refuses on the fence
+    # admit_writer's own refusal on the fence (present/access-denied -> update_in_progress; unknown ->
+    # ownership_unavailable; the shared admission given back each time) is proven by behaviour in
+    # tests/test_store_admission.py::test_a_writer_admission_already_taken_is_given_back_when_the_fence_is_unknown.
 
 
 # ------------------------------------------------------------------ the hold names what the runtime owns
