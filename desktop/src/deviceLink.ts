@@ -253,6 +253,8 @@ const ERROR_TEXT: Record<string, string> = {
   relay_invalid: "نشانی، درگاه یا گواهی رله معتبر نبود؛ چیزی ذخیره نشد.",
   device_revoked: "دسترسی این دستگاه لغو شده است.",
   security_quarantined: "پایشگر امنیتی اتصال را قرنطینه کرده است.",
+  // The bridge's refusal code for a quarantined link (relay set, remote grant): the same explanation.
+  quarantined: "پایشگر امنیتی اتصال را قرنطینه کرده است.",
   security_contained: "پایشگر امنیتی دسترسی از بیرون خانه را بسته است.",
   security_monitor_not_ready: "پایشگر امنیتی آماده نیست.",
   outcome_unknown: "معلوم نیست این تغییر انجام شد یا نه؛ وضعیت دوباره خوانده شد. پیش از تکرار، آن را ببینید.",

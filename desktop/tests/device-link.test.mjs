@@ -530,3 +530,15 @@ test("the panel offers the opt-in, relay form and finite grants only when wired,
   assert.deepEqual(calls, [["on", ID_A, 30]]);
   assert.ok(all.includes("تا "), "a granted device shows its end");
 });
+
+test("a quarantined refusal from the bridge is explained as the quarantine, not as a generic failure", async () => {
+  const h = wanHarness();
+  await h.controller.relaySet({ host: "relay.example.test", port: 443 });
+  h.emit("link_operation_result", result(h.sent[0].data.requestNonce, "qronos.link_relay_set", "refused", "quarantined"));
+  assert.equal(h.view().operation, null);
+  assert.notEqual(h.view().error, link.linkErrorText("failed"));
+  assert.equal(h.view().error, link.linkErrorText("security_quarantined"));
+  h.controller.dismissError();
+  h.emit("link_error", JSON.stringify({ action: "qronos.link_remote", code: "quarantined" }));
+  assert.equal(h.view().error, link.linkErrorText("security_quarantined"));
+});
