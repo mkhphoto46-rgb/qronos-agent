@@ -1,6 +1,16 @@
+/* Device Link panel: the Settings page's own dark surfaces, borders and focus glow (SettingsView.css). */
+
 .device-link {
   display: grid;
   gap: 12px;
+  color: rgba(225, 244, 252, 0.94);
+}
+
+.device-link h3 {
+  margin: 4px 0 0;
+  font-size: 1em;
+  font-weight: 600;
+  color: rgba(235, 249, 255, 0.97);
 }
 
 .device-link-copy,
@@ -14,12 +24,77 @@
   align-items: center;
 }
 
+.device-link-switch input {
+  accent-color: rgb(76, 225, 255);
+}
+
 .device-link-error {
   display: flex;
   gap: 12px;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
 }
+
+/* ------------------------------------------------------------ shared fields and buttons (panel only) */
+
+.device-link input[type="text"],
+.device-link input[type="number"],
+.device-link textarea {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-block-size: 36px;
+  padding: 8px 12px;
+  border: 1px solid rgba(84, 151, 205, 0.12);
+  border-radius: 8px;
+  color: rgba(208, 233, 243, 0.86);
+  background: rgba(6, 20, 29, 0.76);
+  font: inherit;
+  outline: 0;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.device-link textarea {
+  min-block-size: 112px;
+  resize: vertical;
+  line-height: 1.6;
+  background: rgba(3, 14, 23, 0.62);
+}
+
+.device-link input[type="text"]:focus-visible,
+.device-link input[type="number"]:focus-visible,
+.device-link textarea:focus-visible {
+  border-color: rgba(77, 224, 255, 0.26);
+  box-shadow: 0 0 22px rgba(77, 224, 255, 0.045);
+}
+
+.device-link input:disabled,
+.device-link textarea:disabled {
+  opacity: 0.52;
+  cursor: default;
+}
+
+.device-link .file-approval-button {
+  min-block-size: 36px;
+  padding: 0 14px;
+  color: rgba(218, 241, 250, 0.88);
+  background: rgba(8, 32, 43, 0.5);
+  font: inherit;
+  white-space: nowrap;
+}
+
+.device-link .file-approval-button:hover:not(:disabled) {
+  border-color: rgba(73, 221, 255, 0.28);
+  background: rgba(11, 43, 57, 0.62);
+}
+
+.device-link .file-approval-button:focus-visible,
+.device-link-switch input:focus-visible {
+  outline: 2px solid rgba(80, 232, 255, 0.7);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------ pairing */
 
 .device-link-pair {
   display: flex;
@@ -31,12 +106,8 @@
 .device-link-pair label {
   display: grid;
   gap: 6px;
-}
-
-.device-link-pair input {
-  font: inherit;
-  padding: 8px 10px;
-  border-radius: 8px;
+  flex: 1 1 220px;
+  max-inline-size: 360px;
 }
 
 .device-link-qr {
@@ -50,6 +121,8 @@
   block-size: auto;
   border-radius: 8px;
 }
+
+/* ------------------------------------------------------------ devices */
 
 .device-link-devices {
   display: grid;
@@ -65,11 +138,22 @@
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid rgba(77, 172, 215, 0.085);
+  border-radius: 10px;
+  background: rgba(7, 22, 32, 0.38);
 }
 
 .device-link-devices li > div {
   display: grid;
   gap: 2px;
+  flex: 1 1 200px;
+  min-inline-size: 0;
+}
+
+.device-link-devices li > .file-approval-button,
+.device-link-devices li > .device-link-confirm {
+  flex: 0 0 auto;
 }
 
 .device-link-devices small {
@@ -79,21 +163,46 @@
 .device-link-confirm {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
+/* ------------------------------------------------------------ access from outside the home network */
+
 .device-link-remote {
-  border-top: 1px solid rgba(127, 127, 127, 0.3);
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid rgba(76, 170, 212, 0.12);
   margin-top: 12px;
-  padding-top: 8px;
+  padding-top: 10px;
+}
+
+.device-link-relay {
+  margin: 0;
+  opacity: 0.85;
 }
 
 .device-link-relay-form {
   display: grid;
-  gap: 8px;
+  gap: 12px;
   max-width: 520px;
 }
 
+/* Labels sit on their own line (RTL); the values below them stay LTR (dir="ltr" in the markup). */
+.device-link-relay-form label {
+  display: grid;
+  gap: 6px;
+  color: rgba(185, 218, 230, 0.82);
+}
+
+.device-link-relay-form input[type="number"] {
+  max-inline-size: 140px;
+}
+
 .device-link-relay-form textarea {
-  min-height: 6em;
-  font-family: monospace;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.device-link-relay-form > .file-approval-button {
+  justify-self: start;
 }
