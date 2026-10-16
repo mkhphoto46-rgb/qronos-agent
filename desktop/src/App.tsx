@@ -56,6 +56,7 @@ import LibraryView from "./components/LibraryView";
 import PermissionsView from "./components/PermissionsView";
 import SettingsView from "./components/SettingsView";
 import SetupStatus from "./components/SetupStatus";
+import VoiceTurnNotice from "./components/VoiceTurnNotice";
 import RuntimeConnectionStatus from "./components/RuntimeConnectionStatus";
 import {
   createRuntimeConnection,
@@ -63,7 +64,7 @@ import {
   type RuntimeConnection,
   type RuntimeConnectionView,
 } from "./runtimeConnection";
-import { setupNeedsAttention, useSetupStore } from "./setupStore";
+import { refreshSetup, setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
@@ -317,6 +318,14 @@ function App() {
   const runtimeConnectionRef = useRef<RuntimeConnection | null>(null);
   const retryRuntimeConnection = useCallback(() => {
     runtimeConnectionRef.current?.retry();
+  }, []);
+
+  // A failed voice turn (voice_turn_failed): its own notice, separate from the connection state. Retry is one
+  // explicit new push-to-talk turn through the same hotkey path.
+  const [voiceTurnFailed, setVoiceTurnFailed] = useState(false);
+  const retryVoiceTurn = useCallback(() => {
+    setVoiceTurnFailed(false);
+    window.dispatchEvent(new CustomEvent("qronos:hotkey-action", { detail: { actionId: "qronos.push_to_talk" } }));
   }, []);
 
   // The Device Link page: one controller, fed by link_* runtime events.
@@ -1575,7 +1584,15 @@ function App() {
                 );
                 break;
 
+              case "voice_turn_failed":
+                // A voice turn ended in an error: say so, and re-read the local setup so a missing speech
+                // service shows as incomplete setup. The diagnostic itself stays in runtime_error.
+                setVoiceTurnFailed(true);
+                void refreshSetup();
+                break;
+
               case "voice_listening":
+                setVoiceTurnFailed(false);
                 // Explicit Push-to-Talk already stops active speech before
                 // asking Runtime to listen. A generic listening event must
                 // never kill healthy playback on its own; doing that turns a
@@ -2526,6 +2543,7 @@ function App() {
         view={runtimeConnection}
         onRetry={retryRuntimeConnection}
       />
+      {voiceTurnFailed && <VoiceTurnNotice onRetry={retryVoiceTurn} onDismiss={() => setVoiceTurnFailed(false)} />}
 
       {/* The Smart Queue: queued requests, their progress and outcomes,
           with hold/pause/resume/cancel. Its hold is the queue's own and is

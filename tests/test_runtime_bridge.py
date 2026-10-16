@@ -762,8 +762,15 @@ class TestPushToTalkFailures(unittest.TestCase):
 
         events = captured_events(runtime.push_to_talk)
 
-        self.assertIn("runtime_error", event_types(events))
-        self.assertIn("microphone disappeared", events[-2]["message"])
+        types = event_types(events)
+        error = events[types.index("runtime_error")]
+        self.assertIn("microphone disappeared", error["message"])
+        # The desktop gets one fixed, safe failure event after the diagnostic, so it can show the voice notice;
+        # it carries no diagnostic text.
+        failed = events[types.index("voice_turn_failed")]
+        self.assertGreater(types.index("voice_turn_failed"), types.index("runtime_error"))
+        self.assertEqual(json.loads(failed["message"]), {"reason": "voice_turn_failed"})
+        self.assertEqual(types.count("voice_turn_failed"), 1)
 
     def test_followup_brain_timeout_keeps_conversation_active_with_spoken_retry(
         self,
