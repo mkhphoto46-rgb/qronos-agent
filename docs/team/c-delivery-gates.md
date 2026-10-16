@@ -52,9 +52,14 @@ repository root. Check an asset root read-only with `python -m build_support.run
   - It holds the registry's 30 verified files, each copied by exact path and checked against its pinned size and
     SHA-256. The sources were the r35 runtime-assets zip (whisper, ffmpeg), the SigLIP 2 cache on E, and the
     development root for 6 model files. Nothing was downloaded.
-  - The read-only check reports 30 verified, 0 mismatch and 4 missing: the 2 wake files and the 2 unverified voice
-    files, which were not installed. `allVerified` is false.
-  - Installing the files does not clear the licence, provenance or release gates.
+  - Local voice files (C108): the owner's existing `crispasr.exe`, `t3-fa-q4_k.gguf` and the unregistered companions
+    beside the exe (`crispasr.dll`, `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, `ggml-vulkan.dll`, `whisper.dll`,
+    `LICENSE`, `THIRD_PARTY_NOTICES.txt`) were copied from the development root at the same paths. Their local hashes are
+    a work record only, not provenance; nothing was executed.
+  - The read-only check now reports 32 registry files present: 30 verified, 2 unverified (the two voice files), 0
+    mismatch, and 2 missing (the wake files). `allVerified` is false.
+  - Local provisioning does not clear the licence, provenance or release gates. The first voice run and hardware
+    (Vulkan GPU) acceptance are deferred, and redistribution of the voice files stays closed.
 
 - **SigLIP 2 image search** (3 files): **verified** in the registry (`27c424a`), equal to the publisher's Hugging Face
   identity at revision `ba1f3b08`.
@@ -69,7 +74,9 @@ repository root. Check an asset root read-only with `python -m build_support.run
     cannot be reproduced.
   - The owner must supply them; without them the wake word cannot work.
 - **Voice (speech synthesis)** `crispasr.exe` and `t3-fa-q4_k.gguf`: **unverified**. No published identity matches
-  the local files, so the registry holds no hash for them.
+  the local files, so the registry holds no hash for them. They are installed locally (C108) and block only the
+  release gate (`--require-verified`), not local use. The companion DLLs and notices are not in the registry, and the
+  t3-fa licence is not established.
 - **Registry totals**: 30 verified, 2 unverified, 2 missing.
 
 ## Open gates
