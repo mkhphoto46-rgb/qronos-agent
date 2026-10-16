@@ -86,23 +86,30 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
   The 26 failures above remain the record of A100.
 - The broad gate has **not** been rerun, so there is no broad or full pass claim.
 
-**Remaining software gate** (A104, after the asset-root isolation fix):
+**Remaining software gate** (A104–A106, after the asset-root isolation fix):
 - The fix: the conftest now points `QRONOS_ASSET_ROOT` into each test's own profile, so an inherited user-level
   asset root (installed assets) is never used by tests or their children.
 - Regression `test_software_profile_redirects_an_inherited_asset_root`: failed on the old fixture, passed after the
   fix.
-- Gate: 5 of the 13 excluded files, run as source-audited software tests (3 whole; 2 minus 6 functions, which expand
-  to 17 parametrized cases). Exit 0: 261 passed, 3 skipped.
-- The other 8 files are not run:
-  - 4 run native NSIS installers or uninstallers, or write the HKCU registry. These are deferred to a disposable
-    Windows machine.
-  - 4 start real bridge or supervisor processes whose child targets are not yet audited. These are not verified.
+- 9 of the 13 excluded files were source-audited and then run:
+  - A104, 5 files (3 whole; 2 minus 6 functions, which expand to 17 parametrized cases): exit 0, 261 passed,
+    3 skipped, 17 deselected.
+  - A105, the supervisor and supervisor IPC tests (controlled stdlib and named-pipe fixture children): exit 0,
+    73 passed.
+  - A106, the bridge-process and supervisor-relay tests: exit 0, 80 passed, 1 skipped (the live-marked real
+    end-to-end node). They ran after confirming no Qronos process held the session bridge mutex.
+- Not run: the 4 files that run native NSIS installers or uninstallers, or write the HKCU registry, plus the 6
+  deselected functions. These are deferred to a disposable Windows machine. The live-device nodes have not run
+  either. This is not the full suite.
 
 **Desktop:**
 - `npm test`: exit 0, 183 of 183 passed across the 12 node unit-test files (A100). They ran on byte-identical
   desktop sources.
 - TypeScript typecheck, Vite build and the Rust release build: compiled by the C95 installer build on `1755aa52`.
-- Rust unit tests (C99): 72 passed, 0 failed, 2 ignored, using the local Rust 1.98.0. CI pins 1.98.1.
+- Rust unit tests:
+  - C99: 72 passed, 0 failed, 2 ignored, on the local Rust 1.98.0.
+  - C105: the private toolchain pinned to the CI version 1.98.1 passed its check.
+  - C106, on that pinned 1.98.1 toolchain: 72 passed, 0 failed, 2 ignored.
 
 **Android:**
 - The Gradle linkcore vector tests are reused; the linkcore tree is unchanged.
@@ -112,14 +119,20 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
 - An unsigned review candidate from `1755aa52`, accepted on static evidence (A98).
 - An unsigned review candidate from `31fc2ad` (C102 receipt; installer sha256 `5def1112…`), accepted on static
   evidence (A102).
+- An unsigned review candidate from `31fc2ad`, built with the pinned Rust 1.98.1 (C106; installer sha256
+  `96647219…`, 318,601,298 bytes):
+  - It reuses the unchanged C102 backend.
+  - It was accepted on static evidence (A107): the payload equals the C102 backend (3096 files), and the install
+    manifest, prerequisite pins, UI assets and Apache notices are unchanged.
 - Product code is unchanged since then, so no rebuild is necessary after doc-only changes.
 - This is build proof only, not installation or quality proof.
 
 ## Not verified (explicit limits)
 
 - **No broad-gate rerun:** the gate has not been rerun since A100; the fixes were checked by focused nodes only.
-- **Excluded tests:** 8 of the 13 originally excluded Python files, the 6 deselected functions above, and the
-  live-device nodes. The 2 ignored Rust tests did not run.
+- **Excluded tests:** 4 of the 13 originally excluded Python files (native installers and the registry), the 6
+  deselected functions above, and the live-device nodes. The 2 ignored Rust tests did not run.
+- **Hosted CI:** not run.
 - **Deferred:** human and live tests on the PC, phone, GPU, microphone, devices and user archives.
 - **Provisioning:**
   - Runtime model assets are provisioned separately and are not bundled.
