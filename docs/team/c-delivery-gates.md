@@ -83,20 +83,38 @@ repository root. Check an asset root read-only with `python -m build_support.run
   t3-fa licence is not established.
 - **Registry totals**: 30 verified, 4 unverified, 0 missing.
 
-## Open gates
+## Gates
 
-| Gate | State | Owner | Next concrete action |
+Qronos is private and for personal use. Setup steps are in `docs/personal-use.md`.
+
+### Personal use: ready, nothing blocks install or startup
+
+| Item | State | Owner | Next concrete action |
 |---|---|---|---|
-| Asset licence and provenance | owner review is required for the openWakeWord feature models (CC BY-NC-SA 4.0 question), the SigLIP 2 ONNX conversion (base Apache-2.0; the conversion states no licence) and the Persian Chatterbox fine-tune | owner | decide each licence; the registry text then changes as a reviewed change |
+| Installer and startup | the unsigned installer installs per user and the desktop finds its bundled backend by manifest only; no signature, `allVerified` or CI result is consulted at startup (C112) | owner | install and launch (see Deferred) |
+| Runtime assets | all 34 present in `E:/qronos-runtime-assets` (30 verified, 4 unverified); `QRONOS_ASSET_ROOT` set for the user | — | none |
+| CI | the hosted PR #101 jobs never started: billing failed / spending limit (annotations 116733368374 and 116733367898), not a code failure. CI runs `cargo check --locked --all-targets` with 1.98.1 but no `cargo test` | — | none for development: checks run locally (`docs/local-validation.md`); locally, the same check and the Rust unit tests pass on 1.98.1 (see below) |
+| Rust 1.98.1 | closed locally: installed privately (C105); `cargo +1.98.1 check --locked --offline --all-targets` exit 0 at `31fc2adc` (C105); unit tests 72 passed, 0 failed, 2 ignored (C106) | — | none locally; a hosted run still needs CI billing |
+| Update key (separate purpose) | the owner's Ed25519 update PUBLIC key is admitted in `config/update_trusted_keys.json` (keyId `b0566b68ca6ee2887a8db62b3aff00e8`, PR #68, matching the 2026-10-09 public receipt). This does not prove the private key is available or usable, that any update is signed, or release clearance | owner | none for the public key; a signed update needs the owner's key and a reviewed release |
+
+### Deferred live acceptance (owner, on the real PC and phone)
+
+| Item | State | Owner | Next concrete action |
+|---|---|---|---|
+| Human and device tests | deferred: real-phone LAN/WAN, clean-Windows install/upgrade/uninstall, voice quality and resource use | owner (human tester) | schedule them on the exact artifacts above |
 | Custom wake head | present, unverified (owner-supplied recovered backup) | owner | licence/ownership review; live wake acceptance on the target hardware |
 | Voice assets identity | unverified | owner / Track C | provide a publisher identity (size and SHA-256) or accept them as unverified |
+
+### Optional: public distribution and access from outside the home network
+
+Needed only to give Qronos to others or to reach it over the internet; not needed for personal use. These stay real restrictions: unsigned builds are not for distribution, and updates still require the owner's signature.
+
+| Item | State | Owner | Next concrete action |
+|---|---|---|---|
+| Asset licence and provenance | owner review is required for the openWakeWord feature models (CC BY-NC-SA 4.0 question), the SigLIP 2 ONNX conversion (base Apache-2.0; the conversion states no licence) and the Persian Chatterbox fine-tune | owner | decide each licence; the registry text then changes as a reviewed change |
 | Genuine signing (Authenticode) | none: no certificate, provider, approved trust root or same-artifact signing receipt. Free-signing preparation is in `docs/signing` | owner | choose a provider and certificate; then one signing receipt on the exact artifact |
-| Update key (separate purpose) | the owner's Ed25519 update PUBLIC key is admitted in `config/update_trusted_keys.json` (keyId `b0566b68ca6ee2887a8db62b3aff00e8`, PR #68, matching the 2026-10-09 public receipt). This does not prove the private key is available or usable, that any update is signed, or release clearance | owner | none for the public key; a signed update needs the owner's key and a reviewed release |
-| Publication | public visibility or a provider release: the GitHub repository is private and no worker may make it public or release it. Root-authorised PR pushes are separate | owner | decide visibility and release |
-| CI | the hosted PR #101 jobs never started: billing failed / spending limit (annotations 116733368374 and 116733367898), not a code failure. CI runs `cargo check --locked --all-targets` with 1.98.1 but no `cargo test` | owner (billing) | restore billing; locally, the same check and the Rust unit tests pass on 1.98.1 (see below) |
-| Rust 1.98.1 | closed locally: installed privately (C105); `cargo +1.98.1 check --locked --offline --all-targets` exit 0 at `31fc2adc` (C105); unit tests 72 passed, 0 failed, 2 ignored (C106) | — | none locally; a hosted run still needs CI billing |
+| Public distribution | public visibility or a provider release: the GitHub repository is private and no worker may make it public or release it. Root-authorised PR pushes are separate | owner | decide visibility and release |
 | Device Link relay | no operator, host, TLS certificate or deployment authority; WAN is default off | owner | name the operator and host; then a deployment review |
-| Human and device tests | deferred: real-phone LAN/WAN, clean-Windows install/upgrade/uninstall, voice quality and resource use | owner (human tester) | schedule them on the exact artifacts above |
 
 ## Test evidence
 
