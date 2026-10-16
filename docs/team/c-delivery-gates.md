@@ -72,7 +72,7 @@ repository root. Check an asset root read-only with `python -m build_support.run
   - The owner supplied them from a recovered backup. Earlier targeted searches (C96, C100) had not found them, and no
     release, export or published identity exists; they stay out of Git.
   - Checked read-only, without running them: ONNX opset 18, input `[1, 16, 96]` float, output `[1, 1]` sigmoid, with
-    the external tensors exactly covering `qronos.onnx.data`. This matches the openWakeWord classifier contract and the
+    the external tensors exactly covering `qronos.onnx.data`. The metadata shape/type matches the openWakeWord classifier contract and the
     recorded settings (threshold 0.660167, 1280-sample frames, 16 kHz, external data required).
   - That the files are the original export, and how well they detect, is not independently proven. The recorded
     quality is `experimental_not_production_ready`; live wake acceptance is deferred, and production wake is not

@@ -136,10 +136,10 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
 - **Deferred:** human and live tests on the PC, phone, GPU, microphone, devices and user archives.
 - **Provisioning:**
   - Runtime model assets are provisioned separately and are not bundled.
-  - In the registry: the 3 SigLIP 2 files are verified against publisher hashes, the 2 wake assets are missing,
+  - In the registry: the 3 SigLIP 2 files are verified against publisher hashes, the 2 wake assets are present locally and unverified (C109),
     and the 2 voice assets are unverified.
   - C100: the original wake model was not found in the authoritative sources or the targeted local locations. No
-    generic replacement was substituted.
+    generic replacement was substituted. The owner later supplied the pair (C109); identity and detection quality remain unproven.
 - **External:**
   - no genuine Authenticode signing, reviewed trusted root, update key or signing receipt;
   - the relay is not deployed;
