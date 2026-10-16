@@ -23,10 +23,16 @@ These are distinct. Do not mix their identities.
   - Location: `E:/qronos-release-ac-2026-10-16/delivery-1755aa52`, with its provenance, install manifest and
     notices.
   - It is accurate for `1755aa52` only.
-- **Asset registry source**, `27c424a` (on `91551fa`). It changes `build_support/runtime_assets.json`, which is a
-  packaged input, so the `1755aa52` installer does NOT contain it.
-- **Next matching installer**: built only from the final frozen source that Root admits. Its identity is the hash in
-  its own delivery receipt; no hash is stated here in advance.
+- **Asset registry**, `build_support/runtime_assets.json` (`27c424a`): a source-side review record, read only by the
+  `build_support.runtime_assets` checker. It is NOT bundled in the runtime or the installer (C102: no `build_support`
+  module in the frozen runtime, no copy in the payload, and the install manifest is unchanged). Correcting it is not a
+  runtime feature, and both installers contain the same product code.
+- **Current matching desktop installer**, built from the final frozen source `31fc2adc` (C102). It is UNSIGNED and a
+  review candidate only.
+  - File: `qronos-desktop_0.1.0_x64-setup.exe`, 318,596,791 B, sha256 `5def1112…7de1`.
+  - Location: `E:/qronos-release-ac-final-2026-10-16/delivery-31fc2adc`, with its provenance, install manifest and
+    notices.
+  - It differs from the `1755aa52` installer only by rebuilt binaries and its recorded source commit.
 - **Android APK**, the standard debug build from source `53dd571`.
   - File: `qronos-remote-0.1.0-debug.apk`, 4,022,723 B, sha256 `d0f006b4…9af8`.
   - It is signed with the Android **debug** key only, which is not release signing.
@@ -34,13 +40,24 @@ These are distinct. Do not mix their identities.
 
 ## Runtime assets
 
-Assets are never bundled. They live under `<LocalAppData>/Qronos/RuntimeAssets` and are checked read-only with
-`python -m build_support.runtime_assets --root <RuntimeAssets>`.
+Assets are never bundled. An installed Qronos reads them from `QRONOS_ASSET_ROOT` when it is set, and otherwise from
+`<LocalAppData>/Qronos/RuntimeAssets` (`core/config.py`). A development checkout ignores that variable and uses the
+repository root. Check an asset root read-only with `python -m build_support.runtime_assets --root <RuntimeAssets>`.
+
+- **Installed asset root (C103)**: `E:/qronos-runtime-assets`. It was new, and the user-level `QRONOS_ASSET_ROOT`
+  points to it; the variable was previously unset, and the Machine value is unset. It takes effect for later
+  installed launches; no app was started.
+  - It holds the registry's 30 verified files, each copied by exact path and checked against its pinned size and
+    SHA-256. The sources were the r35 runtime-assets zip (whisper, ffmpeg), the SigLIP 2 cache on E, and the
+    development root for 6 model files. Nothing was downloaded.
+  - The read-only check reports 30 verified, 0 mismatch and 4 missing: the 2 wake files and the 2 unverified voice
+    files, which were not installed. `allVerified` is false.
+  - Installing the files does not clear the licence, provenance or release gates.
 
 - **SigLIP 2 image search** (3 files): **verified** in the registry (`27c424a`), equal to the publisher's Hugging Face
   identity at revision `ba1f3b08`.
-  - Staged copies (approved): `E:/qronos-delivery/ac-2026-10-16/RuntimeAssets`. That folder is supplemental. It holds
-    ONLY these three exact files, and the checker reports the other 31 registry entries as missing there.
+  - Also installed in the asset root above. The earlier supplemental copy `E:/qronos-delivery/ac-2026-10-16/RuntimeAssets`
+    holds only these three files.
   - Image-retrieval quality is not measured.
 - **Custom wake head** `models/wake_word/qronos.onnx` and `.data`: **missing**.
   - Not found in the targeted locations and sources (C96, C100). This was not a search of every folder on E:.
