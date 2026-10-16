@@ -35,7 +35,7 @@ export default function VoiceTurnNotice({ state, onRetry, onDismiss }: {
     : state === "retryFailed" ? [text.retryFailedLabel, text.retryFailedDetail]
     : state === "retryRefused" ? [text.retryRefusedLabel, text.retryRefusedDetail] : [text.label, text.detail];
   const pending = state === "retrying";
-  return <aside className="runtime-connection runtime-connection-degraded" style={{ top: 112 }} dir="rtl">
+  return <aside className="runtime-connection runtime-connection-degraded" dir="rtl">
     <div role={pending ? "status" : "alert"} aria-live={pending ? "polite" : "assertive"}
       className="runtime-connection-text">
       <span className="runtime-connection-dot" aria-hidden="true" />

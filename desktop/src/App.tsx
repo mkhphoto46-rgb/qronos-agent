@@ -2549,12 +2549,15 @@ function App() {
 
       <RightTelemetryPanel />
       <SetupStatus />
-      <RuntimeConnectionStatus
-        view={runtimeConnection}
-        onRetry={retryRuntimeConnection}
-      />
-      {voiceNotice && <VoiceTurnNotice state={voiceNotice} onRetry={() => { void retryVoiceTurn(); }}
-        onDismiss={() => settleVoiceNotice(null)} />}
+      {/* One fixed column for the connection status and the voice notice, so they stack instead of overlapping. */}
+      <div className="runtime-notices">
+        <RuntimeConnectionStatus
+          view={runtimeConnection}
+          onRetry={retryRuntimeConnection}
+        />
+        {voiceNotice && <VoiceTurnNotice state={voiceNotice} onRetry={() => { void retryVoiceTurn(); }}
+          onDismiss={() => settleVoiceNotice(null)} />}
+      </div>
 
       {/* The Smart Queue: queued requests, their progress and outcomes,
           with hold/pause/resume/cancel. Its hold is the queue's own and is

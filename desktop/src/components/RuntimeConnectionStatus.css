@@ -9,6 +9,10 @@
 .runtime-connection-detail { color: #a9bccb; flex-basis: 100%; }
 .runtime-connection button { background: #152b40; border: 1px solid #496276; border-radius: 8px; color: #d7ebf8; padding: 4px 11px; cursor: pointer; flex: none; }
 .runtime-connection button:disabled { opacity: .6; cursor: default; }
+/* The App's notice column: the notices inside it stack in the flow instead of each being fixed at the same place.
+   The column itself does not take clicks; only the notices do. */
+.runtime-notices { position: fixed; top: 60px; left: 20px; z-index: 110; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; max-width: min(360px, calc(100vw - 40px)); pointer-events: none; }
+.runtime-notices > .runtime-connection { position: static; max-width: 100%; pointer-events: auto; }
 @keyframes runtime-connection-pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .runtime-connection-connecting .runtime-connection-dot { animation: none; } }
-@media (max-width: 600px) { .runtime-connection { top: 50px; left: 10px; max-width: calc(100vw - 20px); } }
+@media (max-width: 600px) { .runtime-connection, .runtime-notices { top: 50px; left: 10px; max-width: calc(100vw - 20px); } }
