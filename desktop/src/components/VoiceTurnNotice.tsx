@@ -1,7 +1,10 @@
 import "./RuntimeConnectionStatus.css";
 
-/** failed: a voice turn ended in an error; retrying: one explicit retry is pending; retryFailed: that retry was refused. */
-export type VoiceNoticeState = "failed" | "retrying" | "retryFailed";
+/**
+ * failed: a voice turn ended in an error; retrying: one explicit retry is pending; retryFailed: that retry could not
+ * be sent; retryRefused: the runtime refused it (busy with another request, or paused).
+ */
+export type VoiceNoticeState = "failed" | "retrying" | "retryFailed" | "retryRefused";
 
 /** Fixed Persian text for a voice request that ended in an error (runtime event voice_turn_failed). */
 export const VOICE_TURN_FAILED_TEXT = {
@@ -11,6 +14,8 @@ export const VOICE_TURN_FAILED_TEXT = {
   retryingDetail: "پس از شروع شنیدن، این پیام بسته می‌شود.",
   retryFailedLabel: "شروع دوبارهٔ گفتار انجام نشد",
   retryFailedDetail: "اتصال Qronos و «بررسی راه‌اندازی» را ببینید، سپس دوباره امتحان کنید.",
+  retryRefusedLabel: "Qronos الان نمی‌تواند گوش دهد",
+  retryRefusedDetail: "کار قبلی هنوز در جریان است یا Qronos مکث شده است؛ پس از آن دوباره امتحان کنید.",
   retry: "دوباره صحبت کنید",
   dismiss: "بستن",
 };
@@ -27,7 +32,8 @@ export default function VoiceTurnNotice({ state, onRetry, onDismiss }: {
 }) {
   const text = VOICE_TURN_FAILED_TEXT;
   const [label, detail] = state === "retrying" ? [text.retryingLabel, text.retryingDetail]
-    : state === "retryFailed" ? [text.retryFailedLabel, text.retryFailedDetail] : [text.label, text.detail];
+    : state === "retryFailed" ? [text.retryFailedLabel, text.retryFailedDetail]
+    : state === "retryRefused" ? [text.retryRefusedLabel, text.retryRefusedDetail] : [text.label, text.detail];
   const pending = state === "retrying";
   return <aside className="runtime-connection runtime-connection-degraded" style={{ top: 112 }} dir="rtl">
     <div role={pending ? "status" : "alert"} aria-live={pending ? "polite" : "assertive"}

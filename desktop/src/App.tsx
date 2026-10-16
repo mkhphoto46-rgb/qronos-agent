@@ -322,23 +322,11 @@ function App() {
 
   // A failed voice turn (voice_turn_failed): its own notice, separate from the connection state. Retry is one
   // explicit new push-to-talk turn per click: while it is pending the button is disabled, a rejected attempt stays
-  // visible as failed with its retry, and only voice_listening (the turn really started) closes the notice.
+  // visible as failed with its retry, a definite refusal (runtime_busy or runtime_paused_rejected) shows as refused
+  // with its retry, and only voice_listening (the turn really started) closes the notice. retryVoiceTurn is defined
+  // after requestPushToTalk below.
   const [voiceNotice, setVoiceNotice] = useState<VoiceNoticeState | null>(null);
   const voiceRetryPendingRef = useRef(false);
-  const retryVoiceTurn = useCallback(async () => {
-    if (voiceRetryPendingRef.current) return;
-    voiceRetryPendingRef.current = true;
-    setVoiceNotice("retrying");
-    try {
-      const status = await invoke<{ running: boolean }>("get_runtime_status");
-      if (!status.running) await invoke("start_runtime");
-      await invoke("send_runtime_action", { actionId: "qronos.push_to_talk" });
-    } catch (error) {
-      console.error("[Qronos Runtime] voice retry failed:", error);
-      voiceRetryPendingRef.current = false;
-      setVoiceNotice((current) => (current === "retrying" ? "retryFailed" : current));
-    }
-  }, []);
   const settleVoiceNotice = useCallback((next: VoiceNoticeState | null) => {
     voiceRetryPendingRef.current = false;
     setVoiceNotice(next);
@@ -1404,6 +1392,32 @@ function App() {
       [],
     );
 
+  // One explicit push-to-talk request, shared by the hotkey and the voice notice's retry. Valid speech that is still
+  // playing is stopped first, because the person asked to speak; the runtime is started only if it is not running.
+  const requestPushToTalk = useCallback(async () => {
+    if (voicePlayerRef.current?.isActive()) {
+      await stopCurrentResponse();
+    }
+    const status = await invoke<{ running: boolean }>("get_runtime_status");
+    if (!status.running) {
+      await invoke("start_runtime");
+    }
+    await invoke("send_runtime_action", { actionId: "qronos.push_to_talk" });
+  }, [stopCurrentResponse]);
+
+  const retryVoiceTurn = useCallback(async () => {
+    if (voiceRetryPendingRef.current) return;
+    voiceRetryPendingRef.current = true;
+    setVoiceNotice("retrying");
+    try {
+      await requestPushToTalk();
+    } catch (error) {
+      console.error("[Qronos Runtime] voice retry failed:", error);
+      voiceRetryPendingRef.current = false;
+      setVoiceNotice((current) => (current === "retrying" ? "retryFailed" : current));
+    }
+  }, [requestPushToTalk]);
+
   useEffect(() => {
     let disposed = false;
     let unlistenRuntime:
@@ -1453,12 +1467,6 @@ function App() {
     const connectRuntimeActions = async () => {
       type RuntimeEvent = {
         eventType: string;
-        status: string;
-        message: string;
-      };
-
-      type RuntimeStatus = {
-        running: boolean;
         status: string;
         message: string;
       };
@@ -1598,6 +1606,15 @@ function App() {
                 setScenario(
                   "listening",
                 );
+                break;
+
+              case "runtime_busy":
+              case "runtime_paused_rejected":
+                // A definite refusal of the request. Only a pending voice-notice retry is affected: it shows as
+                // refused with its retry again; nothing is retried or replayed on its own.
+                if (voiceRetryPendingRef.current) {
+                  settleVoiceNotice("retryRefused");
+                }
                 break;
 
               case "voice_turn_failed":
@@ -2095,30 +2112,7 @@ function App() {
         }
 
         try {
-          if (
-            voicePlayerRef.current
-              ?.isActive()
-          ) {
-            await stopCurrentResponse();
-          }
-
-          const status =
-            await invoke<RuntimeStatus>(
-              "get_runtime_status",
-            );
-
-          if (!status.running) {
-            await invoke<RuntimeStatus>(
-              "start_runtime",
-            );
-          }
-
-          await invoke(
-            "send_runtime_action",
-            {
-              actionId,
-            },
-          );
+          await requestPushToTalk();
         } catch (error) {
           console.error(
             "[Qronos Runtime] action failed:",
