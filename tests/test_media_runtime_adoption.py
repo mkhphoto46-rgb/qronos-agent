@@ -142,5 +142,7 @@ def test_the_registry_agrees_with_the_pins_media_admits():
         assert "NOT a publisher binary" in entry["evidence"] and "AV1" in entry["licence"]
     assert entries["runtime/ffmpeg/SOURCE/ffmpeg-9.0.2.tar.xz"]["provenance"] == "publisher"
     # still honest about what is not provisioned or not vouched for
-    assert entries["models/wake_word/qronos.onnx"]["status"] == "missing"
+    # The owner-supplied wake head is present but has no published identity (C109): unverified, never hashed.
+    assert entries["models/wake_word/qronos.onnx"]["status"] == "unverified"
+    assert "sha256" not in entries["models/wake_word/qronos.onnx"]
     assert entries["runtime/chatterbox/models/t3-fa-q4_k.gguf"]["status"] == "unverified"

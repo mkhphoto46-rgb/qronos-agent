@@ -36,16 +36,16 @@
     {
       "path": "models/wake_word/qronos.onnx",
       "feature": "wakeWord",
-      "status": "missing",
-      "evidence": "project-specific wake head; not present on this machine or E:. Must be supplied by the owner.",
-      "licence": "project-owned (to be supplied)"
+      "status": "unverified",
+      "evidence": "project-specific wake head, owner-supplied from the owner's recovered backup (2026-10-16). Structure checked read-only: ONNX IR 10, opset 18, input x float [1,16,96], output sigmoid float [1,1], 9 initializers in qronos.onnx.data. No published identity exists; its local hash is not provenance, and its identity as the original export and its quality are not independently proven (experimental_not_production_ready).",
+      "licence": "owner-review-required: project-owned per the owner"
     },
     {
       "path": "models/wake_word/qronos.onnx.data",
       "feature": "wakeWord",
-      "status": "missing",
-      "evidence": "external data of the project-specific wake head; not present.",
-      "licence": "project-owned (to be supplied)"
+      "status": "unverified",
+      "evidence": "external data of the project-specific wake head, owner-supplied from the same recovered backup; every external tensor range of qronos.onnx lies inside it and together they cover the whole file. No published identity; local hash is not provenance.",
+      "licence": "owner-review-required: project-owned per the owner"
     },
     {
       "path": "runtime/whisper/models/ggml-large-v3-turbo-q5_0.bin",

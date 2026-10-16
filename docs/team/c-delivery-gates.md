@@ -56,8 +56,10 @@ repository root. Check an asset root read-only with `python -m build_support.run
     beside the exe (`crispasr.dll`, `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, `ggml-vulkan.dll`, `whisper.dll`,
     `LICENSE`, `THIRD_PARTY_NOTICES.txt`) were copied from the development root at the same paths. Their local hashes are
     a work record only, not provenance; nothing was executed.
-  - The read-only check now reports 32 registry files present: 30 verified, 2 unverified (the two voice files), 0
-    mismatch, and 2 missing (the wake files). `allVerified` is false.
+  - Recovered wake head (C109): the owner-supplied `qronos.onnx` and `.onnx.data` were copied to `models/wake_word` here
+    and in the development root (git-ignored there).
+  - The read-only check reports all 34 registry files present: 30 verified, 4 unverified (2 voice, 2 wake), 0 mismatch,
+    0 missing. `allVerified` is false, so the release gate stays closed.
   - Local provisioning does not clear the licence, provenance or release gates. The first voice run and hardware
     (Vulkan GPU) acceptance are deferred, and redistribution of the voice files stays closed.
 
@@ -66,25 +68,27 @@ repository root. Check an asset root read-only with `python -m build_support.run
   - Also installed in the asset root above. The earlier supplemental copy `E:/qronos-delivery/ac-2026-10-16/RuntimeAssets`
     holds only these three files.
   - Image-retrieval quality is not measured.
-- **Custom wake head** `models/wake_word/qronos.onnx` and `.data`: **missing**.
-  - Not found in the targeted locations and sources (C96, C100). This was not a search of every folder on E:.
-  - They were never committed (git-ignored). The private GitHub repository has no release or export of them, and no
-    public copy or published identity exists.
-  - They were trained on Colab/Molab; the original export and the training config are not recorded, so the original
-    cannot be reproduced.
-  - The owner must supply them; without them the wake word cannot work.
+- **Custom wake head** `models/wake_word/qronos.onnx` and `.data`: **unverified, present locally** (C109).
+  - The owner supplied them from a recovered backup. Earlier targeted searches (C96, C100) had not found them, and no
+    release, export or published identity exists; they stay out of Git.
+  - Checked read-only, without running them: ONNX opset 18, input `[1, 16, 96]` float, output `[1, 1]` sigmoid, with
+    the external tensors exactly covering `qronos.onnx.data`. This matches the openWakeWord classifier contract and the
+    recorded settings (threshold 0.660167, 1280-sample frames, 16 kHz, external data required).
+  - That the files are the original export, and how well they detect, is not independently proven. The recorded
+    quality is `experimental_not_production_ready`; live wake acceptance is deferred, and production wake is not
+    claimed.
 - **Voice (speech synthesis)** `crispasr.exe` and `t3-fa-q4_k.gguf`: **unverified**. No published identity matches
   the local files, so the registry holds no hash for them. They are installed locally (C108) and block only the
   release gate (`--require-verified`), not local use. The companion DLLs and notices are not in the registry, and the
   t3-fa licence is not established.
-- **Registry totals**: 30 verified, 2 unverified, 2 missing.
+- **Registry totals**: 30 verified, 4 unverified, 0 missing.
 
 ## Open gates
 
 | Gate | State | Owner | Next concrete action |
 |---|---|---|---|
 | Asset licence and provenance | owner review is required for the openWakeWord feature models (CC BY-NC-SA 4.0 question), the SigLIP 2 ONNX conversion (base Apache-2.0; the conversion states no licence) and the Persian Chatterbox fine-tune | owner | decide each licence; the registry text then changes as a reviewed change |
-| Custom wake head | missing | owner | supply both files and their origin; register them as `unverified` unless an authoritative identity exists |
+| Custom wake head | present, unverified (owner-supplied recovered backup) | owner | licence/ownership review; live wake acceptance on the target hardware |
 | Voice assets identity | unverified | owner / Track C | provide a publisher identity (size and SHA-256) or accept them as unverified |
 | Genuine signing | none: no certificate, provider, trust root, update key or same-artifact signing receipt. Free-signing preparation is in `docs/signing` | owner | choose a provider and certificate; then one signing receipt on the exact artifact |
 | Publication | public visibility or a provider release: the GitHub repository is private and no worker may make it public or release it. Root-authorised PR pushes are separate | owner | decide visibility and release |
