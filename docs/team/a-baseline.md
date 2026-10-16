@@ -141,7 +141,9 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
   - C100: the original wake model was not found in the authoritative sources or the targeted local locations. No
     generic replacement was substituted. The owner later supplied the pair (C109); identity and detection quality remain unproven.
 - **External:**
-  - no genuine Authenticode signing, reviewed trusted root, update key or signing receipt;
+  - no genuine Authenticode signing, reviewed trusted root or same-artifact signing receipt. (The owner's update
+    PUBLIC key is already admitted in `config/update_trusted_keys.json`, keyId `b0566b68…`, PR #68; that is a separate
+    trust purpose and proves no private-key availability, signed update or release clearance.)
   - the relay is not deployed;
   - no real-phone LAN/WAN acceptance;
   - no clean-Windows installation or launch;
