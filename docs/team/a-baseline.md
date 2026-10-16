@@ -86,6 +86,18 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
   The 26 failures above remain the record of A100.
 - The broad gate has **not** been rerun, so there is no broad or full pass claim.
 
+**Remaining software gate** (A104, after the asset-root isolation fix):
+- The fix: the conftest now points `QRONOS_ASSET_ROOT` into each test's own profile, so an inherited user-level
+  asset root (installed assets) is never used by tests or their children.
+- Regression `test_software_profile_redirects_an_inherited_asset_root`: failed on the old fixture, passed after the
+  fix.
+- Gate: 5 of the 13 excluded files, run as source-audited software tests (3 whole; 2 minus 6 functions, which expand
+  to 17 parametrized cases). Exit 0: 261 passed, 3 skipped.
+- The other 8 files are not run:
+  - 4 run native NSIS installers or uninstallers, or write the HKCU registry. These are deferred to a disposable
+    Windows machine.
+  - 4 start real bridge or supervisor processes whose child targets are not yet audited. These are not verified.
+
 **Desktop:**
 - `npm test`: exit 0, 183 of 183 passed across the 12 node unit-test files (A100). They ran on byte-identical
   desktop sources.
@@ -106,7 +118,8 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
 ## Not verified (explicit limits)
 
 - **No broad-gate rerun:** the gate has not been rerun since A100; the fixes were checked by focused nodes only.
-- **Excluded tests:** the 13 excluded Python files and the live-device nodes. The 2 ignored Rust tests did not run.
+- **Excluded tests:** 8 of the 13 originally excluded Python files, the 6 deselected functions above, and the
+  live-device nodes. The 2 ignored Rust tests did not run.
 - **Deferred:** human and live tests on the PC, phone, GPU, microphone, devices and user archives.
 - **Provisioning:**
   - Runtime model assets are provisioned separately and are not bundled.

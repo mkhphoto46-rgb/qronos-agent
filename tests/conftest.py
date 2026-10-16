@@ -272,6 +272,9 @@ def isolate_qronos_storage_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
     monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    # A user-level QRONOS_ASSET_ROOT (installed runtime assets) is an absolute override that packaged paths would
+    # inherit; keep the packaged asset root inside this test's own profile.
+    monkeypatch.setenv("QRONOS_ASSET_ROOT", str(tmp_path / "RuntimeAssets"))
     monkeypatch.setenv("QRONOS_CONVERSATION_HISTORY_PATH", str(tmp_path / "history.sqlite3"))
     monkeypatch.setenv("QRONOS_SETTINGS_PATH", str(tmp_path / "settings.json"))
 
