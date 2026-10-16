@@ -1,8 +1,9 @@
-"""The local validation runner plans and refuses without running anything here."""
+"""The local validation runner plans, refuses and reports; subprocess is faked, so nothing is launched here."""
 
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -79,3 +80,54 @@ def test_dry_run_plans_scoped_pytest_and_node_without_running(capsys, monkeypatc
 def test_execution_without_a_supplied_python_is_refused(capsys, tmp_path):
     assert lv.main(["--workspace", str(tmp_path / "pytest-ws"), "tests/test_local_validate.py"]) == 2
     assert "--python" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_execution_without_a_workspace_is_refused(capsys):
+    assert lv.main(["--python", sys.executable, "tests/test_local_validate.py"]) == 2
+    assert "--workspace" in json.loads(capsys.readouterr().out)["error"]
+
+
+def _fake_run(monkeypatch, outcome):
+    """Replace subprocess.run: git answers empty, the step records what it saw and then returns or raises."""
+    seen = []
+
+    def run(argv, **kwargs):
+        if argv[0] == "git":
+            return type("R", (), {"returncode": 1, "stdout": ""})()
+        environment = kwargs["env"]
+        seen.append({"argv": argv, "env": environment,
+                     "dirs": {name: Path(environment[name]).is_dir() for name in lv.FOLDERS}})
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return type("R", (), {"returncode": outcome})()
+
+    monkeypatch.setattr(lv.subprocess, "run", run)
+    return seen
+
+
+def test_execution_isolates_and_creates_every_redirected_location_before_the_child(capsys, monkeypatch, tmp_path):
+    for name in lv.STORE_FILES:
+        monkeypatch.setenv(name, "C:/real-user-data/" + name)
+    seen = _fake_run(monkeypatch, 0)
+    workspace = tmp_path / "pytest-ws"
+    assert lv.main(["--python", sys.executable, "--workspace", str(workspace), "tests/test_local_validate.py"]) == 0
+    (call,) = seen
+    assert all(call["dirs"].values())  # TEMP, TMP, profile and caches existed when the child started
+    for name in (*lv.FOLDERS, *lv.STORE_FILES):
+        assert workspace.resolve() in Path(call["env"][name]).parents
+    assert (workspace / "state").is_dir() and not any((workspace / "state").glob("*.json"))
+    assert json.loads(capsys.readouterr().out)["exit"] == 0
+
+
+@pytest.mark.parametrize("outcome, code, key", [
+    (FileNotFoundError(2, "No such file"), 127, "error"),
+    (lv.subprocess.TimeoutExpired(["x"], 1), 124, "timedOut"),
+    (3, 3, None),
+])
+def test_a_failing_step_is_reported_with_its_own_exit(capsys, monkeypatch, tmp_path, outcome, code, key):
+    _fake_run(monkeypatch, outcome)
+    assert lv.main(["--python", sys.executable, "--workspace", str(tmp_path / "pytest-ws"),
+                    "tests/test_local_validate.py"]) == code
+    report = json.loads(capsys.readouterr().out)
+    (step,) = report["steps"]
+    assert report["exit"] == step["exit"] == code and (key is None or step[key])

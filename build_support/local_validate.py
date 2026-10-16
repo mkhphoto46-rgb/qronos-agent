@@ -7,9 +7,14 @@ or with ``--dry-run``, it only prints the plan.
 
 Every child gets live devices off (``QRONOS_RUN_LIVE_DEVICE_TESTS=0``), Ollama
 auto-start off, no desktop wake bootstrap, and its profile, asset, data, temp and
-cache folders inside a fresh workspace whose name contains ``pytest``. Commands
-are argument lists (never a shell) with a timeout. The report records the source
-head, the commands and their actual exit codes.
+cache folders and the known Qronos store overrides inside a fresh workspace whose
+name contains ``pytest``; those folders exist before any child starts. Commands
+are argument lists (never a shell) with a timeout that ends the direct child
+only. The report records the source head (read with ``git``), the commands and
+their actual exit codes; it stops at the first failing step.
+
+This is a scoped runner, not a sandbox: a selected test runs with the user's
+rights, so audit what you select.
 
     python -m build_support.local_validate --python <python.exe> \\
         --workspace <...>/pytest-local-1 tests/test_x.py tests/test_y.py::test_z
@@ -31,6 +36,20 @@ DESKTOP = ROOT / "desktop"
 MAX_TIMEOUT = 3600
 #: Environment the runner removes from every child.
 DROPPED = ("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "QRONOS_PACKAGED_RUNTIME")
+#: Profile, temp and cache folders redirected into the workspace (created before any child starts).
+FOLDERS = {
+    "LOCALAPPDATA": "local", "APPDATA": "roaming", "USERPROFILE": "user", "HOME": "user",
+    "TEMP": "temp", "TMP": "temp", "QRONOS_DATA_ROOT": "data", "QRONOS_ASSET_ROOT": "assets",
+    "npm_config_cache": "npm-cache", "XDG_CACHE_HOME": "cache", "QRONOS_MEDIA_DATA_DIR": "state/media",
+}
+#: Qronos store overrides that name one file, redirected into <workspace>/state. The folder is created and the
+#: file is not, so each store starts empty and the Paint reference is simply unavailable.
+STORE_FILES = {
+    "QRONOS_CONVERSATION_HISTORY_PATH": "conversation_history.json", "QRONOS_SETTINGS_PATH": "settings.json",
+    "QRONOS_QUEUE_STATE_PATH": "queue_state.json", "QRONOS_PERMISSION_POLICY_PATH": "permission_policy.json",
+    "QRONOS_PERMISSION_AUDIT_PATH": "permission_audit.jsonl", "QRONOS_APPROVAL_SECRET_PATH": "approval_secret.bin",
+    "QRONOS_PAINT_REFERENCE_PATH": "paint_reference_absent.png",
+}
 
 
 class SelectionError(ValueError):
@@ -51,7 +70,9 @@ def check_selection(item: str, root: Path = ROOT) -> str:
     return text
 
 
-def check_workspace(workspace: Path) -> Path:
+def check_workspace(workspace: Path | None) -> Path:
+    if workspace is None:
+        raise SelectionError("--workspace is required to execute")
     workspace = workspace.resolve()
     if "pytest" not in workspace.name.lower():
         raise SelectionError("the workspace folder name must contain 'pytest'")
@@ -75,15 +96,18 @@ def child_environment(workspace: Path, base: Mapping[str, str] | None = None) ->
     environment = dict(os.environ if base is None else base)
     for name in DROPPED:
         environment.pop(name, None)
-    folders = {
-        "LOCALAPPDATA": "local", "APPDATA": "roaming", "USERPROFILE": "user", "HOME": "user",
-        "TEMP": "temp", "TMP": "temp", "QRONOS_DATA_ROOT": "data", "QRONOS_ASSET_ROOT": "assets",
-        "npm_config_cache": "npm-cache", "XDG_CACHE_HOME": "cache",
-    }
-    environment.update({name: str(workspace / folder) for name, folder in folders.items()})
+    environment.update({name: str(workspace / folder) for name, folder in FOLDERS.items()})
+    environment.update({name: str(workspace / "state" / file) for name, file in STORE_FILES.items()})
     environment.update({"QRONOS_RUN_LIVE_DEVICE_TESTS": "0", "QRONOS_OLLAMA_AUTO_START": "0",
                         "PYTHONDONTWRITEBYTECODE": "1"})
     return environment
+
+
+def prepare_workspace(workspace: Path) -> None:
+    """Create the fresh workspace and every redirected folder, so no child falls back to a real location."""
+    workspace.mkdir(parents=True)
+    for folder in {*FOLDERS.values(), "state"}:
+        (workspace / folder).mkdir(parents=True, exist_ok=True)
 
 
 def plan(selections: Sequence[str], frontend: bool, python: str | None, node: str | None,
@@ -140,23 +164,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     steps = plan(selections, args.frontend, python, node, workspace)
     report = {"source": source_state(), "workspace": str(workspace), "executed": execute,
               "environment": {"QRONOS_RUN_LIVE_DEVICE_TESTS": "0", "QRONOS_OLLAMA_AUTO_START": "0",
-                              "removed": list(DROPPED), "redirectedInto": "workspace"},
+                              "removed": list(DROPPED), "redirectedInto": "workspace",
+                              "redirected": sorted([*FOLDERS, *STORE_FILES])},
               "steps": steps}
     if not steps:
         report["note"] = "no selection: nothing to run (there is no full-suite default)"
     exit_code = 0
     if execute:
-        workspace.mkdir(parents=True)
+        prepare_workspace(workspace)
         environment = child_environment(workspace)
-        for step in steps:
+        for index, step in enumerate(steps):
             started = time.monotonic()
             try:
                 step["exit"] = subprocess.run(step["argv"], cwd=step["cwd"], env=environment,
                                               timeout=args.timeout).returncode
             except subprocess.TimeoutExpired:
+                # subprocess.run ends the direct child only; a grandchild it started is not tracked here.
                 step["exit"], step["timedOut"] = 124, True
+            except OSError as error:
+                step["exit"], step["error"] = 127, f"could not start {step['argv'][0]}: {error.strerror or error}"
             step["seconds"] = round(time.monotonic() - started, 2)
-            exit_code = exit_code or step["exit"]
+            if step["exit"] != 0:
+                exit_code = step["exit"]
+                for later in steps[index + 1:]:
+                    later["skipped"] = "an earlier step failed"
+                break
         report["exit"] = exit_code
     text = json.dumps(report, indent=1)
     print(text)
