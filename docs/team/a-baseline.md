@@ -34,8 +34,10 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
   files as verified. It also corrects `docs/qronos_project_context.md`.
 - A0 and A101: this document, plus the test fixture and network inventory repairs.
 - C98, C99 and C101: the delivery-gates doc, the Rust receipt and one test.
-- Product Python, TypeScript and Rust code is unchanged from `1755aa52`. The only packaged change is the asset
-  registry JSON.
+- Product Python, TypeScript and Rust code is unchanged from `1755aa52`.
+- The asset registry JSON is a source-only release-checker file. C102 and A102 independently proved it is **not**
+  bundled: the installed product code and assets are unchanged from `1755aa52` to `31fc2ad`.
+- The `31fc2ad` rebuild is therefore a fresh, source-bound candidate, not a runtime feature change.
 - The installer bundles no model weights.
 
 ## Ownership
@@ -78,7 +80,8 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
   - the checkout's `tauri.svg` was restored to the committed 2599-byte blob (no source change);
   - the pinned PDF dependencies were installed in the fixture environment;
   - the image-embedding test now expects the verified SigLIP 2 entries with exactly the publisher pins.
-- The pinned `defusedxml`: C102 completes its notice metadata only.
+- The pinned `defusedxml`: installed into the fixture environment as a pinned fixture dependency, with its metadata
+  verified (C102).
 - All 26 originally failed node IDs are covered by these focused follow-ups (A101 also ran one extra policy check).
   The 26 failures above remain the record of A100.
 - The broad gate has **not** been rerun, so there is no broad or full pass claim.
@@ -95,6 +98,9 @@ peer review (C93/C95, A98). PR100 changes only `tests/test_link_mobile_contract.
 
 **Installer:**
 - An unsigned review candidate from `1755aa52`, accepted on static evidence (A98).
+- An unsigned review candidate from `31fc2ad` (C102 receipt; installer sha256 `5def1112…`), accepted on static
+  evidence (A102).
+- Product code is unchanged since then, so no rebuild is necessary after doc-only changes.
 - This is build proof only, not installation or quality proof.
 
 ## Not verified (explicit limits)
