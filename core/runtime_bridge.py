@@ -9439,6 +9439,7 @@ class QronosRuntime:
                     "error",
                     str(exc),
                 )
+                self._notify_voice_turn_failed()
 
             self._cancel_pending_voice_playback_wait()
 
@@ -9476,6 +9477,7 @@ class QronosRuntime:
                     "error",
                     str(exc),
                 )
+                self._notify_voice_turn_failed()
 
             self._cancel_pending_voice_playback_wait()
 
@@ -9522,6 +9524,14 @@ class QronosRuntime:
 
         return playback_seconds
 
+    def _notify_voice_turn_failed(self) -> None:
+        """A voice turn ended in an error: one fixed, safe event the desktop can act on.
+
+        The diagnostic stays in the runtime_error before it; this carries no message, path or provider, so the
+        desktop can say in its own words that the voice request failed and point to the local setup check.
+        """
+        self._notify("voice_turn_failed", "error", json.dumps({"reason": "voice_turn_failed"}))
+
     def push_to_talk(self) -> None:
         self._run_voice_turn(trigger_source="push_to_talk", prepare_push_to_talk=True)
 
@@ -9546,6 +9556,7 @@ class QronosRuntime:
             inference_checkpoint()
             with self._foreground_lifecycle().publication():
                 self._notify("runtime_error", "error", str(exc))
+                self._notify_voice_turn_failed()
             return 0.0
 
         finally:

@@ -24,11 +24,12 @@ Runtime lifecycle events the desktop relies on:
 | `runtime_pong` | an already running bridge answered `ping_runtime` | connection **ready** |
 | `runtime_error` | a diagnostic (bridge error, stderr traceback, closed stream, unconfirmed command) | startup: **failed**; after ready: **degraded**. Valid audio playback is never stopped by it |
 | `runtime_stopping` | the bridge is ending (Stop/restart) | **reconnecting**; the supervisor restarts it, the desktop spawns nothing |
+| `voice_turn_failed` | a voice turn ended in an error; emitted once after its `runtime_error`, with the fixed message `{"reason": "voice_turn_failed"}` | a Persian voice notice and a setup re-check; its retry is one explicit new push-to-talk turn. Cleared by the next `voice_listening` |
 
 Spawning (`start_runtime`) is never "ready". The person sees only fixed Persian texts
 (`desktop/src/runtimeConnection.ts`), never a message, path or provider. Retry is offered only after a failure or an
 error, one attempt at a time. It only checks, starts or pings the runtime: it never replays a user action and never
-starts inference or a microphone. Late results of an older attempt, or of a disposed view, are ignored.
+starts inference or a microphone (the separate voice notice's retry is the person's own new push-to-talk). Late results of an older attempt, or of a disposed view, are ignored.
 
 ## Device Link WAN wiring (A90 with C; approved interface 2026-10-16)
 

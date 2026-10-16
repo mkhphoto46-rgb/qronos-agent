@@ -56,6 +56,7 @@ import LibraryView from "./components/LibraryView";
 import PermissionsView from "./components/PermissionsView";
 import SettingsView from "./components/SettingsView";
 import SetupStatus from "./components/SetupStatus";
+import VoiceTurnNotice, { type VoiceNoticeState } from "./components/VoiceTurnNotice";
 import RuntimeConnectionStatus from "./components/RuntimeConnectionStatus";
 import {
   createRuntimeConnection,
@@ -63,7 +64,7 @@ import {
   type RuntimeConnection,
   type RuntimeConnectionView,
 } from "./runtimeConnection";
-import { setupNeedsAttention, useSetupStore } from "./setupStore";
+import { refreshSetup, setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
@@ -317,6 +318,30 @@ function App() {
   const runtimeConnectionRef = useRef<RuntimeConnection | null>(null);
   const retryRuntimeConnection = useCallback(() => {
     runtimeConnectionRef.current?.retry();
+  }, []);
+
+  // A failed voice turn (voice_turn_failed): its own notice, separate from the connection state. Retry is one
+  // explicit new push-to-talk turn per click: while it is pending the button is disabled, a rejected attempt stays
+  // visible as failed with its retry, and only voice_listening (the turn really started) closes the notice.
+  const [voiceNotice, setVoiceNotice] = useState<VoiceNoticeState | null>(null);
+  const voiceRetryPendingRef = useRef(false);
+  const retryVoiceTurn = useCallback(async () => {
+    if (voiceRetryPendingRef.current) return;
+    voiceRetryPendingRef.current = true;
+    setVoiceNotice("retrying");
+    try {
+      const status = await invoke<{ running: boolean }>("get_runtime_status");
+      if (!status.running) await invoke("start_runtime");
+      await invoke("send_runtime_action", { actionId: "qronos.push_to_talk" });
+    } catch (error) {
+      console.error("[Qronos Runtime] voice retry failed:", error);
+      voiceRetryPendingRef.current = false;
+      setVoiceNotice((current) => (current === "retrying" ? "retryFailed" : current));
+    }
+  }, []);
+  const settleVoiceNotice = useCallback((next: VoiceNoticeState | null) => {
+    voiceRetryPendingRef.current = false;
+    setVoiceNotice(next);
   }, []);
 
   // The Device Link page: one controller, fed by link_* runtime events.
@@ -1575,7 +1600,15 @@ function App() {
                 );
                 break;
 
+              case "voice_turn_failed":
+                // A voice turn ended in an error: say so, and re-read the local setup so a missing speech
+                // service shows as incomplete setup. The diagnostic itself stays in runtime_error.
+                settleVoiceNotice("failed");
+                void refreshSetup();
+                break;
+
               case "voice_listening":
+                settleVoiceNotice(null);
                 // Explicit Push-to-Talk already stops active speech before
                 // asking Runtime to listen. A generic listening event must
                 // never kill healthy playback on its own; doing that turns a
@@ -2526,6 +2559,8 @@ function App() {
         view={runtimeConnection}
         onRetry={retryRuntimeConnection}
       />
+      {voiceNotice && <VoiceTurnNotice state={voiceNotice} onRetry={() => { void retryVoiceTurn(); }}
+        onDismiss={() => settleVoiceNotice(null)} />}
 
       {/* The Smart Queue: queued requests, their progress and outcomes,
           with hold/pause/resume/cancel. Its hold is the queue's own and is
