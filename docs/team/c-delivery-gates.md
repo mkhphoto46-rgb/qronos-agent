@@ -27,7 +27,13 @@ These are distinct. Do not mix their identities.
   `build_support.runtime_assets` checker. It is NOT bundled in the runtime or the installer (C102: no `build_support`
   module in the frozen runtime, no copy in the payload, and the install manifest is unchanged). Correcting it is not a
   runtime feature, and both installers contain the same product code.
-- **Current pinned desktop installer**, built from source `31fc2adc` with rustc/cargo 1.98.1 (C106). It is UNSIGNED
+- **Current personal installer**, a fresh backend and desktop build of source `2835768f` with rustc/cargo 1.98.1
+  (C118), including the voice-failure fix (A111/A112). It is UNSIGNED. A static peer accepted it (A113): the packed
+  `core.runtime_bridge` equals its source, the payload manifest equals the backend's, and the voice notice is in the
+  desktop assets. Installation and human acceptance remain deferred.
+  - File: `E:/qronos-delivery/personal-2026-10-17-2835768f/qronos-desktop_0.1.0_x64-setup.exe`, 318,611,167 B,
+    sha256 `ac441a6d…e85b`.
+- **Previous pinned desktop installer**, built from source `31fc2adc` with rustc/cargo 1.98.1 (C106). It is UNSIGNED
   and a review candidate only. Its independent static desktop-delta review passed (A107); Root confirmed both CLI exits were zero. Installation and human acceptance remain deferred.
   - File: `qronos-desktop_0.1.0_x64-setup.exe`, 318,601,298 B, sha256 `96647219…1ef9`.
   - Location: `E:/qronos-release-pinned-2026-10-16/delivery-31fc2adc`, with its provenance (recording 1.98.1),

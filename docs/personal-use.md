@@ -7,16 +7,17 @@ or a public release. Every step below is an **owner action**; none of them has b
 
 | Artifact | Location | Built from |
 |---|---|---|
-| Windows installer (UNSIGNED) | `E:/qronos-release-pinned-2026-10-16/delivery-31fc2adc/qronos-desktop_0.1.0_x64-setup.exe` (318,601,298 B, sha256 `96647219…1ef9`) | `31fc2adc`, Rust 1.98.1 |
+| Windows installer (UNSIGNED) | `E:/qronos-delivery/personal-2026-10-17-2835768f/qronos-desktop_0.1.0_x64-setup.exe` (318,611,167 B, sha256 `ac441a6d…e85b`, built 2026-10-16 UTC) | `2835768f`, Rust 1.98.1 |
 | Android phone app (DEBUG-signed) | `E:/qronos-delivery/ac-2026-10-16/qronos-remote-0.1.0-debug.apk` (4,022,723 B, sha256 `d0f006b4…9af8`) | `53dd571` |
 
 Source equivalence, per component:
-- **Windows product:** unchanged from `31fc2adc` through `d4abd00`; only docs, tests and two unpackaged source-side
-  tools (the local validation runner and the asset registry) changed.
-- **Phone app:** `mobile/` is unchanged from `53dd571` through `d4abd00`.
-
-A pending desktop and runtime fix (A111, the voice-failure notice) is not in this installer. Once it is accepted and
-integrated, this installer becomes the predecessor and a new build is needed; that build does not exist yet.
+- **Windows product:** this installer is a fresh backend and desktop build of `2835768f`. It includes the voice-failure
+  fix (A111/A112): a failed voice request shows its own Persian notice, re-checks the setup, and offers one explicit
+  retry. A static peer accepted it (A113): the packed runtime bridge equals its source, and the voice notice is in the
+  desktop assets.
+- **Phone app:** `mobile/` is unchanged from `53dd571` through `2835768f`, so the existing APK still applies.
+- **Previous installer:** `E:/qronos-release-pinned-2026-10-16/delivery-31fc2adc` (`96647219…1ef9`) is kept, but it
+  lacks the voice-failure fix.
 
 ## Install on Windows
 
