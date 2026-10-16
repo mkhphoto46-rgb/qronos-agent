@@ -11,7 +11,8 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 ## What is signed
 
 - Only the Qronos Windows installer (`qronos-desktop_<version>_x64-setup.exe`), built by the project's
-  GitHub Actions workflow on GitHub-hosted runners from the public source at `[OWNER: repository URL]`.
+  GitHub Actions workflow on GitHub-hosted runners from the source at https://github.com/mkhphoto46-rgb/qronos-agent (currently PRIVATE;
+  it must be public before signing).
 - Upstream programs inside the installer keep their own publishers' signatures or stay unsigned. They are never
   signed with this certificate: the Python runtime, PyInstaller, NSIS, the Microsoft Visual C++ redistributable,
   the Microsoft WebView2 installer, ffmpeg, whisper.cpp and crispasr.
@@ -20,12 +21,15 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 ## Team roles
 
-- Authors (may change the source): `[OWNER: names or accounts]`
-- Reviewers (review every change from someone outside the team): `[OWNER: names or accounts]`
-- Approvers (approve each signing request in SignPath): `[OWNER: names or accounts]`
+PROPOSED, not yet configured in SignPath. The accounts are the repository's GitHub collaborators as observed on
+2026-10-16; being a collaborator is not a SignPath role.
+
+- Authors (may change the source): `amyn-asd`, `mkhphoto46-rgb` (proposed)
+- Reviewers (review every change from someone outside the team): `amyn-asd`, `mkhphoto46-rgb` (proposed)
+- Approvers (approve each signing request in SignPath): `mkhphoto46-rgb` (proposed, pending the owner's acceptance)
 
 `[OWNER: confirm before publishing]` Every team member uses multi-factor authentication for GitHub and
-SignPath. Every release is approved by hand.
+SignPath. MFA is currently **UNCONFIRMED** for both accounts. Every release is approved by hand.
 
 ## Privacy
 
@@ -43,4 +47,4 @@ user provides and that carry the owner's update signature.
 
 Windows shows **SignPath Foundation** as the publisher of a signed Qronos installer. Each release also lists the
 installer's SHA-256 `[OWNER: release page]`. A GitHub artifact attestation can be checked with
-`gh attestation verify <file> -R <owner>/<repository>`; that is build provenance, not a Windows trust decision.
+`gh attestation verify <file> -R mkhphoto46-rgb/qronos-agent`; that is build provenance, not a Windows trust decision.
