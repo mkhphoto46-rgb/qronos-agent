@@ -10,7 +10,7 @@ policy. Writer: Track C. Status as of 2026-10-16.
 | Test fixtures | project `.venv`, Python 3.13.13 | pytest, the registry checker, synthetic fixtures |
 | Packaging | private CPython 3.14.8 venv, PyInstaller 6.22.3 | frozen runtime; freeze unchanged since r73 |
 | Desktop | Tauri CLI 2.11.4, Node v24.19.0, NSIS from the Tauri cache | WebView2 and VC++ prerequisites pinned in `build_support/*_prerequisite.json` |
-| Rust | local rustc/cargo **1.98.0** | CI pins **1.98.1** (`.github/workflows/tests.yml`); 1.98.1 is not installed locally. The pin is not changed |
+| Rust | pinned **1.98.1** in a private `RUSTUP_HOME` (`E:/qronos-toolchains/rustup-1.98.1`, C105); global `stable` is still 1.98.0 | equals the CI pin (`.github/workflows/tests.yml`). Installed with `rustup toolchain install 1.98.1 --profile minimal --no-self-update` from the official channel; the global rustup settings, toolchains, cargo proxies, default and PATH are unchanged |
 | Android | Gradle 9.8.1 wrapper, SDK unpacked from the pinned archives (`mobile/android/buildcheck/sdk-packages.json`) | owner approved the SDK licence; built through `sdk_setup.py` |
 
 ## Artifacts and sources
@@ -27,12 +27,14 @@ These are distinct. Do not mix their identities.
   `build_support.runtime_assets` checker. It is NOT bundled in the runtime or the installer (C102: no `build_support`
   module in the frozen runtime, no copy in the payload, and the install manifest is unchanged). Correcting it is not a
   runtime feature, and both installers contain the same product code.
-- **Current matching desktop installer**, built from the final frozen source `31fc2adc` (C102). It is UNSIGNED and a
-  review candidate only.
-  - File: `qronos-desktop_0.1.0_x64-setup.exe`, 318,596,791 B, sha256 `5def1112…7de1`.
-  - Location: `E:/qronos-release-ac-final-2026-10-16/delivery-31fc2adc`, with its provenance, install manifest and
-    notices.
-  - It differs from the `1755aa52` installer only by rebuilt binaries and its recorded source commit.
+- **Current pinned desktop installer**, built from source `31fc2adc` with rustc/cargo 1.98.1 (C106). It is UNSIGNED
+  and a review candidate only. Its independent desktop-delta peer review is **pending**.
+  - File: `qronos-desktop_0.1.0_x64-setup.exe`, 318,601,298 B, sha256 `96647219…1ef9`.
+  - Location: `E:/qronos-release-pinned-2026-10-16/delivery-31fc2adc`, with its provenance (recording 1.98.1),
+    install manifest and notices.
+  - It reuses the unchanged C102 backend (3096 files, byte-equal); only the desktop executable was recompiled.
+- **Earlier candidates** (kept): `31fc2adc` built with 1.98.0 (C102, `5def1112…7de1`) and `1755aa52` built with
+  1.98.0 (C95, `425cdf19…52c2`).
 - **Android APK**, the standard debug build from source `53dd571`.
   - File: `qronos-remote-0.1.0-debug.apk`, 4,022,723 B, sha256 `d0f006b4…9af8`.
   - It is signed with the Android **debug** key only, which is not release signing.
@@ -79,8 +81,8 @@ repository root. Check an asset root read-only with `python -m build_support.run
 | Voice assets identity | unverified | owner / Track C | provide a publisher identity (size and SHA-256) or accept them as unverified |
 | Genuine signing | none: no certificate, provider, trust root, update key or same-artifact signing receipt. Free-signing preparation is in `docs/signing` | owner | choose a provider and certificate; then one signing receipt on the exact artifact |
 | Publication | public visibility or a provider release: the GitHub repository is private and no worker may make it public or release it. Root-authorised PR pushes are separate | owner | decide visibility and release |
-| CI | hosted Actions billing is unresolved; CI runs `cargo check --locked --all-targets` with 1.98.1 but no `cargo test` | owner (billing), Root | restore billing; the Rust unit tests passed locally on 1.98.0 (see below) |
-| Rust 1.98.1 | not installed locally; the local unit-test pass (72/0/2 ignored) is on 1.98.0 | Root / owner | approve installing the pinned toolchain for a CI-equal run, or accept the 1.98.0 evidence as local only |
+| CI | the hosted PR #101 jobs never started: billing failed / spending limit (annotations 116733368374 and 116733367898), not a code failure. CI runs `cargo check --locked --all-targets` with 1.98.1 but no `cargo test` | owner (billing) | restore billing; locally, the same check and the Rust unit tests pass on 1.98.1 (see below) |
+| Rust 1.98.1 | closed locally: installed privately (C105); `cargo +1.98.1 check --locked --offline --all-targets` exit 0 at `31fc2adc` (C105); unit tests 72 passed, 0 failed, 2 ignored (C106) | — | none locally; a hosted run still needs CI billing |
 | Device Link relay | no operator, host, TLS certificate or deployment authority; WAN is default off | owner | name the operator and host; then a deployment review |
 | Human and device tests | deferred: real-phone LAN/WAN, clean-Windows install/upgrade/uninstall, voice quality and resource use | owner (human tester) | schedule them on the exact artifacts above |
 
@@ -93,7 +95,8 @@ repository root. Check an asset root read-only with `python -m build_support.run
 - **Fixture PDF dependencies**: the project `.venv` now holds the `requirements.txt` pins fpdf2 2.8.9,
   fonttools 4.66.1, uharfbuzz 0.56.3 and defusedxml 0.7.1 (C101, C102).
 - **Node**: `npm test` passed 183 of 183 (A100).
-- **Rust**: 72 passed and 2 ignored on local 1.98.0 (C99, below).
+- **Rust**: 72 passed, 0 failed, 2 ignored on the pinned 1.98.1 (C106) and earlier on 1.98.0 (C99, below);
+  `cargo +1.98.1 check --locked --offline --all-targets` exit 0 (C105).
 
 ## Rust tests (`desktop/src-tauri`, 74 `#[test]`)
 
@@ -131,5 +134,8 @@ cargo +stable test --locked --offline --release --lib --target-dir E:/qronos-rel
     test.
   - The release build reused the C95 cache: 1 m 16 s compile, then 16.6 s of tests.
   - Nothing was downloaded, and the fixture temp folder was empty afterwards.
-- Limit: this is local `stable` = rustc/cargo **1.98.0** evidence. It is not the CI pin 1.98.1, which is not
-  installed, and it is not a CI run.
+- Limit: this run is local `stable` = rustc/cargo **1.98.0** evidence (historical).
+
+C106 repeated the same command at `31fc2adc` with the pinned toolchain (`cargo.exe +1.98.1 test ...`, private
+`RUSTUP_HOME`, the same isolation): **exit 0, 72 passed, 0 failed, 2 ignored**. The Rust sources are unchanged since
+C99. This is local evidence, not a hosted CI run.
