@@ -85,9 +85,13 @@ repository root. Check an asset root read-only with `python -m build_support.run
 
 ## Gates
 
-Qronos is private and for personal use. Setup steps are in `docs/personal-use.md`.
+Qronos is private and for personal use, and the repository stays PRIVATE (owner decision). Setup steps are in
+`docs/personal-use.md`.
 
-### Personal use: ready, nothing blocks install or startup
+### Personal use: a software candidate is available
+
+The source shows no signing or hosted-CI gate on installation or startup. An actual install and startup have not
+been tested yet (see Deferred).
 
 | Item | State | Owner | Next concrete action |
 |---|---|---|---|
@@ -107,13 +111,13 @@ Qronos is private and for personal use. Setup steps are in `docs/personal-use.md
 
 ### Optional: public distribution and access from outside the home network
 
-Needed only to give Qronos to others or to reach it over the internet; not needed for personal use. These stay real restrictions: unsigned builds are not for distribution, and updates still require the owner's signature.
+Needed only to give Qronos to others or to reach it over the internet; not needed for personal use. A public release and signing policy would be a separate owner decision; this table gives no legal clearance either way. Updates still require the owner's signature.
 
 | Item | State | Owner | Next concrete action |
 |---|---|---|---|
 | Asset licence and provenance | owner review is required for the openWakeWord feature models (CC BY-NC-SA 4.0 question), the SigLIP 2 ONNX conversion (base Apache-2.0; the conversion states no licence) and the Persian Chatterbox fine-tune | owner | decide each licence; the registry text then changes as a reviewed change |
 | Genuine signing (Authenticode) | none: no certificate, provider, approved trust root or same-artifact signing receipt. Free-signing preparation is in `docs/signing` | owner | choose a provider and certificate; then one signing receipt on the exact artifact |
-| Public distribution | public visibility or a provider release: the GitHub repository is private and no worker may make it public or release it. Root-authorised PR pushes are separate | owner | decide visibility and release |
+| Public distribution | not planned: the repository stays PRIVATE. Making it public or releasing to others would be a new owner decision; no worker may do either. Root-authorised PR pushes are separate | owner | none while private |
 | Device Link relay | no operator, host, TLS certificate or deployment authority; WAN is default off | owner | name the operator and host; then a deployment review |
 
 ## Test evidence
