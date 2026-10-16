@@ -28,7 +28,7 @@ These are distinct. Do not mix their identities.
   module in the frozen runtime, no copy in the payload, and the install manifest is unchanged). Correcting it is not a
   runtime feature, and both installers contain the same product code.
 - **Current pinned desktop installer**, built from source `31fc2adc` with rustc/cargo 1.98.1 (C106). It is UNSIGNED
-  and a review candidate only. Its independent desktop-delta peer review is **pending**.
+  and a review candidate only. Its independent static desktop-delta review passed (A107); Root confirmed both CLI exits were zero. Installation and human acceptance remain deferred.
   - File: `qronos-desktop_0.1.0_x64-setup.exe`, 318,601,298 B, sha256 `96647219…1ef9`.
   - Location: `E:/qronos-release-pinned-2026-10-16/delivery-31fc2adc`, with its provenance (recording 1.98.1),
     install manifest and notices.
