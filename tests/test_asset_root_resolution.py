@@ -24,6 +24,8 @@ def test_a_stale_process_without_the_variable_uses_the_persisted_user_root(tmp_p
     assert paths.assets == persisted.resolve()
     assert paths.models == persisted.resolve() / "models"
     assert paths.data == (tmp_path / "local" / "Qronos").resolve()  # writable state does not move
+    assert paths.voice_temp == paths.data / "Temp" / "Chatterbox"
+    assert paths.voice_cache == paths.data / "Cache" / "Chatterbox"
 
 
 def test_an_explicit_process_value_wins_over_the_persisted_one(tmp_path):
@@ -63,6 +65,9 @@ def test_development_honours_the_asset_root_but_keeps_its_data_logs_and_settings
     checkout = (tmp_path / "checkout").resolve()
     assert (paths.root, paths.data, paths.logs, paths.memory) == (
         checkout, checkout / "data", checkout / "logs", checkout / "memory")
+    # Writable voice state stays in the checkout, never in the configured asset root.
+    assert paths.voice_temp == checkout / "runtime" / "chatterbox" / "temp"
+    assert paths.voice_cache == checkout / "runtime" / "chatterbox" / "cache"
 
 
 def test_an_injected_environment_never_reads_the_real_user_environment(tmp_path, monkeypatch):

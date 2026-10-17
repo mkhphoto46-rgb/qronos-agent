@@ -32,7 +32,9 @@ class QronosPaths:
         return (
             self.temp / "Chatterbox"
             if self.packaged
-            else self.runtime_assets / "chatterbox" / "temp"
+            # Writable voice state stays in the checkout (where the desktop's asset scope allows playback), not in a
+            # configured asset root.
+            else self.root / "runtime" / "chatterbox" / "temp"
         )
 
     @property
@@ -40,7 +42,7 @@ class QronosPaths:
         return (
             self.data / "Cache" / "Chatterbox"
             if self.packaged
-            else self.runtime_assets / "chatterbox" / "cache"
+            else self.root / "runtime" / "chatterbox" / "cache"
         )
 
 
