@@ -54,8 +54,24 @@ def _prevent_asio_selection() -> None:
         os.environ.pop("SD_ENABLE_ASIO", None)
 
 
+def _utf8_stdio() -> None:
+    """Exchange UTF-8 with the desktop on standard input, output and error.
+
+    The desktop sends and reads UTF-8 JSON and sets PYTHONUTF8=1, which a source
+    interpreter honours. The frozen backend does not take UTF-8 mode from the
+    environment, so its streams would use the Windows code page: Persian text
+    from the desktop then arrives as undecodable characters and every request
+    that carries it fails. Input is strict; output keeps the bridge's
+    backslashreplace so a stray character can never stop a reply.
+    """
+    for stream, errors in ((sys.stdin, "strict"), (sys.stdout, "backslashreplace"), (sys.stderr, "backslashreplace")):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors=errors)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _prevent_asio_selection()
+    _utf8_stdio()
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["--version"]:
         print(json.dumps({"name": "qronos-runtime", "protocolVersion": PROTOCOL_VERSION}))
