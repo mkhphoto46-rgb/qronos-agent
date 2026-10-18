@@ -69,7 +69,14 @@ class WhisperCppRuntime(SpeechRuntime):
         self,
         audio_path: str | Path,
         language: str = "auto",
+        grammar: str | None = None,
     ) -> str:
+        """Transcribe one audio file.
+
+        ``grammar`` is an optional GBNF grammar (top-level rule ``root``) that
+        limits the output to its sentences; it is used for closed answers such
+        as yes/no, never for open speech.
+        """
         source = Path(
             audio_path
         )
@@ -111,6 +118,9 @@ class WhisperCppRuntime(SpeechRuntime):
         transcript_path = Path(
             f"{output_base}.txt"
         )
+        grammar_path = Path(
+            f"{output_base}.gbnf"
+        )
 
         command = [
             str(self.executable_path),
@@ -126,6 +136,18 @@ class WhisperCppRuntime(SpeechRuntime):
             str(output_base),
             "-fa",
         ]
+
+        if grammar is not None:
+            grammar_path.write_text(grammar, encoding="utf-8")
+            command += [
+                "--grammar",
+                str(grammar_path),
+                "--grammar-rule",
+                "root",
+                # Effectively forbids anything outside the grammar.
+                "--grammar-penalty",
+                "10000",
+            ]
 
         try:
             try:
@@ -174,3 +196,5 @@ class WhisperCppRuntime(SpeechRuntime):
         finally:
             if transcript_path.exists():
                 transcript_path.unlink()
+            if grammar_path.exists():
+                grammar_path.unlink()

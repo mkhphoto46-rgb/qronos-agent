@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from typing import Any, Callable
 
 
@@ -51,6 +51,20 @@ from core.file_resolver import (
     is_computer_capability_query,
     parse_location_request,
     parse_named_file_request,
+)
+from core.sound_alike_commands import (
+    CONFIRMATION_SECONDS as SOUND_ALIKE_CONFIRMATION_SECONDS,
+    YES_NO_GRAMMAR as SOUND_ALIKE_YES_NO_GRAMMAR,
+    COMMAND_GRAMMAR as SOUND_ALIKE_COMMAND_GRAMMAR,
+    command_from_grammar_reading,
+    GRAMMAR_CHECK_SCORE as SOUND_ALIKE_GRAMMAR_CHECK_SCORE,
+    closest_command_score,
+    grammar_candidate as sound_alike_grammar_candidate,
+    SoundAlikeDecision,
+    is_no as is_spoken_no,
+    is_yes as is_spoken_yes,
+    is_whisper_non_speech,
+    match_spoken_command,
 )
 from core.computer_action_parser import (
     ComputerActionParseError,
@@ -1434,6 +1448,12 @@ class QronosRuntime:
         # desktop must answer with that identity; Stop/Pause/shutdown revoke
         # it. pending_paint_draw/pending_paint_undo/pending_look are views.
         self._approvals = ApprovalLedger()
+        # An unanswered "did you mean ...?" voice question: (command sentence, monotonic deadline).
+        self._pending_sound_alike: tuple[str, float] | None = None
+        # The audio of the voice command being handled, for a grammar re-read of a possible command.
+        self._last_voice_audio_path: Path | None = None
+        # A weak transcript whose audio re-read completed a command: (transcript, candidate).
+        self._grammar_candidate = None
         # Makes "check nothing is pending, then issue" atomic.
         self._approval_lock = threading.Lock()
         # App workflows (browser navigation); prompts share the ledger above.
@@ -2647,9 +2667,15 @@ class QronosRuntime:
         text: str,
         routed_task_type: TaskType,
         routing_shadow: dict[str, Any] | None = None,
+        *,
+        spoken: bool = False,
     ) -> tuple[TaskType, dict[str, Any]]:
         """
         Apply one conservative production promotion on top of TaskRouter.
+
+        ``spoken`` marks a speech-recognition transcript: only then may a
+        misheard app command that sounds like a known one
+        (core/sound_alike_commands.py) be promoted to COMPUTER.
 
         TaskRouter remains authoritative for every non-FAST route. The compute
         estimator may only promote FAST -> HEAVY, and only when complexity
@@ -2669,7 +2695,31 @@ class QronosRuntime:
         # to FAST merely because legacy TaskRouter lacks a particular noun such
         # as Drive/Downloads.  This promotion is deterministic and happens
         # before any model runs.
-        if _windows_control_route_promotion(text):
+        pending_answer = False
+        if spoken and self._live_pending_sound_alike() is not None:
+            pending_answer = is_spoken_yes(text) or is_spoken_no(text)
+            if not pending_answer:
+                # Anything but a yes or no ends the "did you mean ...?" question.
+                self._pending_sound_alike = None
+
+        self._grammar_candidate = None
+        grammar_promoted = False
+        if (
+            spoken
+            and not pending_answer
+            and match_spoken_command(text) is None
+            and closest_command_score(text) >= SOUND_ALIKE_GRAMMAR_CHECK_SCORE
+        ):
+            # Too weak as text; let the audio decide. Ordinary speech stays in
+            # chat unless its audio completes a known command sentence.
+            candidate = sound_alike_grammar_candidate(text, self._read_voice_command_grammar(details))
+            if candidate is not None:
+                self._grammar_candidate = (text, candidate)
+                grammar_promoted = True
+
+        if pending_answer or grammar_promoted or _windows_control_route_promotion(text) or (
+            spoken and match_spoken_command(text) is not None
+        ):
             details.update(
                 {
                     "selectedRoute": TaskType.COMPUTER.value,
@@ -4852,6 +4902,16 @@ class QronosRuntime:
         command. The spoken command itself satisfies VOICE_CONFIRMATION only;
         it never substitutes for UI_CONFIRMATION or TYPED_SECRET.
         """
+        pending = self._live_pending_sound_alike()
+        self._pending_sound_alike = None
+        if pending is not None and is_spoken_yes(transcript):
+            # The person confirmed the exact command they were asked about.
+            report["voiceSoundAlikeConfirmed"] = True
+            return self._execute_voice_computer_action(pending, report)
+        if pending is not None and is_spoken_no(transcript):
+            report["voiceSoundAlikeDeclined"] = True
+            return "باشه، کاری انجام نشد."
+
         if is_computer_capability_query(transcript):
             report["voiceComputerCapabilityQuery"] = True
             report["voiceComputerDeferred"] = False
@@ -4894,6 +4954,44 @@ class QronosRuntime:
                 app_resolver=self.computer_executor.resolve_app_id,
             )
         except ComputerActionParseError:
+            # A misheard app command ("نوت پدرو بسکو") is recovered by how it
+            # sounds before it can fall through to a file or folder search.
+            sound_alike = match_spoken_command(transcript)
+            if sound_alike is not None:
+                sound_alike = self._confirm_sound_alike_by_grammar(sound_alike, report)
+            else:
+                stored = getattr(self, "_grammar_candidate", None)
+                if stored is not None and stored[0] == transcript:
+                    # Only the audio supports this command: always ask first.
+                    sound_alike = stored[1]
+            self._grammar_candidate = None
+            if sound_alike is not None:
+                report["voiceSoundAlike"] = {
+                    "decision": sound_alike.decision.value,
+                    "sentence": sound_alike.sentence,
+                    "score": sound_alike.score,
+                    "margin": sound_alike.margin,
+                }
+            if (
+                sound_alike is not None
+                and sound_alike.decision is SoundAlikeDecision.CONFIRM
+            ):
+                report["voiceComputerDeferred"] = True
+                report["voiceComputerReason"] = "sound_alike_needs_confirmation"
+                # One exact command, answerable once with a spoken yes or no.
+                self._pending_sound_alike = (
+                    sound_alike.sentence,
+                    time.monotonic() + SOUND_ALIKE_CONFIRMATION_SECONDS,
+                )
+                return (
+                    f"منظورتان «{sound_alike.sentence}» بود؟ "
+                    "اگر بله، بگو «آره»."
+                )
+            action = None
+            if sound_alike is not None:
+                action = sound_alike.action()
+
+        if action is None:
             named_file_response = self._execute_voice_named_file_action(
                 transcript,
                 report,
@@ -6779,15 +6877,57 @@ class QronosRuntime:
             ),
         )
 
+    def _confirm_sound_alike_by_grammar(self, match, report: dict[str, Any]):
+        """Re-read the command audio allowing only known command sentences.
+
+        Free transcription garbles short commands on narrow-band headset audio;
+        limited to the command sentences, the audio picks the sentence itself.
+        When that re-read is exactly a command for the same app and operation
+        as the sound-alike match, the match is acted on; otherwise the match is
+        returned unchanged (still asked first when it is only fairly close).
+        """
+        reading = self._read_voice_command_grammar(report)
+        command = command_from_grammar_reading(reading)
+        if command is None or (command[0], command[1]) != (match.operation, match.app_id):
+            return match
+        return dataclass_replace(match, sentence=command[2], decision=SoundAlikeDecision.ACT)
+
+    def _read_voice_command_grammar(self, report: dict[str, Any]) -> str:
+        """The current voice command's audio re-read allowing only known command sentences ("" if unavailable)."""
+        audio = getattr(self, "_last_voice_audio_path", None)
+        if audio is None or not Path(audio).is_file():
+            return ""
+        reader = getattr(self.speech_runtime, "fallback_runtime", self.speech_runtime)
+        try:
+            reading = reader.transcribe_file(audio, language="fa", grammar=SOUND_ALIKE_COMMAND_GRAMMAR)
+        except Exception as exc:  # noqa: BLE001 - the re-read is only supporting evidence
+            report["voiceCommandGrammarFailure"] = str(exc)
+            return ""
+        report["voiceCommandGrammar"] = reading
+        return reading
+
+    def _live_pending_sound_alike(self) -> str | None:
+        """The command of an unexpired "did you mean ...?" voice question, or None."""
+        pending = getattr(self, "_pending_sound_alike", None)
+        if pending is None:
+            return None
+        sentence, deadline = pending
+        if time.monotonic() >= deadline:
+            self._pending_sound_alike = None
+            return None
+        return sentence
+
     def _discard_pending_approvals(self, reason: str) -> int:
         """
-        Revoke every computer/Paint/screen prompt still waiting for an answer.
+        Revoke every computer/Paint/screen prompt still waiting for an answer,
+        including an unanswered "did you mean ...?" voice question.
 
         The prompt may already be on screen. Its identity is revoked, so its
         later answer is refused even if an identical question is asked again
         (that new prompt gets a new identity). Nothing ran, and the discard is
         audited for a prepared Paint drawing/undo. Idempotent.
         """
+        self._pending_sound_alike = None
         revoked = self._approvals.revoke_kinds(
             (
                 ApprovalKind.PAINT_DRAW,
@@ -8146,6 +8286,7 @@ class QronosRuntime:
             )
 
             stt_started = time.perf_counter()
+            self._last_voice_audio_path = Path(recording.audio_path)
 
             primary_stt_language = self.voice_language
             transcript = (
@@ -8193,6 +8334,44 @@ class QronosRuntime:
                     inference_checkpoint()
                     report["sttActionRetry"] = True
                     report["sttActionRetryFailure"] = str(retry_exc)
+
+            # While a "did you mean ...?" question is open the answer is yes or
+            # no. A one-word «آره» on a headset microphone is often transcribed
+            # as something else in Persian («موسیقی», «با»). Only then, re-read
+            # the same audio limited to a yes/no grammar (it gives "Yeah.") and
+            # keep the answer if it is a clear yes or no.
+            if (
+                self._live_pending_sound_alike() is not None
+                and not (is_spoken_yes(transcript) or is_spoken_no(transcript))
+            ):
+                try:
+                    inference_checkpoint()
+                    # The CLI can limit its output to a yes/no grammar, so the
+                    # audio itself decides; free English text drifts ("Vale.").
+                    reader = getattr(
+                        self.speech_runtime, "fallback_runtime", self.speech_runtime
+                    )
+                    english = (
+                        reader.transcribe_file(
+                            recording.audio_path,
+                            language="en",
+                            grammar=SOUND_ALIKE_YES_NO_GRAMMAR,
+                        )
+                        .strip()
+                    )
+                    report["sttConfirmationRetry"] = english
+                    if is_spoken_yes(english) or is_spoken_no(english):
+                        report["sttPrimaryTranscript"] = transcript
+                        transcript = english
+                except Exception as retry_exc:
+                    inference_checkpoint()
+                    report["sttConfirmationRetryFailure"] = str(retry_exc)
+
+            # Whisper's stock output for audio it cannot read is «موسیقی»
+            # ("music"); on its own it is not a request.
+            if is_whisper_non_speech(transcript):
+                report["sttNonSpeech"] = transcript
+                transcript = ""
 
             inference_checkpoint()
             stt_finished = time.perf_counter()
@@ -8279,6 +8458,7 @@ class QronosRuntime:
                 transcript,
                 routed_task_type,
                 routing_shadow,
+                spoken=True,
             )
 
             if _looks_like_calculator_semantic_action(
