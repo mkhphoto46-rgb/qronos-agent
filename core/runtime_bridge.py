@@ -57,6 +57,7 @@ from core.sound_alike_commands import (
     SoundAlikeDecision,
     is_no as is_spoken_no,
     is_yes as is_spoken_yes,
+    is_whisper_non_speech,
     match_spoken_command,
 )
 from core.computer_action_parser import (
@@ -8270,6 +8271,38 @@ class QronosRuntime:
                     inference_checkpoint()
                     report["sttActionRetry"] = True
                     report["sttActionRetryFailure"] = str(retry_exc)
+
+            # While a "did you mean ...?" question is open the answer is yes or
+            # no. A one-word «آره» on a headset microphone is often transcribed
+            # as something else in Persian («موسیقی», «با»), but in English it
+            # comes out as "Okay"/"Yeah". Only then, re-read the same audio in
+            # English and keep the answer if it is a clear yes or no.
+            if (
+                self._live_pending_sound_alike() is not None
+                and not (is_spoken_yes(transcript) or is_spoken_no(transcript))
+            ):
+                try:
+                    inference_checkpoint()
+                    english = (
+                        self.speech_runtime.transcribe_file(
+                            recording.audio_path,
+                            language="en",
+                        )
+                        .strip()
+                    )
+                    report["sttConfirmationRetry"] = english
+                    if is_spoken_yes(english) or is_spoken_no(english):
+                        report["sttPrimaryTranscript"] = transcript
+                        transcript = english
+                except Exception as retry_exc:
+                    inference_checkpoint()
+                    report["sttConfirmationRetryFailure"] = str(retry_exc)
+
+            # Whisper's stock output for audio it cannot read is «موسیقی»
+            # ("music"); on its own it is not a request.
+            if is_whisper_non_speech(transcript):
+                report["sttNonSpeech"] = transcript
+                transcript = ""
 
             inference_checkpoint()
             stt_finished = time.perf_counter()

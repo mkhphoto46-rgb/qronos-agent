@@ -141,8 +141,12 @@ def match_spoken_command(transcript: str) -> SoundAlikeMatch | None:
 CONFIRMATION_SECONDS = 30.0
 
 # Whole-utterance answers to "did you mean ...?", as sound keys (see _sound_key).
-_YES = {_sound_key(word) for word in ("آره", "آری", "بله", "بلی", "باشه", "اوهوم", "آره آره", "بله بله", "آره باز کن", "بله باز کن", "yes", "yeah", "ok", "okay")}
-_NO = {_sound_key(word) for word in ("نه", "نخیر", "نه نه", "ولش کن", "نمی‌خوام", "no")}
+_YES = {_sound_key(word) for word in (
+    "آره", "آری", "بله", "بلی", "بل", "باشه", "اوهوم", "آره آره", "بله بله", "آره باز کن", "بله باز کن",
+    # The same answers as an English transcription hears them (see the confirmation retry in runtime_bridge).
+    "yes", "yeah", "yep", "yup", "ok", "okay", "are", "aare", "bale", "bali", "belle", "bella", "sure",
+)}
+_NO = {_sound_key(word) for word in ("نه", "نخیر", "نه نه", "ولش کن", "نمی‌خوام", "no", "nah", "nope", "na", "nay", "neh")}
 
 
 def _answer_key(text: str) -> str:
@@ -159,3 +163,12 @@ def is_no(text: str) -> bool:
     """A spoken "no" to a "did you mean ...?" question: the whole utterance."""
     key = _answer_key(text)
     return bool(key) and key in _NO
+
+
+_NON_SPEECH = {_sound_key(word) for word in ("موسیقی", "موزیک", "music")}
+
+
+def is_whisper_non_speech(text: str) -> bool:
+    """A transcript that is only Whisper's stock output for unreadable audio («موسیقی», "music")."""
+    key = _sound_key(text)
+    return bool(key) and key in _NON_SPEECH

@@ -211,3 +211,32 @@ def test_not_yes_words(word):
     from core.sound_alike_commands import is_yes
 
     assert not is_yes(word)
+
+
+@pytest.mark.parametrize("heard", ["Okay.", "Yeah.", "Are.", "Bale.", "بل"])
+def test_a_yes_as_an_english_transcription_hears_it(heard):
+    # A headset recording of «آره» read in English came out as "Okay." and, under a yes/no grammar, "Yeah.".
+    from core.sound_alike_commands import is_yes
+
+    assert is_yes(heard)
+
+
+@pytest.mark.parametrize("heard", ["No.", "Nah.", "Nope"])
+def test_a_no_as_an_english_transcription_hears_it(heard):
+    from core.sound_alike_commands import is_no
+
+    assert is_no(heard)
+
+
+@pytest.mark.parametrize("heard", ["Grazie.", "?.", "با", "موسیقی", "Pedro Bosco"])
+def test_noise_transcriptions_are_neither_yes_nor_no(heard):
+    from core.sound_alike_commands import is_no, is_yes
+
+    assert not is_yes(heard) and not is_no(heard)
+
+
+def test_a_bare_music_transcript_is_not_speech():
+    from core.sound_alike_commands import is_whisper_non_speech
+
+    assert is_whisper_non_speech("موسیقی") and is_whisper_non_speech("Music.")
+    assert not is_whisper_non_speech("موسیقی پخش کن") and not is_whisper_non_speech("")
