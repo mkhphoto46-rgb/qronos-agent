@@ -198,3 +198,29 @@ def command_from_grammar_reading(text: str) -> tuple[ComputerOperation, str, str
     sentence = " ".join(text.strip().rstrip(".").split())
     found = _SENTENCE_ACTIONS.get(sentence)
     return None if found is None else (found[0], found[1], sentence)
+
+
+#: Between this and CONFIRM_SCORE the text alone is too weak to call a command
+#: (on recorded headset commands it was 0.50; ordinary sentences stayed at or
+#: below 0.44). There the audio decides: only if a command-grammar re-read
+#: completes a known sentence is the person asked "did you mean ...?".
+GRAMMAR_CHECK_SCORE = 0.48
+
+
+def closest_command_score(transcript: str) -> float:
+    """How close ``transcript`` sounds to the nearest known spoken app command (0 to 1)."""
+    key = _sound_key(transcript)
+    if not key:
+        return 0.0
+    return max(1 - _distance(key, command_key) / max(len(key), len(command_key)) for *_, command_key in _COMMANDS)
+
+
+def grammar_candidate(transcript: str, reading: str) -> SoundAlikeMatch | None:
+    """A "did you mean ...?" candidate from a command-grammar re-read of a weak transcript, or None."""
+    command = command_from_grammar_reading(reading)
+    if command is None:
+        return None
+    operation, app_id, sentence = command
+    return SoundAlikeMatch(
+        operation, app_id, sentence, round(closest_command_score(transcript), 3), 0.0, SoundAlikeDecision.CONFIRM
+    )

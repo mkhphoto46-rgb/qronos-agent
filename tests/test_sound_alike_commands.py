@@ -284,3 +284,43 @@ def test_the_command_grammar_accepts_only_whole_command_sentences():
     assert command_from_grammar_reading(" نوت پد رو باز کن.")[1] == "notepad"
     assert command_from_grammar_reading("نوت پد رو") is None
     assert command_from_grammar_reading("اکس") is None
+
+
+def test_a_weak_transcript_is_asked_about_only_when_its_audio_completes_a_command(voice_runtime, tmp_path):
+    from core.task_router import TaskType
+
+    runtime, launched = voice_runtime
+    audio = tmp_path / "command.wav"
+    audio.write_bytes(b"RIFF")
+    runtime._last_voice_audio_path = audio
+    runtime.speech_runtime = _GrammarReader("نوت پد رو باز کن")
+    selected, _ = runtime._select_production_task_type("نتفیر بسکم", TaskType.FAST, {}, spoken=True)
+    assert selected is TaskType.COMPUTER
+    report = {}
+    response = runtime._execute_voice_computer_action("نتفیر بسکم", report)
+    assert launched == [] and "منظورتان «نوت پد رو باز کن»" in response
+
+
+def test_a_weak_transcript_whose_audio_is_not_a_command_stays_in_chat(voice_runtime, tmp_path):
+    from core.task_router import TaskType
+
+    runtime, launched = voice_runtime
+    audio = tmp_path / "speech.wav"
+    audio.write_bytes(b"RIFF")
+    runtime._last_voice_audio_path = audio
+    runtime.speech_runtime = _GrammarReader("ماشی")
+    selected, _ = runtime._select_production_task_type("نتفیر بسکم", TaskType.FAST, {}, spoken=True)
+    assert selected is TaskType.FAST and launched == []
+
+
+def test_ordinary_speech_is_never_re_read(voice_runtime, tmp_path):
+    from core.task_router import TaskType
+
+    runtime, _ = voice_runtime
+    reader = _GrammarReader("نوت پد رو باز کن")
+    runtime.speech_runtime = reader
+    runtime._last_voice_audio_path = tmp_path
+    for text in ("پای تخت ایران کجا است؟", "یه جوک بگو", "سلام حالت شطوره"):
+        selected, _ = runtime._select_production_task_type(text, TaskType.FAST, {}, spoken=True)
+        assert selected is TaskType.FAST
+    assert reader.calls == []

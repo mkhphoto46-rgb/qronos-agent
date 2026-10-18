@@ -57,6 +57,9 @@ from core.sound_alike_commands import (
     YES_NO_GRAMMAR as SOUND_ALIKE_YES_NO_GRAMMAR,
     COMMAND_GRAMMAR as SOUND_ALIKE_COMMAND_GRAMMAR,
     command_from_grammar_reading,
+    GRAMMAR_CHECK_SCORE as SOUND_ALIKE_GRAMMAR_CHECK_SCORE,
+    closest_command_score,
+    grammar_candidate as sound_alike_grammar_candidate,
     SoundAlikeDecision,
     is_no as is_spoken_no,
     is_yes as is_spoken_yes,
@@ -1449,6 +1452,8 @@ class QronosRuntime:
         self._pending_sound_alike: tuple[str, float] | None = None
         # The audio of the voice command being handled, for a grammar re-read of a possible command.
         self._last_voice_audio_path: Path | None = None
+        # A weak transcript whose audio re-read completed a command: (transcript, candidate).
+        self._grammar_candidate = None
         # Makes "check nothing is pending, then issue" atomic.
         self._approval_lock = threading.Lock()
         # App workflows (browser navigation); prompts share the ledger above.
@@ -2697,7 +2702,22 @@ class QronosRuntime:
                 # Anything but a yes or no ends the "did you mean ...?" question.
                 self._pending_sound_alike = None
 
-        if pending_answer or _windows_control_route_promotion(text) or (
+        self._grammar_candidate = None
+        grammar_promoted = False
+        if (
+            spoken
+            and not pending_answer
+            and match_spoken_command(text) is None
+            and closest_command_score(text) >= SOUND_ALIKE_GRAMMAR_CHECK_SCORE
+        ):
+            # Too weak as text; let the audio decide. Ordinary speech stays in
+            # chat unless its audio completes a known command sentence.
+            candidate = sound_alike_grammar_candidate(text, self._read_voice_command_grammar(details))
+            if candidate is not None:
+                self._grammar_candidate = (text, candidate)
+                grammar_promoted = True
+
+        if pending_answer or grammar_promoted or _windows_control_route_promotion(text) or (
             spoken and match_spoken_command(text) is not None
         ):
             details.update(
@@ -4939,6 +4959,12 @@ class QronosRuntime:
             sound_alike = match_spoken_command(transcript)
             if sound_alike is not None:
                 sound_alike = self._confirm_sound_alike_by_grammar(sound_alike, report)
+            else:
+                stored = getattr(self, "_grammar_candidate", None)
+                if stored is not None and stored[0] == transcript:
+                    # Only the audio supports this command: always ask first.
+                    sound_alike = stored[1]
+            self._grammar_candidate = None
             if sound_alike is not None:
                 report["voiceSoundAlike"] = {
                     "decision": sound_alike.decision.value,
@@ -6860,20 +6886,25 @@ class QronosRuntime:
         as the sound-alike match, the match is acted on; otherwise the match is
         returned unchanged (still asked first when it is only fairly close).
         """
-        audio = getattr(self, "_last_voice_audio_path", None)
-        if audio is None or not Path(audio).is_file():
-            return match
-        reader = getattr(self.speech_runtime, "fallback_runtime", self.speech_runtime)
-        try:
-            reading = reader.transcribe_file(audio, language="fa", grammar=SOUND_ALIKE_COMMAND_GRAMMAR)
-        except Exception as exc:  # noqa: BLE001 - the re-read is only a confirmation
-            report["voiceCommandGrammarFailure"] = str(exc)
-            return match
-        report["voiceCommandGrammar"] = reading
+        reading = self._read_voice_command_grammar(report)
         command = command_from_grammar_reading(reading)
         if command is None or (command[0], command[1]) != (match.operation, match.app_id):
             return match
         return dataclass_replace(match, sentence=command[2], decision=SoundAlikeDecision.ACT)
+
+    def _read_voice_command_grammar(self, report: dict[str, Any]) -> str:
+        """The current voice command's audio re-read allowing only known command sentences ("" if unavailable)."""
+        audio = getattr(self, "_last_voice_audio_path", None)
+        if audio is None or not Path(audio).is_file():
+            return ""
+        reader = getattr(self.speech_runtime, "fallback_runtime", self.speech_runtime)
+        try:
+            reading = reader.transcribe_file(audio, language="fa", grammar=SOUND_ALIKE_COMMAND_GRAMMAR)
+        except Exception as exc:  # noqa: BLE001 - the re-read is only supporting evidence
+            report["voiceCommandGrammarFailure"] = str(exc)
+            return ""
+        report["voiceCommandGrammar"] = reading
+        return reading
 
     def _live_pending_sound_alike(self) -> str | None:
         """The command of an unexpired "did you mean ...?" voice question, or None."""
