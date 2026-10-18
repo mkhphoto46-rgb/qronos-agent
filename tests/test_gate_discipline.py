@@ -80,6 +80,11 @@ NATIVE_BACKENDS = {
 # the reason. Anything not listed has to be justified by adding it here, which
 # is the point: the list is short and someone has to look at it.
 KNOWN_SYSTEM_MODULES: dict[str, str] = {
+    "core.config": (
+        "Reads one value (QRONOS_ASSET_ROOT) from the user's environment key "
+        "HKCU\\Environment through winreg, read only; it writes nothing and "
+        "launches nothing."
+    ),
     "core.runtime_instance_guard": (
         "Creates/closes only the local named Qronos runtime mutex; it does not "
         "launch processes or manipulate user applications."
