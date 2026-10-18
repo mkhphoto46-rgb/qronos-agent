@@ -52,6 +52,7 @@ from core.file_resolver import (
     parse_location_request,
     parse_named_file_request,
 )
+from core.sound_alike_commands import SoundAlikeDecision, match_spoken_command
 from core.computer_action_parser import (
     ComputerActionParseError,
     parse_computer_action,
@@ -2647,9 +2648,15 @@ class QronosRuntime:
         text: str,
         routed_task_type: TaskType,
         routing_shadow: dict[str, Any] | None = None,
+        *,
+        spoken: bool = False,
     ) -> tuple[TaskType, dict[str, Any]]:
         """
         Apply one conservative production promotion on top of TaskRouter.
+
+        ``spoken`` marks a speech-recognition transcript: only then may a
+        misheard app command that sounds like a known one
+        (core/sound_alike_commands.py) be promoted to COMPUTER.
 
         TaskRouter remains authoritative for every non-FAST route. The compute
         estimator may only promote FAST -> HEAVY, and only when complexity
@@ -2669,7 +2676,9 @@ class QronosRuntime:
         # to FAST merely because legacy TaskRouter lacks a particular noun such
         # as Drive/Downloads.  This promotion is deterministic and happens
         # before any model runs.
-        if _windows_control_route_promotion(text):
+        if _windows_control_route_promotion(text) or (
+            spoken and match_spoken_command(text) is not None
+        ):
             details.update(
                 {
                     "selectedRoute": TaskType.COMPUTER.value,
@@ -4894,6 +4903,31 @@ class QronosRuntime:
                 app_resolver=self.computer_executor.resolve_app_id,
             )
         except ComputerActionParseError:
+            # A misheard app command ("نوت پدرو بسکو") is recovered by how it
+            # sounds before it can fall through to a file or folder search.
+            sound_alike = match_spoken_command(transcript)
+            if sound_alike is not None:
+                report["voiceSoundAlike"] = {
+                    "decision": sound_alike.decision.value,
+                    "sentence": sound_alike.sentence,
+                    "score": sound_alike.score,
+                    "margin": sound_alike.margin,
+                }
+            if (
+                sound_alike is not None
+                and sound_alike.decision is SoundAlikeDecision.CONFIRM
+            ):
+                report["voiceComputerDeferred"] = True
+                report["voiceComputerReason"] = "sound_alike_needs_confirmation"
+                return (
+                    f"منظورتان «{sound_alike.sentence}» بود؟ "
+                    "اگر بله، همین را دوباره و شمرده بگو."
+                )
+            action = None
+            if sound_alike is not None:
+                action = sound_alike.action()
+
+        if action is None:
             named_file_response = self._execute_voice_named_file_action(
                 transcript,
                 report,
@@ -8279,6 +8313,7 @@ class QronosRuntime:
                 transcript,
                 routed_task_type,
                 routing_shadow,
+                spoken=True,
             )
 
             if _looks_like_calculator_semantic_action(
