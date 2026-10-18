@@ -41,8 +41,6 @@
 !include "LogicLib.nsh"
 !include "x64.nsh"
 !include "${__FILEDIR__}\qronos-install-root.nsh"
-!include "${__FILEDIR__}\qronos-update-fence.nsh"
-!include "${__FILEDIR__}\qronos-update-transaction.nsh"
 
 ; The Qronos template (installer-template/installer.nsi) refuses to compile without these hooks.
 !define QRONOS_TEMPLATE_HOOKS
@@ -82,6 +80,34 @@
   !endif
   Abort "${MESSAGE}"
 !macroend
+
+; After a material install step (the Qronos template inserts it right after each one): NSIS commands that fail
+; in a silent install (File, WriteUninstaller, WriteRegStr, CreateShortcut) only set the error flag and
+; continue, so the installation stops here. IfErrors also clears the flag for the next step.
+!macro QRONOS_STEP STEP
+  ${If} ${Errors}
+    !ifdef QRONOS_PROBE_RESULT
+      Push "${STEP}"
+      Call QronosProbeStepFailed
+    !endif
+    Abort "Qronos was not completely installed: ${STEP} failed. Run the installer again."
+  ${EndIf}
+!macroend
+
+; Immediately before NSIS_HOOK_POSTINSTALL: the last step check, so every step above passed its QRONOS_STEP.
+!macro QRONOS_INSTALL_COMPLETE
+  !insertmacro QRONOS_STEP "the last install step"
+!macroend
+
+!ifdef QRONOS_PROBE_RESULT
+Function QronosProbeStepFailed
+  Exch $R6
+  FileOpen $R7 "${QRONOS_PROBE_RESULT}" w
+  FileWrite $R7 "step failed: $R6"
+  FileClose $R7
+  Pop $R6
+FunctionEnd
+!endif
 
 !macro QRONOS_FAIL MESSAGE
   !ifdef QRONOS_PROBE_RESULT
@@ -178,34 +204,8 @@
   Push $R7
   Push $R8
   Push $R9
-  ; First: the update fence and the exclusive store admission (update hand-over or manual install),
-  ; before anything is checked, killed, copied or removed (qronos-update-fence.nsh).
-  !insertmacro QRONOS_FENCE_INSTALL
-  ${If} $QronosFenceMessage != ""
-    !insertmacro QRONOS_REFUSE "$QronosFenceMessage"
-  ${EndIf}
-  ; The install folder must be Qronos's own before anything is installed.
+  ; First: the install folder must be Qronos's own before anything is checked, killed, copied or removed.
   Call QronosCheckInstallRoot
-  ${If} $QronosMessage != ""
-    !insertmacro QRONOS_REFUSE "$QronosMessage"
-  ${EndIf}
-  ; The update transaction (qronos-update-transaction.nsh) needs this installer's own file list, and it
-  ; restores exactly the metadata and shortcuts this template writes.
-  !ifndef QRONOS_OWNED_MANIFEST
-    !error "Qronos installers must be built with build_support.build_desktop: the install manifest (QRONOS_OWNED_MANIFEST) was not provided."
-  !endif
-  !ifdef STARTMENUFOLDER
-    !if "${STARTMENUFOLDER}" != ""
-      !error "Qronos: a Start-menu folder is not covered by the update transaction's shortcut restore."
-    !endif
-  !endif
-  StrCpy $QronosUninstKey "${UNINSTKEY}"
-  StrCpy $QronosManuKey "${MANUPRODUCTKEY}"
-  StrCpy $QronosLnkStart "$SMPROGRAMS\${PRODUCTNAME}.lnk"
-  StrCpy $QronosLnkDesktop "$DESKTOP\${PRODUCTNAME}.lnk"
-  ; What an earlier, interrupted update left is untrusted: an empty folder is removed, anything else refuses
-  ; with nothing moved or deleted (qronos-update-transaction.nsh, QronosTxnRecover).
-  Call QronosTxnRecover
   ${If} $QronosMessage != ""
     !insertmacro QRONOS_REFUSE "$QronosMessage"
   ${EndIf}
@@ -264,19 +264,13 @@
   Pop $R6
   Pop $R5
   Pop $R4
-  ; Replace, never mix, never lose: once Qronos is not running, the previous installation's listed files
-  ; are SET ASIDE (kept byte for byte, identity journaled) and every path of the new payload is claimed.
-  ; Any later failure puts the previous version back (QRONOS_STEP, QRONOS_INSTALL_COMPLETE, .onInstFailed).
+  ; Replace, never mix: once Qronos is not running, remove exactly the previous installation's listed
+  ; files, before anything new is installed.
   !ifmacrodef CheckIfAppIsRunning
     !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   !endif
-  Call QronosTxnBegin
+  Call QronosRemoveOwnedPayload
   ${If} $QronosMessage != ""
-    Push $QronosMessage
-    ${If} $QronosTxn == "1"
-      Call QronosTxnRollbackInRun
-    ${EndIf}
-    Pop $QronosMessage
     !insertmacro QRONOS_REFUSE "$QronosMessage"
   ${EndIf}
   Pop $R9
@@ -284,34 +278,15 @@
   Pop $R7
 !macroend
 
-; The last statement of the Install section, reached only after every install step succeeded: in
-; update mode, the installation receipt for the start-up barrier. A failure leaves no receipt (the
-; barrier then reports the update as unconfirmed); the installed files stay.
-!macro NSIS_HOOK_POSTINSTALL
-  Call QronosWriteReceipt
-  ${If} $QronosFenceMessage != ""
-    DetailPrint "$QronosFenceMessage"
-  ${EndIf}
-!macroend
-
-; First in the Uninstall section, before anything is stopped, removed or unregistered: the fence and the
-; exclusive admission, then the install folder must be Qronos's own (protected roots and ancestors, no link;
-; a folder with content must carry a valid Qronos file list), the whole file list is checked against the
-; disk, the app is stopped, and exactly the listed files and folders are removed. The Qronos template has
+; First in the Uninstall section, before anything is stopped, removed or unregistered: the install folder
+; must be Qronos's own (protected roots and ancestors, no link; a folder with content must carry a valid
+; Qronos file list), the whole file list is checked against the disk, the app is stopped, and exactly the
+; listed files and folders are removed. The Qronos template has
 ; no other file deletion in its Uninstall section (except uninstall.exe by exact name).
 !macro NSIS_HOOK_PREUNINSTALL
-  Call un.QronosFenceUninstall
-  ${If} $QronosFenceMessage != ""
-    !insertmacro QRONOS_REFUSE "$QronosFenceMessage"
-  ${EndIf}
   Call un.QronosCheckInstallRoot
   ${If} $QronosMessage != ""
     !insertmacro QRONOS_REFUSE "$QronosMessage Nothing was removed."
-  ${EndIf}
-  ; An interrupted update keeps the previous version's files in its transaction folder: only the
-  ; installer may finish or undo it (qronos-update-transaction.nsh).
-  ${If} ${FileExists} "$INSTDIR\${QRONOS_TXN_FOLDER}\*.*"
-    !insertmacro QRONOS_REFUSE "An earlier Qronos update was interrupted. Run the Qronos installer to restore or finish it first. Nothing was removed."
   ${EndIf}
   ; Without its own file list nothing here is provably Qronos's: refuse before anything is touched.
   ${IfNot} ${FileExists} "$INSTDIR\${QRONOS_MANIFEST}"

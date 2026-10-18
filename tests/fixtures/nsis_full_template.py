@@ -17,13 +17,14 @@ What is made inert (every replacement below is applied an exact, asserted number
   shortcut retargeting.
 - SEAMS (inserted lines): QPROBE_REINSTALL_SECTION before "Section Install" (calls the real PageLeaveReinstall for
   the reinstall-page cases) and QPROBE_AFTER_POSTINSTALL right after NSIS_HOOK_POSTINSTALL (logs, may hold).
-- PRIVATE VALUES in the hook wrapper only: QRONOS_UPDATE_FENCE_NAME (unique), QRONOS_PROBE_DATA_ROOT,
-  QRONOS_PROBE_RESULT and the install-root QRONOS_PROBE_* folders, all inside the test's tmp folder.
+- PRIVATE VALUES in the hook wrapper only: QRONOS_PROBE_RESULT and the install-root QRONOS_PROBE_* folders, all
+  inside the test's tmp folder.
 The WebView2 runtime is reported present through the fake registry, so the embedded installer never runs.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,10 +33,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from build_support import install_manifest
-from tests.fixtures.nsis_fence_probe import MAKENSIS
 from tests.fixtures.nsis_template import render
 
 REPO = Path(__file__).resolve().parent.parent.parent
+_LOCAL = os.environ.get("LOCALAPPDATA", "")
+MAKENSIS = Path(_LOCAL, "tauri", "NSIS", "makensis.exe") if _LOCAL else None
 TEMPLATE = REPO / "desktop" / "src-tauri" / "installer-template" / "installer.nsi"
 HOOKS = REPO / "desktop" / "src-tauri" / "installer-hooks"
 PLUGINS = MAKENSIS.parent / "Plugins" / "x86-unicode" / "additional" if MAKENSIS else None
@@ -87,13 +89,7 @@ def _inert_registry(text: str, counts: dict[str, int] | None, log: dict[str, int
 # tests/test_installer_template.py pins them. Probes record the actual counts in transforms.json.
 SCRIPT_REGISTRY = {"WriteRegStr": 12, "WriteRegDWORD": 3, "ReadRegStr": 15, "ReadRegDWORD": 0, "DeleteRegKey": 7,
                    "DeleteRegValue": 2, "EnumRegKey": 1}
-HOOK_REGISTRY = {"webview2-offline.nsh": {"ReadRegStr": 3, "ReadRegDWORD": 4},
-                 # the update transaction's metadata snapshot and restore (macros: each command once in the text)
-                 "qronos-update-transaction.nsh": {"ReadRegStr": 1, "ReadRegDWORD": 1, "WriteRegStr": 1,
-                                                   "WriteRegDWORD": 1, "DeleteRegValue": 2}}
-# Folder variables the hooks name (the update transaction's shortcut paths), replaced in the copied hooks too, so a
-# probe never reads or writes the real Start menu or desktop.
-HOOK_FOLDERS = {"webview2-offline.nsh": {"$SMPROGRAMS": 1, "$DESKTOP": 1}}
+HOOK_REGISTRY = {"webview2-offline.nsh": {"ReadRegStr": 3, "ReadRegDWORD": 4}}
 
 STUB_UTILS = r"""; Fixture stub of Tauri's utils.nsh (nothing is killed, pinned or retargeted).
 !macro SetContext
@@ -128,8 +124,6 @@ class FullProbe:
     exe: Path
     work: Path
     instdir: Path
-    data_root: Path
-    fence: str
     registry: Path
     smprograms: Path
     desktop: Path
@@ -177,17 +171,14 @@ def payload_manifest_files() -> list[str]:
     return [f"{BINARY}.exe", "uninstall.exe", "res/one.txt", "res2/two.txt", install_manifest.FILE_NAME]
 
 
-def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[str, Path], version: str,
+def build_full_probe(work: Path, *, profile: dict[str, Path], version: str,
                      template: Path | None = None, instdir: Path | None = None, go: bool = False, go2: bool = False,
                      python: str | None = None, reinstall: dict[str, str] | None = None,
                      compile_log: list | None = None, deep_link: bool = False,
-                     registry_fault: str | None = None, extra_defines: dict[str, str] | None = None,
-                     owned_manifest_files: list[str] | None = None) -> FullProbe:
+                     registry_fault: str | None = None, extra_defines: dict[str, str] | None = None) -> FullProbe:
     """registry_fault: the ONE registry write whose rendered line contains this text goes to a read-only fake
     registry file (a real WriteINIStr failure); every other write succeeds. deep_link: render one protocol.
-    extra_defines: private probe values for the hook wrapper (QRONOS_PROBE_* / QPROBE_* seams only).
-    owned_manifest_files: the update transaction's own list (QRONOS_OWNED_MANIFEST) differs from the payload's
-    manifest (an incoming-manifest mismatch); by default both are the same file, as build_desktop makes them."""
+    extra_defines: private probe values for the hook wrapper (QRONOS_PROBE_* / QPROBE_* seams only)."""
     if MAKENSIS is None or not MAKENSIS.is_file() or PLUGINS is None or not PLUGINS.is_dir():
         raise FileNotFoundError("Tauri's NSIS compiler (with its plug-ins) is not installed on this machine.")
     work.mkdir(parents=True, exist_ok=False)
@@ -201,8 +192,6 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
     (payload / install_manifest.FILE_NAME).write_bytes(install_manifest.render(payload_manifest_files()))
     webview2 = payload / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
     webview2.write_bytes(b"never run: the runtime is reported present")
-    if owned_manifest_files:
-        (work / "owned-list-mismatch.txt").write_bytes(install_manifest.render(owned_manifest_files))
 
     for hook in HOOKS.glob("*.nsh"):
         text = hook.read_text(encoding="utf-8")
@@ -210,8 +199,8 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
         text = _sub(text, re.compile(r"\bSHCTX\b"), "HKCU", None, f"{hook.name}:SHCTX=HKCU", transforms)
         text = _inert_registry(text, HOOK_REGISTRY.get(hook.name, {}), transforms, hook.name)
         for variable, folder in (("$SMPROGRAMS", "QPROBE_SMPROGRAMS"), ("$DESKTOP", "QPROBE_DESKTOP")):
-            # Every occurrence is replaced (recorded in transforms.json); the committed hooks' counts are pinned
-            # by HOOK_FOLDERS in the tests, so an older tree under test still builds (pre-repair controls).
+            # Every occurrence is replaced (recorded in transforms.json), so a hook can never reach the real
+            # Start menu or desktop from a probe.
             pattern = re.compile(re.escape(variable) + r"(?![A-Za-z])")
             text = _sub(text, pattern, "${" + folder + "}", len(pattern.findall(text)), f"{hook.name}:{variable}",
                         transforms)
@@ -284,9 +273,6 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
         "QRONOS_WEBVIEW2_INSTALLER": str(webview2), "QRONOS_WEBVIEW2_VERSION": "1.2.3.4",
         "QRONOS_VCREDIST_INSTALLER": str(webview2), "QRONOS_VCREDIST_VERSION": "14.44.35211.0",
         "QRONOS_VCREDIST_MAJOR": "14", "QRONOS_VCREDIST_MINOR": "44", "QRONOS_VCREDIST_BUILD": "35211",
-        "QRONOS_OWNED_MANIFEST": str(payload / install_manifest.FILE_NAME),
-        **({"QRONOS_OWNED_MANIFEST": str(work / "owned-list-mismatch.txt")} if owned_manifest_files else {}),
-        "QRONOS_UPDATE_FENCE_NAME": fence, "QRONOS_PROBE_DATA_ROOT": str(data_root),
         "QRONOS_PROBE_RESULT": str(work / "result.txt"),
         "QRONOS_PROBE_PROFILE": str(profile["profile"]), "QRONOS_PROBE_LOCALAPPDATA": str(profile["local"]),
         "QRONOS_PROBE_APPDATA": str(profile["roaming"]), "QRONOS_PROBE_DOCUMENTS": str(profile["documents"]),
@@ -346,7 +332,7 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
         "  !endif",
         "!macroend",
         "!macro QPROBE_AFTER_POSTINSTALL",
-        '  !insertmacro QPROBE_LOG "postinstall receipt=[$QronosFenceMessage]"',
+        '  !insertmacro QPROBE_LOG "postinstall"',
         "  !ifdef QPROBE_GO2",
         '    !insertmacro QPROBE_WAIT "${QPROBE_GO2}"',
         "  !endif",
@@ -384,7 +370,7 @@ def build_full_probe(work: Path, *, fence: str, data_root: Path, profile: dict[s
     (work / "compile.log").write_bytes(output)
     if compiler.returncode != 0 or not exe.is_file():
         raise AssertionError("makensis failed:\n" + output.decode("utf-8", "replace")[-5000:])
-    return FullProbe(exe, work, instdir, data_root, fence, work / "fake-registry.ini", work / "fake-start-menu",
+    return FullProbe(exe, work, instdir, work / "fake-registry.ini", work / "fake-start-menu",
                      work / "fake-desktop", transforms)
 
 

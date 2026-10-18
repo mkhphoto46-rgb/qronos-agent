@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "release-exclude.txt"
 
-PRODUCT_PACKAGES = ("core", "security", "qronos_media")
+PRODUCT_PACKAGES = ("core", "security")
 DEBUG_MARKER = "QRONOS_DEBUG_TOOL"
 DEBUG_DIRECTORY = "tools/debug/"
 
@@ -199,8 +199,6 @@ PRIVATE_PATTERN_EXCEPTIONS: dict[str, str] = {
 #: Exact lines (path, stripped text) that hold synthetic, non-personal path shapes. Every other line of these
 #: files is still scanned, and an entry whose line no longer exists fails the stale-entry test.
 SYNTHETIC_PATH_LINES: dict[tuple[str, str], str] = {
-    ("tests/test_action_broker.py", 'return "C:/Users/someone/Downloads/not-qronos.exe"'):
-        "A fabricated foreign executable path for a fake process; 'someone' is a placeholder, nobody's home.",
     ("tests/test_installer_template.py",
      '_winapi.CreateJunction(str(local), str(apps / "alias"))  # apps-target\\alias -> ...\\AppData\\Local'):
         "A comment describing a junction to the private test known-folder fixture, not a real profile.",

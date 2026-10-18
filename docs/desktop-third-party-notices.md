@@ -79,6 +79,19 @@ Output, all relative and deterministic:
   - Each name segment and the version is its own directory level, so
     `@foo/bar` and `foo__bar` cannot collide.
   - Verified upstream files are under `upstream/`.
+- `qronos/LICENSE` and `qronos/NOTICE`: Qronos's own licence, Apache-2.0
+  (`build_support/project_licence.py`). LICENSE must be the official text,
+  byte-for-byte (pinned SHA-256). The inventory records both under
+  `projectOwned`. The packaged runtime carries the same two files in its
+  `third-party-notices/qronos/`, and the installer check requires identical
+  copies in both places.
+- `artwork/<upstream>-<revision>/...`: the licence texts of the third-party template icons and logos
+  (`desktop/src-tauri/icons/`, `desktop/public/`, `desktop/src/assets/`), vendored byte-for-byte from their pinned
+  upstream revisions. `build_support/desktop_artwork.json` lists every file under those folders, its exact
+  SHA-256 and the upstream file it is identical to. An unlisted, changed or extra file stops the build. The
+  notices text has an artwork section and the inventory an `artwork` record. The installer check requires that
+  record to name exactly the registered files. This artwork is not Qronos's work and is not covered by its
+  Apache-2.0 licence.
 
 ## Identities, destinations and the output directory
 
@@ -161,7 +174,7 @@ Any of the following stops the build:
 
 ## Exceptions
 
-`build_support/desktop_notice_exceptions.json` is empty. Root must review an entry
+`build_support/desktop_notice_exceptions.json` is empty. An entry must be reviewed
 before it is added.
 
 Each entry has to match the exact ecosystem, name, version and provenance. It
@@ -212,7 +225,7 @@ Each of the 12 is pinned to the source revision recorded for it:
 | rust | webview2-com, webview2-com-macros | 0.38.2, 0.8.1 | MIT | repository `LICENSE` |
 | rust | webview2-com-sys | 0.38.2 | MIT | repository `LICENSE`, plus Microsoft's `LICENSE.txt` and `NOTICE.txt`; see below |
 
-Root decisions (2026-10-07). These are technical packaging decisions, not
+Review decisions (2026-10-07). These are technical packaging decisions, not
 redistribution clearance:
 
 - **`selectors`:** the exact stylo source revision has no licence file. Its

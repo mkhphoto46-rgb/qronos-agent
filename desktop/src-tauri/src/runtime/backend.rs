@@ -1,5 +1,6 @@
 //! Closed backend dispatch: installed builds use only the bundled executable.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -25,11 +26,6 @@ pub(super) enum Service {
     Settings,
     Permissions,
     Doctor,
-    /// The offline update service (core/update_cli.py, Installer-owned), reached
-    /// only through `update_command`: one-shot reads, approval steps and pickers
-    /// through service_ipc.rs; `launch` only through the update lifecycle
-    /// (lifecycle.rs), never through one-shot IPC.
-    Update,
 }
 
 /// The product version every backend service is told (QRONOS_APP_VERSION): the
@@ -52,7 +48,6 @@ impl Service {
             Self::Settings => "settings",
             Self::Permissions => "permissions",
             Self::Doctor => "doctor",
-            Self::Update => "update",
         }
     }
 
@@ -75,7 +70,6 @@ impl Service {
             Self::Settings => "core.settings_cli",
             Self::Permissions => "core.permissions_cli",
             Self::Doctor => "core.runtime_preflight",
-            Self::Update => "core.update_cli",
         }
     }
 }
@@ -129,7 +123,6 @@ impl Backend {
         };
         command.env("PYTHONUTF8", "1").env("PYTHONUNBUFFERED", "1");
         if let Some(version) = APP_VERSION.get() {
-            // The start-up barrier of every store-opening service needs the running version.
             command.env("QRONOS_APP_VERSION", version);
         }
         Ok(command)
@@ -157,9 +150,99 @@ fn packaged_directory(resource_directory: &Path) -> Result<Option<PathBuf>, Stri
     Ok(Some(directory))
 }
 
+const ASSET_ROOT_VARIABLE: &str = "QRONOS_ASSET_ROOT";
+/// Longest persisted value read, in UTF-16 units (the Windows environment-variable limit).
+#[cfg(windows)]
+const MAX_PERSISTED_UNITS: usize = 32_767;
+
+/// A non-blank value, trimmed like the Python side; None when absent or blank.
+fn configured_value(value: Option<OsString>) -> Option<OsString> {
+    let value = value?;
+    match value.to_str() {
+        Some(text) if text.trim().is_empty() => None,
+        Some(text) => Some(OsString::from(text.trim())),
+        None => Some(value),
+    }
+}
+
+/// The asset root, in the same precedence as core/config.py resolve_asset_root: a non-blank process value, then the
+/// persisted user value, then the default. A configured value must be absolute; it is refused, never replaced.
+pub(super) fn resolve_asset_root(
+    process: Option<OsString>,
+    persisted: impl FnOnce() -> Option<OsString>,
+    default: PathBuf,
+) -> Result<PathBuf, String> {
+    let (value, source) = match configured_value(process) {
+        Some(value) => (value, "process"),
+        None => match configured_value(persisted()) {
+            Some(value) => (value, "user"),
+            None => return Ok(default),
+        },
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!("{ASSET_ROOT_VARIABLE} ({source} environment) must be an absolute path."));
+    }
+    Ok(path)
+}
+
+/// The current value of one variable in the user's persisted environment (HKCU\Environment), read only.
+///
+/// A desktop started from an Explorer session older than the variable does not inherit it. RegGetValueW with
+/// RRF_RT_REG_SZ accepts REG_SZ and expands REG_EXPAND_SZ natively; any other type, an oversized value or any error
+/// gives None.
+#[cfg(windows)]
+fn read_persisted_user_variable(name: &str) -> Option<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+
+    let wide = |text: &str| text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let subkey = wide("Environment");
+    let value = wide(name);
+    let mut bytes: u32 = 0;
+    // SAFETY: both names are NUL-terminated UTF-16 buffers that outlive the call; a null data pointer asks only for
+    // the size.
+    let status = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, subkey.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ,
+                     std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes)
+    };
+    if status != ERROR_SUCCESS || bytes < 2 || bytes as usize > (MAX_PERSISTED_UNITS + 1) * 2 {
+        return None;
+    }
+    let mut buffer = vec![0u16; (bytes as usize).div_ceil(2)];
+    let mut size = (buffer.len() * 2) as u32;
+    // SAFETY: the buffer holds `size` bytes and outlives the call.
+    let status = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, subkey.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ,
+                     std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let units = (size as usize / 2).min(buffer.len());
+    let end = buffer[..units].iter().position(|&unit| unit == 0).unwrap_or(units);
+    Some(OsString::from_wide(&buffer[..end]))
+}
+
+#[cfg(not(windows))]
+fn read_persisted_user_variable(_name: &str) -> Option<OsString> {
+    None
+}
+
 pub(super) fn discover(
     resource_directory: Option<&Path>,
     local_data_directory: Option<&Path>,
+) -> Result<Option<Backend>, String> {
+    discover_with(resource_directory, local_data_directory, std::env::var_os(ASSET_ROOT_VARIABLE),
+                  || read_persisted_user_variable(ASSET_ROOT_VARIABLE))
+}
+
+fn discover_with(
+    resource_directory: Option<&Path>,
+    local_data_directory: Option<&Path>,
+    process_asset_root: Option<OsString>,
+    persisted_asset_root: impl FnOnce() -> Option<OsString>,
 ) -> Result<Option<Backend>, String> {
     if let Some(resources) = resource_directory {
         if let Some(directory) = packaged_directory(resources)? {
@@ -167,16 +250,8 @@ pub(super) fn discover(
                 "The local Qronos user-data directory is unavailable.".to_string()
             })?;
             let data_root = local.join("Qronos");
-            let asset_root = match std::env::var_os("QRONOS_ASSET_ROOT") {
-                Some(value) if !value.is_empty() => {
-                    let path = PathBuf::from(value);
-                    if !path.is_absolute() {
-                        return Err("QRONOS_ASSET_ROOT must be an absolute path.".to_string());
-                    }
-                    path
-                }
-                _ => data_root.join("RuntimeAssets"),
-            };
+            let asset_root = resolve_asset_root(process_asset_root, persisted_asset_root,
+                                                data_root.join("RuntimeAssets"))?;
             return Ok(Some(Backend::Packaged {
                 directory,
                 data_root,
@@ -324,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn every_service_is_told_the_desktop_package_version_and_update_is_a_closed_service() {
+    fn every_service_is_told_the_desktop_package_version() {
         let fixture = Fixture::new();
         let directory = fixture.bundle();
         let backend = Backend::Packaged {
@@ -333,7 +408,7 @@ mod tests {
             asset_root: fixture.0.join("assets"),
         };
         set_app_version("9.8.7".to_string());
-        for service in [Service::Settings, Service::Update, Service::Supervisor] {
+        for service in [Service::Settings, Service::Supervisor] {
             let command = backend.command(service).unwrap();
             let version = command
                 .get_envs()
@@ -341,10 +416,6 @@ mod tests {
                 .and_then(|(_, value)| value.map(|v| v.to_owned()));
             assert_eq!(version, Some(std::ffi::OsString::from(APP_VERSION.get().unwrap())));
         }
-        assert_eq!(
-            backend.command(Service::Update).unwrap().get_args().collect::<Vec<_>>(),
-            vec![std::ffi::OsStr::new("update")]
-        );
     }
 
     #[test]
@@ -386,6 +457,51 @@ mod tests {
             discover(Some(&fixture.0), Some(&fixture.0)).unwrap(),
             Some(Backend::Packaged { .. })
         ));
+    }
+
+    // Asset-root discovery: every case injects both sources, so the real user registry is never read.
+    #[test]
+    fn a_stale_desktop_without_the_variable_uses_the_persisted_user_root_for_its_children() {
+        let fixture = Fixture::new();
+        fixture.bundle();
+        let persisted = fixture.0.join("persisted assets");
+        let backend = discover_with(Some(&fixture.0), Some(&fixture.0), None,
+                                    || Some(persisted.clone().into_os_string())).unwrap().unwrap();
+        let command = backend.command(Service::Bridge).unwrap();
+        let passed = command.get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new(ASSET_ROOT_VARIABLE))
+            .and_then(|(_, value)| value.map(PathBuf::from));
+        assert_eq!(passed, Some(persisted));
+    }
+
+    #[test]
+    fn an_explicit_process_value_wins_over_the_persisted_one() {
+        let process = std::env::temp_dir().join("qronos-process-assets");
+        let root = resolve_asset_root(Some(process.clone().into_os_string()),
+                                      || panic!("the persisted value must not be read"),
+                                      PathBuf::from("default"));
+        assert_eq!(root.unwrap(), process);
+    }
+
+    #[test]
+    fn blank_values_keep_the_default() {
+        let default = std::env::temp_dir().join("qronos-default-assets");
+        for (process, persisted) in [(Some(""), None), (Some("   "), Some("")), (None, Some("  ")), (None, None)] {
+            let root = resolve_asset_root(process.map(OsString::from), || persisted.map(OsString::from),
+                                          default.clone());
+            assert_eq!(root.unwrap(), default);
+        }
+    }
+
+    #[test]
+    fn a_relative_override_is_refused_not_replaced_by_the_default() {
+        let default = std::env::temp_dir().join("qronos-default-assets");
+        assert!(resolve_asset_root(Some(OsString::from("relative/assets")), || None, default.clone()).is_err());
+        assert!(resolve_asset_root(None, || Some(OsString::from("relative/assets")), default).is_err());
+        let fixture = Fixture::new();
+        fixture.bundle();
+        assert!(discover_with(Some(&fixture.0), Some(&fixture.0), None,
+                              || Some(OsString::from("relative/assets"))).is_err());
     }
 
     #[test]

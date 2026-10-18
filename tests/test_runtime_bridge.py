@@ -762,8 +762,15 @@ class TestPushToTalkFailures(unittest.TestCase):
 
         events = captured_events(runtime.push_to_talk)
 
-        self.assertIn("runtime_error", event_types(events))
-        self.assertIn("microphone disappeared", events[-2]["message"])
+        types = event_types(events)
+        error = events[types.index("runtime_error")]
+        self.assertIn("microphone disappeared", error["message"])
+        # The desktop gets one fixed, safe failure event after the diagnostic, so it can show the voice notice;
+        # it carries no diagnostic text.
+        failed = events[types.index("voice_turn_failed")]
+        self.assertGreater(types.index("voice_turn_failed"), types.index("runtime_error"))
+        self.assertEqual(json.loads(failed["message"]), {"reason": "voice_turn_failed"})
+        self.assertEqual(types.count("voice_turn_failed"), 1)
 
     def test_followup_brain_timeout_keeps_conversation_active_with_spoken_retry(
         self,
@@ -916,6 +923,25 @@ class TestPushToTalkFailures(unittest.TestCase):
         self.assertFalse(
             runtime._last_voice_turn_had_valid_speech_evidence
         )
+
+    def test_a_push_to_talk_that_cannot_prepare_reports_the_fixed_voice_failure(self) -> None:
+        # The preparation step (microphone capture) fails before any turn starts: the desktop still gets the fixed
+        # voice_turn_failed after the diagnostic, so its voice notice appears.
+        runtime = prepared_runtime()
+
+        def refuse() -> None:
+            raise OSError("capture device unavailable")
+
+        runtime.prepare_wake_capture = refuse
+
+        events = captured_events(runtime.push_to_talk)
+        types = event_types(events)
+
+        self.assertIn("capture device unavailable", events[types.index("runtime_error")]["message"])
+        self.assertGreater(types.index("voice_turn_failed"), types.index("runtime_error"))
+        self.assertEqual(json.loads(events[types.index("voice_turn_failed")]["message"]),
+                         {"reason": "voice_turn_failed"})
+        self.assertNotIn("voice_listening", types)
 
     def test_the_runtime_is_free_again_after_a_failure(self) -> None:
         # A turn that failed must not leave the runtime marked busy, or every

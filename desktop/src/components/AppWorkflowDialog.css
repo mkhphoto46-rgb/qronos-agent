@@ -21,18 +21,6 @@
   overflow-wrap: anywhere;
 }
 
-.workflow-approval-secret {
-  display: grid;
-  gap: 6px;
-  margin: 12px 0;
-}
-
-.workflow-approval-secret input {
-  font: inherit;
-  padding: 8px 10px;
-  border-radius: 8px;
-}
-
 .workflow-result {
   position: fixed;
   inset-block-end: 24px;
@@ -51,36 +39,6 @@
   display: flex;
   gap: 8px;
   margin-block-start: 12px;
-}
-
-.workflow-recovery-list {
-  display: grid;
-  gap: 8px;
-  margin: 12px 0;
-  padding: 0;
-  list-style: none;
-}
-
-.workflow-recovery-list li {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 4px 12px;
-  align-items: center;
-}
-
-.workflow-recovery-list span {
-  overflow-wrap: anywhere;
-}
-
-.workflow-recovery-list time {
-  grid-row: 2;
-  font-size: 0.8em;
-  opacity: 0.7;
-}
-
-.workflow-recovery-list button {
-  grid-row: 1 / span 2;
-  grid-column: 2;
 }
 
 .workflow-result-page p {

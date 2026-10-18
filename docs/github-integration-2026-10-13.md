@@ -69,8 +69,8 @@ model tags. Whisper's verified executable also passed its no-model help probe.
 
 ## Delivery limits
 
-The application remains offline-first; no cloud inference was added. Update
-launch remains disabled. A source merge is not a signed production release,
+The application remains offline-first; no cloud inference was added. A
+source merge is not a signed production release,
 deployment, or proof of live desktop/mobile/model acceptance.
 
 Whisper v1.9.5 files can be provisioned from the pinned official archive and

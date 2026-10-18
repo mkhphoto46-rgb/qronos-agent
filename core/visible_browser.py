@@ -26,8 +26,8 @@ module adds the browser-side guarantees:
 
 The repository does not contain the user-supplied browser workflow the
 project documents mention. This launcher is a narrowly scoped visible
-adapter for that contract and is not wired into the runtime until Root
-accepts it.
+adapter for that contract and is not wired into the runtime until it is
+accepted.
 """
 
 from __future__ import annotations

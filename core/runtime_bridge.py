@@ -36,7 +36,6 @@ from core.config import CONFIG
 from core.actions import ActionOutcome, ActionResult
 from core.app_workflow_runtime import (
     APP_WORKFLOW_DECISION_ACTION,
-    APP_WORKFLOW_UNCERTAIN_ACTION,
     AppWorkflowCoordinator,
 )
 from core.file_action_parser import FileActionParseError, parse_file_action
@@ -90,7 +89,11 @@ from core.model_registry import MODELS
 from core.openwakeword_engine import OpenWakeWordEngine
 from core.orchestrator import Orchestrator
 from core.spoken_normalizer import normalise_spoken_text
-from core.settings_service import DEFAULT_DEFINITIONS, DEFAULT_SETTINGS_PATH, SettingsService
+from core.settings_service import (
+    DEFAULT_DEFINITIONS,
+    DEFAULT_SETTINGS_PATH,
+    SettingsService,
+)
 from core.screen_capture import (
     Capture,
     CaptureRefused,
@@ -132,7 +135,6 @@ from core.task_plan import TaskPlan
 from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.compute_estimator import ComputeEstimator
 from core.intent_gate import IntentGate
-from core.runtime_hooks import run_startup_status_hooks
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.undo_journal import Reversal, UndoJournal
@@ -215,24 +217,6 @@ class PendingPaintUndoAction:
 VOICE_PLAYBACK_STARTED_ACTION = "qronos.voice_playback_started"
 VOICE_PLAYBACK_COMPLETE_ACTION = "qronos.voice_playback_complete"
 STOP_RESPONSE_ACTION = "qronos.stop_response"
-# The desktop's Device Link page (docs/QRONOS_DEVICE_LINK.md 5.7).
-LINK_STATUS_ACTION = "qronos.link_status"
-LINK_DEVICES_ACTION = "qronos.link_devices"
-LINK_PAIR_OPEN_ACTION = "qronos.link_pair_open"
-LINK_PAIR_CANCEL_ACTION = "qronos.link_pair_cancel"
-LINK_REVOKE_ACTION = "qronos.link_revoke"
-LINK_REMOTE_ACTION = "qronos.link_remote"
-LINK_RELAY_SET_ACTION = "qronos.link_relay_set"
-# Console-only: clears the Security Monitor's containment/quarantine (Link D9).
-LINK_SECURITY_RESET_ACTION = "qronos.link_security_reset"
-# The media product route (qronos_media.product): typed {op, requestId, ...} operations on the one media host.
-MEDIA_ACTION = "qronos.media"
-#: How long a brain/voice media request waits for its typed result before answering honestly that it did not.
-MEDIA_INTENT_WAIT_SECONDS = 12.0
-LINK_ACTIONS = frozenset({
-    LINK_STATUS_ACTION, LINK_DEVICES_ACTION, LINK_PAIR_OPEN_ACTION, LINK_PAIR_CANCEL_ACTION,
-    LINK_REVOKE_ACTION, LINK_REMOTE_ACTION, LINK_RELAY_SET_ACTION, LINK_SECURITY_RESET_ACTION,
-})
 
 # How long shutdown waits for cancelled GUI actions to release input state.
 COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS = 2.0
@@ -1324,22 +1308,6 @@ class RuntimeEvent:
     message: str
 
 
-def _telegram_download_folder() -> Path | None:
-    """The exact folder Telegram saves into, when configured.
-
-    Telegram decides where a download is saved; Qronos verifies it there and
-    never searches elsewhere. The folder is an explicit, absolute, existing
-    destination, shown in the download approval; Qronos never guesses it.
-    """
-    value = os.environ.get("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", "").strip()
-    if not value:
-        return None
-    folder = Path(value)
-    if not folder.is_absolute() or not folder.is_dir():
-        return None
-    return folder
-
-
 def _text_event_message(
     request_id: str,
     **fields: Any,
@@ -1468,11 +1436,7 @@ class QronosRuntime:
         self._approvals = ApprovalLedger()
         # Makes "check nothing is pending, then issue" atomic.
         self._approval_lock = threading.Lock()
-        # The in-process media host (qronos_media.host), built on first use only:
-        # nothing about media runs, probes or opens at startup.
-        self._media_host: Any = None
-        self._media_host_lock = threading.Lock()
-        # Telegram download / print workflows; prompts share the ledger above.
+        # App workflows (browser navigation); prompts share the ledger above.
         self._app_workflows: AppWorkflowCoordinator | None = None
         # One explicit UI approval grants a short, process-local lease for
         # ordinary reversible file-write actions. The window is fixed: auto-
@@ -1595,127 +1559,6 @@ class QronosRuntime:
             scheduler.start()
 
             return scheduler
-
-    # ------------------------------------------------------ media host
-
-    def _media_foreground_busy(self) -> bool:
-        """The person's own turn (voice, text, screen) is in progress: media yields to it."""
-        with self._lock:
-            return bool(self._busy or self._foreground.active)
-
-    def ensure_media_host(self) -> Any:
-        """
-        The one in-process media host, built the first time media work is asked for.
-
-        It is bound to THIS runtime's objects only: the queue scheduler's
-        ResourceGovernor, the shared ResourceLedger, the ApprovalLedger and the
-        action audit, plus the live foreground and Pause state. Its model
-        authority is issued here, never from anything in a request.
-        """
-        with self._media_host_lock:
-            if self._media_host is not None:
-                return self._media_host
-            from core.resource_ownership import GLOBAL_RESOURCE_LEDGER
-            from qronos_media.host import build_bridge_media_host
-
-            from core.library_executor import WorkflowSecretCheck
-
-            scheduler = self.ensure_scheduler()
-            audit = self.action_audit.record_verdict if self.action_audit is not None else None
-            self._media_host = build_bridge_media_host(
-                governor=scheduler.governor,
-                ledger=GLOBAL_RESOURCE_LEDGER,
-                foreground_busy=self._media_foreground_busy,
-                paused=lambda: self.runtime_paused,
-                approvals=self._approvals,
-                audit=audit,
-                # The owner and THAT generation's lifecycle capability, read together (one lock) per admission.
-                embedding_generation=self._memory_sidecar_generation,
-                # The bridge never opens the secret store itself; media borrows the narrow typed-secret check.
-                secrets=WorkflowSecretCheck(),
-            )
-            return self._media_host
-
-    def _memory_sidecar_owner(self) -> Any:
-        """The owned bge-m3 memory sidecar process, if the memory runtime runs one (else None: unavailable)."""
-        memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
-        sidecar = getattr(memory, "sidecar", None)
-        return getattr(sidecar, "owned_process", None) if sidecar is not None else None
-
-    def _memory_sidecar_generation(self) -> Any:
-        """(owner, lifecycle capability) of the owned bge-m3 sidecar's CURRENT generation, atomically, or None.
-
-        ``MemorySidecarManager.owned_generation`` reads both under one lock; media binds that pair per admission and
-        frees a slot only on THAT capability's whole-tree proof. Off or missing: None (unavailable).
-        """
-        memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
-        sidecar = getattr(memory, "sidecar", None)
-        owned_generation = getattr(sidecar, "owned_generation", None) if sidecar is not None else None
-        if not callable(owned_generation):
-            return None
-        try:
-            return owned_generation()
-        except Exception:  # an unreadable generation is no generation
-            return None
-
-    def media_product(self) -> Any:
-        """The typed media operations (qronos_media.product) on the one media host, built with it."""
-        with self._media_host_lock:
-            product = getattr(self, "_media_product", None)
-        if product is not None:
-            return product
-        host = self.ensure_media_host()
-        from qronos_media.product import MediaProduct
-
-        with self._media_host_lock:
-            product = getattr(self, "_media_product", None)
-            if product is None:
-                product = MediaProduct(
-                    host,
-                    emit=lambda event, status, payload: self._notify(event, status, _compact(payload)),
-                    paused=lambda: self.runtime_paused,
-                )
-                self._media_product = product
-        return product
-
-    def _run_media_intent(self, intent: Any) -> str:
-        """Run a brain/voice media request through the SAME typed product operation; a short Persian answer."""
-        from qronos_media.intents import MediaSearchIntent, spoken_answer
-
-        request_id = f"brain_{uuid.uuid4().hex[:16]}"
-        if isinstance(intent, MediaSearchIntent):
-            data = {"op": "search", "requestId": request_id, "query": intent.query, "mode": intent.mode, "limit": 10}
-        else:
-            data = {"op": "status", "requestId": request_id}
-        answered: dict[str, Any] = {}
-        done = threading.Event()
-
-        def reply(result: dict[str, Any]) -> None:
-            answered.update(result)
-            done.set()
-
-        self.media_product().handle(data, reply=reply)
-        done.wait(MEDIA_INTENT_WAIT_SECONDS)
-        return spoken_answer(intent, answered if done.is_set() else None)
-
-    def _begin_text_media_request(self, text: str, request_id: str, started_at: float) -> bool:
-        """A deterministic media search/status request goes to the media product, not to a model."""
-        from qronos_media.intents import parse_media_intent
-
-        intent = parse_media_intent(text)
-        if intent is None:
-            return False
-        response = self._run_media_intent(intent)
-        self._finish_text_file_action(request_id=request_id, response=response, started_at=started_at)
-        return True
-
-    def _preempt_media(self, reason: str) -> None:
-        host = self._media_host
-        if host is not None:
-            try:
-                host.preempt(reason)
-            except Exception:
-                pass
 
     # ------------------------------------------------------ durable queue
 
@@ -2740,7 +2583,6 @@ class QronosRuntime:
 
         if paused:
             self._discard_pending_file_approvals(CANCEL_REASON_PAUSE)
-            self._discard_pending_media_approvals(CANCEL_REASON_PAUSE)
             self._discard_pending_history_undo(CANCEL_REASON_PAUSE)
             # Pause stops GUI work the same way Stop does: in-flight actions
             # are cancelled cooperatively (releasing held buttons), turns in
@@ -3584,99 +3426,19 @@ class QronosRuntime:
 
         if self.orchestrator is None:
             self.orchestrator = Orchestrator()
+            self.orchestrator.code_policy_audit = self._code_policy_audit
 
-    # ------------------------------------------------------------ device link
+    def _code_policy_audit(self, verdict: Any) -> None:
+        """Record one code-policy refusal (core/code_policy.py) in the action audit trail.
 
-    def _link_runtime_settings(self):
-        """The link's switches and files, read now (tests move CONFIG's roots)."""
-        from core.link_runtime import LinkRuntimeSettings
-
-        return LinkRuntimeSettings(
-            link_enabled=self.settings.get("link.enabled") is True,
-            # Off until the Link worker's WAN gate is accepted: no relay is
-            # dialled and no phone outside this network is served.
-            remote_access_enabled=False,
-            device_path=Path(CONFIG.paths.data) / "link_devices.json",
-            audit_path=Path(CONFIG.paths.logs) / "link_audit.jsonl",
-            relay_path=Path(CONFIG.paths.data) / "link_relay.json",
-            # The Security Monitor's latches and incident log (Link D9); a
-            # quarantine keeps the whole link off until reset at this PC.
-            security_path=Path(CONFIG.paths.data) / "link_security.json",
-            incident_path=Path(CONFIG.paths.logs) / "link_incidents.jsonl",
-        )
-
-    def _device_link(self):
-        """The one LinkRuntime, built on first use and never started here."""
-        link = getattr(self, "_link_runtime", None)
-
-        if link is None:
-            from core.link_runtime import LinkRuntime, runtime_services
-
-            # Phone questions reach only LinkRuntime's ToolFreeAsk over the
-            # orchestrator's prompt-only Fast-brain call: no router, workers,
-            # tools, file actions or queue.
-            link = LinkRuntime(self._link_runtime_settings(), services=runtime_services(self))
-            self._link_runtime = link
-
-        return link
-
-    def start_device_link(self) -> bool:
-        """Start the link when the user turned it on. Never raises.
-
-        Called once the bridge is ready, in text-only mode too: it needs the
-        text runtime, never the microphone or the wake model. Off means
-        nothing is built: no device file, listener, socket or thread.
+        The record carries the category, the channel, the stage and the rule, never the text. A trail that
+        cannot be written must not let the refused code through: the refusal stands and a warning says so.
         """
-        settings = self._link_runtime_settings()
-
-        if not settings.link_enabled:
-            return False
-
         try:
-            self._ensure_text_runtime()
-            link = self._device_link()
-            link.settings = settings
-            running = link.start()
-        except Exception as exc:  # the link must never stop the runtime
-            self._notify("link_error", "warning", json.dumps(
-                {"action": "start", "code": "failed", "detail": type(exc).__name__},
-            ))
-            return False
-
-        self._publish_link_status()
-        return running
-
-    def stop_device_link(self) -> None:
-        link = getattr(self, "_link_runtime", None)
-
-        if link is not None:
-            link.stop()
-
-    def apply_device_link_settings(self) -> None:
-        """After a settings reload: restart only when the link's own settings changed."""
-        wanted = self._link_runtime_settings()
-        link = getattr(self, "_link_runtime", None)
-
-        if link is None or link.settings == wanted:
-            if link is None and wanted.link_enabled:
-                self.start_device_link()
-            return
-
-        # Every open phone session ends here, before anything restarts.
-        link.stop()
-        link.settings = wanted
-
-        if wanted.link_enabled:
-            self.start_device_link()
-        else:
-            self._publish_link_status()
-
-    def _publish_link_status(self) -> None:
-        link = self._device_link()
-        self._notify("link_status", "ready", json.dumps(link.status(), ensure_ascii=True))
-        self._notify("link_devices", "ready", json.dumps(
-            [device.to_json() for device in link.devices()], ensure_ascii=True,
-        ))
+            audit, _ = self._history_records()
+            audit.record_verdict(verdict)
+        except Exception as exc:  # noqa: BLE001 - auditing must not undo a refusal
+            self._notify("runtime_warning", "warning", f"Could not audit a code-policy refusal: {type(exc).__name__}")
 
     def _ensure_file_runtime(self) -> None:
         """Prepare only the trusted local file-action collaborators."""
@@ -3699,63 +3461,15 @@ class QronosRuntime:
             self.file_resolver = KnownFolderFileResolver(use_index=True)
 
     def _ensure_app_workflows(self) -> AppWorkflowCoordinator:
-        """Prepare the Telegram/print workflow coordinator with real Windows adapters.
+        """Prepare the app-workflow coordinator with real Windows adapters.
 
         Native collaborators are created only when a workflow step runs, so a
-        recognised request never touches Telegram or the spooler before its
-        approval. Tests inject their own coordinator instead.
+        recognised request never opens a browser before its approval. Tests
+        inject their own coordinator instead.
         """
         existing = getattr(self, "_app_workflows", None)
         if existing is not None:
             return existing
-        self._ensure_file_runtime()
-        from core.app_workflow import SideEffectJournal, WorkflowError, WorkflowRefused
-        from core.file_resolver import NamedFileRequest
-        from core.print_workflow import PrintWorkflow, ShellPrintToSubmitter, WinSpooler, default_renderer
-        from core.telegram_workflow import LocalDownloadFolder, TelegramDownloadWorkflow, UiaTelegramUi
-
-        journal = SideEffectJournal(Path(CONFIG.paths.data) / "workflows" / "side-effects.json")
-        # Durable, shared by every workflow in this runtime; kept for inspection.
-        self._app_workflow_journal = journal
-        try:
-            # Attempts left SUBMITTING by a process that no longer runs become
-            # UNCERTAIN: still blocking repeats, and visible for a person to check.
-            journal.reconcile_interrupted()
-        except WorkflowError:
-            pass  # a damaged journal refuses every side effect on use anyway
-
-        def telegram_workflow() -> TelegramDownloadWorkflow:
-            self._ensure_computer_runtime()
-            executor = self.computer_executor
-            folder = _telegram_download_folder()
-            if folder is None:
-                raise WorkflowRefused(
-                    "Telegram's download folder is not configured (QRONOS_TELEGRAM_DOWNLOAD_FOLDER)."
-                )
-
-            def target():
-                from core.computer_executor import get_app_spec
-                from core.window_binding import WindowTarget
-
-                spec = get_app_spec(executor.resolve_app_id("telegram"))
-                return WindowTarget(
-                    app_id=spec.app_id, display_name=spec.display_name, aliases=spec.aliases,
-                    executable=spec.executable, process_names=spec.process_names,
-                )
-
-            from core.accessibility_action_executor import AccessibilityActionExecutor
-            from core.accessibility_targeting import AccessibilityTargetLocator
-
-            binder = executor.window_binder
-            # Exact-RuntimeId actions only; the locator has no model and is unused.
-            actuator = AccessibilityActionExecutor(binder, executor, AccessibilityTargetLocator(None))
-            return TelegramDownloadWorkflow(
-                UiaTelegramUi(binder=binder, target_fn=target, actuator=actuator),
-                binder=binder,
-                journal=journal,
-                folder=LocalDownloadFolder(folder),
-            )
-
         def browser_workflow():
             from core.browser_research import (
                 BrowserResearchWorkflow,
@@ -3772,95 +3486,21 @@ class QronosRuntime:
                 foreground_fn=foreground_window_snapshot,
             )
 
-        def print_workflow() -> PrintWorkflow:
-            return PrintWorkflow(
-                spooler=WinSpooler(), submitter=ShellPrintToSubmitter(), journal=journal,
-                renderer=default_renderer(),
-            )
-
-        def resolve_file(reference: str) -> Path:
-            exact = reference if Path(reference).is_absolute() else None
-            return self.file_resolver.resolve(NamedFileRequest(name_hint=reference, exact_path=exact)).path
-
-        def default_printer() -> str | None:
-            return next((item.name for item in WinSpooler().printers() if item.is_default), None)
-
-        from core.library_executor import WorkflowSecretCheck
-
-        # The per-profile approval secret and its shared lockout (Library store).
-        secret_check = WorkflowSecretCheck()
-
         self._app_workflows = AppWorkflowCoordinator(
             ledger=self._approvals,
             notify=self._notify,
             actions=self._computer_actions,
-            telegram_workflow=telegram_workflow,
-            print_workflow=print_workflow,
-            resolve_file=resolve_file,
-            default_printer=default_printer,
-            # The bridge never opens the secret store itself
-            # (tests/test_approval_secret.py); it borrows the Library's check.
-            verify_secret=secret_check.verify,
-            secret_status=secret_check.status,
             paused=lambda: self.runtime_paused,
             audit=self.action_audit,
-            journal=journal,
             browser_workflow=browser_workflow,
         )
         return self._app_workflows
 
-    def _ensure_elevated_actions(self):
-        """The elevated-action coordinator (core/elevated_actions.py), built on first use."""
-        coordinator = getattr(self, "_elevated_actions", None)
-        if coordinator is None:
-            from core.elevated_actions import ElevatedActionCoordinator
-            from core.library_executor import WorkflowSecretCheck
-
-            # The bridge never opens the secret store itself; like printing,
-            # it borrows the Library's per-profile check and shared lockout.
-            secret_check = WorkflowSecretCheck()
-            coordinator = ElevatedActionCoordinator(
-                notify=self._notify,
-                verify_secret=secret_check.verify,
-                secret_status=secret_check.status,
-                paused=lambda: self.runtime_paused,
-            )
-            self._elevated_actions = coordinator
-        return coordinator
-
-    def _begin_text_elevated_action(self, text: str, request_id: str, started_at: float) -> bool:
-        """
-        Route the person's own request to restart the print spooler.
-
-        Only desktop chat turns come here; Device Link text goes to the
-        tool-free chat path and can never reach an elevated action.
-        """
-        from core.elevated_actions import parse_spooler_restart
-
-        if not parse_spooler_restart(text):
-            return False
-        if self._computer_actions.stopped_since_turn_start():
-            self._finish_text_file_action(
-                request_id=request_id,
-                response="لغو شد؛ هیچ کاری شروع نشد.",
-                started_at=started_at,
-            )
-            return True
-        reply = self._ensure_elevated_actions().try_begin(text, request_id)
-        if reply is None:
-            return False
-        self._finish_text_file_action(request_id=request_id, response=reply, started_at=started_at)
-        return True
-
     def _begin_text_app_workflow(self, text: str, request_id: str, started_at: float) -> bool:
-        """Route a Telegram-download or print request to its approval flow."""
-        from core.app_workflow_intents import parse_workflow_intent
+        """Route a browser navigation or web search request to its approval flow."""
         from core.browser_research import plan_navigation
 
-        if self._begin_text_elevated_action(text, request_id, started_at):
-            return True
-
-        if parse_workflow_intent(text) is None and plan_navigation(text) is None:
+        if plan_navigation(text) is None:
             return False
         if self._computer_actions.stopped_since_turn_start():
             self._finish_text_file_action(
@@ -3875,18 +3515,8 @@ class QronosRuntime:
         self._finish_text_file_action(request_id=request_id, response=reply, started_at=started_at)
         return True
 
-    def resolve_app_workflow_decision(
-        self,
-        action_token: str,
-        *,
-        approved: bool,
-        secret: str | None = None,
-    ) -> None:
+    def resolve_app_workflow_decision(self, action_token: str, *, approved: bool) -> None:
         """Answer one workflow prompt by its single-use identity."""
-        elevated = getattr(self, "_elevated_actions", None)
-        if elevated is not None and elevated.owns(action_token):
-            elevated.resolve(action_token, approved=approved, secret=secret)
-            return
         coordinator = getattr(self, "_app_workflows", None)
         if coordinator is None:
             self._notify(
@@ -3895,7 +3525,7 @@ class QronosRuntime:
                 json.dumps({"actionToken": str(action_token or ""), "reason": "unknown"}, separators=(",", ":")),
             )
             return
-        coordinator.resolve(action_token, approved=approved, secret=secret)
+        coordinator.resolve(action_token, approved=approved)
 
     def _ensure_computer_runtime(self) -> None:
         """Prepare the trusted Windows computer-action collaborator."""
@@ -5227,15 +4857,6 @@ class QronosRuntime:
             report["voiceComputerDeferred"] = False
             return _computer_capability_response()
 
-        from qronos_media.intents import parse_media_intent
-
-        media_intent = parse_media_intent(transcript)
-        if media_intent is not None:
-            # The same typed media product operation as the desktop (no shell, model or database call).
-            report["voiceMediaRequest"] = type(media_intent).__name__
-            report["voiceComputerDeferred"] = False
-            return self._run_media_intent(media_intent)
-
         paint_undo_response = self._prepare_voice_paint_undo_action(
             transcript,
             report,
@@ -5914,13 +5535,6 @@ class QronosRuntime:
             ):
                 return
 
-            if self._begin_text_media_request(
-                cleaned_text,
-                cleaned_request_id,
-                started,
-            ):
-                return
-
             if self._begin_text_app_workflow(
                 cleaned_text,
                 cleaned_request_id,
@@ -6391,6 +6005,7 @@ class QronosRuntime:
 
         if self.orchestrator is None:
             orchestrator = Orchestrator()
+            orchestrator.code_policy_audit = self._code_policy_audit
             # Public web access requires the browser adapter. Legacy direct
             # HTTP research is intentionally unavailable in production.
             orchestrator.workers.register(
@@ -7122,15 +6737,6 @@ class QronosRuntime:
         self._clear_file_write_approval_lease(reason)
         return len(revoked)
 
-    def _discard_pending_media_approvals(self, reason: str) -> int:
-        """
-        Revoke every media library question (MEDIA_ACTION) at the same Pause,
-        Stop and shutdown points as the file approvals. Their payloads belong
-        to the media route and are never read here; a late answer is stale
-        there. Idempotent.
-        """
-        return len(self._approvals.revoke_kinds((ApprovalKind.MEDIA_ACTION,), reason))
-
     def _notify_file_stale(self, action_token: str, reason: str) -> None:
         self._notify(
             "file_action_stale",
@@ -7202,13 +6808,8 @@ class QronosRuntime:
                     pass
         app_workflows = getattr(self, "_app_workflows", None)
         if app_workflows is not None:
-            # Telegram/print prompts and running steps stop with everything else.
+            # App-workflow prompts and running steps stop with everything else.
             app_workflows.discard(reason)
-        elevated = getattr(self, "_elevated_actions", None)
-        if elevated is not None:
-            # Open elevation prompts too. A broker already started is not
-            # interrupted: it performs one action or none, and reports.
-            elevated.discard(reason)
         if revoked:
             self._notify(
                 "computer_approval_discarded",
@@ -7229,7 +6830,6 @@ class QronosRuntime:
         lifecycle = self._foreground_lifecycle()
         with lifecycle.transition():
             cancelled = lifecycle.cancel_current(CANCEL_REASON_USER_STOP)
-            self._preempt_media(CANCEL_REASON_USER_STOP)
             result = self._request_stop_response()
             result["foregroundInferenceCancelled"] = cancelled
             return result
@@ -7263,7 +6863,6 @@ class QronosRuntime:
         pending_file_approvals_discarded = self._discard_pending_file_approvals(
             CANCEL_REASON_USER_STOP
         )
-        self._discard_pending_media_approvals(CANCEL_REASON_USER_STOP)
         self._discard_pending_history_undo(CANCEL_REASON_USER_STOP)
 
         with self._lock:
@@ -8702,13 +8301,6 @@ class QronosRuntime:
                     "calculatorLocalSemanticRoute"
                 ] = True
 
-            from qronos_media.intents import parse_media_intent as _parse_media_intent
-
-            if _parse_media_intent(transcript) is not None:
-                # A media search/status request runs the typed media operation (voice computer branch).
-                routed_task_type = TaskType.COMPUTER
-                selected_task_type = TaskType.COMPUTER
-
             report["route"] = (
                 routed_task_type.value
             )
@@ -9292,6 +8884,7 @@ class QronosRuntime:
                     "error",
                     str(exc),
                 )
+                self._notify_voice_turn_failed()
 
             self._cancel_pending_voice_playback_wait()
 
@@ -9329,6 +8922,7 @@ class QronosRuntime:
                     "error",
                     str(exc),
                 )
+                self._notify_voice_turn_failed()
 
             self._cancel_pending_voice_playback_wait()
 
@@ -9375,6 +8969,14 @@ class QronosRuntime:
 
         return playback_seconds
 
+    def _notify_voice_turn_failed(self) -> None:
+        """A voice turn ended in an error: one fixed, safe event the desktop can act on.
+
+        The diagnostic stays in the runtime_error before it; this carries no message, path or provider, so the
+        desktop can say in its own words that the voice request failed and point to the local setup check.
+        """
+        self._notify("voice_turn_failed", "error", json.dumps({"reason": "voice_turn_failed"}))
+
     def push_to_talk(self) -> None:
         self._run_voice_turn(trigger_source="push_to_talk", prepare_push_to_talk=True)
 
@@ -9399,6 +9001,7 @@ class QronosRuntime:
             inference_checkpoint()
             with self._foreground_lifecycle().publication():
                 self._notify("runtime_error", "error", str(exc))
+                self._notify_voice_turn_failed()
             return 0.0
 
         finally:
@@ -9953,21 +9556,9 @@ class QronosRuntime:
         # exits. Daemon workers that do not finish in time are abandoned.
         # After close() nothing may run: the registry refuses new actions and
         # pending approvals are discarded so a late answer finds nothing.
-        # No phone request may arrive while the runtime shuts down.
-        if getattr(self, "_link_runtime", None) is not None:
-            self.stop_device_link()
         self._computer_actions.close()
-        media_host = self._media_host
-        if media_host is not None:
-            # Before the approvals close: the media stage stops, its model child is
-            # torn down and its exit proven (or it stays counted) within a bound.
-            try:
-                media_host.close()
-            except Exception:
-                pass
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
-        self._discard_pending_media_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_history_undo(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
@@ -10190,11 +9781,6 @@ def handle_action(
         action_id,
     )
 
-    if action_id == MEDIA_ACTION:
-        # The media product applies its own pause rule per operation (reads stay available while paused).
-        handle_media_action(runtime, payload)
-        return
-
     pause_safe_actions = {
         CONVERSATION_HISTORY_REQUEST_ACTION,
         HISTORY_REQUEST_ACTION,
@@ -10240,11 +9826,6 @@ def handle_action(
 
     if action_id == SETTINGS_RELOAD_ACTION:
         runtime.reload_settings()
-        runtime.apply_device_link_settings()
-        return
-
-    if action_id in LINK_ACTIONS:
-        handle_link_action(runtime, action_id, payload)
         return
 
     if action_id == INPUT_METER_START_ACTION:
@@ -10373,16 +9954,6 @@ def handle_action(
 
         return
 
-    if action_id == APP_WORKFLOW_UNCERTAIN_ACTION:
-        data = payload.get("data", {})
-        if not isinstance(data, dict):
-            raise ValueError("Uncertain-attempt request data must be an object.")
-        acknowledge = data.get("acknowledge")
-        if acknowledge is not None and (not isinstance(acknowledge, str) or len(acknowledge) > 128):
-            raise ValueError("acknowledge must be one operation key.")
-        runtime._ensure_app_workflows().report_uncertain(acknowledge)
-        return
-
     if action_id == APP_WORKFLOW_DECISION_ACTION:
         data = payload.get("data", {})
         if not isinstance(data, dict):
@@ -10391,15 +9962,10 @@ def handle_action(
         approved = data.get("approved", False)
         if not isinstance(approved, bool):
             raise ValueError("Workflow decision approved must be boolean.")
-        secret = data.get("secret")
-        if secret is not None and (not isinstance(secret, str) or len(secret) > 256):
-            # Never echo the value; only its shape is wrong.
-            raise ValueError("Workflow decision secret must be a short string.")
         worker = threading.Thread(
             target=lambda: runtime.resolve_app_workflow_decision(
                 action_token,
                 approved=approved,
-                secret=secret,
             ),
             name="qronos-app-workflow-decision",
             daemon=True,
@@ -10515,149 +10081,6 @@ def handle_action(
         "warning",
         f"Unsupported runtime action: {action_id}",
     )
-
-
-class LinkRequestError(Exception):
-    """A Device Link request refused before acting; ``code`` is all the desktop sees."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-_LINK_REQUEST_NONCE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
-_LINK_DEVICE_ID = re.compile(r"^[0-9a-f]{16}$")
-_LINK_ACTION_KEYS = {
-    LINK_STATUS_ACTION: frozenset(),
-    LINK_DEVICES_ACTION: frozenset(),
-    LINK_PAIR_OPEN_ACTION: frozenset({"requestNonce", "name"}),
-    LINK_PAIR_CANCEL_ACTION: frozenset(),
-    LINK_REVOKE_ACTION: frozenset({"deviceId"}),
-    LINK_REMOTE_ACTION: frozenset({"deviceId", "enabled", "days"}),
-    LINK_RELAY_SET_ACTION: None,  # refused whole until the WAN gate is accepted
-    LINK_SECURITY_RESET_ACTION: frozenset(),
-}
-
-
-def _link_request(action_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    data = payload.get("data", {})
-
-    if not isinstance(data, dict):
-        raise LinkRequestError("invalid_request")
-
-    allowed = _LINK_ACTION_KEYS[action_id]
-
-    if allowed is not None and not set(data) <= allowed:
-        raise LinkRequestError("invalid_request")
-
-    return data
-
-
-def _link_device_id(data: dict[str, Any]) -> str:
-    value = data.get("deviceId")
-
-    if type(value) is not str or not _LINK_DEVICE_ID.match(value):
-        raise LinkRequestError("invalid_request")
-
-    return value
-
-
-def _link_device_name(data: dict[str, Any]) -> str:
-    value = data.get("name", "")
-
-    if type(value) is not str:
-        raise LinkRequestError("invalid_request")
-
-    value = value.strip()
-
-    if len(value) > 40 or any(_refused_name_character(character) for character in value):
-        raise LinkRequestError("invalid_request")
-
-    return value
-
-
-def _refused_name_character(character: str) -> bool:
-    """Control, line-break and bidi-override characters; Persian joiners are fine."""
-    code = ord(character)
-    return (
-        code < 0x20
-        or 0x7F <= code <= 0x9F
-        or code in (0x2028, 0x2029)
-        or 0x202A <= code <= 0x202E
-        or 0x2066 <= code <= 0x2069
-    )
-
-
-def handle_link_action(
-    runtime: QronosRuntime,
-    action_id: str,
-    payload: dict[str, Any],
-) -> None:
-    """The desktop's Device Link page: thin, validated calls on the one LinkRuntime.
-
-    Nothing is acted on until the request has exactly the expected shape. A
-    refusal is a typed ``link_error`` carrying a code, never the payload or an
-    exception's text. The pairing URI holds the new phone's key: it is sent
-    once, tagged with the requesting window's nonce, and never logged or kept.
-    """
-    try:
-        data = _link_request(action_id, payload)
-
-        if action_id == LINK_RELAY_SET_ACTION:
-            raise LinkRequestError("remote_unavailable")
-
-        link = runtime._device_link()
-
-        if action_id == LINK_PAIR_OPEN_ACTION:
-            nonce = data.get("requestNonce")
-
-            if type(nonce) is not str or not _LINK_REQUEST_NONCE.match(nonce):
-                raise LinkRequestError("invalid_request")
-
-            name = _link_device_name(data)
-
-            if not link.running:
-                raise LinkRequestError("not_running")
-
-            uri = link.open_pairing(name)
-            runtime._notify("link_pairing", "ready", json.dumps({"requestNonce": nonce, "uri": uri}))
-        elif action_id == LINK_PAIR_CANCEL_ACTION:
-            link.cancel_pairing()
-        elif action_id == LINK_REVOKE_ACTION:
-            # Works with the link off too: a lost phone is revoked at once.
-            link.revoke(_link_device_id(data))
-        elif action_id == LINK_REMOTE_ACTION:
-            device_id = _link_device_id(data)
-            enabled = data.get("enabled")
-            days = data.get("days")
-
-            if type(enabled) is not bool or days is not None:
-                raise LinkRequestError("invalid_request")
-
-            if enabled:
-                # Remote access needs the WAN gate; switching it off is always allowed.
-                raise LinkRequestError("remote_unavailable")
-
-            link.set_remote_access(device_id, False)
-        elif action_id == LINK_SECURITY_RESET_ACTION:
-            # The person at this PC clears the monitor's latches. Only this
-            # desktop action reaches it; nothing on the link can. A link that
-            # is switched on starts again, with phone questions answerable.
-            link.settings = runtime._link_runtime_settings()
-            if link.settings.link_enabled:
-                runtime._ensure_text_runtime()
-            link.reset_security()
-    except LinkRequestError as refused:
-        runtime._notify("link_error", "warning", json.dumps({"action": action_id, "code": refused.code}))
-        return
-    except Exception as exc:  # noqa: BLE001 - typed for the desktop, details stay here
-        from core.link_devices import UnknownDevice
-
-        code = "unknown_device" if isinstance(exc, UnknownDevice) else "failed"
-        runtime._notify("link_error", "warning", json.dumps({"action": action_id, "code": code}))
-        return
-
-    runtime._publish_link_status()
 
 
 def handle_text_message(
@@ -11154,42 +10577,6 @@ def handle_queue_debug_load(
     )
 
 
-def handle_media_index(
-    runtime: QronosRuntime,
-    payload: dict[str, Any],
-) -> None:
-    """Ask the media host for one bounded index pass (only numbers are read from the request)."""
-    host = runtime.ensure_media_host()
-    answer = host.submit_index(
-        max_seconds=float(payload.get("maxSeconds", 120.0)),
-        max_stages=int(payload.get("maxStages", 50)),
-    )
-    runtime._notify("media_index", "ready" if answer.get("accepted") else "warning", _compact(answer))
-
-
-def handle_media_status(
-    runtime: QronosRuntime,
-    payload: dict[str, Any],
-) -> None:
-    host = runtime._media_host
-    status = host.status() if host is not None else {"workerStarted": False}
-    runtime._notify("media_status", "ready", _compact(status))
-
-
-def handle_media_action(
-    runtime: QronosRuntime,
-    payload: dict[str, Any],
-) -> None:
-    """One typed media product operation (the data object only; validated in qronos_media.product)."""
-    runtime.media_product().handle(payload.get("data"))
-
-
-MEDIA_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
-    "media_index": handle_media_index,
-    "media_status": handle_media_status,
-}
-
-
 QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
     "queue_debug_load": handle_queue_debug_load,
     "queue_list": handle_queue_list,
@@ -11278,8 +10665,7 @@ def main() -> int:
     supervision = None
 
     # Before ANY store opens (core/startup_admission.py): own the bridge singleton,
-    # refuse while an update runs, resolve an interrupted update, then hold the shared
-    # writer admission for this process's life. The frozen entry point has already done
+    # then hold the shared writer admission for this process's life. The frozen entry point has already done
     # this before importing this module; then this is a no-op.
     from core import startup_admission
 
@@ -11376,14 +10762,6 @@ def _run() -> int:
         "Qronos runtime bridge is ready.",
     )
 
-    # Reviewed status hooks (core/runtime_hooks.py), on their own daemon
-    # thread with a deadline each: they can never hold up the command loop.
-    run_startup_status_hooks(emit)
-
-    # Paired phones, when the user turned the link on. Text-only mode too;
-    # off by default, and then nothing is built.
-    runtime.start_device_link()
-
     try:
         for raw_line in _command_lines(sys.stdin):
             line = raw_line.strip()
@@ -11428,7 +10806,7 @@ def _run() -> int:
                     )
                     continue
 
-                handler = QUEUE_COMMANDS.get(command) or MEDIA_COMMANDS.get(command)
+                handler = QUEUE_COMMANDS.get(command)
 
                 if handler is not None:
                     handler(runtime, payload)

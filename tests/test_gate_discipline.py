@@ -39,11 +39,7 @@ EXECUTOR_MODULES: tuple[str, ...] = (
     "core.screen_capture",
     "core.library_executor",
     # Application workflows: every side effect needs a gate grant.
-    "core.telegram_workflow",
-    "core.print_workflow",
     "core.browser_research",
-    # Performs one exact approved typed action, re-asking the gate first.
-    "core.action_broker",
 )
 
 # The one sanctioned route to performing an action.
@@ -62,14 +58,17 @@ NATIVE_BACKENDS = {
         "core.keyboard_control", "core.mouse_button", "core.mouse_hover", "core.mouse_wheel",
     }),
     "core.windows_accessibility_mutation": frozenset({"core.accessibility_action_executor"}),
-    # GDI/GDI+/Windows.Data.Pdf print renderer: only the gated print workflow.
-    "core.print_renderer": frozenset({"core.print_workflow"}),
 }
 
 # Modules that legitimately touch these without being action executors, with
 # the reason. Anything not listed has to be justified by adding it here, which
 # is the point: the list is short and someone has to look at it.
 KNOWN_SYSTEM_MODULES: dict[str, str] = {
+    "core.config": (
+        "Reads one value (QRONOS_ASSET_ROOT) from the user's environment key "
+        "HKCU\\Environment through winreg, read only; it writes nothing and "
+        "launches nothing."
+    ),
     "core.runtime_instance_guard": (
         "Creates/closes only the local named Qronos runtime mutex; it does not "
         "launch processes or manipulate user applications."
@@ -85,19 +84,7 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     ),
     "core.store_admission": (
         "Takes and releases byte-range locks (LockFileEx/UnlockFileEx) on "
-        "Qronos's own admission lock file, and asks whether the update fence "
-        "mutex exists (OpenMutexW); it launches nothing."
-    ),
-    "core.update_service": (
-        "Starts only the verified staged Qronos installer (/S /QRONOSUPDATE) "
-        "through fenced_launcher. GateAuthorizer asks security.gate for an "
-        "INSTALL_SOFTWARE action at request, approve and launch, and the "
-        "person's typed approval secret is required as well; the launch is "
-        "refused by default (launch_unavailable). Only that child receives a "
-        "duplicate of the update fence handle. ctypes: the update fence and "
-        "runtime-singleton mutexes (CreateMutexW, WaitForSingleObject with no "
-        "wait), a share-read CreateFileW lock on the staged installer and "
-        "GetProcessTimes."
+        "Qronos's own admission lock file; it launches nothing."
     ),
     "core.windows_accessibility": (
         "Reads UI Automation focus, geometry, properties and RuntimeIds. "
@@ -124,20 +111,9 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "pipes to it, binds it to a kill-on-close Job Object and stops only "
         "that exact child. It performs no user action and owns no audio, UI or dialog."
     ),
-    "core.spooler_service": (
-        "Stops and starts the one Windows service named Spooler (a constant) "
-        "through the Service Control Manager, with query/stop/start rights "
-        "only. Called only by the broker's registered printer.spooler_restart "
-        "action, after the broker's full verification and its gate re-check."
-    ),
     "core.pipe_peer": (
         "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "
         "ctypes only to read which process is on the other end of a Qronos pipe."
-    ),
-    "core.uac_launch": (
-        "Starts only the bundled Qronos executable as the Action Broker through "
-        "ShellExecuteExW 'runas', i.e. the normal UAC prompt the user can decline; "
-        "the handle is used only to read its id, wait and read its exit code."
     ),
     "core.windows_power_status": (
         "Calls GetSystemPowerStatus through ctypes only to read whether Windows "
@@ -292,7 +268,7 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
                 if backend in imports:
                     self.assertIn(name, callers, f"{name} bypasses the reviewed {backend} callers")
                     guard = "security.gate" if name in {
-                        "core.computer_executor", "core.accessibility_action_executor", "core.print_workflow",
+                        "core.computer_executor", "core.accessibility_action_executor",
                     } else "core.input_safety"
                     self.assertIn(guard, imports, f"{name} lost its action guard")
 

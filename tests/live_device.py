@@ -4,7 +4,7 @@ Default-off gate for tests that touch real devices.
 A live-device test reads or drives something real on the machine running the
 suite: the screen or a window's pixels, the foreground window and window list,
 the microphone or speakers, the GPU or a local model, the UI Automation tree,
-a printer or a phone. Those are acceptance checks, not software tests, and the
+or a printer. Those are acceptance checks, not software tests, and the
 person running the suite has not necessarily agreed to them. They run only
 when ``QRONOS_RUN_LIVE_DEVICE_TESTS`` is exactly ``1``.
 

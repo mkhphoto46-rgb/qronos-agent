@@ -317,4 +317,14 @@ Rules that must not be broken:
 
 ## Licence
 
-No licence has been chosen yet.
+The source owned by the Qronos project is licensed under the Apache License 2.0: see [LICENSE](LICENSE)
+and [NOTICE](NOTICE). Third-party components keep their own licences and are not relicensed. They include:
+
+- the bundled libraries;
+- the template icons and logos in `desktop/src-tauri/icons/`, `desktop/public/` and `desktop/src/assets/`.
+  These come from the create-tauri-app and create-vite templates and are not Qronos artwork; see
+  `build_support/desktop_artwork.json`;
+- the Tauri-derived installer template;
+- the models and tools provisioned separately.
+
+NOTICE and the third-party notices shipped with the app list them.

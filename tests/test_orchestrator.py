@@ -22,17 +22,13 @@ from core.workers import (
 class TestOrchestrator(unittest.TestCase):
     def setUp(self) -> None:
         # The default runtime is the real local model client. These tests
-        # fake the model calls they make, so the model store's metadata must
-        # be faked too: no installed-size reader (admission keeps the
-        # configured estimate) and nothing already resident. Without this the
-        # tests read the user's real model server.
-        no_size_reader = patch("core.orchestrator._installed_size_reader", return_value=None)
+        # fake the model calls they make, so nothing may be read as already
+        # resident either. Without this the tests read the user's real model
+        # server.
         nothing_resident = patch(
             "core.ollama_controller.OllamaController.list_running_models", return_value=[]
         )
-        no_size_reader.start()
         nothing_resident.start()
-        self.addCleanup(no_size_reader.stop)
         self.addCleanup(nothing_resident.stop)
         self.orchestrator = Orchestrator()
 

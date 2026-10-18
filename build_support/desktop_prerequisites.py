@@ -352,13 +352,12 @@ def verify_build_tools(tools: Path, tauri_cli_version: str) -> dict[str, Any]:
 # ------------------------------------------------------------ NSIS hook
 
 
-def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *, owned_manifest: Path,
+def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *,
                  vcredist: tuple[Path, dict[str, Any]]) -> str:
-    """The generated NSIS include that hands the verified WebView2 installer, the verified Visual C++
-    Redistributable (``vcredist`` = (file, pin)) and this build's install manifest (the exact files the update
-    transaction claims, installer-hooks/qronos-update-transaction.nsh) to the hook."""
+    """The generated NSIS include that hands the verified WebView2 installer and the verified Visual C++
+    Redistributable (``vcredist`` = (file, pin)) to the hook."""
     vc_installer, vc_pin = vcredist
-    for value in (str(installer), str(hook), str(owned_manifest), str(vc_installer)):
+    for value in (str(installer), str(hook), str(vc_installer)):
         if _NSIS_UNSAFE.search(value):
             raise PrerequisiteError("A prerequisite hook path contains characters NSIS would interpret.")
     runtime = vc_pin["runtime"]
@@ -375,17 +374,16 @@ def hook_wrapper(installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *
         f'!define QRONOS_VCREDIST_MINOR "{int(runtime["minor"])}"',
         f'!define QRONOS_VCREDIST_BUILD "{int(runtime["build"])}"',
         f'!define QRONOS_VCREDIST_SHA256 "{vc_pin["sha256"]}"',
-        f'!define QRONOS_OWNED_MANIFEST "{owned_manifest}"',
         f'!include "{hook}"',
         "",
     ))
 
 
 def write_hook_wrapper(directory: Path, installer: Path, pin: dict[str, Any], hook: Path = HOOK_PATH, *,
-                       owned_manifest: Path, vcredist: tuple[Path, dict[str, Any]]) -> Path:
+                       vcredist: tuple[Path, dict[str, Any]]) -> Path:
     wrapper = directory / "qronos-installer-hooks.nsh"
     with open(wrapper, "x", encoding="utf-8", newline="\r\n") as handle:  # never replaces a file
-        handle.write(hook_wrapper(installer, pin, hook, owned_manifest=owned_manifest, vcredist=vcredist))
+        handle.write(hook_wrapper(installer, pin, hook, vcredist=vcredist))
     return wrapper
 
 
@@ -435,7 +433,7 @@ _NEUTRAL = ("${EndIf}", "!insertmacro MUI_STARTMENU_WRITE_END", "!endif")
 #: Commands that clear or set the error flag; inside the shortcut functions they could hide a failure.
 _FLAG_CHANGERS = re.compile(r"\b(ClearErrors|IfErrors|SetErrors|ReadRegStr|ReadINIStr|GetSize|\$\{Errors\})")
 #: Values only test probes define; a production script or hook wrapper with one is refused.
-_PROBE_ONLY = re.compile(r"^\s*!define\s+(QRONOS_PROBE_\w+|QRONOS_UPDATE_FENCE_NAME|QPROBE_\w+)\b", re.MULTILINE)
+_PROBE_ONLY = re.compile(r"^\s*!define\s+(QRONOS_PROBE_\w+|QPROBE_\w+)\b", re.MULTILINE)
 
 
 def _file_sha256(path: Path) -> str:
@@ -473,13 +471,13 @@ def _statements(block: str) -> list[str]:
 
 
 def verify_generated_order(script: str) -> None:
-    """Tauri's REAL generated installer.nsi has the Qronos order (contracts round 11-12)."""
+    """Tauri's REAL generated installer.nsi has the Qronos order."""
     text = script.lstrip("\ufeff").replace("\r\n", "\n")
     if "!ifndef QRONOS_TEMPLATE_HOOKS" not in text:
         raise PrerequisiteError("The generated installer script is not from the Qronos template.")
     install = _statements(_block(text, "Section Install", "SectionEnd"))
     if not install or install[0] != "!insertmacro NSIS_HOOK_PREINSTALL":
-        raise PrerequisiteError("The generated installer does not run the Qronos fence and checks first.")
+        raise PrerequisiteError("The generated installer does not run the Qronos checks first.")
     if install.count("SetOutPath $INSTDIR") != 1:
         raise PrerequisiteError("The generated installer does not create the install folder exactly once.")
     pending = None
@@ -500,12 +498,12 @@ def verify_generated_order(script: str) -> None:
         raise PrerequisiteError("The generated installer has no single install-complete step.")
     after = install[install.index("!insertmacro QRONOS_INSTALL_COMPLETE") + 1:]
     if after[:2] != ["!ifmacrodef NSIS_HOOK_POSTINSTALL", "!insertmacro NSIS_HOOK_POSTINSTALL"]:
-        raise PrerequisiteError("The install-complete step is not immediately before the receipt hook.")
+        raise PrerequisiteError("The install-complete step is not immediately before the post-install hook.")
     if any(statement.startswith(("Delete ", "RMDir ", "RmDir ")) for statement in install):
         raise PrerequisiteError("The generated Install section deletes outside the owned file list.")
     uninstall = _statements(_block(text, "Section Uninstall", "SectionEnd"))
     if not uninstall or uninstall[0] != "!insertmacro NSIS_HOOK_PREUNINSTALL":
-        raise PrerequisiteError("The generated uninstaller does not run the Qronos fence and checks first.")
+        raise PrerequisiteError("The generated uninstaller does not run the Qronos checks first.")
     deletions = [s for s in uninstall if s.startswith(("Delete ", "RMDir ", "RmDir "))]
     allowed = re.compile(r'^(Delete "\$INSTDIR\\uninstall\.exe"|Delete "\$(SMPROGRAMS|DESKTOP)\\[^"]*\.lnk"|'
                          r'RMDir "\$SMPROGRAMS\\\$AppStartMenuFolder")$')
@@ -531,11 +529,9 @@ def verify_generated_order(script: str) -> None:
 
 
 def verify_hook_wrapper(text: str) -> None:
-    """The generated hook wrapper never carries a test-probe value, and names this build's install manifest."""
+    """The generated hook wrapper never carries a test-probe value, and names the verified VC++ redistributable."""
     if _PROBE_ONLY.search(text):
         raise PrerequisiteError("The hook wrapper defines a test-probe value.")
-    if not re.search(r'^!define\s+QRONOS_OWNED_MANIFEST\s+"[^"\r\n]+"', text, re.MULTILINE):
-        raise PrerequisiteError("The hook wrapper does not name the install manifest the update transaction needs.")
     for name in ("QRONOS_VCREDIST_INSTALLER", "QRONOS_VCREDIST_MAJOR", "QRONOS_VCREDIST_MINOR",
                  "QRONOS_VCREDIST_BUILD"):
         if not re.search(rf'^!define\s+{name}\s+"[^"\r\n]+"', text, re.MULTILINE):

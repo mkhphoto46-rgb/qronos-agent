@@ -316,10 +316,8 @@ def test_unprepared_build_tools_stop_before_anything_is_built(tmp_path, monkeypa
 
 def test_the_hook_wrapper_names_the_verified_file_and_refuses_unsafe_paths(tmp_path):
     pin = committed_pin()
-    manifest = tmp_path / "qronos-install-manifest.txt"
     vc = vc_stand_in(tmp_path)
-    wrapper = prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest,
-                                               vcredist=vc)
+    wrapper = prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, vcredist=vc)
 
     text = wrapper.read_text(encoding="utf-8")
     assert f'!define QRONOS_VCREDIST_INSTALLER "{vc[0]}"' in text
@@ -328,19 +326,14 @@ def test_the_hook_wrapper_names_the_verified_file_and_refuses_unsafe_paths(tmp_p
     prerequisites.verify_hook_wrapper(text)
     assert f'!define QRONOS_WEBVIEW2_INSTALLER "{tmp_path / pin["fileName"]}"' in text
     assert f'!define QRONOS_WEBVIEW2_VERSION "{pin["runtime"]["version"]}"' in text
-    assert f'!define QRONOS_OWNED_MANIFEST "{manifest}"' in text
     assert f'!include "{prerequisites.HOOK_PATH}"' in text
     with pytest.raises(FileExistsError):
-        prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest,
-                                         vcredist=vc)
+        prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, vcredist=vc)
     for unsafe in ('a"b', "a$b", "a\nb", "a;b"):
         with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / unsafe / pin["fileName"], pin, owned_manifest=manifest, vcredist=vc)
+            prerequisites.hook_wrapper(tmp_path / unsafe / pin["fileName"], pin, vcredist=vc)
         with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=tmp_path / unsafe / "m.txt",
-                                       vcredist=vc)
-        with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=manifest,
+            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin,
                                        vcredist=(tmp_path / unsafe / "vc_redist.x64.exe", vc[1]))
 
 
@@ -376,12 +369,9 @@ def test_the_compiled_hook_embeds_exactly_the_pinned_bytes_and_no_downloader(tmp
     payload.parent.mkdir()
     payload.write_bytes(data)
     pin = fake_pin(data)
-    manifest = tmp_path / "qronos-install-manifest.txt"  # the update transaction embeds the build's own list
-    manifest.write_bytes(b"stand-in list (embedded under $PLUGINSDIR, never installed as a payload file)")
 
     vc_payload, vc_pin = vc_stand_in(tmp_path)
-    result = compile_hook(tmp_path, prerequisites.hook_wrapper(payload, pin, owned_manifest=manifest,
-                                                               vcredist=(vc_payload, vc_pin)))
+    result = compile_hook(tmp_path, prerequisites.hook_wrapper(payload, pin, vcredist=(vc_payload, vc_pin)))
 
     assert result.returncode == 0, result.stdout + result.stderr
     tool = seven_zip()
@@ -830,10 +820,18 @@ def test_a_stale_installer_at_the_output_path_is_quarantined_first(tmp_path, mon
 # ------------------------------------------------ the extracted installer
 
 
-def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
-    """A synthetic extracted installer built with the real runtime-manifest and notice writers."""
-    from build_support import build_runtime
+def extracted_tree(tmp_path: Path, *, desktop_licence: str = "repo", runtime_licence: str = "repo",
+                   artwork: str = "repo") -> tuple[Path, dict]:
+    """A synthetic extracted installer built with the real runtime-manifest and notice writers.
+
+    Both carry Qronos's own LICENSE and NOTICE ("repo"); "none" leaves them out, and "other-notice" ships a
+    different (still valid) NOTICE, with every manifest consistent either way."""
+    from build_support import build_runtime, project_licence
     from build_support import desktop_notices as notices
+
+    licence = project_licence.read()
+    variants = {"repo": licence, "none": None,
+                "other-notice": {**licence, "NOTICE": licence["NOTICE"] + b"Another valid line.\n"}}
 
     root = tmp_path / "x"
     payload = b"MZ stand-in for the pinned WebView2 installer"
@@ -847,6 +845,10 @@ def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
     (runtime / "_internal").mkdir(parents=True)
     (runtime / "qronos-runtime.exe").write_bytes(b"MZ runtime")
     (runtime / "_internal" / "python313.dll").write_bytes(b"MZ python")
+    if variants[runtime_licence] is not None:
+        (runtime / "third-party-notices" / "qronos").mkdir(parents=True)
+        for name, data in variants[runtime_licence].items():
+            (runtime / "third-party-notices" / "qronos" / name).write_bytes(data)
     build_runtime.write_manifest(runtime)
     package = tmp_path / "pkg"
     package.mkdir()
@@ -855,7 +857,9 @@ def extracted_tree(tmp_path: Path) -> tuple[Path, dict]:
     component = notices.Component("rust", "demo", "1.0.0", "MIT", None,
                                   "registry+https://github.com/rust-lang/crates.io-index", "sum", package.resolve())
     files = notices.check_coverage([component], {})
-    notices.write_notices([component], files, {}, root / "third-party-notices", notices.WINDOWS_TARGET, ())
+    notices.write_notices([component], files, {}, root / "third-party-notices", notices.WINDOWS_TARGET, (),
+                          project=variants[desktop_licence],
+                          artwork=notices.load_artwork() if artwork == "repo" else None)
     install_manifest.write(root, install_manifest.payload_files(runtime, root / "third-party-notices",
                                                                 "qronos-desktop"))
     return root, pin
@@ -868,8 +872,36 @@ def test_an_extracted_installer_is_verified_byte_for_byte(tmp_path):
 
     assert evidence["topLevel"] == sorted(installer_verify.EXPECTED_TOP_LEVEL)
     assert evidence["webview2Installer"]["sha256"] == pin["sha256"]
-    assert evidence["runtimeFiles"] == 2 and evidence["desktopNoticeFiles"] >= 3
+    assert evidence["runtimeFiles"] == 4 and evidence["desktopNoticeFiles"] >= 5
     assert evidence["plugins"] == ["MicrosoftEdgeWebView2RuntimeInstallerX64.exe", "System.dll"]
+    assert evidence["projectLicence"]["license"] == "Apache-2.0"
+    assert evidence["projectLicence"]["files"]["LICENSE"] == {
+        "bytes": 11358, "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"}
+    assert evidence["projectLicence"]["locations"] == ["qronos-runtime/third-party-notices/qronos",
+                                                       "third-party-notices/qronos"]
+    assert evidence["thirdPartyArtworkAttributed"] == 19
+
+
+def test_an_installer_whose_notices_do_not_attribute_the_template_artwork_is_refused(tmp_path):
+    # Every manifest is consistent; only the artwork attribution is missing.
+    root, pin = extracted_tree(tmp_path, artwork="none")
+
+    with pytest.raises(PrerequisiteError, match="do not attribute exactly the third-party artwork"):
+        installer_verify.verify_extracted(root, pin)
+
+
+@pytest.mark.parametrize(("desktop", "runtime", "message"), [
+    ("none", "repo", "does not carry Qronos's own LICENSE and NOTICE"),
+    ("repo", "none", "does not carry Qronos's own LICENSE and NOTICE"),
+    ("repo", "other-notice", "copies of Qronos's LICENSE and NOTICE differ"),
+])
+def test_an_installer_without_the_project_licence_in_both_distributions_is_refused(tmp_path, desktop, runtime,
+                                                                                    message):
+    # Every manifest is consistent here, so only the licence check can refuse.
+    root, pin = extracted_tree(tmp_path, desktop_licence=desktop, runtime_licence=runtime)
+
+    with pytest.raises(PrerequisiteError, match=message):
+        installer_verify.verify_extracted(root, pin)
 
 
 @pytest.mark.parametrize(("damage", "message"), [
@@ -917,6 +949,8 @@ def test_provenance_states_what_was_and_was_not_verified(tmp_path):
 
     assert record["installer"] == {"fileName": setup.name, "bytes": 12, "sha256": sha256(b"MZ installer"),
                                    "signed": False}
+    assert record["projectLicence"] == extracted["projectLicence"]
+    assert record["projectLicence"]["license"] == "Apache-2.0"
     assert record["backend"]["sourceAsStatedByBuilder"] == "7e12e2b"
     assert record["backend"]["sourceVerifiedFromBundle"] is False
     assert len(record["desktopSource"]["commit"]) == 40

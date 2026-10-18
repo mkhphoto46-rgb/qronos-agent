@@ -1,4 +1,4 @@
-"""The three Paint failure routes in the runtime bridge answer in honest Persian (R1-R3).
+"""The three Paint failure routes in the runtime bridge answer in honest Persian.
 
 The Paint executor is a fake that fails exactly as the real one reports a
 failure (a PaintDrawExecution with an English diagnostic detail and a typed

@@ -29,7 +29,6 @@ import os
 import re
 import secrets
 import subprocess
-import threading
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -53,14 +52,6 @@ DEVICE_ID_BYTES = 8
 DEVICE_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 
 SCHEMA_VERSION = 1
-
-# How long a remote opt-in lasts when the PC does not say. Remote access is a
-# decision about one phone for a period, not a setting that outlives the
-# reason it was turned on; the user renews it at the PC.
-DEFAULT_REMOTE_SECONDS = 30 * 24 * 3600.0
-
-# The longest a single opt-in may run, whatever the caller asks for.
-MAX_REMOTE_SECONDS = 365 * 24 * 3600.0
 
 
 class Clock(Protocol):
@@ -256,31 +247,10 @@ class DeviceRecord:
     # Layer 2 is opt-in for one named device at a time, not a global switch.
     remote_enabled: bool = False
 
-    # When that opt-in lapses. Remote access with no expiry is not a state the
-    # registry creates; a record that has one anyway (written before expiry
-    # existed, or edited by hand) is treated as lapsed, which is the safe
-    # reading of a missing limit.
-    remote_expires_at: float | None = None
-
     @property
     def can_authenticate(self) -> bool:
         """A pending device may connect; that is how pairing completes."""
         return self.status in {DeviceStatus.PENDING, DeviceStatus.ACTIVE}
-
-    def remote_allowed(self, now: float) -> bool:
-        """
-        Whether this device may be served through the relay at ``now``.
-
-        Active, opted in, and inside the opt-in's period. A pending device
-        never qualifies: pairing happens on the local network only.
-        """
-
-        return (
-            self.status is DeviceStatus.ACTIVE
-            and self.remote_enabled
-            and self.remote_expires_at is not None
-            and now < self.remote_expires_at
-        )
 
     def __repr__(self) -> str:
         """Never render the key."""
@@ -288,8 +258,7 @@ class DeviceRecord:
             f"DeviceRecord(device_id={self.device_id!r}, "
             f"name={self.name!r}, status={self.status.value}, "
             f"secret=<redacted {len(self.secret)} bytes>, "
-            f"remote_enabled={self.remote_enabled}, "
-            f"remote_expires_at={self.remote_expires_at})"
+            f"remote_enabled={self.remote_enabled})"
         )
 
     def describe(self) -> str:
@@ -321,7 +290,6 @@ class DeviceRecord:
                 else sorted(item.value for item in self.grants)
             ),
             "remote_enabled": self.remote_enabled,
-            "remote_expires_at": self.remote_expires_at,
         }
 
     @classmethod
@@ -367,16 +335,6 @@ class DeviceRecord:
             raise DeviceStoreCorrupt(f"{device_id} has malformed grants")
 
         last_seen = data.get("last_seen_at")
-        remote_expires = data.get("remote_expires_at")
-
-        try:
-            remote_expires_at = (
-                None if remote_expires is None else float(remote_expires)  # type: ignore[arg-type]
-            )
-        except (TypeError, ValueError) as exc:
-            raise DeviceStoreCorrupt(
-                f"{device_id} has a malformed remote expiry"
-            ) from exc
 
         return cls(
             device_id=device_id,
@@ -388,124 +346,16 @@ class DeviceRecord:
             paired_from=str(data.get("paired_from", "")),
             grants=grants,
             remote_enabled=bool(data.get("remote_enabled", False)),
-            remote_expires_at=remote_expires_at,
         )
-
-
-class DeviceStoreBusy(Exception):
-    """Another process held the device file's lock for too long."""
-
-
-# How long a change waits for another process to finish its own. A change is a
-# read, one record and a file write, so anything near this is a stuck process.
-LOCK_TIMEOUT_SECONDS = 10.0
-
-
-def _try_lock(handle: object) -> None:
-    """Take an exclusive lock on byte 0 of an open file, or raise OSError."""
-
-    fileno = handle.fileno()  # type: ignore[attr-defined]
-
-    if os.name == "nt":
-        import msvcrt
-
-        handle.seek(0)  # type: ignore[attr-defined]
-        msvcrt.locking(fileno, msvcrt.LK_NBLCK, 1)
-    else:  # pragma: no cover - POSIX
-        import fcntl
-
-        fcntl.flock(fileno, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-def _unlock(handle: object) -> None:
-    fileno = handle.fileno()  # type: ignore[attr-defined]
-
-    if os.name == "nt":
-        import msvcrt
-
-        handle.seek(0)  # type: ignore[attr-defined]
-        msvcrt.locking(fileno, msvcrt.LK_UNLCK, 1)
-    else:  # pragma: no cover - POSIX
-        import fcntl
-
-        fcntl.flock(fileno, fcntl.LOCK_UN)
-
-
-class _FileLock:
-    """
-    An exclusive lock between processes, on a file beside the device file.
-
-    The lock file holds nothing; it exists to be locked. Waiting is bounded:
-    a process that cannot get the lock in ``LOCK_TIMEOUT_SECONDS`` raises
-    ``DeviceStoreBusy`` rather than hanging the desktop or a handshake.
-    """
-
-    def __init__(self, path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> None:
-        self.path = path
-        self.timeout = timeout
-        self._handle: object | None = None
-
-    def __enter__(self) -> _FileLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(self.path, "a+b")
-        deadline = time.monotonic() + self.timeout
-
-        while True:
-            try:
-                _try_lock(handle)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    handle.close()
-                    raise DeviceStoreBusy(
-                        f"{self.path} stayed locked by another process"
-                    ) from None
-
-                time.sleep(0.02)
-
-        self._handle = handle
-
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        handle, self._handle = self._handle, None
-
-        if handle is None:
-            return
-
-        try:
-            _unlock(handle)
-        except OSError:
-            pass
-        finally:
-            handle.close()  # type: ignore[attr-defined]
 
 
 class DeviceRegistry:
     """
     The paired devices, backed by one JSON file.
 
-    Every change is written through immediately. A phone pairing or being
-    revoked is rare and consequential, so there is no value in batching it and
-    real cost in losing it to a crash.
-
-    More than one process holds a registry for the same file — the link
-    service and whatever the user revokes a phone from — so neither may trust
-    its own memory:
-
-        Reads check the file first. If it has been replaced since it was last
-        read (a different modification time, size or file id), it is read
-        again. A ``stat`` per lookup is the cost, and it means a revocation
-        written by another process reaches the next handshake and, through the
-        server's per-request check, the next request of an open session.
-
-        Changes hold a lock shared between processes, re-read the file under
-        it, change one record and write the whole file back. Without the
-        re-read two processes would each write back their own stale copy and
-        the second would silently undo the first — a revocation lost that way
-        is a revoked phone working again.
-
-    A file that disappears reads as no devices, which is the safe direction.
+    Reads are served from memory; every change is written through immediately.
+    A phone pairing or being revoked is rare and consequential, so there is no
+    value in batching it and real cost in losing it to a crash.
     """
 
     def __init__(
@@ -517,66 +367,12 @@ class DeviceRegistry:
         # tests use.
         self.path = None if path is None else Path(path)
         self.clock: Clock = clock if clock is not None else time.time
-
-        # Threads within this process: the link server's session threads, the
-        # relay dialler and the desktop. Reentrant, because a change can be
-        # made of smaller changes.
-        self._lock = threading.RLock()
-        self._file_lock = (
-            None
-            if self.path is None
-            else _FileLock(self.path.with_suffix(self.path.suffix + ".lock"))
-        )
-        self._changing_depth = 0
-        self._signature: tuple[int, int, int] | None = None
         self._records: dict[str, DeviceRecord] = self._load()
 
     # ------------------------------------------------------------- persistence
 
-    def _stat_signature(self) -> tuple[int, int, int] | None:
-        assert self.path is not None
-
-        try:
-            stat = self.path.stat()
-        except FileNotFoundError:
-            return None
-
-        return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
-
-    def _refresh(self) -> None:
-        """Re-read the file if another process has replaced it."""
-
-        if self.path is None:
-            return
-
-        if self._stat_signature() == self._signature:
-            return
-
-        with self._lock:
-            if self._stat_signature() != self._signature:
-                self._records = self._load()
-
-    def _changing(self) -> _Changing:
-        return _Changing(self)
-
     def _load(self) -> dict[str, DeviceRecord]:
-        if self.path is None:
-            return {}
-
-        # Stat before reading. If the file is replaced in between, the
-        # signature kept is the older one and the next lookup reads again,
-        # which costs a read and is never stale.
-        #
-        # The signature is recorded only once the file has been read
-        # successfully. Recording it first meant a file that failed to parse
-        # was remembered as read, and every later lookup went on serving the
-        # records from before it — a revocation hidden behind a corrupt write
-        # would have been ignored. Now every lookup retries, and fails, until
-        # the file is readable again.
-        signature = self._stat_signature()
-
-        if signature is None:
-            self._signature = None
+        if self.path is None or not self.path.exists():
             return {}
 
         try:
@@ -602,8 +398,6 @@ class DeviceRegistry:
 
             record = DeviceRecord.from_json(entry)
             records[record.device_id] = record
-
-        self._signature = signature
 
         return records
 
@@ -650,22 +444,18 @@ class DeviceRegistry:
             # rather than a truncated one. The Windows access-control list is
             # carried across by the rename, and the POSIX mode with it.
             os.replace(temporary, self.path)
-            self._signature = self._stat_signature()
         finally:
             temporary.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ queries
 
     def __len__(self) -> int:
-        self._refresh()
         return len(self._records)
 
     def get(self, device_id: str) -> DeviceRecord | None:
-        self._refresh()
         return self._records.get(device_id)
 
     def all(self) -> tuple[DeviceRecord, ...]:
-        self._refresh()
         return tuple(
             sorted(self._records.values(), key=lambda r: r.created_at)
         )
@@ -690,7 +480,7 @@ class DeviceRegistry:
         if not is_valid_device_id(device_id):
             return None
 
-        record = self.get(device_id)
+        record = self._records.get(device_id)
 
         if record is None or not record.can_authenticate:
             return None
@@ -707,39 +497,37 @@ class DeviceRegistry:
     ) -> DeviceRecord:
         """Mint a new pending device with a fresh key."""
 
-        with self._changing():
+        device_id = new_device_id()
+
+        while device_id in self._records:  # pragma: no cover - 2**64 odds
             device_id = new_device_id()
 
-            while device_id in self._records:  # pragma: no cover - 2**64 odds
-                device_id = new_device_id()
+        record = DeviceRecord(
+            device_id=device_id,
+            name=name,
+            secret=new_secret(),
+            status=DeviceStatus.PENDING,
+            created_at=self.clock(),
+            paired_from=paired_from,
+            grants=None if grants is None else frozenset(grants),
+        )
 
-            record = DeviceRecord(
-                device_id=device_id,
-                name=name,
-                secret=new_secret(),
-                status=DeviceStatus.PENDING,
-                created_at=self.clock(),
-                paired_from=paired_from,
-                grants=None if grants is None else frozenset(grants),
-            )
+        self._records[device_id] = record
+        self._save()
 
-            self._records[device_id] = record
-            self._save()
-
-            return record
+        return record
 
     def _update(self, device_id: str, **changes: object) -> DeviceRecord:
-        with self._changing():
-            record = self._records.get(device_id)
+        record = self._records.get(device_id)
 
-            if record is None:
-                raise UnknownDevice(device_id)
+        if record is None:
+            raise UnknownDevice(device_id)
 
-            updated = replace(record, **changes)  # type: ignore[arg-type]
-            self._records[device_id] = updated
-            self._save()
+        updated = replace(record, **changes)  # type: ignore[arg-type]
+        self._records[device_id] = updated
+        self._save()
 
-            return updated
+        return updated
 
     def activate(self, device_id: str) -> DeviceRecord:
         """
@@ -749,41 +537,22 @@ class DeviceRegistry:
         again, deliberately, at the PC.
         """
 
-        with self._changing():
-            record = self._records.get(device_id)
+        record = self._records.get(device_id)
 
-            if record is None:
-                raise UnknownDevice(device_id)
+        if record is None:
+            raise UnknownDevice(device_id)
 
-            if record.status is DeviceStatus.REVOKED:
-                raise ValueError(
-                    f"{device_id} is revoked and cannot be activated"
-                )
+        if record.status is DeviceStatus.REVOKED:
+            raise ValueError(f"{device_id} is revoked and cannot be activated")
 
-            return self._update(
-                device_id,
-                status=DeviceStatus.ACTIVE,
-                last_seen_at=self.clock(),
-            )
-
-    def revoke(self, device_id: str) -> DeviceRecord:
-        """
-        Stop a device authenticating, and withdraw its remote opt-in with it.
-
-        Withdrawing the opt-in is not what makes this safe — a revoked key does
-        not resolve — but it means a revoked record never reads as
-        remote-enabled anywhere, a device list included.
-
-        Revoking here takes effect at the next handshake. A running
-        ``LinkServer`` also closes sessions that are already open; use its
-        ``revoke`` so both happen together.
-        """
         return self._update(
             device_id,
-            status=DeviceStatus.REVOKED,
-            remote_enabled=False,
-            remote_expires_at=None,
+            status=DeviceStatus.ACTIVE,
+            last_seen_at=self.clock(),
         )
+
+    def revoke(self, device_id: str) -> DeviceRecord:
+        return self._update(device_id, status=DeviceStatus.REVOKED)
 
     def rename(self, device_id: str, name: str) -> DeviceRecord:
         """A device's name is a label. Its identity does not change with it."""
@@ -793,48 +562,10 @@ class DeviceRegistry:
         return self._update(device_id, last_seen_at=self.clock())
 
     def set_remote_enabled(
-        self,
-        device_id: str,
-        enabled: bool,
-        expires_at: float | None = None,
+        self, device_id: str, enabled: bool
     ) -> DeviceRecord:
-        """
-        Layer 2 opt-in for one device, always with an end.
-
-        ``expires_at`` defaults to ``DEFAULT_REMOTE_SECONDS`` from now and is
-        clamped to ``MAX_REMOTE_SECONDS``. A revoked device cannot be opted in:
-        that is a decision about a phone that is no longer trusted at all.
-        """
-
-        if not enabled:
-            return self._update(
-                device_id, remote_enabled=False, remote_expires_at=None
-            )
-
-        with self._changing():
-            record = self._records.get(device_id)
-
-            if record is None:
-                raise UnknownDevice(device_id)
-
-            if record.status is DeviceStatus.REVOKED:
-                raise ValueError(
-                    f"{device_id} is revoked and cannot be given remote access"
-                )
-
-            now = self.clock()
-            until = (
-                now + DEFAULT_REMOTE_SECONDS if expires_at is None else expires_at
-            )
-
-            if until <= now:
-                raise ValueError("a remote opt-in must end in the future")
-
-            return self._update(
-                device_id,
-                remote_enabled=True,
-                remote_expires_at=min(until, now + MAX_REMOTE_SECONDS),
-            )
+        """Layer 2 opt-in for one device."""
+        return self._update(device_id, remote_enabled=enabled)
 
     def set_grants(
         self,
@@ -849,56 +580,11 @@ class DeviceRegistry:
     def remove(self, device_id: str) -> None:
         """Forget a device entirely. Pairing again produces a new identity."""
 
-        with self._changing():
-            if device_id not in self._records:
-                raise UnknownDevice(device_id)
+        if device_id not in self._records:
+            raise UnknownDevice(device_id)
 
-            del self._records[device_id]
-            self._save()
-
-
-class _Changing:
-    """
-    One change to the registry: thread lock, process lock, fresh read.
-
-    Reentrant within a thread, because ``activate`` is built on ``_update``;
-    only the outermost level takes the process lock and re-reads the file.
-    """
-
-    def __init__(self, registry: DeviceRegistry) -> None:
-        self.registry = registry
-
-    def __enter__(self) -> _Changing:
-        registry = self.registry
-        registry._lock.acquire()
-
-        try:
-            if registry._changing_depth == 0 and registry._file_lock is not None:
-                registry._file_lock.__enter__()
-
-                try:
-                    registry._records = registry._load()
-                except BaseException:
-                    registry._file_lock.__exit__(None, None, None)
-                    raise
-
-            registry._changing_depth += 1
-        except BaseException:
-            registry._lock.release()
-            raise
-
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        registry = self.registry
-
-        try:
-            registry._changing_depth -= 1
-
-            if registry._changing_depth == 0 and registry._file_lock is not None:
-                registry._file_lock.__exit__(*exc)
-        finally:
-            registry._lock.release()
+        del self._records[device_id]
+        self._save()
 
 
 def main() -> None:

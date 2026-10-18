@@ -26,34 +26,20 @@ SERVICES = {
     # Lifecycle only (`supervisor --desktop`): starts the bridge, relays the
     # desktop's pipes to it and keeps it alive; no audio, UI or dialogs.
     "supervisor": "core.supervisor",
-    # One exact approved typed action per launch; started through UAC by the
-    # runtime when needed. Refuses everything while no action is registered.
-    "action-broker": "core.action_broker",
-    # The Installer's offline update service (core/update_cli.py). Its launch
-    # stays refused (launch_unavailable) until the hand-over path is accepted.
-    "update": "core.update_cli",
 }
 
 #: Services that open Qronos's persistent stores. Each one runs the start-up
 #: order of core/startup_admission.py BEFORE its module is imported, so no
 #: import-time code can open a store first: the bridge also owns its singleton.
 #: The supervisor opens no store (it owns its own singleton in run_desktop);
-#: audio (playback) and doctor (read-only diagnostics) open none either; the
-#: action broker takes its own shared admission on its known-folder profile
-#: inside serve_once, right after it has authenticated the live, admitted bridge
-#: that launched it and before any of its stores (core/action_broker.py).
+#: audio (playback) and doctor (read-only diagnostics) open none either.
 STORE_SERVICES = {
     "bridge": {"instance": True},
     "settings": {},
     "library": {},
     "memory": {},
     "permissions": {},
-    "update": {},
 }
-#: The one update operation that must NOT take a shared admission: launching
-#: takes the EXCLUSIVE admission itself (core.update_service.LaunchHold), and a
-#: process cannot hold both. With the default quiescence it is refused anyway.
-UPDATE_EXCLUSIVE_OPERATIONS = frozenset({"launch"})
 
 
 def _prevent_asio_selection() -> None:
@@ -68,8 +54,24 @@ def _prevent_asio_selection() -> None:
         os.environ.pop("SD_ENABLE_ASIO", None)
 
 
+def _utf8_stdio() -> None:
+    """Exchange UTF-8 with the desktop on standard input, output and error.
+
+    The desktop sends and reads UTF-8 JSON and sets PYTHONUTF8=1, which a source
+    interpreter honours. The frozen backend does not take UTF-8 mode from the
+    environment, so its streams would use the Windows code page: Persian text
+    from the desktop then arrives as undecodable characters and every request
+    that carries it fails. Input is strict; output keeps the bridge's
+    backslashreplace so a stray character can never stop a reply.
+    """
+    for stream, errors in ((sys.stdin, "strict"), (sys.stdout, "backslashreplace"), (sys.stderr, "backslashreplace")):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors=errors)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _prevent_asio_selection()
+    _utf8_stdio()
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["--version"]:
         print(json.dumps({"name": "qronos-runtime", "protocolVersion": PROTOCOL_VERSION}))
@@ -91,7 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": "Unknown Qronos backend service."}))
         return 2
     service = arguments.pop(0)
-    refused = _admit_before_import(service, arguments)
+    refused = _admit_before_import(service)
     if refused is not None:
         return refused
     sys.argv = [service, *arguments]
@@ -104,12 +106,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
-def _admit_before_import(service: str, arguments: list) -> int | None:
+def _admit_before_import(service: str) -> int | None:
     """core/startup_admission.py for a store-opening service; an exit code when start-up is refused."""
     policy = STORE_SERVICES.get(service)
     if policy is None:
-        return None
-    if service == "update" and arguments[:1] and arguments[0].strip().lower() in UPDATE_EXCLUSIVE_OPERATIONS:
         return None
     from core import startup_admission
 

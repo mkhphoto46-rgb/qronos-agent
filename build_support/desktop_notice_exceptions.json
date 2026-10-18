@@ -1,5 +1,5 @@
 {
  "schema": 1,
- "comment": "Exact-version notice exceptions for the desktop installer. Each entry must be reviewed by Root before it is added. An entry records why a covered package lacks a licence expression or licence text in its published source; it never supplies or invents a licence grant. Leave empty until reviewed.",
+ "comment": "Exact-version notice exceptions for the desktop installer. Each entry must be reviewed before it is added. An entry records why a covered package lacks a licence expression or licence text in its published source; it never supplies or invents a licence grant. Leave empty until reviewed.",
  "exceptions": []
 }

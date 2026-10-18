@@ -116,13 +116,6 @@ class LinkOp(Enum):
     LIST_DEVICES = "list_devices"
     REVOKE_DEVICE = "revoke_device"
 
-    # Push-to-talk: a spoken question uploaded in bounded chunks, transcribed
-    # and answered on the PC. Asking by voice is still asking, so all three
-    # map to ASK and the remote ceiling does not move.
-    VOICE_BEGIN = "voice_begin"
-    VOICE_CHUNK = "voice_chunk"
-    VOICE_END = "voice_end"
-
 
 # Every LinkOp appears here. ``None`` means the operation needs an
 # authenticated session but no capability, and PING is the only one: a
@@ -140,9 +133,6 @@ OP_CAPABILITY: dict[LinkOp, Capability | None] = {
     LinkOp.SYSTEM_CONTROL: Capability.CONTROL_SYSTEM,
     LinkOp.LIST_DEVICES: Capability.MANAGE_DEVICES,
     LinkOp.REVOKE_DEVICE: Capability.MANAGE_DEVICES,
-    LinkOp.VOICE_BEGIN: Capability.ASK,
-    LinkOp.VOICE_CHUNK: Capability.ASK,
-    LinkOp.VOICE_END: Capability.ASK,
 }
 
 
@@ -177,9 +167,6 @@ OP_PERMISSION: dict[LinkOp, PermissionLevel] = {
     LinkOp.SYSTEM_CONTROL: PermissionLevel.UI_CONFIRMATION,
     LinkOp.LIST_DEVICES: PermissionLevel.FORBIDDEN,
     LinkOp.REVOKE_DEVICE: PermissionLevel.FORBIDDEN,
-    LinkOp.VOICE_BEGIN: PermissionLevel.AUTO_ALLOW,
-    LinkOp.VOICE_CHUNK: PermissionLevel.AUTO_ALLOW,
-    LinkOp.VOICE_END: PermissionLevel.AUTO_ALLOW,
 }
 
 

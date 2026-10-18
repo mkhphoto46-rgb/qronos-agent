@@ -1,4 +1,4 @@
-"""Owned, inert process trees for the desktop update-lifecycle tests; no Qronos module is imported.
+"""Owned, inert process trees for the desktop runtime Job and stop tests; no Qronos module is imported.
 
 Usage: lifecycle_child.py <mode> <private directory>. Every process writes its pid file and ends by itself:
 on the "go" file in the directory, or within its own bound. Nothing here touches a real runtime, store,
@@ -11,9 +11,6 @@ Modes:
                      {"command": "shutdown"} line or at stdin EOF.
   runtime-lingering  the same, but its grandchild ignores it and waits for "go".
   runtime-deaf       never reads its input; waits for "go" (a stop must use the backstop).
-  launch-answer      record argv and stdin, print the line in answer.txt, then stay alive until "go".
-  launch-silent      record argv and stdin, print nothing, stay alive until "go".
-  launch-exit        record argv and stdin, exit without a line.
 """
 
 import json
@@ -53,12 +50,6 @@ def serve_until_shutdown() -> None:
             continue
 
 
-def record() -> None:
-    write("child.pid", str(os.getpid()))
-    write("argv.json", json.dumps(sys.argv[1:]))
-    write("stdin.txt", sys.stdin.read())
-
-
 if mode == "wait-go":
     write("child.pid", str(os.getpid()))
     wait_go()
@@ -82,17 +73,5 @@ elif mode in ("runtime-clean", "runtime-lingering"):
 elif mode == "runtime-deaf":
     write("child.pid", str(os.getpid()))
     wait_go()
-elif mode == "launch-answer":
-    record()
-    answer = (directory / "answer.txt").read_text(encoding="utf-8")
-    sys.stdout.write(answer)
-    sys.stdout.flush()
-    write("answered", "1")
-    wait_go()
-elif mode == "launch-silent":
-    record()
-    wait_go()
-elif mode == "launch-exit":
-    record()
 else:
     raise SystemExit(f"unknown mode {mode}")

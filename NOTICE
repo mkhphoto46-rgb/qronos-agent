@@ -1,0 +1,35 @@
+Qronos
+Copyright 2026 Qronos project contributors
+
+This product includes software developed by the Qronos project. The source
+owned by the Qronos project is licensed under the Apache License, Version 2.0
+(the LICENSE file distributed with this NOTICE).
+
+Third-party software, fonts, artwork and data included with or used by Qronos
+are NOT covered by that licence and are not relicensed by it. Each keeps its
+own licence and notices, which are kept and distributed unchanged:
+  - the template icons and logos in desktop/src-tauri/icons/,
+    desktop/public/tauri.svg, desktop/public/vite.svg and
+    desktop/src/assets/react.svg, which are byte-identical to files of the
+    create-tauri-app template (its LICENSE.spdx declares Apache-2.0 and MIT)
+    and, for the Vite and React logos, of Vite's create-vite templates (MIT).
+    They are not Qronos's own work. Their sources, revisions and
+    licence texts are recorded in build_support/desktop_artwork.json and
+    shipped in the desktop third-party notices. The names and logos they show
+    may be trademarks of their owners; no trademark right is granted;
+  - the NSIS installer template in desktop/src-tauri/installer-template/,
+    derived from Tauri (Apache-2.0 OR MIT; see its PROVENANCE.md and the
+    upstream licence texts kept there);
+  - upstream licence and notice texts kept verbatim under build_support/
+    (cpython_notice_texts/, desktop_notice_upstream/, desktop_artwork/,
+    runtime_notice_texts/);
+  - the desktop application's third-party components
+    (THIRD_PARTY_NOTICES-desktop.txt and its licenses/ folder) and the
+    packaged runtime's Python, CPython, PyInstaller and Microsoft components
+    (the runtime's third-party-notices/ folder);
+  - runtime assets provisioned separately (speech, voice and wake models and
+    their tools), under the licence recorded for each asset in
+    build_support/runtime_assets.json and the notices shipped beside it.
+    Some of these are not open source (for example, pretrained wake-word
+    models published under CC BY-NC-SA 4.0); their terms apply whatever
+    licence the Qronos source carries.

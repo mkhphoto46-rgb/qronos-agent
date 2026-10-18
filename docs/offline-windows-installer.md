@@ -362,92 +362,51 @@ Documents. It never runs the Qronos installer or reads real user folders.
   absent in the probe harness, so the "Qronos is running" path is covered only
   by a file held open during a probe run, not by a real running app.
 
-## The update fence, hand-over and receipt
+## The pinned template and the install order
 
-The installer's half of the update hand-over in `local-update-packages.md` is
-made of three parts:
-- `installer-hooks/qronos-update-fence.nsh`;
+The installer is made of:
 - the pinned installer template `desktop/src-tauri/installer-template/`
   (`PROVENANCE.md` there lists every change to Tauri 2.9.4's own template);
-- the hook order in `webview2-offline.nsh`.
+- the hooks `installer-hooks/webview2-offline.nsh` and
+  `installer-hooks/qronos-install-root.nsh`, and the order in which
+  `webview2-offline.nsh` runs them.
 
-The contracts are `work/opus-production-installer-contract-round10.txt` and
-`work/opus-production-installer-contract-round11.txt`, with the round-12
-corrections. `build_desktop` refuses Tauri's stock template, verifies the pinned
-source, and checks the order in the real generated `installer.nsi`.
+`build_desktop` refuses Tauri's stock template, verifies the pinned source, and
+checks the order in the real generated `installer.nsi`.
 
 **Order of an installation.** Before NSIS runs the Install section, only
 `.onInit`, the template's no-op checks and the stock WebView2 section (which
 only reads the registry in "skip" mode) run. In the GUI, the pages also run;
 the reinstall page never starts a previous uninstaller (see below). The
 Install section then runs, in this order:
-1. The update fence and the EXCLUSIVE store admission (update hand-over or
-   manual install).
-2. The install-root check (protected folders and ancestors, links, foreign
+1. The install-root check (protected folders and ancestors, links, foreign
    content).
-3. An interrupted earlier update: an empty leftover folder is removed,
-   anything else refuses (see "Update transaction" below).
-4. The previous installation's whole file list, checked against the disk.
-5. The WebView2 child, before anything of the previous installation changes.
-6. Stopping the running app.
-7. The update transaction begins: the previous listed files are SET ASIDE
-   (kept byte for byte) and every path of the new payload is claimed.
-8. Only then `SetOutPath`, the copy, the uninstaller, the registration and the
-   shortcuts, then the commit and, in update mode, the receipt.
+2. The previous installation's whole file list, checked against the disk.
+3. The WebView2 child, then the Visual C++ redistributable, before anything of
+   the previous installation changes.
+4. Stopping the running app.
+5. Removing exactly the previous installation's listed files.
+6. Only then `SetOutPath`, the copy, the uninstaller, the registration and the
+   shortcuts.
 
-On a refusal in steps 1-5, no folder or file under the install folder, the start
-menu or the desktop is created, changed or removed (except an empty leftover
-`.qronos-update` folder in step 3), nothing is stopped and the installer writes no
-registry value. Two things can still exist:
-- NSIS's own temporary plug-in folder in `%TEMP%`;
-- the admission lock file `<data root>\.qronos-store-admission.lock`, opened
-  (`OPEN_ALWAYS`) only when the data folder exists.
+On a refusal in steps 1-3, no folder or file under the install folder, the start
+menu or the desktop is created, changed or removed, nothing is stopped and the
+installer writes no registry value. NSIS's own temporary plug-in folder in
+`%TEMP%` can still exist.
 
-**What is held.** Two things:
-- the update fence: the named mutex `Local\Qronos.UpdateInProgress.v1`;
-- the exclusive store admission: a byte-range lock on the admission file, the
-  same lock `core/store_admission.py` uses.
-
-Both handles are non-inheritable and never closed by the script. They last
-exactly as long as the installer or uninstaller process, whether it ends
-normally, aborts, crashes or is killed. Nothing it starts can keep them.
-
-**Manual install or uninstall.** The fence and the admission must both be free
-at once. Otherwise the installer stops with "Another Qronos update or
-installation is running" or "Qronos is still running with its data open". An
-absent data folder skips only the admission.
-
-**Update mode** (`<installer> /S /QRONOSUPDATE`, started only by the updater):
-- `/QRONOSUPDATE` without `/S` is refused. The uninstaller refuses
-  `/QRONOSUPDATE`. Update mode never falls back to a manual install.
-- The private record on standard input is bounded: 1023 bytes, 30 s.
-- The guard must be the installer's real parent:
-  - If it can be opened, its creation time must match, and it must exit within
-    60 s before anything is installed.
-  - If it cannot be opened, only proof that it no longer exists (error 87)
-    counts as "gone" (a guard that crashed). Then the fence identity is the
-    proof. Access denied or any other failure refuses before the
-    acknowledgement (independent review Media15, F15-1).
-- The handed fence handle must be another handle to the fence object.
-- The receipts folder must be this installer's own
-  `<data root>\Updates\receipts`. The data root is derived by the installer.
-- The version must be the installer's own.
-
-**Explicit success and the receipt.** In a silent install, NSIS 3.11 lets a
-failed `File`, `CreateDirectory`, `WriteUninstaller`, registry write or
-`CreateShortcut` continue with only the error flag set, and `${GetSize}` clears
-that flag. So:
+**Explicit success.** In a silent install, NSIS 3.11 lets a failed `File`,
+`CreateDirectory`, `WriteUninstaller`, registry write or `CreateShortcut`
+continue with only the error flag set, and `${GetSize}` clears that flag. So:
 - every one of those statements, including each iteration of the resource,
   program and deep-link loops and each registry write, is followed
   IMMEDIATELY by `QRONOS_STEP`, which stops the installation;
-- `ClearErrors` appears only right after a checked step.
+- `ClearErrors` appears only right after a checked step;
+- `QRONOS_INSTALL_COMPLETE` is the last check, immediately before
+  `NSIS_HOOK_POSTINSTALL`.
 
-The build refuses a generated script that breaks this. In update mode the
-receipt (`<pid>-<ticks>.receipt`, `CREATE_NEW`) is written only after
-`QRONOS_INSTALL_COMPLETE`, holding the nonce, the approved package and manifest
-SHA-256, the installer's own version and `result=installed`. A stopped
-installation leaves a partial install and no receipt. The start-up barrier
-then reports the update honestly (unconfirmed or not applied).
+The build refuses a generated script that breaks this. A stopped installation
+ends with a failure exit code and leaves a partial install; running the
+installer again replaces it.
 
 **Deletion.** The install-root check and the owned file list come before
 EVERY deletion, every app stop and every registration or shortcut change.
@@ -466,134 +425,44 @@ EVERY deletion, every app stop and every registration or shortcut change.
 chosen language in the registry at the end of a successful installation
 (skipped after an abort). In the GUI, the finish page can create the desktop
 shortcut and start the app. Both happen in the same installer process, after
-the section, while the fence is still held.
+the section.
 
 **Tests** (inert, silent, current-user probes in temporary folders; never a
 real installer, registry, shortcut or user folder):
-- `tests/test_update_fence_nsis.py` (the fence file in small probes);
-- `tests/test_installer_template.py`, which compiles the WHOLE pinned template
-  with Tauri's own compiler. Its rendering is proven equal to Tauri's real
-  output. The registry and shell folders are swapped for files in the test
-  folder, and every swap is counted. It covers:
-  - refusals before any change;
-  - the reinstall page;
-  - a real failure at the FIRST command of every step group while later
-    commands would succeed;
-  - a real `UpdateService` hand-over;
-  - a guard that cannot be opened;
-  - protected roots, links, junctions and missing or malformed file lists with
-    foreign files (nothing changed);
-  - uninstalls that remove only listed files.
+`tests/test_installer_template.py` compiles the WHOLE pinned template with
+Tauri's own compiler. Its rendering is proven equal to Tauri's real output. The
+registry and shell folders are swapped for files in the test folder, and every
+swap is counted. It covers:
+- the reinstall page;
+- a real failure at the FIRST command of every step group while later
+  commands would succeed;
+- protected roots, links, junctions and missing or malformed file lists with
+  foreign files (nothing changed);
+- uninstalls that remove only listed files.
 
 **Limits**
-- NSIS releases the fence's ownership when its install thread ends. The fence
-  object and the admission lock last until the process exits. The app started
-  from the manual finish page can meet a live fence for a moment; Runtime's
-  start-up must retry briefly (contract round 10, section 5, R2).
+- A failed step after the previous files were removed leaves no usable program
+  until the installer is run again; the previous version is not restored.
 - None of this has run as a real Tauri-built installer on a real machine; see
-  below. The default updater launch stays refused.
+  below.
 
-**Update transaction** (installer-hooks/qronos-update-transaction.nsh). A
-failed update leaves the previously installed program usable.
-- The installer creates `<install folder>\.qronos-update` after the fence, the
-  exclusive admission and the install-root checks. Its journal records, before
-  each action takes effect, the exact file identity (volume serial and file
-  index) the installer itself observed:
-  - each previous listed file it moves aside to `.qronos-update\old`;
-  - each new folder it creates;
-  - each new file path it claims (created new, never opened if something is
-    already there).
-  Then come "W" (writes may begin) and "C" (committed).
-- **No mixing, no overwriting.** A new payload path that is already occupied
-  refuses the update before anything new is written. Unlisted files are
-  never moved, overwritten or deleted.
-- **Normal failure.** Any failed step, a failed commit, or any other stop after
-  the transaction began puts the previous version back. It deletes only new
-  files whose current identity is the claimed one, removes only empty created
-  folders, and moves each set-aside file back by handle when its identity
-  matches and its place is free. In the same run it also restores the Apps &
-  features values, the install-location value and the previous Start-menu and
-  desktop shortcuts. No receipt is written.
-- **Trust.** The running installer keeps its own journal open (shared for
-  reading only) from creation to commit or rollback, so no other program can
-  change it. Only that run's rollback deletes the new files it claimed.
-- **Commit and receipt.** "C" is written only after every step succeeded and
-  the installed file list equals the installer's own list (no file written
-  without a claim). Then the set-aside files are deleted (each only if it is
-  still that file). The update receipt follows the commit. If it cannot be
-  written, the new version stays installed and the start-up barrier reports
-  the update as unconfirmed, never as confirmed.
-- **Interrupted work.** A crash or kill leaves `.qronos-update` behind. Nothing
-  in it can be proved to be that installer's own: anyone can write a journal
-  header, file identities can be observed and a file list can be copied. So
-  the next installer never acts on it.
-  - An empty folder is removed.
-  - Anything else is refused, with nothing moved or deleted. The message says
-    that the previous version's files are kept under `.qronos-update\old` at
-    their own paths.
-  - Recovery is then a manual step: move those files back or restore a backup,
-    or reinstall into an empty folder.
-  A journal header alone never makes a folder a Qronos installation: the
-  set-aside Qronos file list must be there too. The uninstaller refuses while
-  the folder exists.
-- **Limits.**
-  - Atomicity across power loss is not claimed (each step is one NTFS
-    operation, decided from what exists, but this was not tested with power
-    loss).
-  - Registry values are restored only in the same run, not after a crash.
-  - A shortcut the failed run newly created is left; it names the same program
-    path.
-  - Any interrupted update needs manual recovery (above). So does a commit
-    whose clean-up of the kept files failed: the update itself is complete,
-    but the leftover folder must be removed by hand before the next update.
-  - An installer whose own list missed a file it writes would leave that one
-    unclaimed file after a rollback. build_desktop makes both lists from one
-    file and verifies the package against it, so a shipped installer has no
-    such gap.
-  - Tested only with inert fixture installers (tests/test_installer_update_transaction.py),
-    never with a real installation.
-
-**Open installer gates** (independent review Media18; nothing here is
+**Open installer gates** (independent review; nothing here is
 activated):
-- **O-A, availability: repaired by the update transaction (round 19,
-  awaiting independent review).** Before, the previous installation's
-  listed files were removed before the WebView2 child and every later
-  step, so a failure left no usable program. Now the WebView2 child comes
-  first and the previous files are set aside, then restored after any
-  failure (see "Update transaction"). The update launch and any release stay
-  gated until that repair is independently accepted.
 - **O-B, defence in depth.** `verify_generated_order` does not inspect the
   sections that run before the Install section. That they do nothing rests on
   the configuration checks: `check_tauri_config` (WebView2 "skip", no minimum
   WebView2 version) and the empty-define check.
-- **O-C, shortcuts.** The updater starts the installer with
-  `/S /QRONOSUPDATE` but not `/UPDATE`, so Tauri's update mode stays off. A
-  silent Qronos update therefore creates or refreshes the Start-menu and
-  desktop shortcuts, including one the person deleted. Whether to pass
-  `/UPDATE` (or `/NS`) is an open product decision.
 
-## Updates and rollback
+## Updates
 
-Qronos does not use Tauri's network updater. Updates are new installers that a
-person gets through the approved browser or on removable media. They are
-checked by the authenticated local update software in `core/local_update.py`,
-documented in `local-update-packages.md`:
-- an owner-signed manifest binds the version, architecture, product and
-  installer hash;
-- the version, rollback, security-floor and data-schema rules are enforced;
-- a verified copy is staged for the user-approved install step.
-
-It accepts no package until the owner adds a public key.
+Qronos has no updater. A newer version is installed by running its installer
+over the installed one; the installer allows a downgrade after a warning.
+Nothing rolls user data back automatically.
 
 `build_desktop` keeps refusing `createUpdaterArtifacts` and an `updater` plugin.
 In the locked bundler, an updater build switches the installer to the WebView2
 download bootstrapper. Tauri's updater would also need an update feed on the
 internet, beyond the current offline-first exceptions.
-
-A rollback means installing an older package that the owner signed explicitly
-as a rollback, at or above the security floor, that can still read the installed
-data format. The installer itself allows a downgrade after a warning. Nothing
-rolls user data back automatically.
 
 ## Not yet verified on a real machine
 
@@ -616,12 +485,8 @@ acceptance testing is allowed:
 7. Uninstalling. No "Delete the application data" choice should be shown.
    `%LOCALAPPDATA%\Qronos` and the Library should remain; WebView2 should
    remain installed.
-8. The update fence inside a real Tauri-built installer:
-   - a manual install, a reinstall and an uninstall, each while Qronos runs
-     and while it is closed;
-   - an update hand-over (`/S /QRONOSUPDATE`) and its receipt.
-   The default updater launch stays refused until this and the Runtime/Control
-   wiring are accepted.
+8. A manual install, a reinstall and an uninstall of a real Tauri-built
+   installer, each while Qronos runs and while it is closed.
 
 ## Owner decisions still open
 

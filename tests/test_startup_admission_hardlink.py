@@ -1,10 +1,10 @@
 """
-Round 16 (Media20 H20-1): a store override that is a file with more than one name (an NTFS hard link) is refused
+A store override that is a file with more than one name (an NTFS hard link) is refused
 before any store is opened or changed, because resolving its path cannot show whether its other names lie in
 installed data.
 
 Native boundary of these fixtures (audited): hard links are made with os.link (CreateHardLinkW) between tmp files
-only; real LockFileEx admissions only on tmp roots with a PRIVATE fence "Local\\QronosR9Test-<uuid>-fence"; the
+only; real LockFileEx admissions only on tmp roots; the
 known-folder Local AppData is a private tmp folder (tests/conftest.py in-process,
 tests/fixtures/startup_entry_child.py in children); children use the base interpreter with -B, bounded waits, and
 are killed only by their own Popen handle. No production mutex, store, profile, device, model or network.
@@ -185,9 +185,8 @@ def test_h20_the_installed_runtime_is_unaffected(tmp_path, known_root):
     (tmp_path / "a.jsonl").write_bytes(SEED)
     os.link(tmp_path / "a.jsonl", tmp_path / "b.jsonl")
     roots: list = []
-    startup_admission.enter("settings", installed=True, windows=True, data_root=root, version="0.1.0",
+    startup_admission.enter("settings", installed=True, windows=True, data_root=root,
                             environ={"QRONOS_PERMISSION_AUDIT_PATH": str(tmp_path / "b.jsonl")},
-                            recover=lambda v: {"ok": True}, confirm=lambda v: {"ok": True},
                             admit=lambda r: roots.append(Path(r)) or "admission")
     assert roots == [root]
 
@@ -197,7 +196,7 @@ def test_h20_the_installed_runtime_is_unaffected(tmp_path, known_root):
 
 def append_case(tmp_path: Path, spelling: str):
     root = tmp_path / "known" / "Qronos"  # the child's known folder is <tmp>/known
-    (root / "Updates").mkdir(parents=True)
+    root.mkdir(parents=True)
     audit = root / "action-audit.jsonl"
     audit.write_bytes(SEED)
     dev = tmp_path / "dev"
@@ -213,8 +212,8 @@ def append_case(tmp_path: Path, spelling: str):
     return root, audit, dev, override
 
 
-def set_policy(tmp_path: Path, root: Path, dev: Path, override: Path, fence: str) -> dict:
-    return r14.run_child(tmp_path, "source", "core.permissions_cli", ["set_policy"], watch=root, fence=fence,
+def set_policy(tmp_path: Path, root: Path, dev: Path, override: Path) -> dict:
+    return r14.run_child(tmp_path, "source", "core.permissions_cli", ["set_policy"], watch=root,
                          env={"QRONOS_PERMISSION_AUDIT_PATH": str(override),
                               "QRONOS_PERMISSION_POLICY_PATH": str(dev / "policy.json"),
                               "QRONOS_APP_VERSION": "0.1.0"},
@@ -222,55 +221,42 @@ def set_policy(tmp_path: Path, root: Path, dev: Path, override: Path, fence: str
 
 
 @pytest.mark.parametrize("spelling", ["hard_link", "plain_path"])
-def test_h20_a_real_source_permissions_cli_never_writes_installed_audit_during_a_restore(tmp_path, spelling):
-    fence = r14.private("fence")
+def test_h20_a_real_source_permissions_cli_never_writes_installed_audit_under_an_exclusive_holder(tmp_path,
+                                                                                                   spelling):
     root, audit, dev, override = append_case(tmp_path, spelling)
-    restore = r14.Holder(tmp_path, "exclusive", root, fence)
+    exclusive = r14.Holder(tmp_path, "exclusive", root)
     try:
-        result = set_policy(tmp_path, root, dev, override, fence)
+        result = set_policy(tmp_path, root, dev, override)
         during = audit.read_bytes()
     finally:
-        restore.end()
+        exclusive.end()
     assert during == SEED and audit.read_bytes() == SEED, (spelling, result)
     assert result["code"] == STARTUP_REFUSED_EXIT and len(result["lines"]) == 1, result
     answer = json.loads(result["lines"][0])
-    expected = "store" if spelling == "hard_link" else "update_in_progress"
+    expected = "store" if spelling == "hard_link" else "busy"
     assert answer == {"ok": False, "code": expected, "error": answer["error"], "errorType": "StartupRefused"}, answer
     assert not result["admittedAtEnd"], result
-    if spelling == "hard_link":  # refused while choosing the root: nothing under it was opened, not even the barrier
+    if spelling == "hard_link":  # refused while choosing the root: nothing under it was opened
         assert result["events"] == [], result
-    else:  # the existing order: only the barrier's Updates/* and the admission lock, never the audit store
-        assert all(e["path"].startswith("updates") or e["path"].endswith(".lock") for e in result["events"]), result
+    else:  # the existing order: only the admission lock, never the audit store
+        assert all(e["path"].endswith(".lock") for e in result["events"]), result
     assert sorted(p.name for p in dev.iterdir()) == ([override.name] if spelling == "hard_link" else []), \
         "the private policy store must not be created either"
 
 
-def test_h20_a_hard_linked_source_cli_is_refused_even_with_no_restore_running(tmp_path):
-    fence = r14.private("fence")
+def test_h20_a_hard_linked_source_cli_is_refused_even_with_no_exclusive_holder(tmp_path):
     root, audit, dev, override = append_case(tmp_path, "hard_link")
-    result = set_policy(tmp_path, root, dev, override, fence)
+    result = set_policy(tmp_path, root, dev, override)
     assert result["code"] == STARTUP_REFUSED_EXIT and len(result["lines"]) == 1, result
     assert json.loads(result["lines"][0])["code"] == "store" and audit.read_bytes() == SEED
     assert result["events"] == [] and sorted(p.name for p in dev.iterdir()) == [override.name]
 
 
 def test_h20_an_ordinary_single_name_source_store_still_works(tmp_path):
-    fence = r14.private("fence")
     root, audit, dev, override = append_case(tmp_path, "private_single_name")
-    result = set_policy(tmp_path, root, dev, override, fence)
+    result = set_policy(tmp_path, root, dev, override)
     answer = json.loads(result["lines"][-1])
     assert result["code"] in (0, None) and answer["ok"] is True, result
     assert result["binding"] == [False, None] and audit.read_bytes() == SEED
     appended = override.read_bytes()
     assert appended.startswith(SEED) and b"permission_changed" in appended[len(SEED):]
-
-
-def test_h20_the_source_update_cli_refuses_a_hard_linked_override_with_one_answer(tmp_path):
-    """N9 kept: the update CLI runs the same admission itself and answers once."""
-    fence = r14.private("fence")
-    root, audit, dev, override = append_case(tmp_path, "hard_link")
-    result = r14.run_child(tmp_path, "source", "core.update_cli", ["status"], watch=root, fence=fence,
-                           env={"QRONOS_PERMISSION_AUDIT_PATH": str(override), "QRONOS_APP_VERSION": "0.1.0"})
-    assert result["code"] == STARTUP_REFUSED_EXIT and len(result["lines"]) == 1, result
-    assert json.loads(result["lines"][0])["code"] == "store" and result["events"] == []
-    assert audit.read_bytes() == SEED

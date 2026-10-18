@@ -284,7 +284,7 @@ def test_no_file_content_is_read_to_list_history_or_before_the_gate_allows_the_u
     monkeypatch.setattr(activity_history, "bounded_sha256", lambda path: reads.append(path) or real(path))
     h.act(HISTORY_UNDO_REQUEST_ACTION, actionId=action_id)
     token = h.payload("history_undo_approval_required")["actionToken"]
-    # Round 34 (R2, documented): the copy AND its source are read, only after the gates allowed it.
+    # The copy AND its source are read, only after the gates allowed it.
     assert [Path(p).parent.name for p in reads] == ["Backup", "source"]
     h.act(HISTORY_UNDO_DECISION_ACTION, actionToken=token, approved=True)
     assert len(reads) == 4 and h.payload("history_undo_result")["outcome"] == "undone"  # and again before it
@@ -314,7 +314,7 @@ def test_a_moved_file_goes_back_only_while_it_is_the_same_file(h):
         assert source.read_text(encoding="utf-8") == "report body" and not moved.exists()
 
 
-# ---------------------------------------------------------------- round 34: the copy's source must still hold its bytes
+# ---------------------------------------------------------------- the copy's source must still hold its bytes
 
 
 def test_a_copy_whose_source_changed_with_the_same_size_is_never_removed(h):

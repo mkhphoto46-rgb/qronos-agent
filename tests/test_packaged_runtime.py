@@ -271,3 +271,24 @@ def test_manifest_refuses_file_or_directory_links(tmp_path):
         write_manifest(bundle)
     with pytest.raises(ValueError, match="links"):
         verify_manifest(bundle)
+
+
+def test_the_packaged_entry_reads_and_writes_utf8_whatever_the_code_page(monkeypatch):
+    # A frozen backend does not take UTF-8 mode from PYTHONUTF8, so its streams start on the Windows code page.
+    import io
+
+    from build_support import runtime_entry
+
+    persian = '{"text":"سلام کرونوس"}\n'
+    stdin = io.TextIOWrapper(io.BytesIO(persian.encode("utf-8")), encoding="cp1252", errors="surrogateescape")
+    stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
+    monkeypatch.setattr(runtime_entry.sys, "stdin", stdin)
+    monkeypatch.setattr(runtime_entry.sys, "stdout", io.TextIOWrapper(stdout_bytes, encoding="cp1252"))
+    monkeypatch.setattr(runtime_entry.sys, "stderr", io.TextIOWrapper(stderr_bytes, encoding="cp1252"))
+
+    runtime_entry._utf8_stdio()
+
+    assert runtime_entry.sys.stdin.read() == persian
+    runtime_entry.sys.stdout.write("خوبم")
+    runtime_entry.sys.stdout.flush()
+    assert stdout_bytes.getvalue().decode("utf-8") == "خوبم"

@@ -38,15 +38,8 @@ import {
 } from "./screenApproval";
 import {
   refreshSettings,
-  setSetting,
   useSettingsStore,
 } from "./settingsStore";
-import {
-  DeviceLinkController,
-  applyDeviceLinkEvent,
-  bindPairingDelivery,
-  createDeviceLinkController,
-} from "./deviceLink";
 
 import "./App.css";
 
@@ -56,12 +49,19 @@ import LibraryView from "./components/LibraryView";
 import PermissionsView from "./components/PermissionsView";
 import SettingsView from "./components/SettingsView";
 import SetupStatus from "./components/SetupStatus";
-import { setupNeedsAttention, useSetupStore } from "./setupStore";
+import VoiceTurnNotice, { type VoiceNoticeState } from "./components/VoiceTurnNotice";
+import RuntimeConnectionStatus from "./components/RuntimeConnectionStatus";
+import {
+  createRuntimeConnection,
+  RUNTIME_CONNECTION_INITIAL,
+  type RuntimeConnection,
+  type RuntimeConnectionView,
+} from "./runtimeConnection";
+import { refreshSetup, setupNeedsAttention, useSetupStore } from "./setupStore";
 import CrossViewParticleTransition from "./components/CrossViewParticleTransition";
 import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
 import HistoryDrawer from "./components/HistoryDrawer";
-import MediaDrawer from "./components/MediaDrawer";
 import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
 import AppWorkflowDialog from "./components/AppWorkflowDialog";
 import QronosOrb from "./components/QronosOrb";
@@ -284,7 +284,7 @@ function App() {
     [screenApproval],
   );
 
-  // Telegram / print / browser workflow steps: one app-native prompt at a
+  // App workflow steps (browser navigation): one app-native prompt at a
   // time, answered only with the step's single-use backend actionToken.
   const workflowApprovalRef =
     useRef<WorkflowApprovalController | null>(null);
@@ -303,40 +303,25 @@ function App() {
 
   const workflowApproval = workflowApprovalRef.current;
 
-  // The Device Link page: one controller, fed by link_* runtime events.
-  const deviceLinkRef = useRef<DeviceLinkController | null>(null);
+  // The local runtime's connection state (connecting / ready / failed / degraded) and its one safe retry.
+  const [runtimeConnection, setRuntimeConnection] =
+    useState<RuntimeConnectionView>(RUNTIME_CONNECTION_INITIAL);
+  const runtimeConnectionRef = useRef<RuntimeConnection | null>(null);
+  const retryRuntimeConnection = useCallback(() => {
+    runtimeConnectionRef.current?.retry();
+  }, []);
 
-  if (deviceLinkRef.current === null) {
-    deviceLinkRef.current = createDeviceLinkController(
-      invoke,
-      async (enabled) => {
-        await setSetting("link.enabled", enabled);
-        const status = await invoke<{ running: boolean }>("get_runtime_status");
-        if (status.running) {
-          await invoke("send_runtime_action", { actionId: "qronos.settings_reload" });
-        }
-      },
-      (error) => {
-        console.error("[Qronos Device Link] request not confirmed:", error);
-      },
-    );
-  }
-
-  const deviceLink = deviceLinkRef.current;
-
-  useEffect(() => {
-    // Pairing replies come only to this window, on their own event.
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    void bindPairingDelivery(listen, deviceLink).then((stop) => {
-      if (disposed) stop();
-      else unlisten = stop;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [deviceLink]);
+  // A failed voice turn (voice_turn_failed): its own notice, separate from the connection state. Retry is one
+  // explicit new push-to-talk turn per click: while it is pending the button is disabled, a rejected attempt stays
+  // visible as failed with its retry, a definite refusal (runtime_busy or runtime_paused_rejected) shows as refused
+  // with its retry, and only voice_listening (the turn really started) closes the notice. retryVoiceTurn is defined
+  // after requestPushToTalk below.
+  const [voiceNotice, setVoiceNotice] = useState<VoiceNoticeState | null>(null);
+  const voiceRetryPendingRef = useRef(false);
+  const settleVoiceNotice = useCallback((next: VoiceNoticeState | null) => {
+    voiceRetryPendingRef.current = false;
+    setVoiceNotice(next);
+  }, []);
 
   const workflowApprovalView = useSyncExternalStore(
     workflowApproval.subscribe,
@@ -349,19 +334,8 @@ function App() {
   }, [workflowApproval]);
 
   const answerWorkflowApproval = useCallback(
-    (actionToken: string, approved: boolean, secret?: string) => {
-      void workflowApproval.answer(actionToken, approved, secret);
-    },
-    [workflowApproval],
-  );
-
-  const openWorkflowRecovery = useCallback(() => {
-    void workflowApproval.openRecovery();
-  }, [workflowApproval]);
-
-  const acknowledgeWorkflowAttempt = useCallback(
-    (operationKey: string) => {
-      void workflowApproval.acknowledge(operationKey);
+    (actionToken: string, approved: boolean) => {
+      void workflowApproval.answer(actionToken, approved);
     },
     [workflowApproval],
   );
@@ -1353,21 +1327,81 @@ function App() {
       [],
     );
 
+  // One explicit push-to-talk request, shared by the hotkey and the voice notice's retry. Valid speech that is still
+  // playing is stopped first, because the person asked to speak; the runtime is started only if it is not running.
+  const requestPushToTalk = useCallback(async () => {
+    if (voicePlayerRef.current?.isActive()) {
+      await stopCurrentResponse();
+    }
+    const status = await invoke<{ running: boolean }>("get_runtime_status");
+    if (!status.running) {
+      await invoke("start_runtime");
+    }
+    await invoke("send_runtime_action", { actionId: "qronos.push_to_talk" });
+  }, [stopCurrentResponse]);
+
+  const retryVoiceTurn = useCallback(async () => {
+    if (voiceRetryPendingRef.current) return;
+    voiceRetryPendingRef.current = true;
+    setVoiceNotice("retrying");
+    try {
+      await requestPushToTalk();
+    } catch (error) {
+      console.error("[Qronos Runtime] voice retry failed:", error);
+      voiceRetryPendingRef.current = false;
+      setVoiceNotice((current) => (current === "retrying" ? "retryFailed" : current));
+    }
+  }, [requestPushToTalk]);
+
   useEffect(() => {
     let disposed = false;
     let unlistenRuntime:
       | (() => void)
       | undefined;
 
+    // Only the first check sends the existing idempotent Wake start to an already running runtime (a new runtime
+    // starts Wake itself on runtime_ready). A retry only re-checks, starts or pings the runtime.
+    let wakeOnRunning = true;
+    const connection = createRuntimeConnection({
+      probe: async () => {
+        const status = await invoke<{ running: boolean }>(
+          "get_runtime_status",
+        );
+        const firstCheck = wakeOnRunning;
+        wakeOnRunning = false;
+
+        if (!status.running) {
+          await invoke("start_runtime");
+          return "spawned";
+        }
+
+        if (firstCheck) {
+          // A runtime that was already alive may have emitted runtime_ready before this effect subscribed.
+          await invoke("send_runtime_action", {
+            actionId: "qronos.wake_listener_start",
+          }).catch((error) => {
+            console.error(
+              "[Qronos Wake Word] startup failed:",
+              error,
+            );
+          });
+        }
+        return "running";
+      },
+      ping: async () => {
+        await invoke("ping_runtime");
+      },
+      onChange: (view) => {
+        if (!disposed) {
+          setRuntimeConnection(view);
+        }
+      },
+    });
+    runtimeConnectionRef.current = connection;
+
     const connectRuntimeActions = async () => {
       type RuntimeEvent = {
         eventType: string;
-        status: string;
-        message: string;
-      };
-
-      type RuntimeStatus = {
-        running: boolean;
         status: string;
         message: string;
       };
@@ -1380,16 +1414,16 @@ function App() {
               event.payload.eventType !==
                 "voice_audio_spectrum" &&
               event.payload.eventType !==
-                "microphone_input_level" &&
-              // Holds a new phone's key: never logged.
-              event.payload.eventType !==
-                "link_pairing"
+                "microphone_input_level"
             ) {
               console.info(
                 "[Qronos Runtime]",
                 event.payload,
               );
             }
+
+            // runtime_ready / runtime_pong / runtime_error / runtime_stopping update the visible connection state.
+            connection.handleEvent(event.payload.eventType);
 
             // Screen/Paint prompts, their revocation and the end of the
             // runtime that asked them. Never blocks this handler.
@@ -1401,16 +1435,7 @@ function App() {
               );
             }
 
-            // Device Link status, devices, pairing code and refusals.
-            if (deviceLinkRef.current !== null) {
-              applyDeviceLinkEvent(
-                deviceLinkRef.current,
-                event.payload.eventType,
-                event.payload.message,
-              );
-            }
-
-            // Telegram / print / browser workflow prompts and results.
+            // App workflow (browser navigation) prompts and results.
             if (workflowApprovalRef.current !== null) {
               applyWorkflowEvent(
                 workflowApprovalRef.current,
@@ -1506,7 +1531,24 @@ function App() {
                 );
                 break;
 
+              case "runtime_busy":
+              case "runtime_paused_rejected":
+                // A definite refusal of the request. Only a pending voice-notice retry is affected: it shows as
+                // refused with its retry again; nothing is retried or replayed on its own.
+                if (voiceRetryPendingRef.current) {
+                  settleVoiceNotice("retryRefused");
+                }
+                break;
+
+              case "voice_turn_failed":
+                // A voice turn ended in an error: say so, and re-read the local setup so a missing speech
+                // service shows as incomplete setup. The diagnostic itself stays in runtime_error.
+                settleVoiceNotice("failed");
+                void refreshSetup();
+                break;
+
               case "voice_listening":
+                settleVoiceNotice(null);
                 // Explicit Push-to-Talk already stops active speech before
                 // asking Runtime to listen. A generic listening event must
                 // never kill healthy playback on its own; doing that turns a
@@ -1958,42 +2000,9 @@ function App() {
           },
         );
 
-      const ensureWakeRuntime =
-        async () => {
-          const status =
-            await invoke<RuntimeStatus>(
-              "get_runtime_status",
-            );
-
-          if (!status.running) {
-            await invoke<RuntimeStatus>(
-              "start_runtime",
-            );
-
-            // The newly spawned runtime will start Wake when it emits
-            // runtime_ready. Do not race startup by sending the action here.
-            return;
-          }
-
-          // A runtime that was already alive may have emitted runtime_ready
-          // before this React effect subscribed. Start Wake directly in that
-          // case. The backend start operation is idempotent.
-          await invoke(
-            "send_runtime_action",
-            {
-              actionId:
-                "qronos.wake_listener_start",
-            },
-          );
-        };
-
-      void ensureWakeRuntime()
-        .catch((error) => {
-          console.error(
-            "[Qronos Wake Word] startup failed:",
-            error,
-          );
-        });
+      // Startup is visible: connecting until the bridge answers (runtime_ready or runtime_pong), failed with a
+      // safe Persian message and a retry otherwise. A spawned process alone is not "ready".
+      void connection.start();
 
       const handleRuntimeAction = async (
         event: Event,
@@ -2026,30 +2035,7 @@ function App() {
         }
 
         try {
-          if (
-            voicePlayerRef.current
-              ?.isActive()
-          ) {
-            await stopCurrentResponse();
-          }
-
-          const status =
-            await invoke<RuntimeStatus>(
-              "get_runtime_status",
-            );
-
-          if (!status.running) {
-            await invoke<RuntimeStatus>(
-              "start_runtime",
-            );
-          }
-
-          await invoke(
-            "send_runtime_action",
-            {
-              actionId,
-            },
-          );
+          await requestPushToTalk();
         } catch (error) {
           console.error(
             "[Qronos Runtime] action failed:",
@@ -2088,6 +2074,10 @@ function App() {
 
     return () => {
       disposed = true;
+      connection.dispose();
+      if (runtimeConnectionRef.current === connection) {
+        runtimeConnectionRef.current = null;
+      }
       removeWindowListener?.();
       unlistenRuntime?.();
     };
@@ -2482,6 +2472,15 @@ function App() {
 
       <RightTelemetryPanel />
       <SetupStatus />
+      {/* One fixed column for the connection status and the voice notice, so they stack instead of overlapping. */}
+      <div className="runtime-notices">
+        <RuntimeConnectionStatus
+          view={runtimeConnection}
+          onRetry={retryRuntimeConnection}
+        />
+        {voiceNotice && <VoiceTurnNotice state={voiceNotice} onRetry={() => { void retryVoiceTurn(); }}
+          onDismiss={() => settleVoiceNotice(null)} />}
+      </div>
 
       {/* The Smart Queue: queued requests, their progress and outcomes,
           with hold/pause/resume/cancel. Its hold is the queue's own and is
@@ -2499,15 +2498,6 @@ function App() {
 
       {/* What Qronos did, what was allowed, what failed, and what can actually be undone. */}
       <HistoryDrawer
-        hidden={
-          viewPhase !== "home" &&
-          viewPhase !== "conversations"
-        }
-      />
-
-      {/* The media library: chosen folders, background indexing, search with evidence cards, open at a time
-          and reports, all through the runtime's one media host (qronos.media actions). */}
-      <MediaDrawer
         hidden={
           viewPhase !== "home" &&
           viewPhase !== "conversations"
@@ -2729,9 +2719,6 @@ function App() {
         view={workflowApprovalView}
         onAnswer={answerWorkflowApproval}
         onDismissResult={workflowApproval.dismissResult}
-        onOpenRecovery={openWorkflowRecovery}
-        onAcknowledge={acknowledgeWorkflowAttempt}
-        onCloseRecovery={workflowApproval.closeRecovery}
       />
 
       {pendingFileApproval && (
@@ -2993,7 +2980,6 @@ function App() {
         onOpenPermissions={
           openPermissions
         }
-        deviceLink={deviceLink}
       />
 
       <nav

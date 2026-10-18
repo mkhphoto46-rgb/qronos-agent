@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from core.model_manager import ModelManager
-from core.ollama_controller import OllamaController
+from core.ollama_controller import OLLAMA_AUTO_START_ENV, OllamaController
 
 
 def test_ensure_ready_does_not_spawn_when_server_is_healthy():
@@ -16,7 +16,9 @@ def test_ensure_ready_does_not_spawn_when_server_is_healthy():
         popen.assert_not_called()
 
 
-def test_ensure_ready_starts_local_server_and_waits_for_health():
+def test_ensure_ready_starts_local_server_and_waits_for_health(monkeypatch):
+    # The start below is faked; auto-start is set here so the test does not depend on the parent environment.
+    monkeypatch.setenv(OLLAMA_AUTO_START_ENV, "1")
     runtime = OllamaController()
     probes = iter((False, False, False, True))
     with patch.object(runtime, "_probe", side_effect=lambda *_: next(probes)), patch.object(

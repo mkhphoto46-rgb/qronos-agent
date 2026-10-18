@@ -1,0 +1,300 @@
+{
+ "schema": 1,
+ "comment": "Third-party artwork tracked in the desktop application (template icons and logos, not Qronos's own work). Every file under 'folders' must be listed here with its exact bytes and the upstream revision it is identical to; build_support.desktop_notices refuses anything unlisted or changed and copies the pinned upstream licence texts into the desktop third-party notices. This artwork is NOT covered by Qronos's Apache-2.0 licence (see NOTICE) and is not relicensed; no trademark right in any name or logo is granted.",
+ "folders": [
+  "desktop/public",
+  "desktop/src-tauri/icons",
+  "desktop/src/assets"
+ ],
+ "sources": [
+  {
+   "id": "create-tauri-app",
+   "repository": "https://github.com/tauri-apps/create-tauri-app",
+   "revision": "5813af8d642c061fc049742895b21b44c24654e6",
+   "licences": [
+    "Apache-2.0",
+    "MIT"
+   ],
+   "licenceEvidence": "LICENSE.spdx at this revision: PackageLicenseDeclared Apache-2.0 and PackageLicenseDeclared MIT; PackageCopyrightText 2019-2022, The Tauri Programme in the Commons Conservancy",
+   "texts": [
+    {
+     "file": "tauri-apps__create-tauri-app-5813af8d642c/LICENSE_APACHE-2.0",
+     "sourcePath": "LICENSE_APACHE-2.0",
+     "gitBlob": "f433b1a53f5b830a205fd2df78e2b34974656c7b",
+     "bytes": 10174,
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "file": "tauri-apps__create-tauri-app-5813af8d642c/LICENSE_MIT",
+     "sourcePath": "LICENSE_MIT",
+     "gitBlob": "7e54d8e4c28e943a545c1bef79f8dfdb2a2affe2",
+     "bytes": 1110,
+     "sha256": "1c1020fa10a6bf318717e82c911bcc54ebdfb9bb280460ae332bcb2f82f57fbe"
+    },
+    {
+     "file": "tauri-apps__create-tauri-app-5813af8d642c/LICENSE.spdx",
+     "sourcePath": "LICENSE.spdx",
+     "gitBlob": "44b69b9f496badfd1242436aa58898e5b097bb6b",
+     "bytes": 845,
+     "sha256": "6df2bd918e4e905cec0555e9adb505c12f6f19e142c0ec3d5e4bf9b257d3809d"
+    }
+   ]
+  },
+  {
+   "id": "create-vite",
+   "repository": "https://github.com/vitejs/vite",
+   "revision": "f3d31499c714fe5c5acf8355520624c662f9d79f",
+   "licences": [
+    "MIT"
+   ],
+   "licenceEvidence": "packages/create-vite/LICENSE at this revision: \"create-vite is released under the MIT license\"",
+   "texts": [
+    {
+     "file": "vitejs__vite-f3d31499c714/packages/create-vite/LICENSE",
+     "sourcePath": "packages/create-vite/LICENSE",
+     "gitBlob": "063dad83542504679fc1db778e0788db5ffaabd3",
+     "bytes": 29611,
+     "sha256": "a5576eaf8986967d36c18b46a21c0598dbe050c0798e7343e73fd3289d9f706b"
+    }
+   ]
+  }
+ ],
+ "files": [
+  {
+   "path": "desktop/src-tauri/icons/128x128.png",
+   "bytes": 3512,
+   "sha256": "19b4fec485db7df51a691fcce72a3dd6f983e754fc4262da7154e4a4c688f69e",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/128x128.png"
+    }
+   ],
+   "use": "listed in tauri.conf.json bundle.icon: the application and installer icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/128x128@2x.png",
+   "bytes": 7012,
+   "sha256": "6c7660390d65217fe8de0892862254f47aee77e0af7096c75b8bfe168c5403f7",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/128x128@2x.png"
+    }
+   ],
+   "use": "listed in tauri.conf.json bundle.icon: the application and installer icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/32x32.png",
+   "bytes": 974,
+   "sha256": "1c6782dc65c8111c12cbc1882a0fea5e71ab8e51b18da2ce9580f5c88860ed02",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/32x32.png"
+    }
+   ],
+   "use": "listed in tauri.conf.json bundle.icon: the application and installer icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/icon.icns",
+   "bytes": 98451,
+   "sha256": "3dc10493b7de48a61de58f768f8a5708d3a44a068c148cedf0502b9b9b71ba5d",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/icon.icns"
+    }
+   ],
+   "use": "listed in tauri.conf.json bundle.icon: the application and installer icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/icon.ico",
+   "bytes": 86642,
+   "sha256": "392206b573a809997f3ff16fe68f456a52e931c372107eade9572b329bbe3321",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/icon.ico"
+    }
+   ],
+   "use": "listed in tauri.conf.json bundle.icon: the application and installer icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/icon.png",
+   "bytes": 14183,
+   "sha256": "273cd669e07c455ad1c7c095890a37984652157cee73128a867300067dfb80e7",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/icon.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square107x107Logo.png",
+   "bytes": 2863,
+   "sha256": "54f7a0f58c96a4b023c1edc4b53fc443e27dace50e345f6936fa29bc20f785ca",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square107x107Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square142x142Logo.png",
+   "bytes": 3858,
+   "sha256": "fec1e2080ca73cd4c4a123b23b1cd364059a8a8efeba3076e21dfefed390693b",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square142x142Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square150x150Logo.png",
+   "bytes": 3966,
+   "sha256": "65fb570cb0e61ffce02ad67784cb200a0bf058400300980a46fa0d0c8f43a77a",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square150x150Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square284x284Logo.png",
+   "bytes": 7737,
+   "sha256": "ea0b7c5d4b1d1ab9c91d2f7c9b069c8dfbf4557b0649a5777d47332cde610262",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square284x284Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square30x30Logo.png",
+   "bytes": 903,
+   "sha256": "cc72279c41b4ed343e8db7e7541ceef7b6b23edaa83d4e7338421dfcb8d63c33",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square30x30Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square310x310Logo.png",
+   "bytes": 8591,
+   "sha256": "9733a89c539115de3c49bd06720bfc99639d9a918f5df48a810e267cf3554119",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square310x310Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square44x44Logo.png",
+   "bytes": 1299,
+   "sha256": "10be9840e58fb018eb9029601d42008e16c0c9cfa66b8f9467fee94f600160d4",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square44x44Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square71x71Logo.png",
+   "bytes": 2011,
+   "sha256": "2937fc83324cd9a1fddcfefd5927c791af31996a6840bfb3e2f1d578ad4129de",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square71x71Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/Square89x89Logo.png",
+   "bytes": 2468,
+   "sha256": "12aed0e7ee06cb631427dc9da72c0c7ecf03857fbc4884d0c31f78314feb6c7f",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/Square89x89Logo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/src-tauri/icons/StoreLogo.png",
+   "bytes": 1523,
+   "sha256": "91a54024dd47230991546088f2e75d3e3199b3ccc9fe40f3f6b7d3bf1cbf7776",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_base_/src-tauri/icons/StoreLogo.png"
+    }
+   ],
+   "use": "not listed in tauri.conf.json bundle.icon"
+  },
+  {
+   "path": "desktop/public/tauri.svg",
+   "bytes": 2599,
+   "sha256": "e5d2738bbaa5543c4684001a558dc53165da9b636144827b28db1dcfacf81aa8",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_assets_/tauri.svg"
+    }
+   ],
+   "use": "copied by Vite from desktop/public into the frontend build; not referenced by the app code"
+  },
+  {
+   "path": "desktop/public/vite.svg",
+   "bytes": 1497,
+   "sha256": "4a748afd443918bb16591c834c401dae33e87861ab5dbad0811c3a3b4a9214fb",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_assets_/vite.svg"
+    },
+    {
+     "source": "create-vite",
+     "sourcePath": "packages/create-vite/template-react/public/vite.svg"
+    }
+   ],
+   "use": "copied by Vite into the frontend build; the window favicon (desktop/index.html)"
+  },
+  {
+   "path": "desktop/src/assets/react.svg",
+   "bytes": 4126,
+   "sha256": "35ef61ed53b323ae94a16a8ec659b3d0af3880698791133f23b084085ab1c2e5",
+   "from": [
+    {
+     "source": "create-tauri-app",
+     "sourcePath": "templates/_assets_/react.svg"
+    },
+    {
+     "source": "create-vite",
+     "sourcePath": "packages/create-vite/template-react/src/assets/react.svg"
+    }
+   ],
+   "use": "not referenced; not part of the frontend build"
+  }
+ ]
+}

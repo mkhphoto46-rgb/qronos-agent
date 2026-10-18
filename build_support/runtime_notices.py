@@ -13,8 +13,9 @@ upstream texts (see ``cpython_notices``).
 It is technical notice packaging, not a legal review: declared licenses are
 recorded as their packages declare them, nothing is inferred from names, and
 anything that cannot be attributed fails the build instead of being waved
-through. Qronos's own license is an owner decision and is recorded as
-unspecified. Nothing is downloaded.
+through. Qronos's own source is licensed under Apache-2.0: its exact LICENSE
+and its NOTICE (``project_licence``) are copied to third-party-notices/qronos/
+and recorded as projectOwned. Nothing is downloaded.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import sys
 import sysconfig
 from typing import Iterable, Mapping, Sequence
 
-from build_support import cpython_notices
+from build_support import cpython_notices, project_licence
 
 
 SCHEMA_VERSION = 1
@@ -63,7 +64,7 @@ _PYINSTALLER_PREFIXES = ("pyimod", "pyiboot", "pyi_rth_", "_pyi_rth_utils")
 PYINSTALLER_DISTRIBUTION = "pyinstaller"
 
 # Qronos's own code and configuration inside the bundle.
-PROJECT_ROOTS = frozenset({"core", "security", "qronos_media", "build_support", "runtime_entry", "config"})
+PROJECT_ROOTS = frozenset({"core", "security", "build_support", "runtime_entry", "config"})
 
 # Microsoft C/C++ runtime files, also when a wheel renamed them with a hash
 # suffix. Their redistribution terms come from Microsoft's distributable-code
@@ -119,8 +120,9 @@ _VENDORED_KEYS = {"component", "version", "sourceRepository", "sourceCommit", "s
 
 PRODUCT_LICENSE_NOTE = (
     "Qronos's own source and configuration (core, security, the runtime entry point and "
-    "config) are owned by the Qronos project. Its public license is an owner decision and is not "
-    "chosen by this build."
+    "config) are owned by the Qronos project and licensed under the Apache License, Version 2.0: "
+    "see qronos/LICENSE and qronos/NOTICE in this folder. The third-party material listed here keeps "
+    "its own licences and is not relicensed."
 )
 MICROSOFT_NOTE = (
     "Microsoft Visual C++ / Universal C Runtime files. Their redistribution is governed by "
@@ -575,12 +577,15 @@ def plan_runtime_notices(
     vendored_root: Path = VENDORED_TEXTS,
     cpython_registry: cpython_notices.Registry | None = None,
     private_roots: Sequence[str] | None = None,
+    project_root: Path = project_licence.ROOT,
 ) -> NoticePlan:
     """Attribute every frozen piece and choose the notice texts to copy (read-only).
 
     The build interpreter must match an audited record of ``cpython_registry``
     (the committed registry by default) by version, platform and build tag, and
     every bundled CPython binary and data folder must equal that record's bytes.
+    Qronos's own LICENSE (the pinned Apache-2.0 text) and NOTICE come from
+    ``project_root``; without them the plan fails.
     """
     reviews = dict(reviews or {})
     used_reviews: set[tuple[str, str]] = set()
@@ -650,6 +655,15 @@ def plan_runtime_notices(
         )
 
     copies: list[NoticeCopy] = []
+    try:
+        project_sources = project_licence.sources(project_root)
+    except project_licence.ProjectLicenceError as error:
+        raise NoticeError(f"Qronos's own licence cannot be shipped: {error}") from None
+    project_copies = [
+        _planned_copy(path.resolve(), f"{NOTICE_DIRECTORY}/{project_licence.FOLDER}/{name}", name == "LICENSE")
+        for name, path in sorted(project_sources.items())
+    ]
+    copies.extend(project_copies)
     entries: list[dict] = []
     missing: list[str] = []
     for name in sorted(represented):
@@ -818,7 +832,8 @@ def plan_runtime_notices(
         },
         "projectOwned": {
             "frozenRoots": sorted(project_roots),
-            "license": "unspecified",
+            "license": project_licence.SPDX,
+            "licenseFiles": [copy.record() for copy in project_copies],
             "note": PRODUCT_LICENSE_NOTE,
         },
         "prunedBinaries": sorted(pruned),

@@ -1,17 +1,16 @@
 """
 The authenticated local channel between Qronos processes.
 
-Used by the Supervisor and the user runtime, and by the runtime and the
-Elevated Action Broker. It is deliberately small, and every wait in it has a
-deadline:
+Used by the Supervisor and the user runtime. It is deliberately small, and
+every wait in it has a deadline:
 
     **Local only, Windows only.** Sessions run over Windows named pipes
     (``\\\\.\\pipe\\qronos-…``). A host/port address is refused before
     anything is opened, so this can never become a network listener. Pipe
     names carry 128 random bits and the first instance is created before the
     peer is launched, so another process can neither guess the name in
-    advance nor take it over. The supervisor and broker are Windows
-    components; off Windows a session is refused rather than run over a
+    advance nor take it over. The supervisor is a Windows
+    component; off Windows a session is refused rather than run over a
     stream transport whose reads could not be bounded (see below).
 
     **Identity first.** The server reads the connecting process id from the
@@ -560,8 +559,7 @@ class ChannelServer:
         asked once, immediately before the key would be sent; False closes
         the connection unanswered and raises ``ChannelCancelled``. It is the
         owner's own serialisation point between "release the key" and
-        "cancel" (see ``core.action_broker_client.Cancellation``), so a
-        cancellation that won it never sees a key leave.
+        "cancel", so a cancellation that won it never sees a key leave.
         """
         deadline = _deadline(timeout)
 
@@ -723,8 +721,8 @@ def connect_for_key(
     """
     Connect to a server that releases the session key on the pipe.
 
-    For a peer started with only public identifiers on its command line (the
-    elevated Action Broker): the server's process id is checked first, and
+    For a peer started with only public identifiers on its command line: the
+    server's process id is checked first, and
     only then is the first message read — the key — followed by the same
     mutual handshake under it. The server sends the key only after checking
     this process's id (``ChannelServer.accept(release_key=True)``), so the

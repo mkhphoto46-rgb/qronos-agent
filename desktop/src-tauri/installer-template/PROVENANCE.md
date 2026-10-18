@@ -33,18 +33,17 @@ identical to upstream 2.9.4.
 
 1. **The Qronos hooks are required.** After the hooks include there is an `!error` unless
    `QRONOS_TEMPLATE_HOOKS` is defined, so the template compiles only with the Qronos hook wrapper.
-2. **The fence comes before any change.** `Section Install` runs `NSIS_HOOK_PREINSTALL` first, and
-   `SetOutPath $INSTDIR` follows it (upstream has them the other way round). PREINSTALL takes the update fence
-   and the exclusive store admission and checks the install folder before anything else happens: before the
-   folder is created, before the app is stopped, and before the WebView2 child, the removal of the previous
-   files, any copy or any registration.
+2. **The checks come before any change.** `Section Install` runs `NSIS_HOOK_PREINSTALL` first, and
+   `SetOutPath $INSTDIR` follows it (upstream has them the other way round). PREINSTALL checks the install
+   folder and the previous installation's file list before anything else happens: before the folder is
+   created, before the app is stopped, and before the WebView2 child, the removal of the previous files, any
+   copy or any registration.
 3. **No previous uninstaller is ever run.** `PageLeaveReinstall` no longer has any `ExecWait`:
    - a WiX/MSI registration is refused visibly (`MessageBox`, then `Quit`);
    - the GUI "uninstall first" choice is refused visibly (`MessageBox`, then `Abort` back to the page);
    - passive mode and `/UPDATE` continue in place.
    Replacement is in place only, through the current installation's own file list
-   (`QronosRemoveOwnedPayload`). That means no assumption that an old uninstaller holds the fence, and no fence
-   deadlock between parent and child.
+   (`QronosRemoveOwnedPayload`), so no old uninstaller acts before the install-root and owned-list checks.
 4. **Install success is explicit.** In a silent install, NSIS 3.11 lets a failed `File`, `WriteUninstaller`,
    `WriteRegStr` or `CreateShortcut` continue with only the error flag set, and `${GetSize}` clears that flag
    (audited; see `work/installer-logs/r11-error-flag-audit.log`). So the template now:
@@ -56,14 +55,12 @@ identical to upstream 2.9.4.
      (the running-app check, a missing old-binary value, the size estimate);
    - refuses file associations with `!error` (none are configured; their macros read the registry);
    - runs `!insertmacro QRONOS_INSTALL_COMPLETE` just before `NSIS_HOOK_POSTINSTALL`.
-   The update receipt is written only after that last step.
 5. **No deletion by a registry-named path.** Upstream deletes `$INSTDIR\<MainBinaryName from the registry>`,
    which allows traversal or a wildcard through a registry string. That deletion is removed. The value is
    still read, for the shortcut migration only. The previous program is removed only through the owned file
    list.
 6. **The uninstaller deletes only what the owned list names.** `Section Uninstall` starts with
    `NSIS_HOOK_PREUNINSTALL`, which runs, in order:
-   - the fence;
    - the protected install-root check;
    - the whole-list validation against the disk;
    - stopping the app;

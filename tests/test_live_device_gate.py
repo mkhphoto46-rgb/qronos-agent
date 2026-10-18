@@ -43,8 +43,6 @@ EXPECTED_LIVE_NODES = frozenset({
     "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_a_real_burst_costs_one_read",
     "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_invalidating_does_not_pay_for_accuracy_again",
     "tests/test_telemetry_cache.py::TestTheDefaultReaderIsCheap::test_the_first_real_reading_is_structurally_valid",
-    # Reads this computer's real printer list.
-    "tests/test_print_workflow.py::test_windows_spooler_reads_printers_without_side_effects",
     # The production supervisor entry with the real bridge and production
     # session mutex/Job names; its child gets no pytest primitive stand-ins.
     "tests/test_supervisor_relay.py::test_the_production_entry_supervises_the_real_bridge_end_to_end",
@@ -357,3 +355,47 @@ def test_only_an_opted_in_marked_test_is_allowed_real_devices(monkeypatch):
     assert not conftest.live_devices_allowed(Node(False))
     monkeypatch.setenv(LIVE_DEVICE_ENV, "true")
     assert not conftest.live_devices_allowed(Node(True))
+
+
+_ASSET_ROOT_CHILD = textwrap.dedent(
+    """
+    import json
+    import os
+    from pathlib import Path
+
+    from core.config import resolve_paths
+
+
+    def test_reports_the_packaged_asset_root(tmp_path):
+        # Metadata only: the path is resolved from the environment; nothing under it is opened.
+        assets = resolve_paths(packaged=True).assets
+        Path(os.environ["QRONOS_ASSET_ROOT_REPORT"]).write_text(
+            json.dumps({"assets": str(assets), "tmp": str(tmp_path)}), encoding="utf-8")
+    """
+)
+
+
+def test_software_profile_redirects_an_inherited_asset_root(tmp_path):
+    # A user-level QRONOS_ASSET_ROOT (an installed asset folder) is inherited by every test process. The repo
+    # conftest, loaded as a plugin into a child pytest, must point the packaged asset root into that test's own
+    # profile; the inherited value here is a fake sentinel folder, never real assets.
+    sentinel = tmp_path / "inherited-asset-root-sentinel"
+    sentinel.mkdir()
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "test_asset_root_child.py").write_text(_ASSET_ROOT_CHILD, encoding="utf-8")
+    report = tmp_path / "report.json"
+    environment = _environment(None)
+    environment.update({"QRONOS_ASSET_ROOT": str(sentinel), "QRONOS_ASSET_ROOT_REPORT": str(report),
+                        "QRONOS_OLLAMA_AUTO_START": "0"})
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(child / "test_asset_root_child.py"), "-q", "-p", "no:cacheprovider",
+         "-p", "tests.conftest", f"--rootdir={child}", f"--basetemp={tmp_path / 'pytest-child'}"],
+        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+    seen = json.loads(report.read_text(encoding="utf-8"))
+    assets, child_tmp = Path(seen["assets"]), Path(seen["tmp"]).resolve()
+    assert assets != sentinel.resolve() and sentinel.resolve() not in assets.parents
+    assert child_tmp in assets.parents
+    assert list(sentinel.iterdir()) == []

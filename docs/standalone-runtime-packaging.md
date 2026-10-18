@@ -227,8 +227,10 @@ Some items are recorded rather than resolved:
   - the Unicode Character Database notice that CPython 3.13 does not document.
 
   The build ships every text involved and makes none of these choices.
-- Qronos's own modules and configuration are listed as project-owned, with an
-  unspecified license. Choosing that license is an owner decision.
+- Qronos's own modules and configuration are listed as project-owned, under
+  Apache-2.0. The exact LICENSE (pinned SHA-256) and the NOTICE are copied to
+  `third-party-notices/qronos/` and recorded in `projectOwned.licenseFiles`. The
+  third-party texts above keep their own terms.
 
 This is technical notice packaging, not a legal clearance.
 

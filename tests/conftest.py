@@ -13,8 +13,6 @@ import pytest
 import core.audio_input as audio_input
 import core.audio_output as audio_output
 import core.computer_executor as computer_executor
-import core.print_renderer as print_renderer
-import core.print_workflow as print_workflow
 import core.screen_capture as screen_capture
 import core.window_binding as window_binding
 import core.windows_accessibility as accessibility_reader
@@ -48,11 +46,6 @@ LIVE_DEVICE_FUNCTIONS = (
     (audio_output, "_get_sounddevice", "opening the real audio output stack (speakers)"),
     (accessibility_reader, "_run_uia_script", "reading the real UI Automation tree"),
     (accessibility_reader, "focused_element", "reading the real focused UI element"),
-    (print_workflow, "WinSpooler", "reading or driving the real print spooler"),
-    (print_workflow, "_shell_execute_printto", "starting a real print handler"),
-    (print_renderer, "printer_capabilities", "reading a real printer's capabilities"),
-    (print_renderer, "job_devmode", "opening a real printer's settings"),
-    (print_renderer, "_create_printer_dc", "opening a real printer device context"),
 )
 # Child processes that read the GPU or run local inference.
 LIVE_DEVICE_EXECUTABLES = frozenset({
@@ -262,6 +255,9 @@ def isolate_qronos_storage_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
     monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    # A user-level QRONOS_ASSET_ROOT (installed runtime assets) is an absolute override that packaged paths would
+    # inherit; keep the packaged asset root inside this test's own profile.
+    monkeypatch.setenv("QRONOS_ASSET_ROOT", str(tmp_path / "RuntimeAssets"))
     monkeypatch.setenv("QRONOS_CONVERSATION_HISTORY_PATH", str(tmp_path / "history.sqlite3"))
     monkeypatch.setenv("QRONOS_SETTINGS_PATH", str(tmp_path / "settings.json"))
 
@@ -381,6 +377,13 @@ def block_real_windows_computer_side_effects(
         blocked_side_effect,
     )
 
+    # The shared launch of any application the person opens (outside the runtime's Jobs).
+    monkeypatch.setattr(
+        computer_executor,
+        "_launch_user_app",
+        blocked_side_effect,
+    )
+
     # Dynamically discovered executable launch, such as Premiere/Photoshop.
     monkeypatch.setattr(
         computer_executor,
@@ -422,17 +425,3 @@ def block_real_windows_computer_side_effects(
         "_default_gui_action",
         blocked_side_effect,
     )
-
-    # The Elevated Action Broker's native adapters: the real UAC prompt
-    # (ShellExecuteExW "runas") and the real Service Control Manager. Tests
-    # inject fake Win32 calls; resolving the real ones is refused.
-    from core import spooler_service, uac_launch
-
-    monkeypatch.setattr(uac_launch, "_real_win32_calls", blocked_side_effect)
-    monkeypatch.setattr(spooler_service, "_real_advapi32", blocked_side_effect)
-    # The broker's installed profile is a real known folder, not an
-    # environment value, so the isolated test profile cannot redirect it:
-    # tests must inject where it is.
-    from core import action_broker
-
-    monkeypatch.setattr(action_broker, "_known_local_appdata", blocked_side_effect)

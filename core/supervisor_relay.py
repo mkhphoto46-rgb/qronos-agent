@@ -119,7 +119,6 @@ EXIT_DRAIN_SECONDS = 2.0
 #: How long an ended generation's output may still drain before it is fenced.
 GENERATION_DRAIN_SECONDS = 0.5
 _READ_CHUNK = 64 * 1024
-PAIRING_URI_PREFIX = b"qronos://pair?"
 
 SHUTDOWN_LINE = b'{"command":"shutdown"}\n'
 
@@ -172,8 +171,6 @@ NOTICES = {
                        "{count} output line(s) from the Qronos runtime were not valid text and were dropped."),
     "old_output": ("runtime_warning", "warning",
                    "{count} output line(s) from a Qronos runtime that had already stopped were dropped."),
-    "stderr_secret": ("runtime_warning", "warning",
-                      "{count} diagnostic line(s) that contained a pairing secret were dropped."),
     "lifecycle_merged": ("runtime_warning", "warning",
                          "{count} older restart notice(s) were merged while the desktop was not reading."),
 }
@@ -504,7 +501,7 @@ class DesktopRelay:
     def end_generation(self) -> None:
         """
         Fence the current bridge generation's output: a bounded drain, then no
-        line of it is ever queued again (F1).
+        line of it is ever queued again.
         """
         with self._cond:
             generation, pump = self._generation, self._pump
@@ -614,9 +611,8 @@ class DesktopRelay:
 
     def pump_errors(self, stream: BinaryIO) -> None:
         """
-        Forward the bridge's standard error as it comes. A line holding a
-        pairing URI is dropped and counted, as the desktop drops it on stdout;
-        invalid UTF-8 is replaced, so no reader stops on it.
+        Forward the bridge's standard error as it comes. Invalid UTF-8 is
+        replaced, so no reader stops on it.
         """
         while True:
             try:
@@ -625,9 +621,6 @@ class DesktopRelay:
                 return
             if not chunk:
                 return
-            if PAIRING_URI_PREFIX in chunk:
-                self.out.notice("stderr_secret")
-                continue
             if self._err is None:
                 continue
             chunk = chunk.decode("utf-8", "replace").encode("utf-8")
@@ -762,7 +755,10 @@ def _default_job():
         return None
     from core.windows_sidecar_guard import WindowsSidecarGuard
 
-    return WindowsSidecarGuard.acquire(JOB_MUTEX_NAME)
+    # Breakaway is allowed only for an application the person asked to open
+    # (core.computer_executor launches it with CREATE_BREAKAWAY_FROM_JOB);
+    # everything else the bridge starts still ends with this Job.
+    return WindowsSidecarGuard.acquire(JOB_MUTEX_NAME, allow_breakaway=True)
 
 
 def run_desktop(
@@ -783,16 +779,12 @@ def run_desktop(
         desktop_err if desktop_err is not None else sys.stderr.buffer,
     )
 
-    from core.instance_ownership import OwnershipError, UpdateInProgress
+    from core.instance_ownership import OwnershipError
 
     try:
         guard = instance_guard()
     except SupervisorAlreadyRunning:
         relay.out.lifecycle("runtime_error", "error", "Another Qronos runtime is already running in this Windows session.")
-        relay.out.drain(EXIT_DRAIN_SECONDS)
-        return 2
-    except UpdateInProgress:
-        relay.out.lifecycle("runtime_error", "error", "An update is being installed; Qronos starts when it ends.")
         relay.out.drain(EXIT_DRAIN_SECONDS)
         return 2
     except (OwnershipError, OSError):
@@ -818,7 +810,7 @@ def run_desktop(
         relay.out.lifecycle("runtime_error", "error", GAVE_UP)
     finally:
         if job is not None:
-            job.close()  # the final fail-safe: nothing the bridge started outlives this
+            job.close()  # the final fail-safe: nothing the bridge started outlives this, except an app the person opened
         guard.release()
         # Bounded: a desktop that stopped reading cannot hold the exit.
         relay.out.drain(EXIT_DRAIN_SECONDS)

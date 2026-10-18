@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -17,7 +18,6 @@ from core.brain_runtime import (
 )
 from core.compute_estimator import ComputeEstimator, ComputeLevel
 from core.model_manager import (
-    InstalledModelSizes,
     ModelManager,
     TaskClass,
 )
@@ -126,42 +126,6 @@ class StepResult:
     resource_blocked: bool = False
 
 
-#: Upper bound on one installed-model listing read during admission.
-INSTALLED_LISTING_TIMEOUT_SECONDS = 2.0
-
-
-def _installed_size_reader(runtime) -> InstalledModelSizes | None:
-    """
-    Installed model sizes from the same local model runtime, for admission.
-
-    For a runtime with a local model store (one that names a base URL). The
-    raw /api/tags listing is read through the bounded loopback-only local
-    model client and validated by InstalledModelSizes before any value is
-    used. A base URL that is not a valid local address makes every read fail,
-    so new GPU loads are deferred rather than admitted on the estimate.
-
-    A runtime with no base URL at all - an injected or legacy backend - gets
-    no reader, and admission keeps the configured estimate for it.
-    """
-    if not hasattr(runtime, "base_url"):
-        return None
-
-    base_url = getattr(runtime, "base_url", None)
-
-    def read_listing():
-        from core.local_ipc import local_model_base_url, requests_client
-
-        url = local_model_base_url(str(base_url))
-        response = requests_client.get(
-            f"{url}/api/tags",
-            timeout=INSTALLED_LISTING_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    return InstalledModelSizes(read_listing)
-
-
 class Orchestrator:
     """
     Execute Qronos plans with resource and activity awareness.
@@ -195,7 +159,6 @@ class Orchestrator:
             if model_manager is not None
             else ModelManager(
                 runtime=self.runtime,
-                installed_size_bytes=_installed_size_reader(self.runtime),
             )
         )
 
@@ -238,6 +201,10 @@ class Orchestrator:
         # the current worker/router behavior.
         self.compute_estimator = ComputeEstimator()
 
+        # Where the chat's code-policy refusals are recorded (security.gate's audit sink; the runtime
+        # passes its action audit trail). None falls back to the gate's default sink.
+        self.code_policy_audit = None
+
         # Warm-model ownership must survive across turns.  The global resource
         # ledger is process-local, so a model preloaded by the PowerShell helper
         # (or kept alive by Ollama after a previous turn) has to be adopted by
@@ -270,6 +237,17 @@ class Orchestrator:
 
         results: list[StepResult] = []
 
+        # The chat's code boundary (core/code_policy.py, security.gate): a request to write, change or run code
+        # is answered with the refusal before ANY step runs - no resource admission, no model call.
+        from core import code_policy
+
+        for step in plan.steps:
+            finding = code_policy.check_request(step.description)
+            if finding is not None and code_policy.refused(
+                finding, channel="desktop", chars=len(step.description or ""), audit=self.code_policy_audit,
+            ):
+                return [StepResult(order=step.order, success=True, output=finding.message)]
+
         for step in plan.steps:
             # Adopt any configured Fast/Heavy model that is already resident
             # before pressure classification.  This prevents a Qronos-owned
@@ -294,6 +272,14 @@ class Orchestrator:
                 ),
                 priority=priority,
             )
+
+            if result.success:
+                # A generated answer that contains code is replaced before anyone records, shows or speaks it.
+                finding = code_policy.check_answer(result.output)
+                if finding is not None and code_policy.refused(
+                    finding, channel="desktop", chars=len(result.output or ""), audit=self.code_policy_audit,
+                ):
+                    result = dataclasses.replace(result, output=finding.message)
 
             results.append(
                 result
@@ -360,7 +346,6 @@ class Orchestrator:
                     error=self._resource_error(
                         selection.decision,
                         resource_pressure,
-                        selection,
                     ),
                     resource_blocked=True,
                 )
@@ -395,7 +380,6 @@ class Orchestrator:
                     error=self._resource_error(
                         selection.decision,
                         live_state.resource_pressure,
-                        selection,
                     ),
                     resource_blocked=True,
                 )
@@ -584,117 +568,6 @@ class Orchestrator:
 
         return changed
 
-    def answer_chat_only(self, messages: Sequence[BrainMessage]) -> str:
-        """
-        One tool-free answer from the Fast Brain, under its configured profile.
-
-        For callers that must not plan, act or queue: the Device Link's remote
-        questions. It is a Fast plan step without the plan. It gets the same
-        admission: activity and resource checks, repeated immediately before
-        the call. It uses the same model, context, think, ``num_predict`` and
-        keep-alive (including the activity-mode keep-alive rule), and the same
-        reservation and foreground cleanup. It adds nothing else: no planner,
-        no workers, no user-memory context, no conversation history, no
-        web-research overrides.
-
-        ``messages`` are the caller's own system rules and the question. The
-        Qronos identity always comes first; caller system messages follow it
-        and cannot replace it.
-
-        Raises ``RuntimeError`` when admission refuses, so the caller can say
-        "busy" rather than wait or queue.
-        """
-
-        chat = [
-            BrainMessage(
-                role=BrainMessageRole.SYSTEM,
-                content=QRONOS_SYSTEM_PROMPT,
-            )
-        ]
-        chat.extend(message for message in messages if message.content.strip())
-
-        task_class = TaskClass.FAST
-        activity = self.activity_guard.detect()
-        selection = self._prepare_resources(
-            task_class=task_class,
-            activity_mode=activity.mode,
-            resource_pressure=activity.resource_pressure,
-        )
-
-        if selection.decision is not ResourceDecision.ALLOW:
-            raise RuntimeError(
-                self._resource_error(
-                    selection.decision,
-                    activity.resource_pressure,
-                    selection,
-                )
-            )
-
-        # Re-read immediately before loading or running the brain, exactly as
-        # a plan step does: the first snapshot may be stale after cleanup.
-        live_state = self.activity_guard.detect()
-        selection = self._prepare_resources(
-            task_class=task_class,
-            activity_mode=live_state.mode,
-            resource_pressure=live_state.resource_pressure,
-        )
-
-        if selection.decision is not ResourceDecision.ALLOW:
-            raise RuntimeError(
-                self._resource_error(
-                    selection.decision,
-                    live_state.resource_pressure,
-                    selection,
-                )
-            )
-
-        generation_effort = self._generation_effort(
-            task_class=task_class,
-            description="",
-        )
-        generation = selection.model.generation_for(generation_effort)
-        keep_alive = self._effective_keep_alive(
-            configured_keep_alive=generation.keep_alive,
-            activity_mode=live_state.mode,
-        )
-        timeout_seconds = self._brain_timeout_seconds(
-            task_class=task_class,
-            generation_effort=generation_effort,
-            already_resident=selection.already_resident,
-        )
-        reservation = self._reserve_brain_resources(
-            selection.model.name,
-            selection.model.estimated_vram_gb,
-        )
-
-        try:
-            return self.runtime.chat(
-                model_name=selection.model.name,
-                messages=chat,
-                think=generation.think,
-                num_predict=generation.num_predict,
-                num_ctx=selection.model.context_tokens,
-                keep_alive=keep_alive,
-                timeout_seconds=timeout_seconds,
-            )
-        finally:
-            # The foreground cleanup of a Fast plan step, unchanged.
-            if not _keep_alive_enabled(keep_alive):
-                try:
-                    self.runtime.stop_model(selection.model.name)
-                except Exception:
-                    try:
-                        self.model_manager.unload_qronos_models()
-                    except Exception:
-                        pass
-
-                self._release_brain_resources(reservation.reservation_id)
-            else:
-                self._sync_resident_brain_ownership()
-
-                if not self.model_manager.is_model_resident(selection.model.name):
-                    self._release_brain_resources(reservation.reservation_id)
-
     def answer_web_prompt(self, prompt: str) -> str:
         """Run Web Research's evidence prompt through the guarded Fast Brain."""
         activity = self.activity_guard.detect()
@@ -709,7 +582,6 @@ class Orchestrator:
                 self._resource_error(
                     selection.decision,
                     activity.resource_pressure,
-                    selection,
                 )
             )
 
@@ -1104,33 +976,12 @@ class Orchestrator:
     def _resource_error(
         decision: ResourceDecision,
         pressure: ResourcePressure,
-        selection=None,
     ) -> str:
-        message = (
+        return (
             "Qronos blocked this task because the current "
             f"resource state is {pressure.value} and the "
             f"resource policy returned {decision.value}."
         )
-
-        needed = getattr(selection, "vram_needed_mb", None)
-        free = getattr(selection, "vram_free_mb", None)
-
-        if getattr(selection, "capacity_evidence", None) == "unavailable":
-            message += (
-                " Qronos could not confirm how much video memory the model "
-                "needs, so it is not loading it onto a card other "
-                "applications are using."
-            )
-        elif isinstance(needed, int) and isinstance(free, int):
-            # Said plainly, so a deferral for capacity is not mistaken for a
-            # busy machine: the model would only fit by taking memory other
-            # applications are using right now.
-            message += (
-                f" The model needs about {needed / 1024:.1f} GB of free "
-                f"video memory and {free / 1024:.1f} GB is free now."
-            )
-
-        return message
 
     @staticmethod
     def _get_task_class(

@@ -13,7 +13,7 @@ mod lifecycle;
 mod service_ipc;
 use backend::{Backend, Service};
 use job::OwnedJob;
-use lifecycle::{LaunchHost, LaunchLine, Lifecycle, UpdateRoute};
+use lifecycle::ServiceGate;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -22,21 +22,6 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const RUNTIME_EVENT_NAME: &str = "qronos://runtime-event";
-
-// Device Link pairing. The runtime's answer holds a new phone's key, so it is
-// never broadcast: it goes only to the window that asked, on its own event.
-const LINK_PAIR_OPEN_ACTION: &str = "qronos.link_pair_open";
-const LINK_PAIR_CANCEL_ACTION: &str = "qronos.link_pair_cancel";
-const LINK_PAIRING_EVENT_TYPE: &str = "link_pairing";
-const LINK_PAIRING_EVENT_NAME: &str = "qronos://link-pairing";
-const PAIRING_URI_PREFIX: &str = "qronos://pair?";
-// The runtime's pairing window is 120 s; a reply later than this is dropped.
-const PAIRING_PENDING_SECONDS: u64 = 130;
-const MAX_PENDING_PAIRINGS: usize = 4;
-const MAX_PAIRING_NAME_CHARS: usize = 40;
-const MAX_PAIRING_URI_CHARS: usize = 400;
-// The capability that grants a window the app's commands; only its windows may pair.
-const DEFAULT_CAPABILITY: &str = include_str!("../../capabilities/default.json");
 
 const MAX_TEXT_MESSAGE_CHARS: usize = 16_000;
 const SCREEN_ACTION_ID: &str = "qronos.look_at_screen";
@@ -182,235 +167,14 @@ pub struct RuntimeManagerState {
     // race to overwrite each other.
     settings_command: Arc<tokio::sync::Mutex<()>>,
 
-    // Which window asked for each open pairing request, by request nonce.
-    pairings: Mutex<PendingPairings>,
-
-    // The update launch phase and the service gate every backend process passes (lifecycle.rs).
-    lifecycle: Lifecycle,
+    // The service gate every backend process passes (lifecycle.rs).
+    gate: Arc<ServiceGate>,
 
     // A stopped runtime whose Job still had a live process: busy ownership, kept
-    // until the Job is proved empty. No runtime start and no launch meanwhile.
+    // until the Job is proved empty. No runtime start meanwhile.
     lingering: Mutex<Option<OwnedJob>>,
 
     backend: Option<Backend>,
-}
-
-// ------------------------------------------------------------ pairing routes
-
-/// One pairing request: the nonce the window sent and the window that sent it.
-#[derive(Debug, Clone)]
-struct PendingPairing {
-    nonce: String,
-    window: String,
-    expires_at: std::time::Instant,
-}
-
-/// Bounded, single-use routes from a pairing reply to the window that asked.
-#[derive(Debug, Default)]
-struct PendingPairings {
-    entries: Vec<PendingPairing>,
-}
-
-impl PendingPairings {
-    fn prune(&mut self, now: std::time::Instant) {
-        self.entries.retain(|entry| entry.expires_at > now);
-    }
-
-    /// Record a request from `window`. A window has at most one open request.
-    fn begin(
-        &mut self,
-        nonce: &str,
-        window: &str,
-        allowed_windows: &[String],
-        now: std::time::Instant,
-    ) -> Result<(), String> {
-        if !allowed_windows.iter().any(|allowed| allowed == window) {
-            return Err("This window may not pair a phone.".to_string());
-        }
-
-        if !valid_pairing_nonce(nonce) {
-            return Err("Invalid pairing request.".to_string());
-        }
-
-        self.prune(now);
-
-        if self.entries.iter().any(|entry| entry.nonce == nonce) {
-            return Err("Invalid pairing request.".to_string());
-        }
-
-        self.entries.retain(|entry| entry.window != window);
-
-        if self.entries.len() >= MAX_PENDING_PAIRINGS {
-            return Err("Too many pairing requests are open.".to_string());
-        }
-
-        self.entries.push(PendingPairing {
-            nonce: nonce.to_string(),
-            window: window.to_string(),
-            expires_at: now + std::time::Duration::from_secs(PAIRING_PENDING_SECONDS),
-        });
-
-        Ok(())
-    }
-
-    /// The window that asked for `nonce`, once; None when unknown or late.
-    fn take(&mut self, nonce: &str, now: std::time::Instant) -> Option<String> {
-        self.prune(now);
-        let index = self.entries.iter().position(|entry| entry.nonce == nonce)?;
-        Some(self.entries.remove(index).window)
-    }
-
-    fn cancel_window(&mut self, window: &str) {
-        self.entries.retain(|entry| entry.window != window);
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-    }
-}
-
-fn valid_pairing_nonce(nonce: &str) -> bool {
-    (16..=64).contains(&nonce.len())
-        && nonce
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-/// Control, line-break and bidi override/isolate characters; Persian joiners are fine.
-fn refused_name_character(character: char) -> bool {
-    let code = character as u32;
-    code < 0x20
-        || (0x7F..=0x9F).contains(&code)
-        || code == 0x2028
-        || code == 0x2029
-        || (0x202A..=0x202E).contains(&code)
-        || (0x2066..=0x2069).contains(&code)
-}
-
-fn clean_pairing_name(name: &str) -> Result<String, String> {
-    let name = name.trim();
-
-    if name.chars().count() > MAX_PAIRING_NAME_CHARS || name.chars().any(refused_name_character) {
-        return Err("Invalid device name.".to_string());
-    }
-
-    Ok(name.to_string())
-}
-
-/// Windows granted the default capability: the only ones that may pair.
-fn pairing_windows() -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(DEFAULT_CAPABILITY)
-        .ok()
-        .and_then(|capability| capability.get("windows").cloned())
-        .and_then(|windows| serde_json::from_value::<Vec<String>>(windows).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|label| !label.contains('*'))
-        .collect()
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct PairingDelivery {
-    request_nonce: String,
-    uri: String,
-}
-
-/// Where one runtime event goes.
-#[derive(Debug, PartialEq)]
-enum EventRoute {
-    Broadcast,
-    /// A pairing reply for the window that asked (looked up by nonce).
-    Pairing(PairingDelivery),
-    /// Never shown anywhere: a malformed pairing reply, or a key out of place.
-    Drop,
-}
-
-fn route_runtime_event(event: &RuntimeEvent) -> EventRoute {
-    if event.event_type == LINK_PAIRING_EVENT_TYPE {
-        let parsed = serde_json::from_str::<serde_json::Value>(&event.message).ok();
-        let field = |name: &str| {
-            parsed
-                .as_ref()
-                .and_then(|value| value.get(name))
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        };
-
-        return match (field("requestNonce"), field("uri")) {
-            (Some(nonce), Some(uri))
-                if valid_pairing_nonce(&nonce)
-                    && uri.starts_with(PAIRING_URI_PREFIX)
-                    && uri.chars().count() <= MAX_PAIRING_URI_CHARS =>
-            {
-                EventRoute::Pairing(PairingDelivery {
-                    request_nonce: nonce,
-                    uri,
-                })
-            }
-            _ => EventRoute::Drop,
-        };
-    }
-
-    // A pairing key in any other event or log line is never broadcast.
-    if event.message.contains(PAIRING_URI_PREFIX) {
-        return EventRoute::Drop;
-    }
-
-    EventRoute::Broadcast
-}
-
-/// A failed pairing request leaves nothing pending.
-fn ends_pairing_requests(event: &RuntimeEvent) -> bool {
-    event.event_type == "link_error"
-        && serde_json::from_str::<serde_json::Value>(&event.message)
-            .ok()
-            .and_then(|value| value.get("action").and_then(|a| a.as_str()).map(str::to_string))
-            .as_deref()
-            == Some(LINK_PAIR_OPEN_ACTION)
-}
-
-fn clear_pairings(app: &AppHandle) {
-    if let Some(state) = app.try_state::<RuntimeManagerState>() {
-        if let Ok(mut pairings) = state.pairings.lock() {
-            pairings.clear();
-        }
-    }
-}
-
-/// The bridge that took a pairing request is gone: it stopped, or its
-/// supervisor is replacing it. A new bridge cannot answer the old request.
-fn ends_runtime_session(event: &RuntimeEvent) -> bool {
-    event.event_type == "runtime_stopping"
-}
-
-fn deliver_runtime_event(app: &AppHandle, event: RuntimeEvent) {
-    if ends_pairing_requests(&event) || ends_runtime_session(&event) {
-        clear_pairings(app);
-    }
-
-    match route_runtime_event(&event) {
-        EventRoute::Broadcast => emit_runtime_event(app, event),
-        EventRoute::Drop => {}
-        EventRoute::Pairing(delivery) => {
-            let window = app.try_state::<RuntimeManagerState>().and_then(|state| {
-                state
-                    .pairings
-                    .lock()
-                    .ok()
-                    .and_then(|mut pairings| pairings.take(&delivery.request_nonce, std::time::Instant::now()))
-            });
-
-            // Unknown, late or replayed replies are dropped without a trace.
-            if let Some(label) = window {
-                let _ = app.emit_to(
-                    tauri::EventTarget::WebviewWindow { label },
-                    LINK_PAIRING_EVENT_NAME,
-                    delivery,
-                );
-            }
-        }
-    }
 }
 
 impl RuntimeManagerState {
@@ -422,15 +186,14 @@ impl RuntimeManagerState {
                 stop_generation: 0,
             }),
             settings_command: Arc::new(tokio::sync::Mutex::new(())),
-            pairings: Mutex::new(PendingPairings::default()),
-            lifecycle: Lifecycle::new(UPDATE_DRAIN_BOUND),
+            gate: Arc::new(ServiceGate::default()),
             lingering: Mutex::new(None),
             backend,
         }
     }
 
     fn ticket(&self) -> Result<lifecycle::Ticket, String> {
-        self.lifecycle.gate.enter()
+        self.gate.enter()
     }
 
     /// Err while an earlier runtime's Job still has a live process; clears it once proved empty.
@@ -469,7 +232,7 @@ fn emit_runtime_event(app: &AppHandle, event: RuntimeEvent) {
 pub async fn runtime_setup_snapshot(
     state: State<'_, RuntimeManagerState>,
 ) -> Result<serde_json::Value, String> {
-    service_ipc::request(state.require_backend()?, Service::Doctor, "", None, None, Some(state.ticket()?)).await
+    service_ipc::request(state.require_backend()?, Service::Doctor, "", None, None, state.ticket()?).await
 }
 
 /// The largest runtime output line read; the supervisor relays at most 4 MiB.
@@ -517,11 +280,10 @@ fn read_runtime_line<R: BufRead>(reader: &mut R, buffer: &mut Vec<u8>, lossy: bo
     }
 }
 
-/// A diagnostic line from the runtime's standard error, or None. A line that
-/// holds a pairing key is dropped, as on standard output (`route_runtime_event`).
+/// A diagnostic line from the runtime's standard error, or None.
 fn stderr_event(line: &str) -> Option<RuntimeEvent> {
     let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.contains(PAIRING_URI_PREFIX) {
+    if trimmed.is_empty() {
         return None;
     }
     let looks_like_error = trimmed.starts_with("Traceback")
@@ -547,7 +309,6 @@ fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
                 RuntimeLine::Skipped => continue,
                 RuntimeLine::End => break,
                 RuntimeLine::Failed => {
-                    clear_pairings(&app);
                     emit_runtime_event(
                         &app,
                         RuntimeEvent {
@@ -567,8 +328,8 @@ fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
             }
 
             match serde_json::from_str::<RuntimeEvent>(trimmed) {
-                Ok(event) => deliver_runtime_event(&app, event),
-                Err(_) => deliver_runtime_event(
+                Ok(event) => emit_runtime_event(&app, event),
+                Err(_) => emit_runtime_event(
                     &app,
                     RuntimeEvent {
                         event_type: "runtime_log".to_string(),
@@ -578,9 +339,6 @@ fn spawn_runtime_reader(app: AppHandle, stdout: std::process::ChildStdout) {
                 ),
             }
         }
-
-        // The runtime is gone: no reply can belong to a pending request now.
-        clear_pairings(&app);
     });
 }
 
@@ -761,10 +519,6 @@ fn start_runtime_inner(
         .lock()
         .map_err(|_| "Runtime manager lock failed.".to_string())?;
 
-    // Checked while holding the slot: an update launch closes the gate BEFORE it
-    // takes the slot, so a start either finishes first (and is then stopped by
-    // the launch) or sees the closed gate.
-    state.lifecycle.runtime_start_allowed()?;
     state.require_no_lingering_runtime()?;
 
     if let Some(process) = guard.as_mut() {
@@ -779,11 +533,6 @@ fn start_runtime_inner(
         *guard = None;
     }
 
-    // A new runtime: no earlier pairing request can be answered by it.
-    if let Ok(mut pairings) = state.pairings.lock() {
-        pairings.clear();
-    }
-
     // The supervisor starts the bridge itself, relays this process's pipes
     // to it, restarts it within a bounded budget and reports
     // `supervisor_state` events; see core/supervisor_relay.py.
@@ -791,7 +540,7 @@ fn start_runtime_inner(
     command
         .env("QRONOS_MEMORY_RUNTIME", "1")
         .env("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "1")
-        // The one product version (tauri.conf.json), for runtime status hooks.
+        // The one product version (tauri.conf.json).
         .env("QRONOS_APP_VERSION", app.package_info().version.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -909,7 +658,6 @@ pub fn send_runtime_action(
     action_id: String,
     playback_id: Option<u64>,
     data: Option<serde_json::Value>,
-    webview_window: tauri::WebviewWindow,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<(), String> {
     let cleaned = action_id.trim();
@@ -919,13 +667,6 @@ pub fn send_runtime_action(
     }
 
     reject_typed_only_action(cleaned)?;
-
-    if cleaned == LINK_PAIR_CANCEL_ACTION {
-        // A cancelled request's late reply, if any, goes nowhere.
-        if let Ok(mut pairings) = state.pairings.lock() {
-            pairings.cancel_window(webview_window.label());
-        }
-    }
 
     let mut payload = serde_json::json!({
         "command": "action",
@@ -959,10 +700,6 @@ pub fn send_runtime_action(
 fn reject_typed_only_action(action_id: &str) -> Result<(), String> {
     if action_id.trim() == SCREEN_ACTION_ID {
         return Err("Screen decisions must use the look_at_screen command.".to_string());
-    }
-
-    if action_id.trim() == LINK_PAIR_OPEN_ACTION {
-        return Err("Pairing must use the link_pair_open command.".to_string());
     }
     Ok(())
 }
@@ -1056,46 +793,6 @@ pub fn look_at_screen(
     send_to_runtime(&state, payload)
 }
 
-/// Ask the runtime to open a pairing window for one new phone.
-///
-/// The request nonce is bound here to the window that actually invoked the
-/// command (never to anything the payload says), and only a window granted
-/// the default capability may ask. The reply carrying the phone's key is
-/// delivered to that window alone, once, on `qronos://link-pairing`.
-#[tauri::command(rename_all = "camelCase")]
-pub fn link_pair_open(
-    request_nonce: String,
-    name: String,
-    webview_window: tauri::WebviewWindow,
-    state: State<'_, RuntimeManagerState>,
-) -> Result<(), String> {
-    let name = clean_pairing_name(&name)?;
-    let window = webview_window.label().to_string();
-
-    state
-        .pairings
-        .lock()
-        .map_err(|_| "Runtime manager lock failed.".to_string())?
-        .begin(&request_nonce, &window, &pairing_windows(), std::time::Instant::now())?;
-
-    let sent = send_to_runtime(
-        &state,
-        serde_json::json!({
-            "command": "action",
-            "actionId": LINK_PAIR_OPEN_ACTION,
-            "data": { "requestNonce": request_nonce, "name": name }
-        }),
-    );
-
-    if sent.is_err() {
-        if let Ok(mut pairings) = state.pairings.lock() {
-            pairings.cancel_window(&window);
-        }
-    }
-
-    sent
-}
-
 #[tauri::command(rename_all = "camelCase")]
 pub async fn library_command(
     operation: String,
@@ -1108,7 +805,7 @@ pub async fn library_command(
         &operation,
         payload,
         None,
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
 }
@@ -1125,7 +822,7 @@ pub async fn memory_command(
         &operation,
         payload,
         None,
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
 }
@@ -1428,7 +1125,7 @@ pub async fn settings_command(
         &operation,
         payload,
         Some(state.settings_command.clone()),
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
 }
@@ -1445,137 +1142,9 @@ pub async fn permissions_command(
         &operation,
         payload,
         None,
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
-}
-
-/// The offline update service (core/update_cli.py) and nothing else.
-///
-/// Reads, approval steps and pickers run as gated one-shot requests; `launch`
-/// runs only through the update lifecycle (lifecycle.rs): drain, preflight,
-/// proved stop, one answer line, restart only on a proved non-start, otherwise
-/// exit. The payload, including an approval secret, travels only on the child's
-/// standard input and is never logged or echoed.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn update_command(
-    operation: String,
-    payload: Option<serde_json::Value>,
-    app: AppHandle,
-    state: State<'_, RuntimeManagerState>,
-) -> Result<serde_json::Value, String> {
-    if lifecycle::route_update(&operation) == UpdateRoute::OneShot {
-        return service_ipc::request(
-            state.require_backend()?,
-            Service::Update,
-            &operation,
-            payload,
-            None,
-            Some(state.ticket()?),
-        )
-        .await;
-    }
-    // Only the single-use token; no other field (a "stopped" claim, a flag) is read or accepted.
-    let token = match payload.as_ref().and_then(serde_json::Value::as_object) {
-        Some(fields) if fields.len() == 1 => fields
-            .get("launchToken")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        _ => String::new(),
-    };
-    let backend = state.require_backend()?.clone();
-    let handle = app.clone();
-    let answer = tauri::async_runtime::spawn_blocking(move || {
-        let state = handle.state::<RuntimeManagerState>();
-        let host = DesktopLaunchHost {
-            app: &handle,
-            state: &state,
-            backend: &backend,
-        };
-        state.lifecycle.launch(&host, &token)
-    })
-    .await
-    .map_err(|_| {
-        "The update launch failed part-way; its outcome is unknown and Qronos starts nothing.".to_string()
-    })?;
-    if answer.get("exiting").and_then(serde_json::Value::as_bool) == Some(true) {
-        // The window shows the outcome first; the update service is never killed by this exit.
-        std::thread::spawn(move || {
-            std::thread::sleep(UPDATE_EXIT_NOTICE);
-            app.exit(0);
-        });
-    }
-    Ok(answer)
-}
-
-/// Ok(was_running) only with the Job proof; an unproved stop keeps its busy ownership.
-fn stop_runtime_for_update(
-    state: &RuntimeManagerState,
-    steps: u32,
-    job_bound: std::time::Duration,
-) -> Result<bool, String> {
-    let process = state
-        .process
-        .lock()
-        .map_err(|_| "Runtime manager lock failed.".to_string())?
-        .take();
-    if let Ok(mut pairings) = state.pairings.lock() {
-        pairings.clear();
-    }
-    match process {
-        None => state.require_no_lingering_runtime().map(|_| false),
-        Some(mut process) => {
-            let was_running = matches!(process.child.try_wait(), Ok(None));
-            stop_with_proof(state, process, steps, job_bound).map(|_| was_running)
-        }
-    }
-}
-
-/// How long the window may show a launch outcome before the app exits.
-const UPDATE_EXIT_NOTICE: std::time::Duration = std::time::Duration::from_millis(2500);
-
-/// The launch answer may come only after the staged installer is re-hashed
-/// (up to 2 GiB), snapshots are taken and the installer acknowledges.
-const LAUNCH_ANSWER_BOUND: std::time::Duration = std::time::Duration::from_secs(900);
-
-struct DesktopLaunchHost<'a> {
-    app: &'a AppHandle,
-    state: &'a RuntimeManagerState,
-    backend: &'a Backend,
-}
-
-impl LaunchHost for DesktopLaunchHost<'_> {
-    fn update_status(&self) -> Result<serde_json::Value, String> {
-        // Inside the closed gate: the lifecycle owns it, so no ticket.
-        tauri::async_runtime::block_on(service_ipc::request(
-            self.backend,
-            Service::Update,
-            "status",
-            None,
-            None,
-            None,
-        ))
-    }
-
-    fn stop_playback(&self) {
-        let _ = stop_native_audio(self.state);
-    }
-
-    fn stop_runtime(&self) -> Result<bool, String> {
-        stop_runtime_for_update(self.state, STOP_WAIT_STEPS, JOB_EXIT_BOUND)
-    }
-
-    fn launch(&self, token: &str) -> LaunchLine {
-        match self.backend.command(Service::Update) {
-            Ok(command) => lifecycle::launch_one_line(command, token, LAUNCH_ANSWER_BOUND),
-            Err(error) => LaunchLine::NotStarted(error),
-        }
-    }
-
-    fn restart_runtime(&self) -> Result<(), String> {
-        start_runtime_inner(self.app, self.state).map(|_| ())
-    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1778,10 +1347,6 @@ pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStat
         .lock()
         .map_err(|_| "Runtime manager lock failed.".to_string())?;
 
-    if let Ok(mut pairings) = state.pairings.lock() {
-        pairings.clear();
-    }
-
     let Some(process) = guard.take() else {
         drop(guard);
         state.require_no_lingering_runtime()?;
@@ -1813,13 +1378,10 @@ pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStat
 /// kill-on-close Job ends the bridge and every descendant.
 const JOB_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How long an update launch waits for running backend requests to finish.
-const UPDATE_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Stop the owned runtime and prove it: the exact supervisor exited AND its
 /// desktop Job has no live process. Unproved: a supervisor that could not be
 /// ended goes back into the slot, a Job with a live process becomes the
-/// lingering busy ownership; both refuse a new start and an update launch.
+/// lingering busy ownership; both refuse a new start.
 fn stop_with_proof(
     state: &RuntimeManagerState,
     mut process: RuntimeProcess,
@@ -1854,10 +1416,6 @@ pub fn shutdown(app: &AppHandle) {
     let Ok(mut guard) = state.process.lock() else {
         return;
     };
-
-    if let Ok(mut pairings) = state.pairings.lock() {
-        pairings.clear();
-    }
 
     let Some(process) = guard.take() else {
         return;
@@ -1910,6 +1468,18 @@ mod stop_proof_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// Ok(was_running) only with the Job proof; an unproved stop keeps its busy ownership.
+    fn stop(state: &RuntimeManagerState, steps: u32, job_bound: Duration) -> Result<bool, String> {
+        let process = state.process.lock().unwrap().take();
+        match process {
+            None => state.require_no_lingering_runtime().map(|_| false),
+            Some(mut process) => {
+                let was_running = matches!(process.child.try_wait(), Ok(None));
+                stop_with_proof(state, process, steps, job_bound).map(|_| was_running)
+            }
+        }
+    }
+
     fn runtime(state: &RuntimeManagerState, fixture: &TreeFixture, mode: &str) {
         let job = OwnedJob::new().unwrap();
         let mut command = fixture.command(mode);
@@ -1930,10 +1500,10 @@ mod stop_proof_tests {
         let fixture = TreeFixture::new();
         runtime(&state, &fixture, "runtime-clean");
         fixture.wait_for("grandchild.pid");
-        assert_eq!(stop_runtime_for_update(&state, 100, Duration::from_secs(10)), Ok(true));
+        assert_eq!(stop(&state, 100, Duration::from_secs(10)), Ok(true));
         assert!(state.process.lock().unwrap().is_none() && state.lingering.lock().unwrap().is_none());
         assert!(state.require_no_lingering_runtime().is_ok());
-        assert_eq!(stop_runtime_for_update(&state, 100, Duration::from_secs(1)), Ok(false));
+        assert_eq!(stop(&state, 100, Duration::from_secs(1)), Ok(false));
     }
 
     #[test]
@@ -1942,13 +1512,13 @@ mod stop_proof_tests {
         let fixture = TreeFixture::new();
         runtime(&state, &fixture, "runtime-lingering");
         fixture.wait_for("grandchild.pid");
-        let unproved = stop_runtime_for_update(&state, 100, Duration::from_millis(500));
+        let unproved = stop(&state, 100, Duration::from_millis(500));
         assert!(unproved.unwrap_err().contains("still running"));
-        // Busy, not stopped: status says so, a start and an update launch are refused.
+        // Busy, not stopped: status says so, and a start is refused.
         let status = inspect_runtime_status(&state).unwrap();
         assert!(status.running && status.status == "stopping", "{}", status.message);
         assert!(state.require_no_lingering_runtime().is_err());
-        assert!(stop_runtime_for_update(&state, 100, Duration::from_millis(100)).is_err());
+        assert!(stop(&state, 100, Duration::from_millis(100)).is_err());
         fixture.release();
         let deadline = Instant::now() + Duration::from_secs(10);
         while state.require_no_lingering_runtime().is_err() {
@@ -1965,43 +1535,9 @@ mod stop_proof_tests {
         let fixture = TreeFixture::new();
         runtime(&state, &fixture, "runtime-deaf");
         let started = Instant::now();
-        assert_eq!(stop_runtime_for_update(&state, 10, Duration::from_secs(10)), Ok(true));
+        assert_eq!(stop(&state, 10, Duration::from_secs(10)), Ok(true));
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(state.lingering.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn an_update_launch_with_an_unproved_stop_restarts_nothing_and_launches_nothing() {
-        // The real stop under the real lifecycle, with a fake update service that must not be reached.
-        struct Host<'a>(&'a RuntimeManagerState, std::sync::Mutex<Vec<&'static str>>);
-        impl LaunchHost for Host<'_> {
-            fn update_status(&self) -> Result<serde_json::Value, String> {
-                Ok(serde_json::json!({"status": {"launchAvailable": true, "updateInProgress": false,
-                    "recoveryPending": false, "launchReady": {"version": "0.2.0"}}}))
-            }
-            fn stop_playback(&self) {}
-            fn stop_runtime(&self) -> Result<bool, String> {
-                stop_runtime_for_update(self.0, 100, Duration::from_millis(500))
-            }
-            fn launch(&self, _token: &str) -> LaunchLine {
-                self.1.lock().unwrap().push("launch");
-                LaunchLine::NoAnswer("must not be reached")
-            }
-            fn restart_runtime(&self) -> Result<(), String> {
-                self.1.lock().unwrap().push("restart");
-                Ok(())
-            }
-        }
-        let state = RuntimeManagerState::new(None);
-        let fixture = TreeFixture::new();
-        runtime(&state, &fixture, "runtime-lingering");
-        fixture.wait_for("grandchild.pid");
-        let host = Host(&state, std::sync::Mutex::new(Vec::new()));
-        let answer = state.lifecycle.launch(&host, "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde");
-        assert_eq!(answer["code"], "runtime_stop_unproved");
-        assert!(host.1.lock().unwrap().is_empty());
-        assert!(state.require_no_lingering_runtime().is_err(), "the busy ownership is kept");
-        fixture.release();
     }
 }
 
@@ -2054,8 +1590,8 @@ mod runtime_reader_tests {
     }
 
     #[test]
-    fn stderr_survives_invalid_text_and_never_carries_a_pairing_key() {
-        let read = lines(b"Traceback (most recent call last)\nbad \xff\nqronos://pair?k=SECRET\n", true);
+    fn stderr_survives_invalid_text() {
+        let read = lines(b"Traceback (most recent call last)\nbad \xff\n", true);
         let events: Vec<RuntimeEvent> = read
             .into_iter()
             .filter_map(|line| match line {
@@ -2066,7 +1602,6 @@ mod runtime_reader_tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "runtime_error");
         assert_eq!(events[1].message, "bad \u{FFFD}");
-        assert!(events.iter().all(|event| !event.message.contains("SECRET")));
     }
 }
 
@@ -2294,159 +1829,5 @@ mod screen_decision_tests {
         assert!(reject_typed_only_action(" qronos.look_at_screen ").is_err());
         assert!(reject_typed_only_action("qronos.stop_response").is_ok());
         assert!(reject_typed_only_action("qronos.file_action_decision").is_ok());
-    }
-}
-
-#[cfg(test)]
-mod pairing_route_tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    const NONCE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const OTHER: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const URI: &str = "qronos://pair?v=1&h=192.168.1.20&p=47711&d=0123456789abcdef&k=KEY&e=1";
-
-    fn main_only() -> Vec<String> {
-        vec!["main".to_string()]
-    }
-
-    fn event(event_type: &str, message: &str) -> RuntimeEvent {
-        RuntimeEvent {
-            event_type: event_type.to_string(),
-            status: "ready".to_string(),
-            message: message.to_string(),
-        }
-    }
-
-    fn pairing_message(nonce: &str, uri: &str) -> String {
-        serde_json::json!({ "requestNonce": nonce, "uri": uri }).to_string()
-    }
-
-    #[test]
-    fn the_reply_goes_only_to_the_window_that_asked_and_only_once() {
-        let mut pairings = PendingPairings::default();
-        let now = Instant::now();
-        pairings.begin(NONCE, "main", &main_only(), now).expect("main may pair");
-        assert_eq!(pairings.take(OTHER, now), None, "another nonce finds nothing");
-        assert_eq!(pairings.take(NONCE, now).as_deref(), Some("main"));
-        assert_eq!(pairings.take(NONCE, now), None, "a replayed reply finds nothing");
-    }
-
-    #[test]
-    fn only_windows_granted_the_default_capability_may_pair() {
-        let mut pairings = PendingPairings::default();
-        let now = Instant::now();
-        assert!(pairings.begin(NONCE, "settings-popup", &main_only(), now).is_err());
-        assert!(pairings.begin(NONCE, "main", &[], now).is_err(), "no capability, no pairing");
-        assert_eq!(pairing_windows(), vec!["main".to_string()], "read from capabilities/default.json");
-    }
-
-    #[test]
-    fn malformed_or_duplicate_nonces_are_refused() {
-        let mut pairings = PendingPairings::default();
-        let now = Instant::now();
-        for bad in ["short", "has space here!!!!!", &"x".repeat(65)] {
-            assert!(pairings.begin(bad, "main", &main_only(), now).is_err(), "{bad}");
-        }
-        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
-        assert!(pairings.begin(NONCE, "main", &main_only(), now).is_err());
-    }
-
-    #[test]
-    fn a_new_request_replaces_the_window_s_earlier_one() {
-        let mut pairings = PendingPairings::default();
-        let now = Instant::now();
-        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
-        pairings.begin(OTHER, "main", &main_only(), now).unwrap();
-        assert_eq!(pairings.take(NONCE, now), None);
-        assert_eq!(pairings.take(OTHER, now).as_deref(), Some("main"));
-    }
-
-    #[test]
-    fn late_cancelled_and_cleared_requests_are_not_answered() {
-        let mut pairings = PendingPairings::default();
-        let now = Instant::now();
-        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
-        let late = now + Duration::from_secs(PAIRING_PENDING_SECONDS + 1);
-        assert_eq!(pairings.take(NONCE, late), None);
-
-        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
-        pairings.cancel_window("main");
-        assert_eq!(pairings.take(NONCE, now), None);
-
-        pairings.begin(NONCE, "main", &main_only(), now).unwrap();
-        pairings.clear();
-        assert_eq!(pairings.take(NONCE, now), None);
-    }
-
-    #[test]
-    fn pending_requests_are_bounded() {
-        let mut pairings = PendingPairings::default();
-        let now = Instant::now();
-        let windows: Vec<String> = (0..=MAX_PENDING_PAIRINGS).map(|i| format!("w{i}")).collect();
-        for (i, window) in windows.iter().enumerate().take(MAX_PENDING_PAIRINGS) {
-            pairings.begin(&format!("{NONCE}{i:02}"), window, &windows, now).unwrap();
-        }
-        let extra = format!("{NONCE}zz");
-        assert!(pairings.begin(&extra, &windows[MAX_PENDING_PAIRINGS], &windows, now).is_err());
-    }
-
-    #[test]
-    fn a_pairing_reply_is_never_broadcast() {
-        let routed = route_runtime_event(&event(LINK_PAIRING_EVENT_TYPE, &pairing_message(NONCE, URI)));
-        assert_eq!(
-            routed,
-            EventRoute::Pairing(PairingDelivery { request_nonce: NONCE.to_string(), uri: URI.to_string() })
-        );
-        for message in [
-            "not json".to_string(),
-            pairing_message("short", URI),
-            pairing_message(NONCE, "https://example.org/?k=1"),
-            pairing_message(NONCE, &format!("{URI}{}", "x".repeat(400))),
-            serde_json::json!({ "uri": URI }).to_string(),
-        ] {
-            assert_eq!(route_runtime_event(&event(LINK_PAIRING_EVENT_TYPE, &message)), EventRoute::Drop, "{message}");
-        }
-    }
-
-    #[test]
-    fn a_pairing_key_in_any_other_event_or_log_line_is_dropped() {
-        assert_eq!(route_runtime_event(&event("runtime_log", URI)), EventRoute::Drop);
-        assert_eq!(route_runtime_event(&event("link_status", &format!("{{\"x\":\"{URI}\"}}"))), EventRoute::Drop);
-        assert_eq!(route_runtime_event(&event("link_status", "{\"running\":true}")), EventRoute::Broadcast);
-    }
-
-    #[test]
-    fn a_failed_pairing_request_ends_pending_requests() {
-        assert!(ends_pairing_requests(&event(
-            "link_error",
-            "{\"action\":\"qronos.link_pair_open\",\"code\":\"not_running\"}"
-        )));
-        assert!(!ends_pairing_requests(&event(
-            "link_error",
-            "{\"action\":\"qronos.link_revoke\",\"code\":\"unknown_device\"}"
-        )));
-    }
-
-    #[test]
-    fn a_runtime_that_stopped_or_is_being_restarted_ends_pending_requests() {
-        assert!(ends_runtime_session(&event("runtime_stopping", "restarting")));
-        assert!(!ends_runtime_session(&event("supervisor_state", "running")));
-        assert!(!ends_runtime_session(&event("runtime_pong", "")));
-    }
-
-    #[test]
-    fn the_generic_action_path_cannot_open_pairing() {
-        assert!(reject_typed_only_action(LINK_PAIR_OPEN_ACTION).is_err());
-        assert!(reject_typed_only_action(" qronos.link_pair_open ").is_err());
-        assert!(reject_typed_only_action(LINK_PAIR_CANCEL_ACTION).is_ok());
-    }
-
-    #[test]
-    fn device_names_follow_the_runtime_s_rules() {
-        assert_eq!(clean_pairing_name("  گوشی\u{200C}ها ").unwrap(), "گوشی\u{200C}ها");
-        assert!(clean_pairing_name(&"x".repeat(41)).is_err());
-        assert!(clean_pairing_name("evil\u{202E}gpj").is_err());
-        assert!(clean_pairing_name("a\u{7}b").is_err());
     }
 }
