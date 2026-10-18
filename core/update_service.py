@@ -72,8 +72,8 @@ Data
     Forward migrations belong to the new build's own reviewed store code. An
     upgrade that would change the format of a store this updater cannot keep a
     copy of is refused with ``unsupported_migration``: SQLite stores (never
-    copied raw), security registries (paired devices, permissions: an old copy
-    would undo revocations) and stores moved out of the data root by an
+    copied raw), security registries (permissions: an old copy would undo a
+    tightened permission) and stores moved out of the data root by an
     environment variable. For the others a bounded, hashed snapshot of the
     exact file (or the recorded fact that it did not exist) is kept before the
     installer starts. A signed rollback that cannot read today's data is
@@ -1144,8 +1144,8 @@ class UpdateService:
             if unsupported:
                 raise UpdateError("unsupported_migration",
                                   f"This upgrade changes the format of {', '.join(unsupported)}, which the updater "
-                                  "cannot keep a safe copy of (a database, a security registry such as paired "
-                                  "devices or permissions, or a store moved out of the data folder), so rolling "
+                                  "cannot keep a safe copy of (a database, a security registry such as "
+                                  "permissions, or a store moved out of the data folder), so rolling "
                                   "back later would be impossible or unsafe. It is refused.")
             snapshot_stores = changed
         return Offer(update.version, self.running_version, update.kind, update.key_id, keys[update.key_id].owner,

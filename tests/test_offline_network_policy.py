@@ -131,20 +131,6 @@ NETWORK_EXCEPTIONS = {
         {"dynamic-import"},
         "Frozen entry imports only a value of its fixed SERVICES map; proven local below.",
     ),
-    # Root-approved 2026-10-08 for the Link worker's Layer 2 dialler.
-    "core.link_tunnel": (
-        {"socket", "ssl"},
-        "Opt-in outbound Device Link relay dialler to a user-configured relay; carries only "
-        "end-to-end TLS-PSK link traffic; no content fetch or inference.",
-    ),
-    # Root-reviewed 2026-10-16 (A101): part of the existing default-off paired Device Link relay boundary, not a
-    # new internet grant.
-    "core.link_runtime": (
-        {"ssl"},
-        "Relay CA parsing only: ssl.create_default_context(cadata=<bounded certificate-only PEM text>) and "
-        "cert_store_stats() in _certificate_pem; no socket, client, requests or dial in this module "
-        "(dialling stays in core.link_tunnel).",
-    ),
 }
 # Approved exceptions whose module has not landed yet. Remove once it exists.
 PENDING_EXCEPTIONS: set[str] = set()
@@ -346,7 +332,7 @@ def test_every_network_exception_is_exact_and_justified():
         assert len(why) > 30, module
     # Device Link is the only internet exception; the sidecars are loopback-only.
     assert {m for m, (f, _) in NETWORK_EXCEPTIONS.items() if "ssl" in f} == {
-        "core.link_client", "core.link_server", "core.link_transport", "core.link_tunnel", "core.link_runtime",
+        "core.link_client", "core.link_server", "core.link_transport",
     }
     assert PENDING_EXCEPTIONS <= set(NETWORK_EXCEPTIONS)
 
@@ -494,48 +480,34 @@ def _fake_product(tmp_path: Path, modules: dict[str, str]) -> Path:
     return tmp_path
 
 
-def test_the_relay_dialler_uses_exactly_its_grant_and_nothing_added_to_it_passes():
-    root = Path(__file__).resolve().parent.parent
-    source = (root / "core" / "link_tunnel.py").read_text(encoding="utf-8")
-    allowed = NETWORK_EXCEPTIONS["core.link_tunnel"][0]
-    assert set(network_findings(source)) == allowed == {"socket", "ssl"}
-    # The same module with one more path in it is no longer covered by its grant.
-    for addition, family in (
-        ("import urllib.request\n", "urllib.request"),
-        ("import asyncio\nasync def f():\n    await asyncio.open_connection('relay', 443)\n", "asyncio-network"),
-        ("import subprocess\nsubprocess.run(['curl', 'https://relay.example'])\n", "subprocess-network"),
-    ):
-        assert set(network_findings(source + "\n" + addition)) - allowed == {family}
-
-
 def test_an_exception_cannot_widen_to_another_family(tmp_path):
-    root = _fake_product(tmp_path, {"core.link_tunnel": "import socket\nimport ssl\nimport requests\n"})
-    violations = _inventory_violations(root, {"core.link_tunnel": NETWORK_EXCEPTIONS["core.link_tunnel"]}, set())
-    assert violations == ["core.link_tunnel: undeclared requests via ['import requests']"]
+    root = _fake_product(tmp_path, {"core.link_client": "import socket\nimport ssl\nimport requests\n"})
+    violations = _inventory_violations(root, {"core.link_client": NETWORK_EXCEPTIONS["core.link_client"]}, set())
+    assert violations == ["core.link_client: undeclared requests via ['import requests']"]
 
 
 def test_an_exception_for_one_module_does_not_cover_a_sibling(tmp_path):
     root = _fake_product(tmp_path, {
-        "core.link_tunnel": "import socket\nimport ssl\n",
-        "core.link_tunnel_helper": "import socket\n",
+        "core.link_client": "import socket\nimport ssl\n",
+        "core.link_client_helper": "import socket\n",
     })
-    violations = _inventory_violations(root, {"core.link_tunnel": NETWORK_EXCEPTIONS["core.link_tunnel"]}, set())
-    assert violations == ["core.link_tunnel_helper: undeclared socket via ['import socket']"]
+    violations = _inventory_violations(root, {"core.link_client": NETWORK_EXCEPTIONS["core.link_client"]}, set())
+    assert violations == ["core.link_client_helper: undeclared socket via ['import socket']"]
 
 
 def test_stale_and_missing_exceptions_are_reported(tmp_path):
-    root = _fake_product(tmp_path, {"core.link_tunnel": "import socket\n"})
+    root = _fake_product(tmp_path, {"core.link_client": "import socket\n"})
     exceptions = {
-        "core.link_tunnel": NETWORK_EXCEPTIONS["core.link_tunnel"],
+        "core.link_client": NETWORK_EXCEPTIONS["core.link_client"],
         "core.gone": ({"socket"}, "x" * 40),
     }
     assert _inventory_violations(root, exceptions, set()) == [
-        "core.link_tunnel: stale grant 'ssl' (module no longer uses it)",
+        "core.link_client: stale grant 'ssl' (module no longer uses it)",
         "core.gone: exception for a module that does not exist",
     ]
     # Once a pending module lands, the pending marker must be removed.
-    assert "core.link_tunnel: has landed; remove it from PENDING_EXCEPTIONS" in _inventory_violations(
-        root, {"core.link_tunnel": ({"socket"}, "x" * 40)}, {"core.link_tunnel"},
+    assert "core.link_client: has landed; remove it from PENDING_EXCEPTIONS" in _inventory_violations(
+        root, {"core.link_client": ({"socket"}, "x" * 40)}, {"core.link_client"},
     )
 
 

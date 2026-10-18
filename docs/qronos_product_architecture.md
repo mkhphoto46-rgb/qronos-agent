@@ -305,13 +305,12 @@ requires the layered gates above and must be measured before production release.
 Current implementation of layers 3 and 4 (core/code_policy.py): deterministic
 Persian/English patterns, not a semantic classifier. The input check runs at the
 start of `Orchestrator.execute_plan` (desktop text and voice turns, the approved
-screen question, queued conversations) and in the paired phone's `remote_chat`,
-before any resource admission or model call. The output check replaces a
+screen question, queued conversations), before any resource admission or model
+call. The output check replaces a
 generated answer that holds a fenced code block, two consecutive code-like lines
-or one machine-changing command before it is recorded, shown, sent or spoken. The
+or one machine-changing command before it is recorded, shown or spoken. The
 decision and its audit record (category, channel, stage, rule and length, never
-the text) come from `security.gate` and the permission engine. Internal data
-calls that use `answer_chat_only` directly are not passed through it. Its
+the text) come from `security.gate` and the permission engine. Its
 red-team measurement (layer 5)
 is still owed.
 

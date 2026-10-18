@@ -75,7 +75,6 @@ def test_a_missing_service_module_is_unavailable_not_a_crash():
 @pytest.mark.parametrize("event_type, check", [
     ("runtime_ready", lambda context: {}),
     ("supervisor_state", lambda context: {}),
-    ("link_pairing", lambda context: {}),
     ("Update", lambda context: {}),
     ("update_status", "core.update_service"),
     ("update_status", None),

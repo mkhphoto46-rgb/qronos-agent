@@ -1,5 +1,0 @@
-# Gradle wrapper: the scripts keep their platform line endings and the jar its pinned bytes
-# (gradle-wrapper.jar sha256 3b8a25775a69158b5ad2b1d17a80a88dc7b40a352a73eb27d06c612a7ce68e98, official 9.8.1).
-gradlew text eol=lf
-gradlew.bat text eol=crlf
-gradle/wrapper/gradle-wrapper.jar binary

@@ -117,8 +117,7 @@ desktop (Tauri start_runtime)
 2. **Supervisor.** The supervisor owns the bridge's pipes. The first stdin
    line is the bootstrap, and then the desktop's lines are relayed. Relayed
    content is not parsed, logged or echoed in any event, apart from
-   recognising `{"command":"shutdown"}`. Pairing secrets are therefore still
-   routed only by the desktop's existing targeted pairing delivery.
+   recognising `{"command":"shutdown"}`.
 2a. **Bounds and back-pressure.** The control loop never waits on a pipe.
    - **Output.** One writer thread writes everything the desktop reads,
      strictly in arrival order, from one queue with three kinds of entry:
@@ -166,8 +165,7 @@ desktop (Tauri start_runtime)
      URI is dropped and counted, and invalid UTF-8 is replaced.
    - **Desktop readers** (`mod.rs`): read bounded byte lines. On stdout, an
      invalid, oversized or cut-off line is skipped, and reading and routing
-     go on. On stderr, text is decoded lossily and the pairing Drop rule
-     applies.
+     go on. On stderr, text is decoded lossily.
 3. **Health.** The bridge's peer pid is checked first, then the HMAC
    handshake, then heartbeats (every 5 s, timeout 45 s). A bridge that
    exits, closes its channel or stops beating is stopped (exact child only)
@@ -183,7 +181,7 @@ desktop (Tauri start_runtime)
 5. **Events to the desktop.** `supervisor_state` reports `starting`,
    `running`, `restarting`, `stopping`, `stopped` or `degraded`.
    `runtime_stopping` is sent when a bridge ended without being asked; the
-   desktop then clears pending pairing requests and screen prompts.
+   desktop then clears pending screen prompts.
    `runtime_error` is sent for commands that were not delivered (while
    restarting or degraded, or when the queue is full) and on giving up.
    Commands are never held for a later bridge, and nothing is retried.
@@ -341,8 +339,7 @@ point until independent acceptance.
   part-way write being reported as unconfirmed. One end-to-end test runs
   `python -m core.supervisor --desktop` with the real bridge on throwaway
   state, through ping, pong and shutdown.
-- Rust (`backend.rs`, `mod.rs`): the closed `supervisor --desktop` command,
-  and `runtime_stopping` ending pending pairing requests.
+- Rust (`backend.rs`, `mod.rs`): the closed `supervisor --desktop` command.
 
 Test children start the base interpreter directly. A venv `python.exe` is a
 launcher whose child is the real process, and the peer-id check correctly

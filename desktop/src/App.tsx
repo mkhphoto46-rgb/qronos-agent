@@ -38,15 +38,8 @@ import {
 } from "./screenApproval";
 import {
   refreshSettings,
-  setSetting,
   useSettingsStore,
 } from "./settingsStore";
-import {
-  DeviceLinkController,
-  applyDeviceLinkEvent,
-  bindPairingDelivery,
-  createDeviceLinkController,
-} from "./deviceLink";
 
 import "./App.css";
 
@@ -329,51 +322,6 @@ function App() {
     voiceRetryPendingRef.current = false;
     setVoiceNotice(next);
   }, []);
-
-  // The Device Link page: one controller, fed by link_* runtime events.
-  const deviceLinkRef = useRef<DeviceLinkController | null>(null);
-
-  if (deviceLinkRef.current === null) {
-    deviceLinkRef.current = createDeviceLinkController(
-      invoke,
-      async (enabled) => {
-        await setSetting("link.enabled", enabled);
-        const status = await invoke<{ running: boolean }>("get_runtime_status");
-        if (status.running) {
-          await invoke("send_runtime_action", { actionId: "qronos.settings_reload" });
-        }
-      },
-      (error) => {
-        console.error("[Qronos Device Link] request not confirmed:", error);
-      },
-      undefined, // random: the controller's default
-      undefined, // clock: the controller's default
-      // The global "access from outside" opt-in, through the same local settings save and reload.
-      async (enabled) => {
-        await setSetting("link.remote_access_enabled", enabled);
-        const status = await invoke<{ running: boolean }>("get_runtime_status");
-        if (status.running) {
-          await invoke("send_runtime_action", { actionId: "qronos.settings_reload" });
-        }
-      },
-    );
-  }
-
-  const deviceLink = deviceLinkRef.current;
-
-  useEffect(() => {
-    // Pairing replies come only to this window, on their own event.
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    void bindPairingDelivery(listen, deviceLink).then((stop) => {
-      if (disposed) stop();
-      else unlisten = stop;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [deviceLink]);
 
   const workflowApprovalView = useSyncExternalStore(
     workflowApproval.subscribe,
@@ -1477,10 +1425,7 @@ function App() {
               event.payload.eventType !==
                 "voice_audio_spectrum" &&
               event.payload.eventType !==
-                "microphone_input_level" &&
-              // Holds a new phone's key: never logged.
-              event.payload.eventType !==
-                "link_pairing"
+                "microphone_input_level"
             ) {
               console.info(
                 "[Qronos Runtime]",
@@ -1496,15 +1441,6 @@ function App() {
             if (screenApprovalRef.current !== null) {
               applyScreenApprovalEvent(
                 screenApprovalRef.current,
-                event.payload.eventType,
-                event.payload.message,
-              );
-            }
-
-            // Device Link status, devices, pairing code and refusals.
-            if (deviceLinkRef.current !== null) {
-              applyDeviceLinkEvent(
-                deviceLinkRef.current,
                 event.payload.eventType,
                 event.payload.message,
               );
@@ -3058,7 +2994,6 @@ function App() {
         onOpenPermissions={
           openPermissions
         }
-        deviceLink={deviceLink}
       />
 
       <nav

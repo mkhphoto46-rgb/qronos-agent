@@ -178,9 +178,9 @@ requests rather than merged release code.
   Browser research and saved-link navigation are currently unavailable.
 - Implement and validate the Telegram exact-contact/latest-file and printer
   workflows described in the computer-control roadmap.
-- Complete Device Link's internet transport, relay operations and native phone
-  application. The relay has not been deployed; local pairing components do
-  not establish completed remote mobile access.
+- Wire Device Link into the application. Its local modules exist but are not
+  connected to the runtime or the desktop; there is no internet transport, relay
+  or phone application.
 - Complete later Device Hub and additional application adapters, with explicit
   capability limits and live acceptance for each supported workflow.
 

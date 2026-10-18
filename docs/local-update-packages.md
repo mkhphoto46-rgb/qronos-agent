@@ -350,8 +350,8 @@ Data rules for snapshots:
 - An upgrade that changes the format of any of the following is refused
   (`unsupported_migration`):
   - a SQLite store;
-  - a security registry (paired devices, permissions), because an old copy
-    would undo a revocation or a tightening;
+  - a security registry (permissions), because an old copy would undo a
+    tightening;
   - a store moved out of the data folder by an environment variable.
 - A store that did not exist before the upgrade is recorded as absent. A
   rollback that would have to delete today's file is refused.

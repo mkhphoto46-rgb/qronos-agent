@@ -39,8 +39,8 @@ This program will not transfer any information to other networked systems unless
 user or the person installing or operating it.
 
 Qronos Core runs on the user's PC without an internet connection. Features that send data off the PC run only
-when the user turns them on or asks for them, and can be turned off: `[OWNER: list each such feature, for
-example pairing a phone through Device Link, and what it sends]`. Updates are installed only from packages the
+when the user turns them on or asks for them, and can be turned off: `[OWNER: list each such feature and
+what it sends]`. Updates are installed only from packages the
 user provides and that carry the owner's update signature.
 
 ## Verifying a download

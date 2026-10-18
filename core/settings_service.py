@@ -436,22 +436,4 @@ DEFAULT_DEFINITIONS: tuple[SettingDefinition, ...] = (
             "what is already stored."
         ),
     ),
-    SettingDefinition(
-        key="link.enabled",
-        default=False,
-        description=(
-            "Let paired phones reach Qronos on this network. Off until "
-            "the user turns it on."
-        ),
-    ),
-    SettingDefinition(
-        key="link.remote_access_enabled",
-        default=False,
-        description=(
-            "Let paired phones that were each given remote access reach "
-            "Qronos from outside this network through the configured relay. "
-            "Off until the user turns it on at this PC; it has no effect "
-            "while the local link is off. Saving a relay never turns it on."
-        ),
-    ),
 )

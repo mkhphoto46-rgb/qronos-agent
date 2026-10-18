@@ -371,7 +371,7 @@ def test_a_rollback_naming_stores_this_build_does_not_have_is_refused(world):
 
 
 @pytest.mark.parametrize("store_id", ["queue_state", "conversation_history", "approval_secret",
-                                      "link_devices", "permissions"])  # M-2: security registries too
+                                      "permissions"])  # M-2: security registries too
 def test_an_upgrade_changing_a_store_that_cannot_be_kept_is_refused(world, store_id):
     with pytest.raises(UpdateError) as refused:
         world.service().verify(*world.release("0.2.0", dataStores=stores(**{store_id: 2})))

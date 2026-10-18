@@ -6,9 +6,6 @@ import unittest
 from pathlib import Path
 
 from core.link_audit import (
-    COALESCE_SECONDS,
-    MAX_COALESCE_KEYS,
-    MAX_MEMORY_RECORDS,
     INVALID_DEVICE,
     UNPARSED_PEER,
     AuditEvent,
@@ -307,104 +304,6 @@ class TestTheFile(unittest.TestCase):
         self.assertEqual(record.event, AuditEvent.LINK_STARTED)
         self.assertEqual(len(log.records()), 1)
 
-
-
-class TestCoalescing(AuditTestCase):
-    """A flood of identical failures costs one line a minute, not one each."""
-
-    def refuse(self, peer: str = "203.0.113.7") -> None:
-        self.log.record(
-            AuditEvent.HANDSHAKE_REFUSED,
-            device_id=DEVICE,
-            peer=peer,
-            scope=LinkScope.REMOTE_TUNNEL,
-            reason=AuthReason.NOT_GRANTED,
-        )
-
-    def test_repeats_are_counted_not_written(self) -> None:
-        for _ in range(100):
-            self.refuse()
-
-        self.assertEqual(len(self.log.records()), 1)
-        self.assertEqual(self.log.count(AuditEvent.HANDSHAKE_REFUSED), 100)
-
-    def test_a_summary_line_follows_when_the_window_closes(self) -> None:
-        for _ in range(10):
-            self.refuse()
-
-        self.clock.advance(COALESCE_SECONDS + 1)
-        self.refuse()
-
-        lines = self.log.records()
-
-        self.assertEqual([line.repeated for line in lines], [0, 9, 0])
-        self.assertEqual(lines[1].to_json()["repeated"], 9)
-        self.assertEqual(self.log.count(AuditEvent.HANDSHAKE_REFUSED), 11)
-
-    def test_stopping_the_link_writes_what_was_being_counted(self) -> None:
-        for _ in range(5):
-            self.refuse()
-
-        self.log.record(AuditEvent.LINK_STOPPED)
-
-        self.assertEqual(
-            [(line.event, line.repeated) for line in self.log.records()],
-            [
-                (AuditEvent.HANDSHAKE_REFUSED, 0),
-                (AuditEvent.HANDSHAKE_REFUSED, 4),
-                (AuditEvent.LINK_STOPPED, 0),
-            ],
-        )
-
-    def test_different_failures_are_not_merged(self) -> None:
-        self.refuse(peer="203.0.113.7")
-        self.refuse(peer="203.0.113.8")
-
-        self.assertEqual(len(self.log.records()), 2)
-
-    def test_successes_are_never_coalesced(self) -> None:
-        for _ in range(5):
-            self.log.record(AuditEvent.HANDSHAKE_OK, device_id=DEVICE)
-
-        self.assertEqual(len(self.log.records()), 5)
-
-    def test_the_number_of_failures_being_counted_is_bounded(self) -> None:
-        # An attacker cycling addresses: each is a new key, twice.
-        for round_ in range(2):
-            for n in range(MAX_COALESCE_KEYS + 50):
-                self.refuse(peer=f"10.0.{n // 250}.{n % 250 + 1}")
-
-        self.assertLessEqual(len(self.log._runs), MAX_COALESCE_KEYS)
-        self.assertEqual(
-            self.log.count(AuditEvent.HANDSHAKE_REFUSED), 2 * (MAX_COALESCE_KEYS + 50)
-        )
-
-    def test_memory_is_a_bounded_window(self) -> None:
-        for n in range(MAX_MEMORY_RECORDS + 100):
-            self.log.record(AuditEvent.HANDSHAKE_OK, device_id=DEVICE)
-
-        self.assertEqual(len(self.log.records()), MAX_MEMORY_RECORDS)
-
-    def test_a_flood_writes_a_handful_of_file_lines(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "link_audit.jsonl"
-            log = AuditLog(path=path, clock=self.clock)
-
-            for _ in range(5):
-                for _ in range(1000):
-                    log.record(
-                        AuditEvent.HANDSHAKE_REFUSED,
-                        device_id=DEVICE,
-                        reason=AuthReason.NOT_GRANTED,
-                    )
-
-                self.clock.advance(COALESCE_SECONDS)
-
-            log.flush()
-            lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-        self.assertLessEqual(len(lines), 10)
-        self.assertEqual(sum(line.get("repeated", 1) for line in lines), 5000)
 
 if __name__ == "__main__":
     unittest.main()

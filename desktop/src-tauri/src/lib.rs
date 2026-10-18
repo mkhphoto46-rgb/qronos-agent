@@ -764,7 +764,6 @@ pub fn run() {
             runtime::ping_runtime,
             runtime::send_runtime_action,
             runtime::look_at_screen,
-            runtime::link_pair_open,
             runtime::library_command,
             runtime::memory_command,
             runtime::settings_command,

@@ -25,11 +25,10 @@ changing such a layout without bumping the version here fails review. SQLite
 stores have no snapshot: they are never copied raw, so an upgrade that changes
 their format is refused by the updater (``unsupported_migration``).
 
-Security registries (``sensitive``: paired devices with their shared secrets, the
-permission policy) are never snapshotted either. Restoring an old copy would bring
-back a device the person revoked or a permission they tightened, so an upgrade
-that changes their format is refused rather than made "rollback-able" by a blind
-restore.
+Security registries (``sensitive``: the permission policy) are never snapshotted
+either. Restoring an old copy would bring back a permission the person tightened,
+so an upgrade that changes their format is refused rather than made
+"rollback-able" by a blind restore.
 
 A store whose file can be moved elsewhere by an environment variable
 (``relocation_env``) is snapshotted only while that variable is unset, so the
@@ -66,7 +65,6 @@ STORES: tuple[StoreSpec, ...] = (
               relocation_env=("QRONOS_SETTINGS_PATH",)),
     StoreSpec("conversations", 1, "core.conversation_store:SCHEMA_VERSION", "conversations.json", "Conversations"),
     StoreSpec("permissions", 1, "core.permission_control:SCHEMA_VERSION", None, "Permissions", sensitive=True),
-    StoreSpec("link_devices", 1, "core.link_devices:SCHEMA_VERSION", None, "Paired devices", sensitive=True),
     StoreSpec("artifact_ownership", 1, "core.artifact_ownership:REGISTRY_FORMAT_VERSION",
               "artifact_ownership.json", "Library file ownership"),
     StoreSpec("undo_journal", 1, "core.undo_journal:SCHEMA_VERSION", "undo_journal.jsonl", "Undo journal"),
@@ -79,7 +77,6 @@ STORES: tuple[StoreSpec, ...] = (
     StoreSpec("user_memory", 1, "core.user_memory:MEMORY_SCHEMA_VERSION", None, "Memory (SQLite)",
               "9687e876cd70d9ecd38a1556eed8c14f9dd0fcecbdcf053aff174961e2285c49"),
     StoreSpec("app_workflow_journal", 1, "core.app_workflow:_JOURNAL_VERSION", None, "App workflow journal"),
-    StoreSpec("security_monitor", 1, "core.security_monitor:STATE_VERSION", None, "Security monitor state"),
     StoreSpec("conversation_history", 1, "unversioned:core.conversation_history", None,
               "Conversation history (SQLite)", "5807990dd2a3865aa49668d6f2af095f8170387dd18536f4e2bd88bfee6225ec"),
     StoreSpec("artifact_registry", 1, "unversioned:core.artifact_registry", None, "Library index (SQLite)",

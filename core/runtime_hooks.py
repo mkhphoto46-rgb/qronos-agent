@@ -4,7 +4,7 @@ Bounded startup status hooks for the runtime bridge.
 A few services owned by other parts of Qronos need to report a status once
 the bridge is ready. The first is the update service (A8, Installer-owned),
 which reports whether a verified update is waiting. They must never hold up
-or break chat, wake or Device Link, whatever state they are in — including
+or break chat or wake, whatever state they are in — including
 an unconfigured update trust store.
 
 So a hook here is a closed record — an event type and a function defined in
@@ -52,7 +52,7 @@ _EVENT_TYPE = re.compile(r"^[a-z][a-z_]{2,39}$")
 #: Event types a hook may never use: they mean something to the desktop already.
 _RESERVED = frozenset({
     "runtime_ready", "runtime_stopping", "runtime_error", "runtime_warning", "runtime_log",
-    "runtime_pong", "supervisor_state", "link_pairing",
+    "runtime_pong", "supervisor_state",
 })
 
 Emit = Callable[[str, str, str], None]

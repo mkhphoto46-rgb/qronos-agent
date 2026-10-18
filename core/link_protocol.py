@@ -26,7 +26,6 @@ network, no threads and no timers.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Protocol
@@ -53,13 +52,6 @@ FIELD_ERROR = "error"
 FIELD_CODE = "code"
 FIELD_TOPIC = "topic"
 FIELD_DATA = "data"
-
-# Optional on a request. Names one command across retries, so the PC can tell a
-# retry from a second command; see ``core/link_commands.py``. Absent from every
-# frame that does not set it, which keeps Layer 1 frames byte-for-byte as they
-# were.
-FIELD_COMMAND_ID = "cid"
-COMMAND_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 class FrameKind(Enum):
@@ -117,20 +109,14 @@ class Request:
     id: int
     op: str
     params: dict[str, Any] = field(default_factory=dict)
-    command_id: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             FIELD_KIND: FrameKind.REQUEST.value,
             FIELD_ID: self.id,
             FIELD_OP: self.op,
             FIELD_PARAMS: dict(self.params),
         }
-
-        if self.command_id is not None:
-            payload[FIELD_COMMAND_ID] = self.command_id
-
-        return payload
 
 
 @dataclass(frozen=True)
@@ -356,23 +342,10 @@ def _parse_request(payload: dict[str, Any]) -> Request:
             f"{FIELD_PARAMS} is {type(params).__name__}",
         )
 
-    command_id = payload.get(FIELD_COMMAND_ID)
-
-    if command_id is not None and not (
-        isinstance(command_id, str) and COMMAND_ID_PATTERN.match(command_id)
-    ):
-        # Checked here rather than where it is used, so a malformed id never
-        # reaches the ledger as a dictionary key or anything else.
-        raise ProtocolError(
-            ProtocolFault.BAD_FIELD_TYPE,
-            f"{FIELD_COMMAND_ID} must be 32 lowercase hex characters",
-        )
-
     return Request(
         id=_require(payload, FIELD_ID, int),
         op=_require(payload, FIELD_OP, str),
         params=params,
-        command_id=command_id,
     )
 
 

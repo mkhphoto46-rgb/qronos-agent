@@ -3,7 +3,7 @@ generated answer containing code is never recorded, shown or spoken. Read-only c
 (docs/qronos_voice_output.md; security/permissions.py CODE_ANALYSIS is AUTO_ALLOW).
 
 No model runs: the "Brain" is a recorder standing in for the orchestrator's step execution, the voice turn uses the
-existing fake audio/STT/TTS of tests/test_runtime_bridge, and phone chat uses a recording chat-only call.
+existing fake audio/STT/TTS of tests/test_runtime_bridge.
 """
 from __future__ import annotations
 
@@ -226,35 +226,6 @@ def test_voice_turn_speaks_only_the_refusal(tmp_path):
     assert "shutil" not in json.dumps(events, ensure_ascii=False)
 
 
-# ------------------------------------------------------------------ the paired phone
-
-def test_phone_chat_refuses_before_the_brain_and_never_sends_code():
-    from core.link_runtime import runtime_services
-
-    asked: list = []
-    answers = {"value": "never"}
-    audit = ActionAuditLog(path=None)
-    runtime = SimpleNamespace(runtime_paused=False, is_busy=False, _code_policy_audit=audit.record_verdict,
-                              orchestrator=SimpleNamespace(answer_chat_only=lambda messages: asked.append(messages)
-                                                           or answers["value"]))
-    chat = runtime_services(runtime).remote_chat
-    assert chat([{"role": "user", "content": FORBIDDEN_FA}]) == code_policy.INPUT_REFUSAL_FA and asked == []
-    answers["value"] = RAW_CODE
-    assert chat([{"role": "user", "content": "پایتون چیست؟"}]) == code_policy.OUTPUT_REFUSAL_FA and len(asked) == 1
-    answers["value"] = "پایتون یک زبان برنامه‌نویسی است."
-    assert chat([{"role": "user", "content": "پایتون چیست؟"}]) == answers["value"]
-    assert [r.target for r in audit.records()] == ["phone chat", "phone chat"]
-
-
-# ------------------------------------------------------------------ what is NOT passed through here
-
-def test_internal_data_calls_and_their_json_are_untouched():
-    """Internal data calls use answer_chat_only, which the boundary does not wrap."""
-    assert "code_policy" not in inspect.getsource(Orchestrator.answer_chat_only)
-    source = inspect.getsource(Orchestrator.execute_plan)
-    assert "check_request" in source and "check_answer" in source
-
-
 def test_every_production_orchestrator_is_given_the_audit_trail():
     from core import runtime_bridge
 
@@ -300,21 +271,14 @@ def test_b1_mentions_explanations_arithmetic_and_prose_still_pass(text):
 
 
 @pytest.mark.parametrize("name", sorted(B1_ANSWERS))
-def test_b1_answers_never_leave_the_orchestrator_or_the_phone(name):
-    from core.link_runtime import runtime_services
-
+def test_b1_answers_never_leave_the_orchestrator(name):
     text, _, raw = B1_ANSWERS[name]
     assert code_policy.check_request(B1_QUESTION) is None  # an ordinary question the input layer admits
     brain, audit = Brain(text), ActionAuditLog(path=None)
     (result,) = guarded_orchestrator(brain, audit.record_verdict).execute_plan(plan_of(B1_QUESTION))
     assert brain.calls[-1] == B1_QUESTION  # the Brain WAS asked: this is the output layer at work
     assert result.output == code_policy.OUTPUT_REFUSAL_FA and raw not in result.output
-    phone_audit = ActionAuditLog(path=None)
-    runtime = SimpleNamespace(runtime_paused=False, is_busy=False, _code_policy_audit=phone_audit.record_verdict,
-                              orchestrator=SimpleNamespace(answer_chat_only=lambda messages: text))
-    sent = runtime_services(runtime).remote_chat([{"role": "user", "content": B1_QUESTION}])
-    assert sent == code_policy.OUTPUT_REFUSAL_FA and raw not in sent
-    assert [r.outcome for r in (*audit.records(), *phone_audit.records())] == ["refused", "refused"]
+    assert [r.outcome for r in audit.records()] == ["refused"]
 
 
 @pytest.mark.parametrize("name", sorted(B1_ANSWERS))
@@ -364,18 +328,12 @@ def test_b1_followup_mentions_still_pass(text):
 
 @pytest.mark.parametrize("name", sorted(B1_FOLLOWUP))
 def test_b1_followup_variants_never_reach_any_output(name, tmp_path):
-    from core.link_runtime import runtime_services
-
     text, _, raw = B1_FOLLOWUP[name]
     assert code_policy.check_request(B1_QUESTION) is None  # admitted: the Brain is asked, the output layer decides
     brain, audit = Brain(text), ActionAuditLog(path=None)
     (result,) = guarded_orchestrator(brain, audit.record_verdict).execute_plan(plan_of(B1_QUESTION))
     assert brain.calls[-1] == B1_QUESTION and result.output == code_policy.OUTPUT_REFUSAL_FA
-    runtime = SimpleNamespace(runtime_paused=False, is_busy=False, _code_policy_audit=audit.record_verdict,
-                              orchestrator=SimpleNamespace(answer_chat_only=lambda messages: text))
-    sent = runtime_services(runtime).remote_chat([{"role": "user", "content": B1_QUESTION}])
-    assert sent == code_policy.OUTPUT_REFUSAL_FA and raw not in sent
-    assert [r.outcome for r in audit.records()] == ["refused", "refused"]
+    assert [r.outcome for r in audit.records()] == ["refused"]
     text_rt, events = text_runtime(Brain(text))
     text_rt.run_text_turn(B1_QUESTION, "req-b1f")
     assert [json.loads(m) for e, _, m in events if e == "text_response"][-1]["text"] == code_policy.OUTPUT_REFUSAL_FA
@@ -416,19 +374,13 @@ def test_r1_r2_admin_tool_prose_and_mentions_still_pass(text):
 
 
 @pytest.mark.parametrize("name", sorted(R1_R2))
-def test_r1_r2_answers_never_leave_the_orchestrator_or_the_phone(name):
-    from core.link_runtime import runtime_services
-
+def test_r1_r2_answers_never_leave_the_orchestrator(name):
     text = R1_R2[name]
     assert code_policy.check_request(B1_QUESTION) is None
     brain, audit = Brain(text), ActionAuditLog(path=None)
     (result,) = guarded_orchestrator(brain, audit.record_verdict).execute_plan(plan_of(B1_QUESTION))
     assert brain.calls[-1] == B1_QUESTION and result.output == code_policy.OUTPUT_REFUSAL_FA
-    runtime = SimpleNamespace(runtime_paused=False, is_busy=False, _code_policy_audit=audit.record_verdict,
-                              orchestrator=SimpleNamespace(answer_chat_only=lambda messages: text))
-    sent = runtime_services(runtime).remote_chat([{"role": "user", "content": B1_QUESTION}])
-    assert sent == code_policy.OUTPUT_REFUSAL_FA and text not in sent
-    assert [(r.category, r.outcome) for r in audit.records()] == [("script_execution", "refused")] * 2
+    assert [(r.category, r.outcome) for r in audit.records()] == [("script_execution", "refused")]
 
 
 # ------------------------------------------------------------------ R3 (Media76): Windows admin tools in any letter
@@ -460,15 +412,9 @@ def test_r3_explanations_in_any_case_still_pass(text):
 
 
 @pytest.mark.parametrize("name", sorted(R3))
-def test_r3_answers_never_leave_the_orchestrator_or_the_phone(name):
-    from core.link_runtime import runtime_services
-
+def test_r3_answers_never_leave_the_orchestrator(name):
     text = R3[name]
     brain, audit = Brain(text), ActionAuditLog(path=None)
     (result,) = guarded_orchestrator(brain, audit.record_verdict).execute_plan(plan_of(B1_QUESTION))
     assert brain.calls[-1] == B1_QUESTION and result.output == code_policy.OUTPUT_REFUSAL_FA
-    runtime = SimpleNamespace(runtime_paused=False, is_busy=False, _code_policy_audit=audit.record_verdict,
-                              orchestrator=SimpleNamespace(answer_chat_only=lambda messages: text))
-    sent = runtime_services(runtime).remote_chat([{"role": "user", "content": B1_QUESTION}])
-    assert sent == code_policy.OUTPUT_REFUSAL_FA and text not in sent
-    assert [(r.category, r.outcome) for r in audit.records()] == [("script_execution", "refused")] * 2
+    assert [(r.category, r.outcome) for r in audit.records()] == [("script_execution", "refused")]
