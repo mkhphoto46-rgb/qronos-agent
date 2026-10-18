@@ -52,7 +52,13 @@ from core.file_resolver import (
     parse_location_request,
     parse_named_file_request,
 )
-from core.sound_alike_commands import SoundAlikeDecision, match_spoken_command
+from core.sound_alike_commands import (
+    CONFIRMATION_SECONDS as SOUND_ALIKE_CONFIRMATION_SECONDS,
+    SoundAlikeDecision,
+    is_no as is_spoken_no,
+    is_yes as is_spoken_yes,
+    match_spoken_command,
+)
 from core.computer_action_parser import (
     ComputerActionParseError,
     parse_computer_action,
@@ -1435,6 +1441,8 @@ class QronosRuntime:
         # desktop must answer with that identity; Stop/Pause/shutdown revoke
         # it. pending_paint_draw/pending_paint_undo/pending_look are views.
         self._approvals = ApprovalLedger()
+        # An unanswered "did you mean ...?" voice question: (command sentence, monotonic deadline).
+        self._pending_sound_alike: tuple[str, float] | None = None
         # Makes "check nothing is pending, then issue" atomic.
         self._approval_lock = threading.Lock()
         # App workflows (browser navigation); prompts share the ledger above.
@@ -2676,7 +2684,14 @@ class QronosRuntime:
         # to FAST merely because legacy TaskRouter lacks a particular noun such
         # as Drive/Downloads.  This promotion is deterministic and happens
         # before any model runs.
-        if _windows_control_route_promotion(text) or (
+        pending_answer = False
+        if spoken and self._live_pending_sound_alike() is not None:
+            pending_answer = is_spoken_yes(text) or is_spoken_no(text)
+            if not pending_answer:
+                # Anything but a yes or no ends the "did you mean ...?" question.
+                self._pending_sound_alike = None
+
+        if pending_answer or _windows_control_route_promotion(text) or (
             spoken and match_spoken_command(text) is not None
         ):
             details.update(
@@ -4861,6 +4876,16 @@ class QronosRuntime:
         command. The spoken command itself satisfies VOICE_CONFIRMATION only;
         it never substitutes for UI_CONFIRMATION or TYPED_SECRET.
         """
+        pending = self._live_pending_sound_alike()
+        self._pending_sound_alike = None
+        if pending is not None and is_spoken_yes(transcript):
+            # The person confirmed the exact command they were asked about.
+            report["voiceSoundAlikeConfirmed"] = True
+            return self._execute_voice_computer_action(pending, report)
+        if pending is not None and is_spoken_no(transcript):
+            report["voiceSoundAlikeDeclined"] = True
+            return "باشه، کاری انجام نشد."
+
         if is_computer_capability_query(transcript):
             report["voiceComputerCapabilityQuery"] = True
             report["voiceComputerDeferred"] = False
@@ -4919,9 +4944,14 @@ class QronosRuntime:
             ):
                 report["voiceComputerDeferred"] = True
                 report["voiceComputerReason"] = "sound_alike_needs_confirmation"
+                # One exact command, answerable once with a spoken yes or no.
+                self._pending_sound_alike = (
+                    sound_alike.sentence,
+                    time.monotonic() + SOUND_ALIKE_CONFIRMATION_SECONDS,
+                )
                 return (
                     f"منظورتان «{sound_alike.sentence}» بود؟ "
-                    "اگر بله، همین را دوباره و شمرده بگو."
+                    "اگر بله، بگو «آره»."
                 )
             action = None
             if sound_alike is not None:
@@ -6813,15 +6843,28 @@ class QronosRuntime:
             ),
         )
 
+    def _live_pending_sound_alike(self) -> str | None:
+        """The command of an unexpired "did you mean ...?" voice question, or None."""
+        pending = getattr(self, "_pending_sound_alike", None)
+        if pending is None:
+            return None
+        sentence, deadline = pending
+        if time.monotonic() >= deadline:
+            self._pending_sound_alike = None
+            return None
+        return sentence
+
     def _discard_pending_approvals(self, reason: str) -> int:
         """
-        Revoke every computer/Paint/screen prompt still waiting for an answer.
+        Revoke every computer/Paint/screen prompt still waiting for an answer,
+        including an unanswered "did you mean ...?" voice question.
 
         The prompt may already be on screen. Its identity is revoked, so its
         later answer is refused even if an identical question is asked again
         (that new prompt gets a new identity). Nothing ran, and the discard is
         audited for a prepared Paint drawing/undo. Idempotent.
         """
+        self._pending_sound_alike = None
         revoked = self._approvals.revoke_kinds(
             (
                 ApprovalKind.PAINT_DRAW,

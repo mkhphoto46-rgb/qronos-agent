@@ -74,8 +74,12 @@ class SoundAlikeMatch:
         return ComputerAction(operation=self.operation, app_id=self.app_id)
 
 
+# Short-vowel marks (fatha, kasra, damma, sukun and the like) carry no consonant and are often added inconsistently.
+_VOWEL_MARKS = {code: None for code in (*range(0x064B, 0x0653), 0x0670)}
+
+
 def _sound_key(text: str) -> str:
-    folded = unicodedata.normalize("NFKC", text).lower().translate(_FOLD)
+    folded = unicodedata.normalize("NFKC", text).lower().translate(_FOLD).translate(_VOWEL_MARKS)
     return _IGNORED.sub("", folded)
 
 
@@ -131,3 +135,27 @@ def match_spoken_command(transcript: str) -> SoundAlikeMatch | None:
     else:
         return None
     return SoundAlikeMatch(operation, app_id, sentence, round(score, 3), round(margin, 3), decision)
+
+
+#: How long a "did you mean ...?" question can be answered with a yes or no.
+CONFIRMATION_SECONDS = 30.0
+
+# Whole-utterance answers to "did you mean ...?", as sound keys (see _sound_key).
+_YES = {_sound_key(word) for word in ("آره", "آری", "بله", "بلی", "باشه", "اوهوم", "آره آره", "بله بله", "آره باز کن", "بله باز کن", "yes", "yeah", "ok", "okay")}
+_NO = {_sound_key(word) for word in ("نه", "نخیر", "نه نه", "ولش کن", "نمی‌خوام", "no")}
+
+
+def _answer_key(text: str) -> str:
+    return _sound_key(text)
+
+
+def is_yes(text: str) -> bool:
+    """A spoken "yes" to a "did you mean ...?" question: exactly one of the yes words, nothing else."""
+    key = _answer_key(text)
+    return bool(key) and key in _YES
+
+
+def is_no(text: str) -> bool:
+    """A spoken "no" to a "did you mean ...?" question: the whole utterance."""
+    key = _answer_key(text)
+    return bool(key) and key in _NO

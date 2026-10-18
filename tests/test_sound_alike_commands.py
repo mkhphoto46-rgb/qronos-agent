@@ -129,3 +129,85 @@ def test_an_unknown_app_still_opens_nothing(voice_runtime):
     report = {}
     runtime._execute_voice_computer_action("Premiere رو باز کن", report)
     assert launched == []
+
+
+def _ask(runtime):
+    report = {}
+    response = runtime._execute_voice_computer_action("اتفاد رو باز کن", report)
+    assert "آره" in response and report["voiceComputerReason"] == "sound_alike_needs_confirmation"
+
+
+@pytest.mark.parametrize("answer", ["آره", "بله.", "باشه"])
+def test_a_spoken_yes_runs_the_command_it_was_asked_about(voice_runtime, answer):
+    runtime, launched = voice_runtime
+    _ask(runtime)
+    report = {}
+    response = runtime._execute_voice_computer_action(answer, report)
+    assert launched == [("notepad.exe",)] and report["voiceSoundAlikeConfirmed"]
+    assert "باز شد" in response
+    # Single use: a second yes does nothing.
+    runtime._execute_voice_computer_action("آره", {})
+    assert launched == [("notepad.exe",)]
+
+
+def test_a_spoken_no_opens_nothing(voice_runtime):
+    runtime, launched = voice_runtime
+    _ask(runtime)
+    report = {}
+    assert runtime._execute_voice_computer_action("نه", report) == "باشه، کاری انجام نشد."
+    assert launched == [] and report["voiceSoundAlikeDeclined"]
+
+
+def test_anything_else_drops_the_question(voice_runtime):
+    from core.task_router import TaskType
+
+    runtime, launched = voice_runtime
+    _ask(runtime)
+    selected, _ = runtime._select_production_task_type("یه جوک بگو", TaskType.FAST, {}, spoken=True)
+    assert selected is TaskType.FAST and runtime._live_pending_sound_alike() is None
+    runtime._execute_voice_computer_action("آره", {})
+    assert launched == []
+
+
+def test_a_yes_is_routed_to_computer_control_only_while_a_question_is_open(voice_runtime):
+    from core.task_router import TaskType
+
+    runtime, _ = voice_runtime
+    selected, _ = runtime._select_production_task_type("آره", TaskType.FAST, {}, spoken=True)
+    assert selected is TaskType.FAST
+    _ask(runtime)
+    selected, _ = runtime._select_production_task_type("آره", TaskType.FAST, {}, spoken=True)
+    assert selected is TaskType.COMPUTER
+
+
+def test_the_question_expires(voice_runtime, monkeypatch):
+    import core.runtime_bridge as bridge
+
+    runtime, launched = voice_runtime
+    _ask(runtime)
+    later = bridge.time.monotonic() + 31
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: later)
+    runtime._execute_voice_computer_action("آره", {})
+    assert launched == []
+
+
+def test_stop_clears_the_question(voice_runtime):
+    runtime, launched = voice_runtime
+    _ask(runtime)
+    runtime._discard_pending_approvals("stopped")
+    runtime._execute_voice_computer_action("آره", {})
+    assert launched == []
+
+
+@pytest.mark.parametrize("word", ["آره", "اره", "ارِه", "بله!", "Yes."])
+def test_yes_words(word):
+    from core.sound_alike_commands import is_yes
+
+    assert is_yes(word)
+
+
+@pytest.mark.parametrize("word", ["بلیط", "موسیقی", "آب", "نوت پد رو باز کن", "نه", ""])
+def test_not_yes_words(word):
+    from core.sound_alike_commands import is_yes
+
+    assert not is_yes(word)
