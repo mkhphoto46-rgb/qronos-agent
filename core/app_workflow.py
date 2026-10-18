@@ -1,9 +1,8 @@
 """
 Shared safety rails for multi-step application workflows.
 
-A workflow such as "download the newest file from one Telegram contact" or
-"print one exact file" is several observations followed by exactly one
-external side effect. Two things go wrong in that shape, and this module is
+A workflow such as "open this search in the person's browser and read the
+page" is several observations followed by exactly one external side effect. Two things go wrong in that shape, and this module is
 where each one is stopped:
 
     The world changes between looking and acting. Every observation is kept as
@@ -13,7 +12,7 @@ where each one is stopped:
     window, or evidence older than its limit stops the step.
 
     A yes arrives for something else. A person approves a *plan*: the exact
-    contact, attachment, file, printer and options. :func:`plan_digest` makes
+    target and options. :func:`plan_digest` makes
     that plan a stable identity and :class:`WorkflowApproval` binds the
     approval to it and to the window identity it was shown against. An
     approval for another plan, another window, or one that was revoked by
@@ -77,10 +76,6 @@ class WorkflowRefused(WorkflowError):
 
 class WorkflowAmbiguous(WorkflowRefused):
     """More than one candidate matched; the workflow will not guess."""
-
-
-class WorkflowUncertain(WorkflowError):
-    """A side effect may have happened but could not be confirmed."""
 
 
 class ApprovalMismatch(WorkflowError):
