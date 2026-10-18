@@ -51,14 +51,27 @@ def test_a_relative_override_is_refused_not_replaced_by_the_default(tmp_path, wh
     environment = {"QRONOS_ASSET_ROOT": "relative/assets"} if where == "process" else {}
     reader = user({"QRONOS_ASSET_ROOT": "relative/assets"} if where == "user" else {})
     with pytest.raises(ValueError, match="absolute"):
-        resolve_paths(root=tmp_path, packaged=False, environ=environment, user_environment=reader)
+        resolve_paths(root=tmp_path, packaged=False, environ={**environment, "QRONOS_DEV_USE_ASSET_ROOT": "1"},
+                      user_environment=reader)
     with pytest.raises(ValueError, match="absolute"):
         resolve_paths(root=tmp_path / "install", packaged=True, environ=environment, user_environment=reader)
 
 
-def test_development_honours_the_asset_root_but_keeps_its_data_logs_and_settings(tmp_path):
+@pytest.mark.parametrize("opt_in", [None, "", "0", "yes"])
+def test_development_keeps_the_checkout_models_unless_it_opts_in(tmp_path, opt_in):
+    environment = {"QRONOS_ASSET_ROOT": str(tmp_path / "process assets")}
+    if opt_in is not None:
+        environment["QRONOS_DEV_USE_ASSET_ROOT"] = opt_in
+    paths = resolve_paths(root=tmp_path / "checkout", packaged=False, environ=environment,
+                          user_environment=user({"QRONOS_ASSET_ROOT": str(tmp_path / "user assets")}))
+    checkout = (tmp_path / "checkout").resolve()
+    assert paths.assets == checkout and paths.models == checkout / "models"
+    assert paths.runtime_assets == checkout / "runtime"
+
+
+def test_development_opted_in_uses_the_asset_root_but_keeps_its_data_logs_and_settings(tmp_path):
     assets = tmp_path / "assets"
-    paths = resolve_paths(root=tmp_path / "checkout", packaged=False, environ={},
+    paths = resolve_paths(root=tmp_path / "checkout", packaged=False, environ={"QRONOS_DEV_USE_ASSET_ROOT": "1"},
                           user_environment=user({"QRONOS_ASSET_ROOT": str(assets)}))
     assert paths.assets == assets.resolve() and paths.models == assets.resolve() / "models"
     assert paths.runtime_assets == assets.resolve() / "runtime"

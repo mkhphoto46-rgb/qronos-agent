@@ -30,8 +30,8 @@ Source equivalence, per component:
 
 - **Speech, wake word, voice, image search and ffmpeg** are runtime assets, not part of the installer. An installed
   Qronos reads them from `QRONOS_ASSET_ROOT`, which is set for your user to `E:/qronos-runtime-assets`. A
-  development checkout uses the same asset root for models and runtime assets when it is set (also from your
-  saved user value), otherwise `models/` and `runtime/` in the repository; see `docs/asset-root-check.md`.
+  development checkout uses `models/` and `runtime/` in the repository, and uses the asset root only when
+  `QRONOS_DEV_USE_ASSET_ROOT=1` is set; see `docs/asset-root-check.md`.
 - All 34 registry files are present there: 30 verified against a published identity and 4 unverified (the custom
   wake head and two voice files, which are owner-supplied). "Present" means available, not measured for quality.
   - Check them read-only with `python -m build_support.runtime_assets --root E:/qronos-runtime-assets`.

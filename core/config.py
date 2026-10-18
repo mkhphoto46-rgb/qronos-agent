@@ -47,6 +47,8 @@ class QronosPaths:
 
 
 ASSET_ROOT_VARIABLE = "QRONOS_ASSET_ROOT"
+#: Set to "1" to make a development checkout load its models from QRONOS_ASSET_ROOT instead of the checkout.
+DEV_ASSET_ROOT_OPT_IN = "QRONOS_DEV_USE_ASSET_ROOT"
 #: Longest value read from the user's persisted environment (the Windows environment-variable limit).
 _MAX_USER_VALUE = 32_767
 
@@ -107,10 +109,12 @@ def resolve_paths(
     """Separate installed read-only code from writable per-user state.
 
     Importing configuration never creates directories. Development keeps the
-    established checkout layout; a frozen runtime uses LocalAppData instead
-    of attempting to write into its installation directory. A configured asset
-    root (resolve_asset_root) holds the models and runtime assets in both
-    modes; development data, logs and settings stay in the checkout.
+    established checkout layout, models and runtime assets included; a frozen
+    runtime uses LocalAppData instead of attempting to write into its
+    installation directory. A configured asset root (resolve_asset_root) holds
+    the models and runtime assets of an installed runtime; a development
+    checkout uses it only when QRONOS_DEV_USE_ASSET_ROOT=1 opts in, so a
+    machine-wide QRONOS_ASSET_ROOT never silently swaps a checkout's models.
 
     The persisted Windows user environment is read only for the real process
     environment; an injected ``environ`` never reaches the user's registry
@@ -119,7 +123,6 @@ def resolve_paths(
     environment = os.environ if environ is None else environ
     if user_environment is None:
         user_environment = read_persisted_user_variable if environ is None else (lambda _name: None)
-    configured_assets = resolve_asset_root(environment, user_environment)
     installed = (
         bool(getattr(sys, "frozen", False))
         or environment.get("QRONOS_PACKAGED_RUNTIME") == "1"
@@ -128,6 +131,8 @@ def resolve_paths(
     )
     root = root.resolve()
     if not installed:
+        opted_in = environment.get(DEV_ASSET_ROOT_OPT_IN, "").strip() == "1"
+        configured_assets = resolve_asset_root(environment, user_environment) if opted_in else None
         assets = configured_assets or root
         return QronosPaths(
             root=root,
@@ -152,7 +157,7 @@ def resolve_paths(
     data = absolute_override("QRONOS_DATA_ROOT", default_data)
     if data == root or root in data.parents:
         raise ValueError("Installed Qronos data must be outside the runtime bundle.")
-    assets = configured_assets or (data / "RuntimeAssets").resolve()
+    assets = resolve_asset_root(environment, user_environment) or (data / "RuntimeAssets").resolve()
     return QronosPaths(
         root=root,
         data=data,
