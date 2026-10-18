@@ -35,7 +35,7 @@ ${StrLoc}
 !include "{{installer_hooks}}"
 {{/if}}
 ; Qronos (installer-template/PROVENANCE.md): this template is only valid with the Qronos hooks, which
-; provide the update fence, the install-root checks and the explicit install-success steps below.
+; provide the install-root checks, the owned-list replacement and the explicit install-success steps below.
 !ifndef QRONOS_TEMPLATE_HOOKS
   !error "The Qronos installer template must be built with build_support.build_desktop (Qronos hooks missing)."
 !endif
@@ -315,9 +315,9 @@ FunctionEnd
 Function PageLeaveReinstall
   ${NSD_GetState} $R2 $R1
 
-  ; Qronos: no previous uninstaller is ever run from this installer (it was never fenced, and one started
-  ; under this installer's fence could not take it). Replacement is in place only, through the current
-  ; installation's own file list (QronosRemoveOwnedPayload). A WiX/MSI registration is refused visibly.
+  ; Qronos: no previous uninstaller is ever run from this installer (it would act before the install-root
+  ; and owned-list checks). Replacement is in place only, through the current installation's own file
+  ; list (QronosRemoveOwnedPayload). A WiX/MSI registration is refused visibly.
   ${If} $WixMode = 1
     MessageBox MB_ICONSTOP "Another (MSI) installation of ${PRODUCTNAME} is registered. Remove it from Windows Settings > Apps first. Nothing was changed." /SD IDOK
     Quit
@@ -614,9 +614,8 @@ Section WebView2
 SectionEnd
 
 Section Install
-  ; Qronos: the update fence, the exclusive store admission and the install-root checks run FIRST
-  ; (NSIS_HOOK_PREINSTALL), before SetOutPath creates the install folder and before anything is killed,
-  ; copied, removed or registered.
+  ; Qronos: the install-root and owned-list checks run FIRST (NSIS_HOOK_PREINSTALL), before SetOutPath
+  ; creates the install folder and before anything is killed, copied, removed or registered.
   !insertmacro NSIS_HOOK_PREINSTALL
   ; Qronos: from here every material step must succeed (QRONOS_STEP); failed commands only set the error flag.
   ClearErrors
@@ -739,7 +738,7 @@ Section Install
   ${EndIf}
   !insertmacro QRONOS_STEP "the desktop shortcut"
 
-  ; Qronos: every material step above succeeded; only now may the receipt be written (POSTINSTALL).
+  ; Qronos: every material step above succeeded; only now does the installation count as complete.
   !insertmacro QRONOS_INSTALL_COMPLETE
   !ifmacrodef NSIS_HOOK_POSTINSTALL
     !insertmacro NSIS_HOOK_POSTINSTALL
@@ -785,10 +784,10 @@ Function un.onInit
 FunctionEnd
 
 Section Uninstall
-  ; Qronos: NSIS_HOOK_PREUNINSTALL holds the fence and the exclusive admission, refuses a folder that is not
-  ; Qronos's own, checks the whole owned file list against the disk, stops the app and removes exactly the
-  ; listed files and folders. The stock raw deletion of the program, resources, binaries and resource
-  ; folders (which would act before any ownership check) is removed; uninstall.exe is deleted by exact name.
+  ; Qronos: NSIS_HOOK_PREUNINSTALL refuses a folder that is not Qronos's own, checks the whole owned file
+  ; list against the disk, stops the app and removes exactly the listed files and folders. The stock raw
+  ; deletion of the program, resources, binaries and resource folders (which would act before any ownership
+  ; check) is removed; uninstall.exe is deleted by exact name.
   !insertmacro NSIS_HOOK_PREUNINSTALL
 
   ; Delete app associations

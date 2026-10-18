@@ -26,9 +26,6 @@ SERVICES = {
     # Lifecycle only (`supervisor --desktop`): starts the bridge, relays the
     # desktop's pipes to it and keeps it alive; no audio, UI or dialogs.
     "supervisor": "core.supervisor",
-    # The Installer's offline update service (core/update_cli.py). Its launch
-    # stays refused (launch_unavailable) until the hand-over path is accepted.
-    "update": "core.update_cli",
 }
 
 #: Services that open Qronos's persistent stores. Each one runs the start-up
@@ -42,17 +39,7 @@ STORE_SERVICES = {
     "library": {},
     "memory": {},
     "permissions": {},
-    "update": {},
 }
-#: The one update operation that must NOT take a shared admission: launching
-#: takes the EXCLUSIVE admission itself (core.update_service.LaunchHold), and a
-#: process cannot hold both. With the default quiescence it is refused anyway.
-UPDATE_EXCLUSIVE_OPERATIONS = frozenset({"launch"})
-#: Services that open no store and own no singleton of their own. They still run this executable, which an
-#: update's installer replaces, so while the update fence exists (an update launch or its installer is alive)
-#: they refuse BEFORE their module is imported. The store services are refused by their writer admission, the
-#: bridge and supervisor by their instance ownership, the sidecars by their guards (each checks the same fence).
-FENCED_SERVICES = frozenset({"audio", "doctor"})
 
 
 def _prevent_asio_selection() -> None:
@@ -90,10 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": "Unknown Qronos backend service."}))
         return 2
     service = arguments.pop(0)
-    refused = _refuse_during_update(service)
-    if refused is not None:
-        return refused
-    refused = _admit_before_import(service, arguments)
+    refused = _admit_before_import(service)
     if refused is not None:
         return refused
     sys.argv = [service, *arguments]
@@ -106,35 +90,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
-def _refuse_during_update(service: str) -> int | None:
-    """While the update fence exists, a FENCED service refuses before import (typed update_in_progress).
-
-    An unknown fence answer refuses too (ownership_unavailable): nothing continues on an unknown fence. Returns the
-    exit code after printing the one refusal JSON, or None to continue.
-    """
-    if service not in FENCED_SERVICES:
-        return None
-    from core import startup_admission
-    from core.instance_ownership import update_fence_exists
-
-    try:
-        live = bool(update_fence_exists())
-        refused = startup_admission.StartupRefused("update_in_progress") if live else None
-    except Exception:  # noqa: BLE001 - an unknown fence is never "no update"
-        refused = startup_admission.StartupRefused("ownership_unavailable",
-                                                   "The update fence could not be checked; nothing was started.")
-    if refused is None:
-        return None
-    print(json.dumps(startup_admission.refusal(refused), ensure_ascii=False), flush=True)
-    return startup_admission.STARTUP_REFUSED_EXIT
-
-
-def _admit_before_import(service: str, arguments: list) -> int | None:
+def _admit_before_import(service: str) -> int | None:
     """core/startup_admission.py for a store-opening service; an exit code when start-up is refused."""
     policy = STORE_SERVICES.get(service)
     if policy is None:
-        return None
-    if service == "update" and arguments[:1] and arguments[0].strip().lower() in UPDATE_EXCLUSIVE_OPERATIONS:
         return None
     from core import startup_admission
 

@@ -134,7 +134,7 @@ def check_tauri_config(config: dict[str, Any]) -> None:
     if nsis.get("template") != TEMPLATE_SETTING:
         raise ValueError(f"tauri.conf.json must use the pinned Qronos template {TEMPLATE_SETTING}: Tauri's stock "
                          "template creates the install folder and can run a previous uninstaller before the "
-                         "Qronos update fence (installer-template/PROVENANCE.md).")
+                         "Qronos install-root checks (installer-template/PROVENANCE.md).")
     if bundle.get("createUpdaterArtifacts") or "updater" in config.get("plugins", {}):
         raise ValueError("Updater artifacts would make Tauri fall back to the WebView2 download bootstrapper; "
                          "authenticated updates need their own reviewed design first.")
@@ -215,10 +215,9 @@ def build(backend: Path, *, bundles: str = "nsis", webview2_installer: Path | No
     collect_desktop_notices(notices)
     verify_notice_output(notices)
     # Every file this installation will own, so a later upgrade or uninstall removes
-    # exactly these and never a user's file (installer-hooks/qronos-install-root.nsh). The
-    # update transaction claims exactly these paths (installer-hooks/qronos-update-transaction.nsh).
+    # exactly these and never a user's file (installer-hooks/qronos-install-root.nsh).
     ownership = install_manifest.write(work, install_manifest.payload_files(backend, notices, config["productName"]))
-    wrapper = write_hook_wrapper(work, installer, pin, owned_manifest=ownership, vcredist=(vc_installer, vc_pin))
+    wrapper = write_hook_wrapper(work, installer, pin, vcredist=(vc_installer, vc_pin))
     verify_hook_wrapper(wrapper.read_text(encoding="utf-8"))
     overlay = work / "tauri-overlay.json"
     overlay.write_text(json.dumps({

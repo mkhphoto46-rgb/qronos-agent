@@ -1,11 +1,9 @@
 """
 Bounded startup status hooks for the runtime bridge.
 
-A few services owned by other parts of Qronos need to report a status once
-the bridge is ready. The first is the update service (A8, Installer-owned),
-which reports whether a verified update is waiting. They must never hold up
-or break chat or wake, whatever state they are in — including
-an unconfigured update trust store.
+A service owned by another part of Qronos may need to report a status once
+the bridge is ready. It must never hold up or break chat or wake, whatever
+state it is in.
 
 So a hook here is a closed record — an event type and a function defined in
 this module that imports its service by a literal, lazy import — never a
@@ -26,12 +24,8 @@ there is no second hard-coded version here.
 READ-ONLY ONLY. A hook runs after the runtime has opened its settings,
 history and stores, and a timeout merely abandons a thread that is still
 running: it cancels nothing. So a hook may only read and report. Work that
-changes data at startup — for example restoring files after an interrupted
-update — is NOT a status hook: it is the bounded, exclusive barrier in
-``core/startup_admission.py``, which completes BEFORE any store opens (the
-frozen entry point runs it before importing the service) and fails closed
-(the runtime does not start over data that may still be changing) when it
-cannot finish.
+must finish before any store opens belongs in ``core/startup_admission.py``,
+never in a status hook.
 
 ``STARTUP_STATUS_HOOKS`` is empty until a reviewed read-only service exists.
 """
@@ -71,19 +65,17 @@ class StartupStatusHook:
             raise ValueError("A hook's check must be a function.")
 
 
-#: Reviewed READ-ONLY hooks only. An update status reader, once one exists in
-#: an accepted commit, is added as a function in this module with a literal,
-#: lazy import (so a missing or failing service only makes its event
-#: "unavailable"):
+#: Reviewed READ-ONLY hooks only. A status reader is added as a function in
+#: this module with a literal, lazy import (so a missing or failing service
+#: only makes its event "unavailable"):
 #:
-#:     def _update_status(context: dict) -> object:
-#:         from core.update_service import read_status  # reads; changes nothing
+#:     def _example_status(context: dict) -> object:
+#:         from core.example_service import read_status  # reads; changes nothing
 #:         return read_status(context)
 #:
-#:     STARTUP_STATUS_HOOKS = (StartupStatusHook("update_status", _update_status),)
+#:     STARTUP_STATUS_HOOKS = (StartupStatusHook("example_status", _example_status),)
 #:
-#: A mutating startup step (such as recovery after an interrupted update)
-#: must never be registered here; see the module doc.
+#: A mutating startup step must never be registered here; see the module doc.
 STARTUP_STATUS_HOOKS: tuple[StartupStatusHook, ...] = ()
 
 

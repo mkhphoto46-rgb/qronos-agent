@@ -786,16 +786,12 @@ def run_desktop(
         desktop_err if desktop_err is not None else sys.stderr.buffer,
     )
 
-    from core.instance_ownership import OwnershipError, UpdateInProgress
+    from core.instance_ownership import OwnershipError
 
     try:
         guard = instance_guard()
     except SupervisorAlreadyRunning:
         relay.out.lifecycle("runtime_error", "error", "Another Qronos runtime is already running in this Windows session.")
-        relay.out.drain(EXIT_DRAIN_SECONDS)
-        return 2
-    except UpdateInProgress:
-        relay.out.lifecycle("runtime_error", "error", "An update is being installed; Qronos starts when it ends.")
         relay.out.drain(EXIT_DRAIN_SECONDS)
         return 2
     except (OwnershipError, OSError):

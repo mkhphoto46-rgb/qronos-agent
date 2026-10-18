@@ -316,10 +316,8 @@ def test_unprepared_build_tools_stop_before_anything_is_built(tmp_path, monkeypa
 
 def test_the_hook_wrapper_names_the_verified_file_and_refuses_unsafe_paths(tmp_path):
     pin = committed_pin()
-    manifest = tmp_path / "qronos-install-manifest.txt"
     vc = vc_stand_in(tmp_path)
-    wrapper = prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest,
-                                               vcredist=vc)
+    wrapper = prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, vcredist=vc)
 
     text = wrapper.read_text(encoding="utf-8")
     assert f'!define QRONOS_VCREDIST_INSTALLER "{vc[0]}"' in text
@@ -328,19 +326,14 @@ def test_the_hook_wrapper_names_the_verified_file_and_refuses_unsafe_paths(tmp_p
     prerequisites.verify_hook_wrapper(text)
     assert f'!define QRONOS_WEBVIEW2_INSTALLER "{tmp_path / pin["fileName"]}"' in text
     assert f'!define QRONOS_WEBVIEW2_VERSION "{pin["runtime"]["version"]}"' in text
-    assert f'!define QRONOS_OWNED_MANIFEST "{manifest}"' in text
     assert f'!include "{prerequisites.HOOK_PATH}"' in text
     with pytest.raises(FileExistsError):
-        prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, owned_manifest=manifest,
-                                         vcredist=vc)
+        prerequisites.write_hook_wrapper(tmp_path, tmp_path / pin["fileName"], pin, vcredist=vc)
     for unsafe in ('a"b', "a$b", "a\nb", "a;b"):
         with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / unsafe / pin["fileName"], pin, owned_manifest=manifest, vcredist=vc)
+            prerequisites.hook_wrapper(tmp_path / unsafe / pin["fileName"], pin, vcredist=vc)
         with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=tmp_path / unsafe / "m.txt",
-                                       vcredist=vc)
-        with pytest.raises(PrerequisiteError, match="NSIS"):
-            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=manifest,
+            prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin,
                                        vcredist=(tmp_path / unsafe / "vc_redist.x64.exe", vc[1]))
 
 
@@ -376,12 +369,9 @@ def test_the_compiled_hook_embeds_exactly_the_pinned_bytes_and_no_downloader(tmp
     payload.parent.mkdir()
     payload.write_bytes(data)
     pin = fake_pin(data)
-    manifest = tmp_path / "qronos-install-manifest.txt"  # the update transaction embeds the build's own list
-    manifest.write_bytes(b"stand-in list (embedded under $PLUGINSDIR, never installed as a payload file)")
 
     vc_payload, vc_pin = vc_stand_in(tmp_path)
-    result = compile_hook(tmp_path, prerequisites.hook_wrapper(payload, pin, owned_manifest=manifest,
-                                                               vcredist=(vc_payload, vc_pin)))
+    result = compile_hook(tmp_path, prerequisites.hook_wrapper(payload, pin, vcredist=(vc_payload, vc_pin)))
 
     assert result.returncode == 0, result.stdout + result.stderr
     tool = seven_zip()

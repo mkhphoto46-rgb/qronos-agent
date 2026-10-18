@@ -4,7 +4,7 @@ Read only: it stats and hashes files, opens nothing else, follows no link, start
 Registry paths are plain relative Windows paths (no drive, root, UNC/device prefix, '..', stream or reserved
 name). A root that is a link, or any folder between the root and an asset that is one, refuses the asset; a
 verified file is hashed only through a handle that does not follow a link and whose final path is still the
-intended file under the root (the audited checks of core.path_safety and build_support.release_signing).
+intended file under the root (core.path_safety and the handle checks below).
 
     python -m build_support.runtime_assets --root "<Local AppData>\\Qronos\\RuntimeAssets"
     python -m build_support.runtime_assets --root ... --require-verified   # release gate: exit 1 unless all verified
@@ -30,7 +30,6 @@ import sys
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from build_support import release_signing
 from core.path_safety import has_control_characters, is_link_or_reparse_point, is_network_or_device_path
 
 REGISTRY = Path(__file__).resolve().parent / "runtime_assets.json"
@@ -76,16 +75,41 @@ def load_registry(path: Path = REGISTRY) -> list[dict[str, Any]]:
     return data["assets"]
 
 
+def _open_unfollowed(path: Path) -> int | None:
+    """A read handle on ``path`` that follows no link and whose final path is still ``path``, else None."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                   wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    kernel.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+    handle = kernel.CreateFileW(str(path), 0x80000000, 0x1, None, 3, 0x00200000, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        return None
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)  # FILE_NAME_NORMALIZED, VOLUME_NAME_DOS
+    final = buffer.value if 0 < length < len(buffer) else ""
+    if final.startswith("\\\\?\\UNC\\"):
+        final = "\\\\" + final[8:]
+    elif final.startswith("\\\\?\\"):
+        final = final[4:]
+    if not final or os.path.normcase(os.path.normpath(final)) != os.path.normcase(
+            os.path.normpath(os.path.abspath(path))):
+        kernel.CloseHandle(handle)  # a folder on the way changed: the opened file is not the intended one
+        return None
+    return int(handle)
+
+
 def _sha256(path: Path) -> str | None:
     """SHA-256 read through a handle that follows no link and is still ``path`` (no writer meanwhile), else None."""
-    try:
-        handle = release_signing._open(path, release_signing._GENERIC_READ, 0x1, 3)  # FILE_SHARE_READ, OPEN_EXISTING
-    except release_signing.SigningError:
-        return None
-    try:
-        release_signing._check_final_path(handle, path)
-    except release_signing.SigningError:
-        release_signing._Win32.get().CloseHandle(handle)
+    handle = _open_unfollowed(path)
+    if handle is None:
         return None
     import msvcrt
 

@@ -139,10 +139,10 @@ def test_one_supervisor_per_session_by_ownership_not_existence():
         close=lambda handle: calls.append(("close", handle)) or True,
         last_error=lambda: 183,  # "already exists" is reported to both and decides nothing
     )
-    first = SupervisorInstanceGuard.acquire(api=api, fence_exists=lambda: False, retry_seconds=0)
+    first = SupervisorInstanceGuard.acquire(api=api)
     assert first.owned and calls[0] == ("create", "Local\\QronosSupervisor")
     with pytest.raises(SupervisorAlreadyRunning):
-        SupervisorInstanceGuard.acquire(api=api, fence_exists=lambda: False, retry_seconds=0)
+        SupervisorInstanceGuard.acquire(api=api)
     first.release()
     first.release()
     assert [kind for kind, _ in calls] == ["create", "wait", "create", "wait", "close", "release", "close"]

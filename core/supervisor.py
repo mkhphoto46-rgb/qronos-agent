@@ -266,8 +266,8 @@ class Supervisor:
                 break
 
             if child.poll() == STARTUP_REFUSED_EXIT:
-                # The runtime refused to start before opening any store (an update in progress,
-                # unresolved update recovery, an unknown version...). It said why on its own
+                # The runtime refused to start before opening any store (another runtime already
+                # running, ownership Windows could not establish, data it cannot open safely...). It said why on its own
                 # output; restarting would only repeat the refusal, so this is terminal.
                 self._set(SupervisorState.DEGRADED, "the runtime refused to start; it reported why")
                 return self._state
@@ -493,11 +493,8 @@ class SupervisorInstanceGuard:
     second supervisor in the same session is refused. Ownership is a
     wait-acquisition by a holder thread kept for the supervisor's life
     (``core.instance_ownership``); creating the mutex, or finding that it
-    exists, proves nothing. After acquiring, the update fence is checked: while
-    an update or its installer is alive the supervisor releases the mutex and
-    refuses (``UpdateInProgress``), after retrying for a bounded time. The
-    updater's quiescence takes this same name, so a live supervisor makes it
-    refuse. Off Windows it is a no-op; the supervisor is a Windows component.
+    exists, proves nothing. Off Windows it is a no-op; the supervisor is a
+    Windows component.
     """
 
     NAME = "Local\\QronosSupervisor"
@@ -506,18 +503,14 @@ class SupervisorInstanceGuard:
         self._owned = owned
 
     @classmethod
-    def acquire(cls, *, api=None, fence_exists=None, retry_seconds: Optional[float] = None,
-                name: Optional[str] = None) -> "SupervisorInstanceGuard":
+    def acquire(cls, *, api=None, name: Optional[str] = None) -> "SupervisorInstanceGuard":
         if sys.platform != "win32" and api is None:
             return cls(None)
 
-        from core.instance_ownership import ENTRY_RETRY_SECONDS, AlreadyOwned, acquire_unless_updating
+        from core.instance_ownership import AlreadyOwned, OwnedMutex
 
-        options = {"retry_seconds": ENTRY_RETRY_SECONDS if retry_seconds is None else retry_seconds, "api": api}
-        if fence_exists is not None:
-            options["fence_exists"] = fence_exists
         try:
-            return cls(acquire_unless_updating(name or cls.NAME, **options))
+            return cls(OwnedMutex.acquire(name or cls.NAME, api=api))
         except AlreadyOwned as error:
             raise SupervisorAlreadyRunning("A Qronos supervisor is already running in this session.") from error
 

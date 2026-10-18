@@ -213,7 +213,7 @@ desktop (Tauri start_runtime)
   (Control). `runtime_error` and `runtime_stopping` already reach existing
   handling.
 
-## Start-up order, singletons and the update fence
+## Start-up order and singletons
 
 Every process that opens Qronos's persistent stores runs one order before its
 first store opens (`core/startup_admission.py`). The frozen entry point
@@ -227,34 +227,10 @@ again, a no-op once done.
    an initial-owner flag or a caller value never count as ownership. The
    release runs on that same thread, once, and a native release failure is
    recorded, never reported as clean.
-2. **The update fence, checked AFTER the acquisition.** While
-   `Local\Qronos.UpdateInProgress.v1` exists, what was acquired is released and
-   start-up is refused. That includes an abandoned mutex (`WAIT_ABANDONED`):
-   its owner may have been stopped by an update. An unknown answer also
-   releases and refuses. Entry points retry for up to 10 s while an update is
-   what stands in the way; sidecars refuse at once.
-   - Why this closes the race with the updater's real order: the updater takes
-     the exclusive store admission, then creates the fence, and only then waits
-     for each runtime singleton. If the fence came first, the runtime sees it
-     and refuses. If the runtime checked first, it already owns its singleton,
-     so the updater's wait times out ("runtime_running") and the updater gives
-     up, fence included.
-3. **The product version:** `QRONOS_APP_VERSION`, set by the desktop for every
-   backend service from its own package information (tauri.conf.json). From
-   source only, it is tauri.conf.json itself. A packaged process without it is
-   refused. Authority boundary: this is the desktop's declaration passed in the
-   environment, not a signed value; a same-user program that starts the backend
-   itself chooses it.
-4. **The barrier:** `UpdateService.recover_before_stores` on exactly the data
-   root the process will be admitted to. It is awaited and bounded (the update
-   store lock waits at most 10 s; the exclusive restore never waits).
-   - It may put data back after an interrupted update, only under the exclusive
-     admission, so a live writer makes it refuse instead.
-   - It is never a status hook or a background task.
-   - Anything but success refuses start-up.
-5. **The writer admission:** a shared `admit_writer` on the data root, kept for
-   the process's life. The updater's exclusive admission is refused while any
-   writer holds it.
+2. **The writer admission:** a shared `admit_writer` on the data root, kept for
+   the process's life (`core/store_admission.py`). An exclusive admission is
+   refused while any writer holds it, and a writer is refused (`busy`) while
+   another process holds the exclusive one.
 
 A refusal is terminal and opens nothing:
 - the bridge reports `runtime_error` with the typed code and exits with 78;
@@ -262,19 +238,14 @@ A refusal is terminal and opens nothing:
 - CLI services print `{"ok": false, "code": ...}`.
 
 Which processes run what:
-- **The supervisor** opens no store: it owns `Local\QronosSupervisor` and checks
-  the fence only.
-- **Store-opening services** (bridge, settings, library, memory, permissions,
-  update): the whole order.
-- **The update service:** the whole order for every operation except `launch`,
-  which takes the exclusive admission itself (`LaunchHold`) and cannot also
-  hold a shared one. It stays refused by default.
+- **The supervisor** opens no store: it owns `Local\QronosSupervisor` only.
+- **Store-opening services** (bridge, settings, library, memory, permissions):
+  the whole order.
 - **Audio and doctor** open no store.
 
 Where it applies: the installed runtime. That is always the frozen executable,
 and no environment value can turn it off there.
-- A source checkout is never updated by the installer and keeps its data in the
-  checkout, so it takes nothing.
+- A source checkout keeps its data in the checkout, so it takes nothing.
 - The exception: a source process whose store-path overrides point INTO an
   installed data root runs the whole order on that root. Overrides and roots are
   compared as resolved paths (junctions, symbolic links, `\\?\` and 8.3 names).
@@ -284,14 +255,6 @@ and no environment value can turn it off there.
   placing them would mean listing the file's names. The check is one link-count
   read per override; nothing is opened and no folder is listed. Single-name files
   and missing files are unaffected. Use a copy, not a link, for a private store.
-
-The update CLI is registered in the desktop backend as `Service::Update`, for
-one-shot reads and approval steps only. One-shot IPC never runs `launch`,
-because it waits for and kills its child. The desktop hand-over launch path,
-which reads one line, never kills the guard and keeps it out of any
-kill-on-close Job, is `runtime/lifecycle.rs` (see local-update-packages.md,
-"Wiring by other owners"); the launch itself stays refused at its enablement
-point until independent acceptance.
 
 ## Tests (fixtures only)
 

@@ -1,16 +1,15 @@
 """
-Round 14 (Runtime17 F1/F2/O1, Installer N9): the start-up order on the RESOLVED data root, bound per process,
-re-checked under the shared admission, and run by the source update CLI itself.
+Round 14 (Runtime17 F1/F2): the start-up order on the RESOLVED data root, bound per process, and run before the
+first store by both the frozen dispatch and a source CLI.
 
 Native boundary of these fixtures (audited):
-- real LockFileEx admission (core.store_admission) ONLY on tmp roots; the update fence is a PRIVATE mutex
-  "Local\\QronosR9Test-<uuid>-fence" (store_admission and update_service defaults replaced in children);
+- real LockFileEx admission (core.store_admission) ONLY on tmp roots;
 - the known-folder Local AppData is a private tmp folder (tests/conftest.py in-process;
   tests/fixtures/startup_entry_child.py in children); the real one is never queried or resolved;
 - junctions only through tests/fixtures/owned_junction.py (link removed, target kept); 8.3 names are read with
   GetShortPathNameW of tmp folders only;
 - children: base interpreter (tests/fixtures/child_python.py) with -B, bounded waits, killed only by their own
-  Popen handle; tmp data, profile and checkout; the real UpdateService barrier on tmp roots only.
+  Popen handle; tmp data, profile and checkout.
 No production mutex, store, profile, device, model, server or network.
 """
 
@@ -20,7 +19,6 @@ import ctypes
 import json
 import os
 import subprocess
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -60,8 +58,7 @@ def key(path) -> str:
 def source_enter(environ: dict, roots: list, **extra):
     """A source (non-installed) process start with seams that record where it would be admitted."""
     return startup_admission.enter(
-        "settings", installed=False, windows=True, environ=environ, version="0.1.0",
-        recover=lambda v: {"ok": True},
+        "settings", installed=False, windows=True, environ=environ,
         admit=lambda r: roots.append(Path(r)) or f"admission:{key(r)}", **extra)
 
 
@@ -192,9 +189,9 @@ import os, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from core import store_admission
-mode, root, fence, ready, go = sys.argv[2:7]
+mode, root, ready, go = sys.argv[2:6]
 admission = (store_admission.admit_exclusive(Path(root)) if mode == "exclusive"
-             else store_admission.admit_writer(Path(root), fence=fence))
+             else store_admission.admit_writer(Path(root)))
 Path(ready + ".tmp").write_text("held", encoding="ascii")
 os.replace(ready + ".tmp", ready)
 deadline = time.monotonic() + 90
@@ -214,13 +211,13 @@ def clean_env() -> tuple[str, dict]:
 
 
 class Holder:
-    """A child holding a SHARED (a live writer) or EXCLUSIVE (a restore) admission on ROOT until ended."""
+    """A child holding a SHARED (a live writer) or EXCLUSIVE admission on ROOT until ended."""
 
-    def __init__(self, tmp: Path, mode: str, root: Path, fence: str) -> None:
+    def __init__(self, tmp: Path, mode: str, root: Path) -> None:
         tag = uuid.uuid4().hex[:8]
         self.ready, self.go = tmp / f"hold-ready-{tag}", tmp / f"hold-go-{tag}"
         executable, environment = clean_env()
-        self.process = subprocess.Popen([executable, "-B", "-c", WRITER, str(ROOT), mode, str(root), fence,
+        self.process = subprocess.Popen([executable, "-B", "-c", WRITER, str(ROOT), mode, str(root),
                                          str(self.ready), str(self.go)], env=environment)
         deadline = time.monotonic() + 30
         while not self.ready.exists() and time.monotonic() < deadline:
@@ -236,24 +233,22 @@ class Holder:
             self.process.wait(10)
 
 
-def installed_enter(root: Path, fence: str, **extra):
-    return startup_admission.enter("settings", installed=True, windows=True, data_root=root, version="0.1.0",
-                                   recover=lambda v: {"ok": True},
-                                   admit=lambda r: store_admission.admit_writer(r, fence=fence), **extra)
+def installed_enter(root: Path, **extra):
+    return startup_admission.enter("settings", installed=True, windows=True, data_root=root,
+                                   admit=store_admission.admit_writer, **extra)
 
 
-def test_f2_an_admission_on_one_root_never_authorises_another_root_under_a_restore(tmp_path):
-    fence = private("fence")
+def test_f2_an_admission_on_one_root_never_authorises_another_root_under_an_exclusive_holder(tmp_path):
     a, b = tmp_path / "A", tmp_path / "B"
     a.mkdir()
     b.mkdir()
-    first = installed_enter(a, fence)
-    restore = Holder(tmp_path, "exclusive", b, fence)
+    first = installed_enter(a)
+    exclusive = Holder(tmp_path, "exclusive", b)
     try:
         with pytest.raises(StartupRefused) as refused:
-            installed_enter(b, fence)
+            installed_enter(b)
     finally:
-        restore.end()
+        exclusive.end()
     assert refused.value.code == "store"
     assert startup_admission._held["admission"] is first  # the process keeps exactly its own first admission
     with pytest.raises(Exception):
@@ -261,34 +256,30 @@ def test_f2_an_admission_on_one_root_never_authorises_another_root_under_a_resto
 
 
 def test_f2_a_not_applicable_source_start_never_authorises_an_installed_call(tmp_path):
-    fence = private("fence")
     roots: list = []
     assert source_enter({"LOCALAPPDATA": str(tmp_path / "local")}, roots) is None
     with pytest.raises(StartupRefused) as refused:
-        installed_enter(tmp_path / "inst", fence)
+        installed_enter(tmp_path / "inst")
     assert refused.value.code == "store" and startup_admission._held["admission"] is None
 
 
 def test_f2_an_installed_admission_never_turns_into_a_not_applicable_answer(tmp_path):
-    fence = private("fence")
     (tmp_path / "inst").mkdir()
-    installed_enter(tmp_path / "inst", fence)
+    installed_enter(tmp_path / "inst")
     with pytest.raises(StartupRefused):
         source_enter({"LOCALAPPDATA": str(tmp_path / "local")}, [])
 
 
 def test_f2_equivalent_spellings_of_the_same_resolved_root_are_idempotent(tmp_path):
-    fence = private("fence")
     root = tmp_path / "Inst"
     root.mkdir()
     calls: list = []
 
     def admit(r):
         calls.append(r)
-        return store_admission.admit_writer(r, fence=fence)
+        return store_admission.admit_writer(r)
 
-    seams = {"installed": True, "windows": True, "version": "0.1.0", "recover": lambda v: {"ok": True},
-             "admit": admit}
+    seams = {"installed": True, "windows": True, "admit": admit}
     first = startup_admission.enter("settings", data_root=root, **seams)
     assert startup_admission.enter("settings", data_root=Path(str(root).upper()), **seams) is first
     assert startup_admission.enter("settings", data_root=Path("\\\\?\\" + str(root)), **seams) is first
@@ -297,235 +288,16 @@ def test_f2_equivalent_spellings_of_the_same_resolved_root_are_idempotent(tmp_pa
     assert len(calls) == 1
 
 
-# ===================================================================== O1: re-checked under the admission
-
-
 def write_settings(path: Path, scale: int) -> None:
     """The PRODUCT settings document (core.json_store, SCHEMA_VERSION 2; a real key with a real choice)."""
     path.write_text(json.dumps({"schemaVersion": 2, "payload": {"appearance.ui_scale_percent": scale}}, indent=2),
                     encoding="utf-8")
 
 
-def read_scale(path: Path) -> int:
-    from core.settings_service import DEFAULT_DEFINITIONS, SettingsService
-
-    return SettingsService(DEFAULT_DEFINITIONS, path=path).get("appearance.ui_scale_percent")
-
-
-def pending_restore(root: Path, fence: str) -> None:
-    """A real interrupted rollback (the Installer's own state): a safety snapshot of the REAL settings document
-    (scale 110), then the current document (scale 90) and a 'restoring' claim."""
-    from core.update_service import UpdateService
-
-    (root / "Updates").mkdir(parents=True, exist_ok=True)
-    write_settings(root / "settings.json", 110)
-    service = UpdateService(root, "0.2.0", liveness=lambda: store_admission.update_in_progress(fence), environ={})
-    snapshot = service._take_snapshot("pre_restore", "0.1.0", ["settings"])
-    write_settings(root / "settings.json", 90)
-    service._change(lambda state: state.update(launching={
-        "claimedAt": 1_800_000_000.0, "pid": 1, "version": "0.1.0", "packageSha256": "b" * 64, "step": "restoring",
-        "restoredSnapshot": snapshot["id"], "safetySnapshot": snapshot["id"]}))
-
-
-HANDOFF = {"version": "0.1.0", "fromVersion": "0.1.0", "kind": "repair", "packageSha256": "a" * 64,
-           "manifestSha256": "b" * 64, "launchedAt": 1_800_000_000.0, "restoredSnapshot": None,
-           "safetySnapshot": None, "dataStores": {}, "nonceSha256": "c" * 64}
-UNCONFIRMED = {"result": "unconfirmed", "kind": "repair", "version": "0.1.0", "runningVersion": "0.1.0",
-               "at": 1_800_000_100.0, "dataMismatch": [], "dataRestored": False, "receipt": "absent"}
-
-
-def set_lifecycle(root: Path, **fields) -> None:
-    from core.update_service import UpdateService
-
-    (root / "Updates").mkdir(parents=True, exist_ok=True)
-    UpdateService(root, "0.1.0", liveness=lambda: False, environ={})._change(lambda state: state.update(**fields))
-
-
-def claim(root: Path):
-    return json.loads((root / "Updates" / "update-lifecycle.json").read_text(encoding="utf-8"))["launching"]
-
-
-class Guard:
-    def __init__(self, log: list) -> None:
-        self.log = log
-
-    def close(self) -> None:
-        self.log.append("instance-released")
-
-
-def real_barrier(root: Path, fence: str):
-    def recover(version):
-        from core.local_update import UpdateError
-        from core.update_service import UpdateService
-
-        try:
-            UpdateService(root, version, liveness=lambda: store_admission.update_in_progress(fence),
-                          environ={}).recover_before_stores()
-        except UpdateError as error:
-            return {"ok": False, "code": error.code}
-        return {"ok": True}
-    return recover
-
-
-@pytest.mark.parametrize("window", ["claim", "unresolved_handoff"])
-def test_o1_an_update_that_ran_between_the_barrier_and_the_admission_is_refused_and_nothing_is_kept(tmp_path, window):
-    fence = private("fence")
-    root = tmp_path / "data"
-    (root / "Updates").mkdir(parents=True)
-    write_settings(root / "settings.json", 100)
-    barrier = real_barrier(root, fence)
-
-    def recover_then_update(version):
-        outcome = barrier(version)  # the real barrier: nothing pending yet
-        if window == "claim":
-            pending_restore(root, fence)  # an update ran and was interrupted in the window
-        else:
-            set_lifecycle(root, handoff=dict(HANDOFF), outcome=None)  # an installer was handed over, then died
-        return outcome
-
-    log: list = []
-    with pytest.raises(StartupRefused) as refused:
-        startup_admission.enter("bridge", instance=True, installed=True, windows=True, data_root=root,
-                                version="0.1.0", recover=recover_then_update,
-                                acquire_instance=lambda retry: Guard(log),
-                                admit=lambda r: store_admission.admit_writer(r, fence=fence))
-    assert refused.value.code == "recovery_pending", refused.value.code
-    assert log == ["instance-released"] and not startup_admission.admitted() and startup_admission._held == {}
-    store_admission.admit_exclusive(root).release()  # our shared admission was released
-    if window == "claim":
-        assert claim(root) is not None and read_scale(root / "settings.json") == 90  # nothing restored while shared
-
-
-def test_o1_a_refusal_lets_a_real_exclusive_restore_child_run_next(tmp_path):
-    fence = private("fence")
-    root = tmp_path / "data"
-    (root / "Updates").mkdir(parents=True)
-    barrier = real_barrier(root, fence)
-
-    def recover_then_update(version):
-        outcome = barrier(version)
-        pending_restore(root, fence)
-        return outcome
-
-    with pytest.raises(StartupRefused):
-        startup_admission.enter("settings", installed=True, windows=True, data_root=root, version="0.1.0",
-                                recover=recover_then_update,
-                                admit=lambda r: store_admission.admit_writer(r, fence=fence))
-    restore = Holder(tmp_path, "exclusive", root, fence)  # would fail to start if our admission were kept
-    restore.end()
-
-
-def test_o1_a_repair_resolved_as_unconfirmed_is_not_a_new_pending_update(tmp_path):
-    fence = private("fence")
-    root = tmp_path / "data"
-    set_lifecycle(root, handoff=dict(HANDOFF), outcome=dict(UNCONFIRMED))
-    admission = startup_admission.enter("settings", installed=True, windows=True, data_root=root, version="0.1.0",
-                                        recover=lambda v: {"ok": True},
-                                        admit=lambda r: store_admission.admit_writer(r, fence=fence))
-    assert admission is not None and startup_admission.admitted()
-
-
-def test_o1_an_unreadable_lifecycle_under_the_admission_refuses_and_releases(tmp_path):
-    fence = private("fence")
-    root = tmp_path / "data"
-    (root / "Updates").mkdir(parents=True)
-
-    def recover_then_corrupt(version):
-        (root / "Updates" / "update-lifecycle.json").write_text("{ broken", encoding="utf-8")
-        return {"ok": True}
-
-    with pytest.raises(StartupRefused) as refused:
-        startup_admission.enter("settings", installed=True, windows=True, data_root=root, version="0.1.0",
-                                recover=recover_then_corrupt,
-                                admit=lambda r: store_admission.admit_writer(r, fence=fence))
-    assert refused.value.code in {"recovery_failed", "store"} and not startup_admission.admitted()
-    store_admission.admit_exclusive(root).release()
-
-
-STARTUP = r"""
-import json, os, sys, time
-from pathlib import Path
-target, root, fence, start, go, out = sys.argv[1:7]
-sys.path.insert(0, target)
-from core import startup_admission, store_admission, update_service
-from core.local_update import UpdateError
-from core.update_service import UpdateService
-from core.settings_service import DEFAULT_DEFINITIONS, SettingsService
-store_admission.admit_writer.__defaults__ = (fence,)
-update_service.update_in_progress.__defaults__ = (fence,)
-root = Path(root)
-
-def recover(version):
-    try:
-        UpdateService(root, version, liveness=lambda: store_admission.update_in_progress(fence),
-                      environ={}).recover_before_stores()
-    except UpdateError as error:
-        return {"ok": False, "code": error.code}
-    return {"ok": True}
-
-deadline = time.monotonic() + 60
-while not os.path.exists(start) and time.monotonic() < deadline:
-    time.sleep(0.001)
-result = {"pid": os.getpid()}
-try:
-    startup_admission.enter("settings", installed=True, windows=True, data_root=root, version="0.1.0",
-                            recover=recover, admit=lambda r: store_admission.admit_writer(r, fence=fence))
-    lifecycle = json.loads((root / "Updates" / "update-lifecycle.json").read_text(encoding="utf-8"))
-    # the FIRST store, through the product's own service
-    store = SettingsService(DEFAULT_DEFINITIONS, path=root / "settings.json")
-    result.update(admitted=True, claimAtAdmission=lifecycle.get("launching"),
-                  scaleAtFirstStore=store.get("appearance.ui_scale_percent"))
-except startup_admission.StartupRefused as refused:
-    result.update(admitted=False, code=refused.code)
-Path(out + ".tmp").write_text(json.dumps(result), encoding="utf-8")
-os.replace(out + ".tmp", out)
-deadline = time.monotonic() + 60
-while result.get("admitted") and not os.path.exists(go) and time.monotonic() < deadline:
-    time.sleep(0.02)
-"""
-
-
-def test_o1_concurrent_real_startups_on_a_pending_restore_see_the_restored_product_settings_first(tmp_path):
-    rounds = []
-    for index in range(3):
-        root, fence = tmp_path / f"data{index}", private("fence")
-        pending_restore(root, fence)
-        start, go = tmp_path / f"start{index}", tmp_path / f"go{index}"
-        outs = [tmp_path / f"out{index}-{n}.json" for n in range(3)]
-        executable, environment = clean_env()
-        children = [subprocess.Popen([executable, "-B", "-c", STARTUP, str(ROOT), str(root), fence, str(start),
-                                      str(go), str(out)], env=environment) for out in outs]
-        try:
-            time.sleep(1.5)
-            start.write_text("1")
-            deadline = time.monotonic() + 60
-            while not all(o.exists() for o in outs) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            results = [json.loads(o.read_text(encoding="utf-8")) for o in outs if o.exists()]
-        finally:
-            go.write_text("1")
-            for child in children:
-                try:
-                    child.wait(30)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(10)
-        rounds.append(results)
-        assert len(results) == 3, results
-        admitted = [r for r in results if r["admitted"]]
-        assert admitted, results
-        for r in admitted:
-            assert r["claimAtAdmission"] is None and r["scaleAtFirstStore"] == 110, results
-        for r in results:
-            if not r["admitted"]:
-                assert r["code"] in {"recovery_pending", "writers_active", "busy", "update_in_progress"}, results
-        assert read_scale(root / "settings.json") == 110 and claim(root) is None
-
-
 # ===================================================================== children: frozen dispatch and source entries
 
 
-def run_child(tmp: Path, mode: str, name: str, args: list, *, watch: Path, fence: str, env: dict | None = None,
+def run_child(tmp: Path, mode: str, name: str, args: list, *, watch: Path, env: dict | None = None,
               stdin: bytes = b"") -> dict:
     executable, environment = clean_env()
     environment.update({"LOCALAPPDATA": str(tmp / "local"), "APPDATA": str(tmp / "roaming"),
@@ -534,7 +306,7 @@ def run_child(tmp: Path, mode: str, name: str, args: list, *, watch: Path, fence
     (tmp / "t").mkdir(exist_ok=True)
     environment.update(env or {})
     out = tmp / f"child-{uuid.uuid4().hex[:8]}.json"
-    done = subprocess.run([executable, "-B", str(CHILD), str(ROOT), str(watch), fence, str(tmp / "known"),
+    done = subprocess.run([executable, "-B", str(CHILD), str(ROOT), str(watch), str(tmp / "known"),
                            str(tmp / "checkout"), str(out), mode, name, *args],
                           env=environment, input=stdin, capture_output=True, timeout=300)
     assert out.exists(), done.stderr.decode("utf-8", "replace")[-3000:]
@@ -544,31 +316,31 @@ def run_child(tmp: Path, mode: str, name: str, args: list, *, watch: Path, fence
     return result
 
 
-def frozen_env(root: Path, version: str = "0.1.0") -> dict:
-    return {"QRONOS_PACKAGED_RUNTIME": "1", "QRONOS_DATA_ROOT": str(root), "QRONOS_APP_VERSION": version}
+def frozen_env(root: Path) -> dict:
+    return {"QRONOS_PACKAGED_RUNTIME": "1", "QRONOS_DATA_ROOT": str(root), "QRONOS_APP_VERSION": "0.1.0"}
 
 
-def test_restore_happens_before_the_first_store_with_the_real_settings_schema(tmp_path):
-    root, fence = tmp_path / "local" / "Qronos", private("fence")
-    pending_restore(root, fence)
-    result = run_child(tmp_path, "frozen", "settings", ["snapshot"], watch=root, fence=fence, env=frozen_env(root))
+def test_the_frozen_settings_service_is_admitted_before_its_first_store(tmp_path):
+    root = tmp_path / "local" / "Qronos"
+    root.mkdir(parents=True)
+    write_settings(root / "settings.json", 110)
+    result = run_child(tmp_path, "frozen", "settings", ["snapshot"], watch=root, env=frozen_env(root))
     answer = json.loads(result["lines"][-1])
     assert result["code"] == 0 and answer["ok"] is True, result["stdout"]
     assert answer["values"]["appearance.ui_scale_percent"] == 110 and answer["problems"] == [], answer
     settings_opens = [e for e in result["events"] if e["path"] == "settings.json" and "core.settings_cli" in
                       e["serviceImported"]]
     assert settings_opens and all(e["admitted"] for e in settings_opens), result["events"]
-    assert claim(root) is None
+    assert result["admittedAtEnd"]  # the frozen dispatch, then the CLI's own main on the same root: idempotent
 
 
 def test_f1_a_real_source_cli_reaching_installed_data_through_a_junction_is_admitted_before_its_store(tmp_path):
-    fence = private("fence")
     root = tmp_path / "known" / "Qronos"
-    (root / "Updates").mkdir(parents=True)
+    root.mkdir(parents=True)
     write_settings(root / "settings.json", 110)
     with owned_junction(root, tmp_path / "alias") as link:
         # watched through the ALIAS: the settings store is opened by that spelling
-        result = run_child(tmp_path, "source", "core.settings_cli", ["snapshot"], watch=link, fence=fence,
+        result = run_child(tmp_path, "source", "core.settings_cli", ["snapshot"], watch=link,
                            env={"QRONOS_SETTINGS_PATH": str(link / "settings.json")})
     answer = json.loads(result["lines"][-1])
     assert result["code"] in (0, None) and answer["values"]["appearance.ui_scale_percent"] == 110, result["stdout"]
@@ -578,70 +350,18 @@ def test_f1_a_real_source_cli_reaching_installed_data_through_a_junction_is_admi
     assert store_admission.ADMISSION_FILE in os.listdir(root)
 
 
-UPDATE_OPS = ["status", "discover", "verify", "request", "approve", "discard", "startup_check", "launchx",
-              "--launch", "launch now", ""]
-
-
-@pytest.mark.parametrize("operation", UPDATE_OPS)
-def test_n9_every_non_launch_update_operation_from_source_is_admitted_before_any_store(tmp_path, operation):
-    fence = private("fence")
+def test_a_refused_source_cli_prints_one_typed_answer_and_opens_no_store(tmp_path):
     root = tmp_path / "known" / "Qronos"
-    (root / "Updates").mkdir(parents=True)
-    audit = root / "action_audit.jsonl"
-    result = run_child(tmp_path, "source", "core.update_cli", [operation], watch=root, fence=fence,
-                       env={"QRONOS_PERMISSION_AUDIT_PATH": str(audit)}, stdin=b"{}")
-    assert len(result["lines"]) == 1, result["stdout"]  # exactly one JSON answer
-    json.loads(result["lines"][0])
-    assert result["admittedAtEnd"] and result["binding"][0] is True, result
-    assert all(e["admitted"] for e in result["events"]
-               if not e["path"].lower().startswith("updates") and e["path"] != store_admission.ADMISSION_FILE)
-    assert "core.update_cli" not in result["imported"]  # ran as __main__; no second import of the module
-
-
-@pytest.mark.parametrize("spelling", ["launch", " Launch ", "LAUNCH"])
-def test_n9_launch_from_source_never_holds_the_shared_admission(tmp_path, spelling):
-    fence = private("fence")
-    root = tmp_path / "known" / "Qronos"
-    (root / "Updates").mkdir(parents=True)
-    result = run_child(tmp_path, "source", "core.update_cli", [spelling], watch=root, fence=fence,
-                       env={"QRONOS_PERMISSION_AUDIT_PATH": str(root / "action_audit.jsonl")},
-                       stdin=b'{"launchToken": "x"}')
-    assert not result["admittedAtEnd"] and len(result["lines"]) == 1, result
-    assert json.loads(result["lines"][0]).get("code") in {"launch_unavailable", "not_approved"}, result["stdout"]
-
-
-@pytest.mark.parametrize("why", ["restore_in_progress", "version_unknown"])
-def test_n9_a_refused_source_update_cli_prints_one_typed_answer_and_opens_no_store(tmp_path, why):
-    fence = private("fence")
-    root = tmp_path / "known" / "Qronos"
-    (root / "Updates").mkdir(parents=True)
-    audit = root / "action_audit.jsonl"
-    env = {"QRONOS_PERMISSION_AUDIT_PATH": str(audit)}
-    holder = None
-    if why == "restore_in_progress":
-        holder = Holder(tmp_path, "exclusive", root, fence)
-    else:
-        env["QRONOS_APP_VERSION"] = "not-a-version"
+    root.mkdir(parents=True)
+    write_settings(root / "settings.json", 110)
+    holder = Holder(tmp_path, "exclusive", root)
     try:
-        result = run_child(tmp_path, "source", "core.update_cli", ["status"], watch=root, fence=fence, env=env,
-                           stdin=b"{}")
+        result = run_child(tmp_path, "source", "core.settings_cli", ["snapshot"], watch=root,
+                           env={"QRONOS_SETTINGS_PATH": str(root / "settings.json")})
     finally:
-        if holder is not None:
-            holder.end()
+        holder.end()
     assert result["code"] == STARTUP_REFUSED_EXIT and len(result["lines"]) == 1, result
     answer = json.loads(result["lines"][0])
-    assert answer["ok"] is False and answer["errorType"] == "StartupRefused"
-    # a shared admission blocked by an exclusive holder (a restore) is reported as update_in_progress
-    assert answer["code"] == ("update_in_progress" if why == "restore_in_progress" else "version_unknown"), answer
-    assert not audit.exists() and not result["admittedAtEnd"]
-    assert [e for e in result["events"] if not e["path"].lower().startswith("updates")
-            and e["path"] != store_admission.ADMISSION_FILE] == []
-
-
-def test_n9_the_frozen_dispatch_then_the_cli_main_on_the_same_root_is_idempotent(tmp_path):
-    root, fence = tmp_path / "local" / "Qronos", private("fence")
-    (root / "Updates").mkdir(parents=True)
-    result = run_child(tmp_path, "frozen", "update", ["status"], watch=root, fence=fence, env=frozen_env(root),
-                       stdin=b"{}")
-    assert result["code"] == 0 and len(result["lines"]) == 1 and json.loads(result["lines"][0])["ok"] is True, result
-    assert result["admittedAtEnd"]
+    assert answer["ok"] is False and answer["errorType"] == "StartupRefused" and answer["code"] == "busy", answer
+    assert not result["admittedAtEnd"]
+    assert [e for e in result["events"] if e["path"] != store_admission.ADMISSION_FILE] == []

@@ -113,8 +113,7 @@ def test_the_real_cached_redistributable_verifies_and_a_tampered_copy_does_not(t
 
 def test_a_hook_wrapper_without_the_redistributable_is_refused(tmp_path):
     pin = committed_pin()
-    wrapper = prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, owned_manifest=tmp_path / "m.txt",
-                                         vcredist=vc_stand_in(tmp_path))
+    wrapper = prerequisites.hook_wrapper(tmp_path / pin["fileName"], pin, vcredist=vc_stand_in(tmp_path))
     prerequisites.verify_hook_wrapper(wrapper)
     stripped = "\n".join(line for line in wrapper.splitlines() if "QRONOS_VCREDIST_" not in line)
     with pytest.raises(PrerequisiteError, match="QRONOS_VCREDIST_INSTALLER"):
@@ -133,7 +132,7 @@ def test_the_redistributable_runs_after_webview2_and_before_anything_of_the_prev
              pre.index("!insertmacro QRONOS_VCREDIST_SATISFIED_TO_R9"),
              pre.index("!insertmacro QRONOS_VCREDIST_RUN_INSTALLER"),
              pre.rindex("!insertmacro QRONOS_VCREDIST_SATISFIED_TO_R9"),  # checked again after the run
-             pre.index("CheckIfAppIsRunning"), pre.index("Call QronosTxnBegin")]
+             pre.index("CheckIfAppIsRunning"), pre.rindex("Call QronosRemoveOwnedPayload")]
     assert order == sorted(order) and order[1] != order[3]
     assert "Abort" not in pre.replace("!insertmacro QRONOS_FAIL", "")  # every stop goes through QRONOS_FAIL
     for register in ("$R4", "$R5", "$R6"):

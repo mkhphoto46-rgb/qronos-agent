@@ -770,7 +770,6 @@ pub fn run() {
             runtime::native_audio_output_play,
             runtime::native_audio_output_stop,
             runtime::permissions_command,
-            runtime::update_command,
             runtime::send_text_message,
             runtime::queue_list,
             runtime::queue_submit,

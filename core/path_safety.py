@@ -144,3 +144,34 @@ def is_absolute_local(value: str) -> bool:
         pure = PureWindowsPath(value)
         return bool(pure.drive) and bool(pure.root) and len(pure.drive) == 2
     return Path(value).is_absolute()
+
+
+def is_link(path: str | Path) -> bool:
+    """
+    The strict question: True for ANY symlink or reparse point, and for a path that cannot be inspected.
+
+    Stricter than ``is_link_or_reparse_point`` (a cloud-sync placeholder counts here too): used where a
+    fixed folder or lock file of Qronos's own must be exactly a plain entry, never something redirected.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def unsafe_file(path: str | Path) -> str | None:
+    """Why an existing directory entry is not a plain, single-name file that may be used, if it is not."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    attributes = getattr(info, "st_file_attributes", 0)
+    if stat.S_ISLNK(info.st_mode) or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        return "is a link"
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if info.st_nlink != 1:
+        return "has another hard link"
+    return None

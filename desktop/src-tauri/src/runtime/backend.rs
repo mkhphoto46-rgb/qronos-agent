@@ -26,11 +26,6 @@ pub(super) enum Service {
     Settings,
     Permissions,
     Doctor,
-    /// The offline update service (core/update_cli.py, Installer-owned), reached
-    /// only through `update_command`: one-shot reads, approval steps and pickers
-    /// through service_ipc.rs; `launch` only through the update lifecycle
-    /// (lifecycle.rs), never through one-shot IPC.
-    Update,
 }
 
 /// The product version every backend service is told (QRONOS_APP_VERSION): the
@@ -53,7 +48,6 @@ impl Service {
             Self::Settings => "settings",
             Self::Permissions => "permissions",
             Self::Doctor => "doctor",
-            Self::Update => "update",
         }
     }
 
@@ -76,7 +70,6 @@ impl Service {
             Self::Settings => "core.settings_cli",
             Self::Permissions => "core.permissions_cli",
             Self::Doctor => "core.runtime_preflight",
-            Self::Update => "core.update_cli",
         }
     }
 }
@@ -130,7 +123,7 @@ impl Backend {
         };
         command.env("PYTHONUTF8", "1").env("PYTHONUNBUFFERED", "1");
         if let Some(version) = APP_VERSION.get() {
-            // The start-up barrier of every store-opening service needs the running version.
+            // The runtime's status hooks report the running version (core/runtime_hooks.py).
             command.env("QRONOS_APP_VERSION", version);
         }
         Ok(command)
@@ -407,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn every_service_is_told_the_desktop_package_version_and_update_is_a_closed_service() {
+    fn every_service_is_told_the_desktop_package_version() {
         let fixture = Fixture::new();
         let directory = fixture.bundle();
         let backend = Backend::Packaged {
@@ -416,7 +409,7 @@ mod tests {
             asset_root: fixture.0.join("assets"),
         };
         set_app_version("9.8.7".to_string());
-        for service in [Service::Settings, Service::Update, Service::Supervisor] {
+        for service in [Service::Settings, Service::Supervisor] {
             let command = backend.command(service).unwrap();
             let version = command
                 .get_envs()
@@ -424,10 +417,6 @@ mod tests {
                 .and_then(|(_, value)| value.map(|v| v.to_owned()));
             assert_eq!(version, Some(std::ffi::OsString::from(APP_VERSION.get().unwrap())));
         }
-        assert_eq!(
-            backend.command(Service::Update).unwrap().get_args().collect::<Vec<_>>(),
-            vec![std::ffi::OsStr::new("update")]
-        );
     }
 
     #[test]

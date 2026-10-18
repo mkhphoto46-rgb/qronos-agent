@@ -2,19 +2,15 @@
 The runtime bridge's singleton: ``Local\\QronosAgentRuntimeBridge``, OWNED for the bridge's life.
 
 Ownership is a wait-acquisition by a holder thread (``core.instance_ownership``),
-never "the mutex was created" or "it already existed". After acquiring, the
-update fence is checked; while an update or its installer is alive, the mutex
-is released again and the bridge refuses (``UpdateInProgress``). The updater's
-quiescence takes this same name by create-then-wait, so a live bridge makes it
-refuse, and a bridge cannot start while the updater holds it.
+never "the mutex was created" or "it already existed".
 """
 
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Optional
 
-from core.instance_ownership import AlreadyOwned, MutexApi, OwnedMutex, acquire_unless_updating
+from core.instance_ownership import AlreadyOwned, MutexApi, OwnedMutex
 
 
 class RuntimeAlreadyRunning(RuntimeError):
@@ -31,19 +27,14 @@ class RuntimeInstanceGuard:
     def acquire(
         cls,
         *,
-        retry_seconds: float = 0.0,
         api: Optional[MutexApi] = None,
-        fence_exists: Optional[Callable[[], bool]] = None,
         name: Optional[str] = None,
     ) -> "RuntimeInstanceGuard":
-        """Own the bridge singleton, then refuse while an update runs (see the module doc)."""
+        """Own the bridge singleton now, or raise RuntimeAlreadyRunning (see the module doc)."""
         if os.name != "nt" and api is None:
             return cls(None)
-        options = {"retry_seconds": retry_seconds, "api": api}
-        if fence_exists is not None:
-            options["fence_exists"] = fence_exists
         try:
-            return cls(acquire_unless_updating(name or cls.NAME, **options))
+            return cls(OwnedMutex.acquire(name or cls.NAME, api=api))
         except AlreadyOwned as error:
             raise RuntimeAlreadyRunning("Another Qronos runtime instance is already active.") from error
 

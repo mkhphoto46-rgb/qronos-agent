@@ -35,10 +35,6 @@ class SidecarGuardUnavailable(RuntimeError):
     """Windows could not establish safe lifetime ownership for a sidecar."""
 
 
-class SidecarUpdateInProgress(SidecarGuardUnavailable):
-    """The update fence exists: no sidecar starts while an update or its installer runs."""
-
-
 class _IO_COUNTERS(ctypes.Structure):
     _fields_ = [
         ("ReadOperationCount", ctypes.c_uint64),
@@ -240,9 +236,7 @@ class WindowsSidecarGuard:
     The mutex is OWNED by a holder thread (``core.instance_ownership``): a
     wait-acquisition, never "created" or "already existed", released on that
     same thread exactly once. ``WAIT_ABANDONED`` is ownership after a dead
-    owner, but the dead owner may have been stopped by an update, so after ANY
-    acquisition the update fence is checked: while it exists the mutex is
-    released again and no sidecar starts (``SidecarUpdateInProgress``).
+    owner (``abandoned``).
     """
 
     def __init__(self, mutex_name: str) -> None:
@@ -262,7 +256,7 @@ class WindowsSidecarGuard:
 
     @classmethod
     def acquire(
-        cls, mutex_name: str, *, api=None, fence_exists=None, allow_breakaway: bool = False
+        cls, mutex_name: str, *, api=None, allow_breakaway: bool = False
     ) -> "WindowsSidecarGuard":
         """Own the mutex and create the kill-on-close Job.
 
@@ -273,7 +267,7 @@ class WindowsSidecarGuard:
         """
         guard = cls(mutex_name)
         try:
-            guard._acquire_mutex(api=api, fence_exists=fence_exists)
+            guard._acquire_mutex(api=api)
             guard._create_kill_on_close_job(allow_breakaway=allow_breakaway)
             return guard
         except Exception:
@@ -291,20 +285,13 @@ class WindowsSidecarGuard:
         owned = self._owned
         return bool(owned is not None and owned.abandoned)
 
-    def _acquire_mutex(self, *, api=None, fence_exists=None) -> None:
-        from core.instance_ownership import AlreadyOwned, OwnershipError, UpdateInProgress, acquire_unless_updating
+    def _acquire_mutex(self, *, api=None) -> None:
+        from core.instance_ownership import AlreadyOwned, OwnedMutex, OwnershipError
 
-        options = {"retry_seconds": 0.0, "api": api}
-        if fence_exists is not None:
-            options["fence_exists"] = fence_exists
         try:
-            self._owned = acquire_unless_updating(self.mutex_name, **options)
+            self._owned = OwnedMutex.acquire(self.mutex_name, api=api)
         except AlreadyOwned as error:
             raise SidecarAlreadyRunning("Another Qronos process already owns this sidecar.") from error
-        except UpdateInProgress as error:
-            raise SidecarUpdateInProgress(
-                "An update is being installed; the sidecar does not start until it ends."
-            ) from error
         except OwnershipError as error:
             raise SidecarGuardUnavailable(
                 f"Could not own Qronos sidecar mutex {self.mutex_name!r}: {error}"

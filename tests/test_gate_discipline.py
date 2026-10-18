@@ -84,19 +84,7 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
     ),
     "core.store_admission": (
         "Takes and releases byte-range locks (LockFileEx/UnlockFileEx) on "
-        "Qronos's own admission lock file, and asks whether the update fence "
-        "mutex exists (OpenMutexW); it launches nothing."
-    ),
-    "core.update_service": (
-        "Starts only the verified staged Qronos installer (/S /QRONOSUPDATE) "
-        "through fenced_launcher. GateAuthorizer asks security.gate for an "
-        "INSTALL_SOFTWARE action at request, approve and launch, and the "
-        "person's typed approval secret is required as well; the launch is "
-        "refused by default (launch_unavailable). Only that child receives a "
-        "duplicate of the update fence handle. ctypes: the update fence and "
-        "runtime-singleton mutexes (CreateMutexW, WaitForSingleObject with no "
-        "wait), a share-read CreateFileW lock on the staged installer and "
-        "GetProcessTimes."
+        "Qronos's own admission lock file; it launches nothing."
     ),
     "core.windows_accessibility": (
         "Reads UI Automation focus, geometry, properties and RuntimeIds. "

@@ -10690,8 +10690,7 @@ def main() -> int:
     supervision = None
 
     # Before ANY store opens (core/startup_admission.py): own the bridge singleton,
-    # refuse while an update runs, resolve an interrupted update, then hold the shared
-    # writer admission for this process's life. The frozen entry point has already done
+    # then hold the shared writer admission for this process's life. The frozen entry point has already done
     # this before importing this module; then this is a no-op.
     from core import startup_admission
 

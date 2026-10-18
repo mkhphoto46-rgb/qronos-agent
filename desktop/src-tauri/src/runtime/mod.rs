@@ -13,7 +13,7 @@ mod lifecycle;
 mod service_ipc;
 use backend::{Backend, Service};
 use job::OwnedJob;
-use lifecycle::{LaunchHost, LaunchLine, Lifecycle, UpdateRoute};
+use lifecycle::ServiceGate;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -167,11 +167,11 @@ pub struct RuntimeManagerState {
     // race to overwrite each other.
     settings_command: Arc<tokio::sync::Mutex<()>>,
 
-    // The update launch phase and the service gate every backend process passes (lifecycle.rs).
-    lifecycle: Lifecycle,
+    // The service gate every backend process passes (lifecycle.rs).
+    gate: Arc<ServiceGate>,
 
     // A stopped runtime whose Job still had a live process: busy ownership, kept
-    // until the Job is proved empty. No runtime start and no launch meanwhile.
+    // until the Job is proved empty. No runtime start meanwhile.
     lingering: Mutex<Option<OwnedJob>>,
 
     backend: Option<Backend>,
@@ -186,14 +186,14 @@ impl RuntimeManagerState {
                 stop_generation: 0,
             }),
             settings_command: Arc::new(tokio::sync::Mutex::new(())),
-            lifecycle: Lifecycle::new(UPDATE_DRAIN_BOUND),
+            gate: Arc::new(ServiceGate::default()),
             lingering: Mutex::new(None),
             backend,
         }
     }
 
     fn ticket(&self) -> Result<lifecycle::Ticket, String> {
-        self.lifecycle.gate.enter()
+        self.gate.enter()
     }
 
     /// Err while an earlier runtime's Job still has a live process; clears it once proved empty.
@@ -232,7 +232,7 @@ fn emit_runtime_event(app: &AppHandle, event: RuntimeEvent) {
 pub async fn runtime_setup_snapshot(
     state: State<'_, RuntimeManagerState>,
 ) -> Result<serde_json::Value, String> {
-    service_ipc::request(state.require_backend()?, Service::Doctor, "", None, None, Some(state.ticket()?)).await
+    service_ipc::request(state.require_backend()?, Service::Doctor, "", None, None, state.ticket()?).await
 }
 
 /// The largest runtime output line read; the supervisor relays at most 4 MiB.
@@ -519,10 +519,6 @@ fn start_runtime_inner(
         .lock()
         .map_err(|_| "Runtime manager lock failed.".to_string())?;
 
-    // Checked while holding the slot: an update launch closes the gate BEFORE it
-    // takes the slot, so a start either finishes first (and is then stopped by
-    // the launch) or sees the closed gate.
-    state.lifecycle.runtime_start_allowed()?;
     state.require_no_lingering_runtime()?;
 
     if let Some(process) = guard.as_mut() {
@@ -809,7 +805,7 @@ pub async fn library_command(
         &operation,
         payload,
         None,
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
 }
@@ -826,7 +822,7 @@ pub async fn memory_command(
         &operation,
         payload,
         None,
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
 }
@@ -1129,7 +1125,7 @@ pub async fn settings_command(
         &operation,
         payload,
         Some(state.settings_command.clone()),
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
 }
@@ -1146,134 +1142,9 @@ pub async fn permissions_command(
         &operation,
         payload,
         None,
-        Some(state.ticket()?),
+        state.ticket()?,
     )
     .await
-}
-
-/// The offline update service (core/update_cli.py) and nothing else.
-///
-/// Reads, approval steps and pickers run as gated one-shot requests; `launch`
-/// runs only through the update lifecycle (lifecycle.rs): drain, preflight,
-/// proved stop, one answer line, restart only on a proved non-start, otherwise
-/// exit. The payload, including an approval secret, travels only on the child's
-/// standard input and is never logged or echoed.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn update_command(
-    operation: String,
-    payload: Option<serde_json::Value>,
-    app: AppHandle,
-    state: State<'_, RuntimeManagerState>,
-) -> Result<serde_json::Value, String> {
-    if lifecycle::route_update(&operation) == UpdateRoute::OneShot {
-        return service_ipc::request(
-            state.require_backend()?,
-            Service::Update,
-            &operation,
-            payload,
-            None,
-            Some(state.ticket()?),
-        )
-        .await;
-    }
-    // Only the single-use token; no other field (a "stopped" claim, a flag) is read or accepted.
-    let token = match payload.as_ref().and_then(serde_json::Value::as_object) {
-        Some(fields) if fields.len() == 1 => fields
-            .get("launchToken")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        _ => String::new(),
-    };
-    let backend = state.require_backend()?.clone();
-    let handle = app.clone();
-    let answer = tauri::async_runtime::spawn_blocking(move || {
-        let state = handle.state::<RuntimeManagerState>();
-        let host = DesktopLaunchHost {
-            app: &handle,
-            state: &state,
-            backend: &backend,
-        };
-        state.lifecycle.launch(&host, &token)
-    })
-    .await
-    .map_err(|_| {
-        "The update launch failed part-way; its outcome is unknown and Qronos starts nothing.".to_string()
-    })?;
-    if answer.get("exiting").and_then(serde_json::Value::as_bool) == Some(true) {
-        // The window shows the outcome first; the update service is never killed by this exit.
-        std::thread::spawn(move || {
-            std::thread::sleep(UPDATE_EXIT_NOTICE);
-            app.exit(0);
-        });
-    }
-    Ok(answer)
-}
-
-/// Ok(was_running) only with the Job proof; an unproved stop keeps its busy ownership.
-fn stop_runtime_for_update(
-    state: &RuntimeManagerState,
-    steps: u32,
-    job_bound: std::time::Duration,
-) -> Result<bool, String> {
-    let process = state
-        .process
-        .lock()
-        .map_err(|_| "Runtime manager lock failed.".to_string())?
-        .take();
-    match process {
-        None => state.require_no_lingering_runtime().map(|_| false),
-        Some(mut process) => {
-            let was_running = matches!(process.child.try_wait(), Ok(None));
-            stop_with_proof(state, process, steps, job_bound).map(|_| was_running)
-        }
-    }
-}
-
-/// How long the window may show a launch outcome before the app exits.
-const UPDATE_EXIT_NOTICE: std::time::Duration = std::time::Duration::from_millis(2500);
-
-/// The launch answer may come only after the staged installer is re-hashed
-/// (up to 2 GiB), snapshots are taken and the installer acknowledges.
-const LAUNCH_ANSWER_BOUND: std::time::Duration = std::time::Duration::from_secs(900);
-
-struct DesktopLaunchHost<'a> {
-    app: &'a AppHandle,
-    state: &'a RuntimeManagerState,
-    backend: &'a Backend,
-}
-
-impl LaunchHost for DesktopLaunchHost<'_> {
-    fn update_status(&self) -> Result<serde_json::Value, String> {
-        // Inside the closed gate: the lifecycle owns it, so no ticket.
-        tauri::async_runtime::block_on(service_ipc::request(
-            self.backend,
-            Service::Update,
-            "status",
-            None,
-            None,
-            None,
-        ))
-    }
-
-    fn stop_playback(&self) {
-        let _ = stop_native_audio(self.state);
-    }
-
-    fn stop_runtime(&self) -> Result<bool, String> {
-        stop_runtime_for_update(self.state, STOP_WAIT_STEPS, JOB_EXIT_BOUND)
-    }
-
-    fn launch(&self, token: &str) -> LaunchLine {
-        match self.backend.command(Service::Update) {
-            Ok(command) => lifecycle::launch_one_line(command, token, LAUNCH_ANSWER_BOUND),
-            Err(error) => LaunchLine::NotStarted(error),
-        }
-    }
-
-    fn restart_runtime(&self) -> Result<(), String> {
-        start_runtime_inner(self.app, self.state).map(|_| ())
-    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1507,13 +1378,10 @@ pub fn stop_runtime(state: State<'_, RuntimeManagerState>) -> Result<RuntimeStat
 /// kill-on-close Job ends the bridge and every descendant.
 const JOB_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How long an update launch waits for running backend requests to finish.
-const UPDATE_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Stop the owned runtime and prove it: the exact supervisor exited AND its
 /// desktop Job has no live process. Unproved: a supervisor that could not be
 /// ended goes back into the slot, a Job with a live process becomes the
-/// lingering busy ownership; both refuse a new start and an update launch.
+/// lingering busy ownership; both refuse a new start.
 fn stop_with_proof(
     state: &RuntimeManagerState,
     mut process: RuntimeProcess,
@@ -1600,6 +1468,18 @@ mod stop_proof_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// Ok(was_running) only with the Job proof; an unproved stop keeps its busy ownership.
+    fn stop(state: &RuntimeManagerState, steps: u32, job_bound: Duration) -> Result<bool, String> {
+        let process = state.process.lock().unwrap().take();
+        match process {
+            None => state.require_no_lingering_runtime().map(|_| false),
+            Some(mut process) => {
+                let was_running = matches!(process.child.try_wait(), Ok(None));
+                stop_with_proof(state, process, steps, job_bound).map(|_| was_running)
+            }
+        }
+    }
+
     fn runtime(state: &RuntimeManagerState, fixture: &TreeFixture, mode: &str) {
         let job = OwnedJob::new().unwrap();
         let mut command = fixture.command(mode);
@@ -1620,10 +1500,10 @@ mod stop_proof_tests {
         let fixture = TreeFixture::new();
         runtime(&state, &fixture, "runtime-clean");
         fixture.wait_for("grandchild.pid");
-        assert_eq!(stop_runtime_for_update(&state, 100, Duration::from_secs(10)), Ok(true));
+        assert_eq!(stop(&state, 100, Duration::from_secs(10)), Ok(true));
         assert!(state.process.lock().unwrap().is_none() && state.lingering.lock().unwrap().is_none());
         assert!(state.require_no_lingering_runtime().is_ok());
-        assert_eq!(stop_runtime_for_update(&state, 100, Duration::from_secs(1)), Ok(false));
+        assert_eq!(stop(&state, 100, Duration::from_secs(1)), Ok(false));
     }
 
     #[test]
@@ -1632,13 +1512,13 @@ mod stop_proof_tests {
         let fixture = TreeFixture::new();
         runtime(&state, &fixture, "runtime-lingering");
         fixture.wait_for("grandchild.pid");
-        let unproved = stop_runtime_for_update(&state, 100, Duration::from_millis(500));
+        let unproved = stop(&state, 100, Duration::from_millis(500));
         assert!(unproved.unwrap_err().contains("still running"));
-        // Busy, not stopped: status says so, a start and an update launch are refused.
+        // Busy, not stopped: status says so, and a start is refused.
         let status = inspect_runtime_status(&state).unwrap();
         assert!(status.running && status.status == "stopping", "{}", status.message);
         assert!(state.require_no_lingering_runtime().is_err());
-        assert!(stop_runtime_for_update(&state, 100, Duration::from_millis(100)).is_err());
+        assert!(stop(&state, 100, Duration::from_millis(100)).is_err());
         fixture.release();
         let deadline = Instant::now() + Duration::from_secs(10);
         while state.require_no_lingering_runtime().is_err() {
@@ -1655,43 +1535,9 @@ mod stop_proof_tests {
         let fixture = TreeFixture::new();
         runtime(&state, &fixture, "runtime-deaf");
         let started = Instant::now();
-        assert_eq!(stop_runtime_for_update(&state, 10, Duration::from_secs(10)), Ok(true));
+        assert_eq!(stop(&state, 10, Duration::from_secs(10)), Ok(true));
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(state.lingering.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn an_update_launch_with_an_unproved_stop_restarts_nothing_and_launches_nothing() {
-        // The real stop under the real lifecycle, with a fake update service that must not be reached.
-        struct Host<'a>(&'a RuntimeManagerState, std::sync::Mutex<Vec<&'static str>>);
-        impl LaunchHost for Host<'_> {
-            fn update_status(&self) -> Result<serde_json::Value, String> {
-                Ok(serde_json::json!({"status": {"launchAvailable": true, "updateInProgress": false,
-                    "recoveryPending": false, "launchReady": {"version": "0.2.0"}}}))
-            }
-            fn stop_playback(&self) {}
-            fn stop_runtime(&self) -> Result<bool, String> {
-                stop_runtime_for_update(self.0, 100, Duration::from_millis(500))
-            }
-            fn launch(&self, _token: &str) -> LaunchLine {
-                self.1.lock().unwrap().push("launch");
-                LaunchLine::NoAnswer("must not be reached")
-            }
-            fn restart_runtime(&self) -> Result<(), String> {
-                self.1.lock().unwrap().push("restart");
-                Ok(())
-            }
-        }
-        let state = RuntimeManagerState::new(None);
-        let fixture = TreeFixture::new();
-        runtime(&state, &fixture, "runtime-lingering");
-        fixture.wait_for("grandchild.pid");
-        let host = Host(&state, std::sync::Mutex::new(Vec::new()));
-        let answer = state.lifecycle.launch(&host, "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde");
-        assert_eq!(answer["code"], "runtime_stop_unproved");
-        assert!(host.1.lock().unwrap().is_empty());
-        assert!(state.require_no_lingering_runtime().is_err(), "the busy ownership is kept");
-        fixture.release();
     }
 }
 

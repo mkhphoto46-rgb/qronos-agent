@@ -7,14 +7,12 @@ Runs ONE entry exactly as the product does, then reports:
 
 Before anything of Qronos runs, and only in this process:
 - the known-folder Local AppData of core.startup_admission is a PRIVATE folder (KNOWN);
-- the update fence is a PRIVATE mutex name (FENCE) for core.store_admission AND core.update_service, so no
-  production mutex name is ever opened;
 - in source mode, core.config.CONFIG is a private checkout under CHECKOUT (so the module's own default data stays
   in tmp; store overrides come from the environment as in a real run);
 - an audit hook records every file open under WATCH, whether the start-up admission was held at that moment, and
   which service modules were imported.
 Writes OUT (JSON). Touches only tmp paths. Usage:
-    startup_entry_child.py TARGET WATCH FENCE KNOWN CHECKOUT OUT MODE NAME [ARGS...]
+    startup_entry_child.py TARGET WATCH KNOWN CHECKOUT OUT MODE NAME [ARGS...]
 """
 import json
 import os
@@ -22,12 +20,12 @@ import runpy
 import sys
 from pathlib import Path
 
-target, watch, fence, known, checkout, out, mode, name = sys.argv[1:9]
-arguments = sys.argv[9:]
+target, watch, known, checkout, out, mode, name = sys.argv[1:8]
+arguments = sys.argv[8:]
 sys.path.insert(0, target)
 watch_root = os.path.normcase(os.path.abspath(watch))  # the spelling the opens use (an alias stays an alias)
 events = []
-SERVICE_MODULES = ("core.settings_cli", "core.update_cli", "core.library_cli", "core.memory_cli",
+SERVICE_MODULES = ("core.settings_cli", "core.library_cli", "core.memory_cli",
                    "core.permissions_cli", "core.runtime_bridge")
 
 
@@ -45,20 +43,9 @@ def hook(event, args):
                        "serviceImported": [m for m in SERVICE_MODULES if m in sys.modules]})
 
 
-from core import startup_admission, store_admission  # noqa: E402
-from core import update_service  # noqa: E402
+from core import startup_admission  # noqa: E402
 
 startup_admission._known_local_appdata = lambda: Path(known)
-store_admission.UPDATE_IN_PROGRESS_MUTEX = fence
-store_admission.update_in_progress.__defaults__ = (fence,)
-store_admission.admit_writer.__defaults__ = (fence,)
-update_service.update_in_progress.__defaults__ = (fence,)
-# The updater's own hold (a `launch` entry, now that the product enables it) takes the fence AND the runtime
-# singletons: every one of them is a private name here too (bound at import, so their defaults are replaced).
-_private_names = (fence, *(f"{fence}.runtime{index}" for index in range(len(update_service.RUNTIME_MUTEXES))))
-update_service.UPDATE_IN_PROGRESS_MUTEX = fence
-update_service.LaunchHold.__init__.__defaults__ = (_private_names, update_service.LaunchHold.__init__.__defaults__[1])
-update_service.hold_runtime_mutexes.__defaults__ = (_private_names,)
 if mode == "source":
     from core import config
 

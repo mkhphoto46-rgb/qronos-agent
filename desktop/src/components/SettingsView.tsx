@@ -31,9 +31,6 @@ import {
   type AudioOutputDevicesResponse,
 } from "../audio/audioOutput";
 
-import UpdatePanel from "./UpdatePanel";
-import { createUpdateClient } from "../updateStore";
-
 import "./SettingsView.css";
 
 type SettingsPhase =
@@ -57,8 +54,7 @@ type SectionId =
   | "performance"
   | "web"
   | "notifications"
-  | "data"
-  | "update";
+  | "data";
 
 type SectionDefinition = {
   id: SectionId;
@@ -79,7 +75,6 @@ const sections: SectionDefinition[] = [
   { id: "web", group: "SYSTEM", label: "وب و جست‌وجو", english: "Web & Search", icon: "07", keywords: ["web", "search", "sources", "citation", "وب", "جستجو", "منابع"] },
   { id: "notifications", group: "SYSTEM", label: "اعلان‌ها", english: "Notifications", icon: "08", keywords: ["notification", "warning", "sound", "اعلان", "هشدار", "صدا"] },
   { id: "data", group: "DATA", label: "داده و پشتیبان‌گیری", english: "Data & Backup", icon: "09", keywords: ["data", "backup", "export", "restore", "داده", "پشتیبان", "خروجی"] },
-  { id: "update", group: "DATA", label: "به‌روزرسانی", english: "Update", icon: "10", keywords: ["update", "install", "version", "به‌روزرسانی", "نصب", "نسخه"] },
 ];
 
 type HotkeyBinding = {
@@ -173,7 +168,6 @@ function SettingRow({
 
 function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SectionId>("general");
-  const updateClient = useMemo(() => createUpdateClient((command, args) => invoke(command, args)), []);
   const [query, setQuery] = useState("");
   const [sensitivityDraft, setSensitivityDraft] = useState(56);
   const voiceMutationRef = useRef(false);
@@ -1492,15 +1486,6 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     </>
   );
 
-  // Offline update from a file the person chose. The panel only asks; the desktop runs the launch lifecycle
-  // (runtime/lifecycle.rs) and the backend keeps the launch refused until its one enablement point is on.
-  const renderUpdate = () => (
-    <>
-      <SectionHeader kicker="SIGNED LOCAL UPDATE" title="به‌روزرسانی" description="نصب نسخهٔ امضاشدهٔ Qronos از فایلی که خودتان انتخاب می‌کنید؛ چیزی دانلود نمی‌شود." />
-      <UpdatePanel client={updateClient} visible={phase === "settings" && activeSection === "update"} />
-    </>
-  );
-
   const contentBySection: Record<SectionId, () => React.ReactNode> = {
     general: renderGeneral,
     hotkeys: renderHotkeys,
@@ -1511,7 +1496,6 @@ function SettingsView({ phase, onClose, onOpenPermissions }: SettingsViewProps) 
     web: renderWeb,
     notifications: renderNotifications,
     data: renderData,
-    update: renderUpdate,
   };
 
   return (
