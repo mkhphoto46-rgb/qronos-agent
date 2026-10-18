@@ -762,7 +762,10 @@ def _default_job():
         return None
     from core.windows_sidecar_guard import WindowsSidecarGuard
 
-    return WindowsSidecarGuard.acquire(JOB_MUTEX_NAME)
+    # Breakaway is allowed only for an application the person asked to open
+    # (core.computer_executor launches it with CREATE_BREAKAWAY_FROM_JOB);
+    # everything else the bridge starts still ends with this Job.
+    return WindowsSidecarGuard.acquire(JOB_MUTEX_NAME, allow_breakaway=True)
 
 
 def run_desktop(
@@ -818,7 +821,7 @@ def run_desktop(
         relay.out.lifecycle("runtime_error", "error", GAVE_UP)
     finally:
         if job is not None:
-            job.close()  # the final fail-safe: nothing the bridge started outlives this
+            job.close()  # the final fail-safe: nothing the bridge started outlives this, except an app the person opened
         guard.release()
         # Bounded: a desktop that stopped reading cannot hold the exit.
         relay.out.drain(EXIT_DRAIN_SECONDS)

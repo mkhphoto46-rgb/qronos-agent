@@ -1530,12 +1530,27 @@ def _default_open_location(path: str) -> None:
     if os.name != "nt":
         raise RuntimeError("OPEN_LOCATION supports Windows only.")
     command = _explorer_location_command(path)
-    process = subprocess.Popen(
-        list(command), shell=False, stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    process = _launch_user_app(list(command))
     if int(getattr(process, "pid", 0) or 0) <= 0:
         raise RuntimeError("Windows Explorer did not return a valid process identifier.")
+
+
+#: CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP: an application the person opens is theirs, not Qronos
+#: work, so it leaves the runtime's Jobs (which allow exactly this) and is not ended when Qronos stops or restarts.
+_USER_APP_CREATION_FLAGS = 0x01000000 | 0x00000200
+
+
+def _launch_user_app(argv: list[str]) -> ProcessLike:
+    """Start an application the person asked for, outside Qronos' Jobs.
+
+    Windows ignores the breakaway request (the app stays in the Job) only when an enclosing Job, for example one a
+    terminal created, does not allow it; it never fails the launch.
+    """
+    return subprocess.Popen(
+        argv, shell=False, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=_USER_APP_CREATION_FLAGS,
+    )
 
 
 def _default_launcher(command: tuple[str, ...]) -> ProcessLike:
@@ -1547,10 +1562,7 @@ def _default_launcher(command: tuple[str, ...]) -> ProcessLike:
     approved = {spec.executable for spec in KNOWN_APPS.values()}
     if executable not in approved:
         raise InvalidAction("Application executable is not in the static reviewed allowlist.")
-    return subprocess.Popen(
-        [executable], shell=False, stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    return _launch_user_app([executable])
 
 
 def _launch_discovered_executable(spec: AppSpec) -> ProcessLike:
@@ -1564,10 +1576,7 @@ def _launch_discovered_executable(spec: AppSpec) -> ProcessLike:
     target = Path(spec.executable).resolve(strict=False)
     if not target.is_file() or target.name.lower() in _BLOCKED_EXECUTABLES:
         raise InvalidAction("Discovered executable failed validation.")
-    return subprocess.Popen(
-        [str(target)], shell=False, stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    return _launch_user_app([str(target)])
 
 
 def _launch_trusted_shortcut(spec: AppSpec) -> None:
@@ -1593,7 +1602,8 @@ def _launch_trusted_shortcut(spec: AppSpec) -> None:
             continue
     if not trusted:
         raise InvalidAction("Shortcut is outside trusted Start Menu roots.")
-    os.startfile(str(shortcut))
+    # Explorer opens the shortcut; os.startfile cannot leave the runtime's Jobs.
+    _launch_user_app(["explorer.exe", str(shortcut)])
 
 
 @dataclass(frozen=True)

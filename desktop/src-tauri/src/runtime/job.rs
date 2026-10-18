@@ -5,11 +5,16 @@
 //! worker) starts is a member from its first instruction. The supervisor's own
 //! kill-on-close Job and the bridge's sidecar/media Jobs nest inside it.
 //!
-//! This Job never kills: it sets no limit (no kill-on-close, no breakaway), so an
-//! ordinary app exit keeps the runtime's graceful shutdown. It is the PROOF of a
-//! stop: the runtime has ended only when the exact supervisor has exited AND the
-//! Job's active process count is zero. A response line, a frontend value or the
-//! supervisor's exit alone is not that proof.
+//! This Job never kills: it sets no kill-on-close, so an ordinary app exit keeps
+//! the runtime's graceful shutdown. It is the PROOF of a stop: the runtime has
+//! ended only when the exact supervisor has exited AND the Job's active process
+//! count is zero. A response line, a frontend value or the supervisor's exit
+//! alone is not that proof.
+//!
+//! It allows breakaway (JOB_OBJECT_LIMIT_BREAKAWAY_OK, not the silent variant):
+//! an application the person asked Qronos to open is started with
+//! CREATE_BREAKAWAY_FROM_JOB so it outlives Qronos and is not counted as runtime
+//! work. Every other child still joins the Job by default.
 
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -27,14 +32,31 @@ unsafe impl Sync for OwnedJob {}
 
 #[cfg(windows)]
 impl OwnedJob {
-    /// An unnamed Job with no limits, owned by this process (handle not inheritable).
+    /// An unnamed Job that only allows explicit breakaway, owned by this process (handle not inheritable).
     pub(super) fn new() -> std::io::Result<Self> {
-        use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        };
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(Self { handle })
+        let job = Self { handle };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error()); // `job` is dropped, closing the handle
+        }
+        Ok(job)
     }
 
     /// Processes in this Job (nested Jobs included) that have not ended.

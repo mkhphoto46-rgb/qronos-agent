@@ -261,11 +261,20 @@ class WindowsSidecarGuard:
         self._lock = threading.RLock()
 
     @classmethod
-    def acquire(cls, mutex_name: str, *, api=None, fence_exists=None) -> "WindowsSidecarGuard":
+    def acquire(
+        cls, mutex_name: str, *, api=None, fence_exists=None, allow_breakaway: bool = False
+    ) -> "WindowsSidecarGuard":
+        """Own the mutex and create the kill-on-close Job.
+
+        ``allow_breakaway`` sets JOB_OBJECT_LIMIT_BREAKAWAY_OK (never the silent
+        variant): only a process started with CREATE_BREAKAWAY_FROM_JOB leaves
+        the Job. The supervisor uses it so an application the person asked to
+        open outlives Qronos; sidecars keep the default, which permits none.
+        """
         guard = cls(mutex_name)
         try:
             guard._acquire_mutex(api=api, fence_exists=fence_exists)
-            guard._create_kill_on_close_job()
+            guard._create_kill_on_close_job(allow_breakaway=allow_breakaway)
             return guard
         except Exception:
             guard.close()
@@ -301,7 +310,7 @@ class WindowsSidecarGuard:
                 f"Could not own Qronos sidecar mutex {self.mutex_name!r}: {error}"
             ) from error
 
-    def _create_kill_on_close_job(self) -> None:
+    def _create_kill_on_close_job(self, *, allow_breakaway: bool = False) -> None:
         kernel32 = _kernel32()
 
         job = kernel32.CreateJobObjectW(
@@ -316,6 +325,7 @@ class WindowsSidecarGuard:
         info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = (
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | (JOB_OBJECT_LIMIT_BREAKAWAY_OK if allow_breakaway else 0)
         )
 
         ok = kernel32.SetInformationJobObject(

@@ -394,6 +394,13 @@ def block_real_windows_computer_side_effects(
         blocked_side_effect,
     )
 
+    # The shared launch of any application the person opens (outside the runtime's Jobs).
+    monkeypatch.setattr(
+        computer_executor,
+        "_launch_user_app",
+        blocked_side_effect,
+    )
+
     # Dynamically discovered executable launch, such as Premiere/Photoshop.
     monkeypatch.setattr(
         computer_executor,
