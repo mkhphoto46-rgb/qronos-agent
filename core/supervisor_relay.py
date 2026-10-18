@@ -119,7 +119,6 @@ EXIT_DRAIN_SECONDS = 2.0
 #: How long an ended generation's output may still drain before it is fenced.
 GENERATION_DRAIN_SECONDS = 0.5
 _READ_CHUNK = 64 * 1024
-PAIRING_URI_PREFIX = b"qronos://pair?"
 
 SHUTDOWN_LINE = b'{"command":"shutdown"}\n'
 
@@ -172,8 +171,6 @@ NOTICES = {
                        "{count} output line(s) from the Qronos runtime were not valid text and were dropped."),
     "old_output": ("runtime_warning", "warning",
                    "{count} output line(s) from a Qronos runtime that had already stopped were dropped."),
-    "stderr_secret": ("runtime_warning", "warning",
-                      "{count} diagnostic line(s) that contained a pairing secret were dropped."),
     "lifecycle_merged": ("runtime_warning", "warning",
                          "{count} older restart notice(s) were merged while the desktop was not reading."),
 }
@@ -614,9 +611,8 @@ class DesktopRelay:
 
     def pump_errors(self, stream: BinaryIO) -> None:
         """
-        Forward the bridge's standard error as it comes. A line holding a
-        pairing URI is dropped and counted, as the desktop drops it on stdout;
-        invalid UTF-8 is replaced, so no reader stops on it.
+        Forward the bridge's standard error as it comes. Invalid UTF-8 is
+        replaced, so no reader stops on it.
         """
         while True:
             try:
@@ -625,9 +621,6 @@ class DesktopRelay:
                 return
             if not chunk:
                 return
-            if PAIRING_URI_PREFIX in chunk:
-                self.out.notice("stderr_secret")
-                continue
             if self._err is None:
                 continue
             chunk = chunk.decode("utf-8", "replace").encode("utf-8")

@@ -113,25 +113,6 @@ def test_answers_and_outcomes_are_audited_with_their_typed_category(harness):
     assert all(r.target == "https://example.org/docs" for r in records)
 
 
-def test_uncertain_attempts_are_listed_and_released_only_by_a_person(tmp_path):
-    from core.app_workflow import SideEffectJournal, SideEffectState
-
-    events = []
-    journal = SideEffectJournal(tmp_path / "j.json")
-    journal.begin("op-1", "content")
-    journal.settle("op-1", SideEffectState.UNCERTAIN, "no result seen")
-    coordinator = AppWorkflowCoordinator(
-        ledger=ApprovalLedger(), notify=lambda e, s, m: events.append((e, json.loads(m))),
-        actions=ActiveActionRegistry(), paused=lambda: False, journal=journal,
-    )
-    coordinator.report_uncertain()
-    listed = events[-1][1]
-    assert listed["available"] and [a["operationKey"] for a in listed["attempts"]] == ["op-1"]
-    coordinator.report_uncertain(acknowledge="op-1")
-    assert events[-1][1]["attempts"] == []
-    assert journal.get("op-1").state is SideEffectState.ACKNOWLEDGED
-
-
 # ------------------------------------------------------------- browser phase
 
 

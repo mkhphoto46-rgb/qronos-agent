@@ -30,12 +30,8 @@ from core.action_cancellation import ActiveActionRegistry
 from core.actions import ActionOutcome, ActionRequest
 from core.app_workflow import (
     ApprovalMismatch,
-    SideEffectJournal,
-    DuplicateSideEffect,
-    JournalUnavailable,
     WorkflowAmbiguous,
     WorkflowApproval,
-    WorkflowError,
     WorkflowRefused,
     WorkflowReport,
     WorkflowStopped,
@@ -52,8 +48,6 @@ from security.permissions import ActionCategory, PermissionDecision
 
 
 APP_WORKFLOW_DECISION_ACTION = "qronos.app_workflow_decision"
-# Lists attempts awaiting a person's check; with "acknowledge", releases one.
-APP_WORKFLOW_UNCERTAIN_ACTION = "qronos.app_workflow_uncertain"
 
 PHASE_BROWSER = "browser_navigate"
 # Page text shown in the result event is bounded; it is untrusted content.
@@ -101,12 +95,10 @@ class AppWorkflowCoordinator:
         paused: Callable[[], bool],
         run_async: Callable[[Callable[[], None]], None] = _start_thread,
         audit: ActionAuditLog | None = None,
-        journal: SideEffectJournal | None = None,
         browser_workflow: Callable[[], BrowserResearchWorkflow] | None = None,
     ) -> None:
         self._browser = browser_workflow
         self._audit = audit
-        self._journal = journal
         self._ledger = ledger
         self._notify = notify
         self._actions = actions
@@ -206,35 +198,6 @@ class AppWorkflowCoordinator:
     def _stale(self, token: str, reason: str) -> None:
         self._notify("app_workflow_stale", "ready", _json({"actionToken": token, "reason": reason}))
 
-    # ------------------------------------------------- uncertain outcomes
-
-    def report_uncertain(self, acknowledge: str | None = None) -> None:
-        """Publish attempts awaiting a person's check; optionally release one.
-
-        Acknowledging means the person checked the outcome. It never
-        repeats anything by itself; it only allows a new, separately approved
-        request for the same content.
-        """
-        if self._journal is None:
-            self._notify("app_workflow_uncertain", "ready", _json({"available": False, "attempts": []}))
-            return
-        try:
-            if acknowledge:
-                self._journal.acknowledge(str(acknowledge), "checked by the user")
-            attempts = [
-                {"operationKey": entry.operation_key, "detail": entry.detail, "updatedAt": entry.updated_at}
-                for entry in self._journal.uncertain()
-            ]
-        except WorkflowError as error:
-            self._notify("app_workflow_uncertain", "warning", _json({
-                "available": False,
-                "attempts": [],
-                "message": "وضعیت کارهای نامطمئن قابل خواندن نیست؛ هیچ کاری تکرار نمی‌شود.",
-                "detail": type(error).__name__,
-            }))
-            return
-        self._notify("app_workflow_uncertain", "ready", _json({"available": True, "attempts": attempts}))
-
     # --------------------------------------------------------- execution
 
     def _approval_valid(self) -> bool:
@@ -274,10 +237,6 @@ class AppWorkflowCoordinator:
                 run(token)
         except WorkflowStopped as stopped:
             self._finish_step(step, "stopped", _FINISHED_FA["stopped"], str(stopped))
-        except (DuplicateSideEffect, JournalUnavailable) as blocked:
-            self._finish_step(step, "refused", (
-                "این کار قبلاً انجام شده یا نتیجهٔ تلاش قبلی هنوز روشن نیست؛ کرونوس آن را تکرار نمی‌کند."
-            ), str(blocked))
         except (WorkflowAmbiguous, WorkflowRefused, ApprovalMismatch) as refused:
             self._finish_step(step, "refused", _refusal_fa(refused), str(refused))
         except Exception as error:  # noqa: BLE001 - report, never retry

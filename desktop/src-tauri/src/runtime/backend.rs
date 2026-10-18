@@ -123,7 +123,6 @@ impl Backend {
         };
         command.env("PYTHONUTF8", "1").env("PYTHONUNBUFFERED", "1");
         if let Some(version) = APP_VERSION.get() {
-            // The runtime's status hooks report the running version (core/runtime_hooks.py).
             command.env("QRONOS_APP_VERSION", version);
         }
         Ok(command)

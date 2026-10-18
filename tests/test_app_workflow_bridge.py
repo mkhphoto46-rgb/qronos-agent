@@ -122,7 +122,7 @@ def test_unknown_or_forged_tokens_are_stale(h):
 
 @pytest.fixture
 def temporary_data_root(tmp_path, monkeypatch):
-    """Production wiring under test writes its journal lock here, never the checkout."""
+    """Production wiring under test writes its data here, never the checkout."""
     from dataclasses import replace
     import core.runtime_bridge as runtime_bridge
 
@@ -132,16 +132,6 @@ def temporary_data_root(tmp_path, monkeypatch):
         replace(runtime_bridge.CONFIG, paths=replace(runtime_bridge.CONFIG.paths, data=root)),
     )
     return root
-
-
-def test_production_wiring_uses_one_durable_journal_under_the_qronos_state_root(temporary_data_root):
-    runtime = QronosRuntime(notify=lambda *args: None)
-    runtime.action_audit = ActionAuditLog(path=None)
-    coordinator = runtime._ensure_app_workflows()
-    assert runtime._ensure_app_workflows() is coordinator
-    journal = runtime._app_workflow_journal
-    assert journal.path == (temporary_data_root / "workflows" / "side-effects.json").absolute()
-    assert not journal.path.exists(), "nothing is recorded until a side effect is begun"
 
 
 def test_production_wiring_routes_web_navigation_to_an_approval_prompt(temporary_data_root):

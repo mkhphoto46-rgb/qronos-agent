@@ -2,13 +2,11 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import type { KeyboardEvent } from "react";
 
 import {
-  outcomeNeedsCheck,
   outcomeTitle,
   workflowDetailRows,
   workflowTitle,
 } from "../appWorkflowApproval";
 import type {
-  RecoveryView,
   WorkflowApprovalView,
   WorkflowPrompt,
   WorkflowResult,
@@ -20,9 +18,6 @@ type Props = {
   view: WorkflowApprovalView;
   onAnswer: (actionToken: string, approved: boolean) => void;
   onDismissResult: () => void;
-  onOpenRecovery: () => void;
-  onAcknowledge: (operationKey: string) => void;
-  onCloseRecovery: () => void;
 };
 
 /**
@@ -32,18 +27,11 @@ type Props = {
  * in a fixed order), answers only with the prompt's single-use identity,
  * starts on the safe choice, and declines on Escape. A result from a page in
  * the browser is shown as untrusted page content.
- *
- * An attempt whose outcome is unclear blocks a repeat of the same work. The
- * recovery list lets the person release one after checking the outcome
- * themselves; releasing never retries anything.
  */
 export default function AppWorkflowDialog({
   view,
   onAnswer,
   onDismissResult,
-  onOpenRecovery,
-  onAcknowledge,
-  onCloseRecovery,
 }: Props) {
   if (view.prompt !== null) {
     return (
@@ -56,11 +44,8 @@ export default function AppWorkflowDialog({
       />
     );
   }
-  if (view.recovery !== null) {
-    return <RecoveryPanel recovery={view.recovery} onAcknowledge={onAcknowledge} onClose={onCloseRecovery} />;
-  }
   if (view.result !== null) {
-    return <WorkflowResultPanel result={view.result} onDismiss={onDismissResult} onOpenRecovery={onOpenRecovery} />;
+    return <WorkflowResultPanel result={view.result} onDismiss={onDismissResult} />;
   }
   return null;
 }
@@ -195,11 +180,9 @@ function WorkflowPromptPanel({
 function WorkflowResultPanel({
   result,
   onDismiss,
-  onOpenRecovery,
 }: {
   result: WorkflowResult;
   onDismiss: () => void;
-  onOpenRecovery: () => void;
 }) {
   const page = result.workflow === "browser_navigate" ? result.result : null;
   const pageText = page !== null && typeof page.text === "string" ? page.text : "";
@@ -214,76 +197,10 @@ function WorkflowResultPanel({
         </details>
       )}
       <div className="workflow-result-actions">
-        {outcomeNeedsCheck(result.outcome) && (
-          <button type="button" className="file-approval-button" onClick={onOpenRecovery}>
-            کارهای نیازمند بررسی
-          </button>
-        )}
         <button type="button" className="file-approval-button" onClick={onDismiss}>
           بستن
         </button>
       </div>
-    </section>
-  );
-}
-
-function RecoveryPanel({
-  recovery,
-  onAcknowledge,
-  onClose,
-}: {
-  recovery: RecoveryView;
-  onAcknowledge: (operationKey: string) => void;
-  onClose: () => void;
-}) {
-  return (
-    <section
-      className="workflow-result workflow-recovery"
-      role="region"
-      aria-label="کارهای با نتیجهٔ نامطمئن"
-      aria-busy={recovery.busy}
-    >
-      <h3>کارهای با نتیجهٔ نامطمئن</h3>
-      <p>
-        Qronos این کارها را تکرار نمی‌کند. اول خودتان نتیجه را بررسی کنید؛
-        «بررسی کردم» فقط این قفل را برمی‌دارد و چیزی را دوباره انجام نمی‌دهد.
-      </p>
-      {recovery.message && <p dir="auto">{recovery.message}</p>}
-      {!recovery.available && !recovery.message && !recovery.busy && (
-        <p>فهرست کارهای نامطمئن در دسترس نیست.</p>
-      )}
-      {recovery.available && recovery.attempts.length === 0 && !recovery.busy && (
-        <p>کار نامطمئنی نمانده است.</p>
-      )}
-      {recovery.attempts.length > 0 && (
-        <ul className="workflow-recovery-list">
-          {recovery.attempts.map((attempt) => (
-            <li key={attempt.operationKey} data-operation-key={attempt.operationKey}>
-              <span dir="auto">{attempt.detail || "بدون توضیح"}</span>
-              <time dateTime={new Date(attempt.updatedAt * 1000).toISOString()}>
-                {new Date(attempt.updatedAt * 1000).toLocaleString("fa-IR")}
-              </time>
-              <button
-                type="button"
-                className="file-approval-button"
-                disabled={recovery.busy}
-                onClick={() => onAcknowledge(attempt.operationKey)}
-              >
-                بررسی کردم
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {recovery.busy && <p role="status">در حال دریافت وضعیت...</p>}
-      {recovery.unconfirmed && (
-        <p className="file-approval-warning" role="status">
-          رسیدن درخواست تأیید نشد؛ دوباره فرستاده نمی‌شود. پیش از تکرار، فهرست را دوباره باز کنید.
-        </p>
-      )}
-      <button type="button" className="file-approval-button" onClick={onClose}>
-        بستن
-      </button>
     </section>
   );
 }

@@ -264,14 +264,11 @@ def test_bridge_output_is_relayed_only_as_whole_valid_bounded_lines(monkeypatch)
     assert b"cut_off" not in out.getvalue() and b"\xff" not in out.getvalue()
 
 
-def test_bridge_stderr_never_carries_a_pairing_secret_or_invalid_text():
-    """F8: the same Drop rule as the desktop's stdout routing, applied to stderr."""
+def test_bridge_stderr_never_carries_invalid_text():
     out, err = io.BytesIO(), io.BytesIO()
     relay = DesktopRelay(io.BytesIO(), out, err)
-    relay.pump_errors(io.BytesIO(b"Traceback\nopen qronos://pair?k=SECRET&n=1\nbad \xff byte\n"))
-    assert b"SECRET" not in err.getvalue() and b"pair?" not in err.getvalue()
+    relay.pump_errors(io.BytesIO(b"Traceback\nbad \xff byte\n"))
     assert err.getvalue().decode("utf-8") == "Traceback\nbad � byte\n"
-    assert events_of(out, relay)[-1]["message"] == notice("stderr_secret", 1)
 
 
 def test_desktop_input_is_framed_bounded_and_a_cut_off_command_is_never_delivered(monkeypatch):

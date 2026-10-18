@@ -369,36 +369,6 @@ def refusal(error: StartupRefused) -> dict:
     return {"ok": False, "code": error.code, "error": str(error), "errorType": "StartupRefused"}
 
 
-def enter_for_store(service: str, override: str, store_path: Any, *,
-                    environ: Optional[Mapping[str, str]] = None, **options: Any) -> Any:
-    """
-    ``enter`` for the ACTUAL resolved location of one store, right before it is opened.
-
-    The exact path is put in its own override (one of ``STORE_PATH_OVERRIDES``),
-    so the whole existing order applies to it: a source process whose store
-    leads into installed data is admitted on that root (or refused if it was
-    already admitted for something else), a file with more than
-    one name is refused, and an unresolvable path is refused. For an
-    installed binding the store must also lie inside the admitted data root:
-    a store elsewhere would be data the admission does not cover.
-    Returns what ``enter`` returns; raises StartupRefused with nothing opened.
-    """
-    if override not in STORE_PATH_OVERRIDES:
-        raise ValueError(f"{override} is not a store path override")
-    environment = dict(os.environ if environ is None else environ)
-    environment[override] = os.fspath(store_path)
-    admission = enter(service, environ=environment, **options)
-    with _lock:
-        binding = _held.get("binding")
-    if binding and binding[0]:
-        key, path = _resolved(store_path)
-        _require_one_name(path)
-        root_key = str(binding[1])
-        if not (key == root_key or key.startswith(root_key.rstrip(os.sep) + os.sep)):
-            raise StartupRefused("store", "A store is outside the admitted Qronos data folder; nothing was opened.")
-    return admission
-
-
 def enter_cli(service: str, **options: Any) -> Optional[int]:
     """``enter`` for a command-line service: None to continue, or the exit code after printing the refusal."""
     import json

@@ -36,7 +36,6 @@ from core.config import CONFIG
 from core.actions import ActionOutcome, ActionResult
 from core.app_workflow_runtime import (
     APP_WORKFLOW_DECISION_ACTION,
-    APP_WORKFLOW_UNCERTAIN_ACTION,
     AppWorkflowCoordinator,
 )
 from core.file_action_parser import FileActionParseError, parse_file_action
@@ -136,7 +135,6 @@ from core.task_plan import TaskPlan
 from core.arithmetic_fast_path import solve_simple_arithmetic
 from core.compute_estimator import ComputeEstimator
 from core.intent_gate import IntentGate
-from core.runtime_hooks import run_startup_status_hooks
 from core.routing_input import RoutingInput
 from core.task_router import TaskRouter, TaskType
 from core.undo_journal import Reversal, UndoJournal
@@ -3472,18 +3470,6 @@ class QronosRuntime:
         existing = getattr(self, "_app_workflows", None)
         if existing is not None:
             return existing
-        from core.app_workflow import SideEffectJournal, WorkflowError
-
-        journal = SideEffectJournal(Path(CONFIG.paths.data) / "workflows" / "side-effects.json")
-        # Durable, shared by every workflow in this runtime; kept for inspection.
-        self._app_workflow_journal = journal
-        try:
-            # Attempts left SUBMITTING by a process that no longer runs become
-            # UNCERTAIN: still blocking repeats, and visible for a person to check.
-            journal.reconcile_interrupted()
-        except WorkflowError:
-            pass  # a damaged journal refuses every side effect on use anyway
-
         def browser_workflow():
             from core.browser_research import (
                 BrowserResearchWorkflow,
@@ -3506,7 +3492,6 @@ class QronosRuntime:
             actions=self._computer_actions,
             paused=lambda: self.runtime_paused,
             audit=self.action_audit,
-            journal=journal,
             browser_workflow=browser_workflow,
         )
         return self._app_workflows
@@ -9969,16 +9954,6 @@ def handle_action(
 
         return
 
-    if action_id == APP_WORKFLOW_UNCERTAIN_ACTION:
-        data = payload.get("data", {})
-        if not isinstance(data, dict):
-            raise ValueError("Uncertain-attempt request data must be an object.")
-        acknowledge = data.get("acknowledge")
-        if acknowledge is not None and (not isinstance(acknowledge, str) or len(acknowledge) > 128):
-            raise ValueError("acknowledge must be one operation key.")
-        runtime._ensure_app_workflows().report_uncertain(acknowledge)
-        return
-
     if action_id == APP_WORKFLOW_DECISION_ACTION:
         data = payload.get("data", {})
         if not isinstance(data, dict):
@@ -10786,10 +10761,6 @@ def _run() -> int:
         "ready",
         "Qronos runtime bridge is ready.",
     )
-
-    # Reviewed status hooks (core/runtime_hooks.py), on their own daemon
-    # thread with a deadline each: they can never hold up the command loop.
-    run_startup_status_hooks(emit)
 
     try:
         for raw_line in _command_lines(sys.stdin):
