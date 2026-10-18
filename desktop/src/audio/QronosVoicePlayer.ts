@@ -55,10 +55,13 @@ const PLAYBACK_RATE: Record<
   fast: 1.25,
 };
 
-// Qronos may be moved between drives. Keep the runtime-temp boundary strict
-// without pinning playback to one historical drive letter.
+// Qronos may live in any folder on any drive. Keep the runtime-temp boundary
+// strict without pinning playback to one checkout's folder name: a voice file
+// must sit directly in the development checkout's runtime\chatterbox\temp or
+// the installed app's Temp\Chatterbox (core/config.py voice_temp). The desktop
+// backend separately limits which folder the webview may load audio from.
 const ALLOWED_AUDIO_ROOT_PATTERN =
-  /^[A-Za-z]:\\Project Qronos Agent\\runtime\\chatterbox\\temp\\/i;
+  /^[A-Za-z]:\\(?:[^\\]+\\)*?(?:runtime\\chatterbox\\temp|Temp\\Chatterbox)\\/i;
 
 const SPECTRUM_BANDS = 32;
 const SPECTRUM_RETRY_MS = 80;
