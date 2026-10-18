@@ -229,10 +229,6 @@ LINK_REMOTE_ACTION = "qronos.link_remote"
 LINK_RELAY_SET_ACTION = "qronos.link_relay_set"
 # Console-only: clears the Security Monitor's containment/quarantine (Link D9).
 LINK_SECURITY_RESET_ACTION = "qronos.link_security_reset"
-# The media product route (qronos_media.product): typed {op, requestId, ...} operations on the one media host.
-MEDIA_ACTION = "qronos.media"
-#: How long a brain/voice media request waits for its typed result before answering honestly that it did not.
-MEDIA_INTENT_WAIT_SECONDS = 12.0
 LINK_ACTIONS = frozenset({
     LINK_STATUS_ACTION, LINK_DEVICES_ACTION, LINK_PAIR_OPEN_ACTION, LINK_PAIR_CANCEL_ACTION,
     LINK_REVOKE_ACTION, LINK_REMOTE_ACTION, LINK_RELAY_SET_ACTION, LINK_SECURITY_RESET_ACTION,
@@ -1456,10 +1452,6 @@ class QronosRuntime:
         self._approvals = ApprovalLedger()
         # Makes "check nothing is pending, then issue" atomic.
         self._approval_lock = threading.Lock()
-        # The in-process media host (qronos_media.host), built on first use only:
-        # nothing about media runs, probes or opens at startup.
-        self._media_host: Any = None
-        self._media_host_lock = threading.Lock()
         # App workflows (browser navigation); prompts share the ledger above.
         self._app_workflows: AppWorkflowCoordinator | None = None
         # One explicit UI approval grants a short, process-local lease for
@@ -1583,140 +1575,6 @@ class QronosRuntime:
             scheduler.start()
 
             return scheduler
-
-    # ------------------------------------------------------ media host
-
-    def _media_foreground_busy(self) -> bool:
-        """The person's own turn (voice, text, screen) is in progress: media yields to it."""
-        with self._lock:
-            return bool(self._busy or self._foreground.active)
-
-    def ensure_media_host(self) -> Any:
-        """
-        The one in-process media host, built the first time media work is asked for.
-
-        It is bound to THIS runtime's objects only: the queue scheduler's
-        ResourceGovernor, the shared ResourceLedger, the ApprovalLedger and the
-        action audit, plus the live foreground and Pause state. Its model
-        authority is issued here, never from anything in a request.
-        """
-        with self._media_host_lock:
-            if self._media_host is not None:
-                return self._media_host
-            from core.resource_ownership import GLOBAL_RESOURCE_LEDGER
-            from qronos_media.host import build_bridge_media_host
-
-            from core.library_executor import WorkflowSecretCheck
-
-            scheduler = self.ensure_scheduler()
-            audit = self.action_audit.record_verdict if self.action_audit is not None else None
-            self._media_host = build_bridge_media_host(
-                governor=scheduler.governor,
-                ledger=GLOBAL_RESOURCE_LEDGER,
-                foreground_busy=self._media_foreground_busy,
-                paused=lambda: self.runtime_paused,
-                approvals=self._approvals,
-                audit=audit,
-                # The owner and THAT generation's lifecycle capability, read together (one lock) per admission.
-                embedding_generation=self._memory_sidecar_generation,
-                # The bridge never opens the secret store itself; media borrows the narrow typed-secret check.
-                secrets=WorkflowSecretCheck(),
-                # The EXISTING governed Fast brain (Orchestrator.answer_chat_only), read per call; never a new client.
-                fast_brain=self._media_fast_brain,
-            )
-            return self._media_host
-
-    def _memory_sidecar_owner(self) -> Any:
-        """The owned bge-m3 memory sidecar process, if the memory runtime runs one (else None: unavailable)."""
-        memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
-        sidecar = getattr(memory, "sidecar", None)
-        return getattr(sidecar, "owned_process", None) if sidecar is not None else None
-
-    def _media_fast_brain(self) -> Any:
-        """(orchestrator, busy) of THIS runtime for media generation, or None (no orchestrator yet: unavailable).
-
-        Media calls only ``orchestrator.answer_chat_only`` (the configured Fast profile with its own admission,
-        ledger reservation and cleanup). ``busy`` is True while the person's own turn runs or Qronos is paused, so a
-        media request yields before calling. Nothing is started here.
-        """
-        orchestrator = self.orchestrator
-        if orchestrator is None or not callable(getattr(orchestrator, "answer_chat_only", None)):
-            return None
-        return orchestrator, (lambda: self._media_foreground_busy() or bool(self.runtime_paused))
-
-    def _memory_sidecar_generation(self) -> Any:
-        """(owner, lifecycle capability) of the owned bge-m3 sidecar's CURRENT generation, atomically, or None.
-
-        ``MemorySidecarManager.owned_generation`` reads both under one lock; media binds that pair per admission and
-        frees a slot only on THAT capability's whole-tree proof. Off or missing: None (unavailable).
-        """
-        memory = getattr(self.orchestrator, "memory_runtime", None) if self.orchestrator is not None else None
-        sidecar = getattr(memory, "sidecar", None)
-        owned_generation = getattr(sidecar, "owned_generation", None) if sidecar is not None else None
-        if not callable(owned_generation):
-            return None
-        try:
-            return owned_generation()
-        except Exception:  # an unreadable generation is no generation
-            return None
-
-    def media_product(self) -> Any:
-        """The typed media operations (qronos_media.product) on the one media host, built with it."""
-        with self._media_host_lock:
-            product = getattr(self, "_media_product", None)
-        if product is not None:
-            return product
-        host = self.ensure_media_host()
-        from qronos_media.product import MediaProduct
-
-        with self._media_host_lock:
-            product = getattr(self, "_media_product", None)
-            if product is None:
-                product = MediaProduct(
-                    host,
-                    emit=lambda event, status, payload: self._notify(event, status, _compact(payload)),
-                    paused=lambda: self.runtime_paused,
-                )
-                self._media_product = product
-        return product
-
-    def _run_media_intent(self, intent: Any) -> str:
-        """Run a brain/voice media request through the SAME typed product operation; a short Persian answer."""
-        from qronos_media.intents import media_request, spoken_answer
-
-        request_id = f"brain_{uuid.uuid4().hex[:16]}"
-        data = media_request(intent, request_id)
-        if data is None:  # a clarification question: nothing is asked of the product, nothing is searched
-            return spoken_answer(intent, None)
-        answered: dict[str, Any] = {}
-        done = threading.Event()
-
-        def reply(result: dict[str, Any]) -> None:
-            answered.update(result)
-            done.set()
-
-        self.media_product().handle(data, reply=reply)
-        done.wait(MEDIA_INTENT_WAIT_SECONDS)
-        return spoken_answer(intent, answered if done.is_set() else None)
-
-    def _begin_text_media_request(self, text: str, request_id: str, started_at: float) -> bool:
-        """A deterministic media search/status request goes to the media product, not to a model."""
-        from qronos_media.intents import parse_media_intent
-
-        intent = parse_media_intent(text)
-        if intent is None:
-            return False
-        response = self._run_media_intent(intent)
-        self._finish_text_file_action(request_id=request_id, response=response, started_at=started_at)
-        return True
-
-    def _preempt_media(self, reason: str) -> None:
-        host = self._media_host
-        if host is not None:
-            try:
-                host.preempt(reason)
-            except Exception:
-                pass
 
     # ------------------------------------------------------ durable queue
 
@@ -2741,7 +2599,6 @@ class QronosRuntime:
 
         if paused:
             self._discard_pending_file_approvals(CANCEL_REASON_PAUSE)
-            self._discard_pending_media_approvals(CANCEL_REASON_PAUSE)
             self._discard_pending_history_undo(CANCEL_REASON_PAUSE)
             # Pause stops GUI work the same way Stop does: in-flight actions
             # are cancelled cooperatively (releasing held buttons), turns in
@@ -5126,15 +4983,6 @@ class QronosRuntime:
             report["voiceComputerDeferred"] = False
             return _computer_capability_response()
 
-        from qronos_media.intents import parse_media_intent
-
-        media_intent = parse_media_intent(transcript)
-        if media_intent is not None:
-            # The same typed media product operation as the desktop (no shell, model or database call).
-            report["voiceMediaRequest"] = type(media_intent).__name__
-            report["voiceComputerDeferred"] = False
-            return self._run_media_intent(media_intent)
-
         paint_undo_response = self._prepare_voice_paint_undo_action(
             transcript,
             report,
@@ -5807,13 +5655,6 @@ class QronosRuntime:
             )
 
             if self._begin_text_calculator_semantic_action(
-                cleaned_text,
-                cleaned_request_id,
-                started,
-            ):
-                return
-
-            if self._begin_text_media_request(
                 cleaned_text,
                 cleaned_request_id,
                 started,
@@ -7022,15 +6863,6 @@ class QronosRuntime:
         self._clear_file_write_approval_lease(reason)
         return len(revoked)
 
-    def _discard_pending_media_approvals(self, reason: str) -> int:
-        """
-        Revoke every media library question (MEDIA_ACTION) at the same Pause,
-        Stop and shutdown points as the file approvals. Their payloads belong
-        to the media route and are never read here; a late answer is stale
-        there. Idempotent.
-        """
-        return len(self._approvals.revoke_kinds((ApprovalKind.MEDIA_ACTION,), reason))
-
     def _notify_file_stale(self, action_token: str, reason: str) -> None:
         self._notify(
             "file_action_stale",
@@ -7124,7 +6956,6 @@ class QronosRuntime:
         lifecycle = self._foreground_lifecycle()
         with lifecycle.transition():
             cancelled = lifecycle.cancel_current(CANCEL_REASON_USER_STOP)
-            self._preempt_media(CANCEL_REASON_USER_STOP)
             result = self._request_stop_response()
             result["foregroundInferenceCancelled"] = cancelled
             return result
@@ -7158,7 +6989,6 @@ class QronosRuntime:
         pending_file_approvals_discarded = self._discard_pending_file_approvals(
             CANCEL_REASON_USER_STOP
         )
-        self._discard_pending_media_approvals(CANCEL_REASON_USER_STOP)
         self._discard_pending_history_undo(CANCEL_REASON_USER_STOP)
 
         with self._lock:
@@ -8597,13 +8427,6 @@ class QronosRuntime:
                     "calculatorLocalSemanticRoute"
                 ] = True
 
-            from qronos_media.intents import parse_media_intent as _parse_media_intent
-
-            if _parse_media_intent(transcript) is not None:
-                # A media search/status request runs the typed media operation (voice computer branch).
-                routed_task_type = TaskType.COMPUTER
-                selected_task_type = TaskType.COMPUTER
-
             report["route"] = (
                 routed_task_type.value
             )
@@ -9863,17 +9686,8 @@ class QronosRuntime:
         if getattr(self, "_link_runtime", None) is not None:
             self.stop_device_link()
         self._computer_actions.close()
-        media_host = self._media_host
-        if media_host is not None:
-            # Before the approvals close: the media stage stops, its model child is
-            # torn down and its exit proven (or it stays counted) within a bound.
-            try:
-                media_host.close()
-            except Exception:
-                pass
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
-        self._discard_pending_media_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_history_undo(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
@@ -10095,11 +9909,6 @@ def handle_action(
         "ready",
         action_id,
     )
-
-    if action_id == MEDIA_ACTION:
-        # The media product applies its own pause rule per operation (reads stay available while paused).
-        handle_media_action(runtime, payload)
-        return
 
     pause_safe_actions = {
         CONVERSATION_HISTORY_REQUEST_ACTION,
@@ -11215,42 +11024,6 @@ def handle_queue_debug_load(
     )
 
 
-def handle_media_index(
-    runtime: QronosRuntime,
-    payload: dict[str, Any],
-) -> None:
-    """Ask the media host for one bounded index pass (only numbers are read from the request)."""
-    host = runtime.ensure_media_host()
-    answer = host.submit_index(
-        max_seconds=float(payload.get("maxSeconds", 120.0)),
-        max_stages=int(payload.get("maxStages", 50)),
-    )
-    runtime._notify("media_index", "ready" if answer.get("accepted") else "warning", _compact(answer))
-
-
-def handle_media_status(
-    runtime: QronosRuntime,
-    payload: dict[str, Any],
-) -> None:
-    host = runtime._media_host
-    status = host.status() if host is not None else {"workerStarted": False}
-    runtime._notify("media_status", "ready", _compact(status))
-
-
-def handle_media_action(
-    runtime: QronosRuntime,
-    payload: dict[str, Any],
-) -> None:
-    """One typed media product operation (the data object only; validated in qronos_media.product)."""
-    runtime.media_product().handle(payload.get("data"))
-
-
-MEDIA_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
-    "media_index": handle_media_index,
-    "media_status": handle_media_status,
-}
-
-
 QUEUE_COMMANDS: dict[str, Callable[[QronosRuntime, dict[str, Any]], None]] = {
     "queue_debug_load": handle_queue_debug_load,
     "queue_list": handle_queue_list,
@@ -11489,7 +11262,7 @@ def _run() -> int:
                     )
                     continue
 
-                handler = QUEUE_COMMANDS.get(command) or MEDIA_COMMANDS.get(command)
+                handler = QUEUE_COMMANDS.get(command)
 
                 if handler is not None:
                     handler(runtime, payload)

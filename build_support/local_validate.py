@@ -40,7 +40,7 @@ DROPPED = ("QRONOS_DESKTOP_WAKE_BOOTSTRAP", "QRONOS_PACKAGED_RUNTIME")
 FOLDERS = {
     "LOCALAPPDATA": "local", "APPDATA": "roaming", "USERPROFILE": "user", "HOME": "user",
     "TEMP": "temp", "TMP": "temp", "QRONOS_DATA_ROOT": "data", "QRONOS_ASSET_ROOT": "assets",
-    "npm_config_cache": "npm-cache", "XDG_CACHE_HOME": "cache", "QRONOS_MEDIA_DATA_DIR": "state/media",
+    "npm_config_cache": "npm-cache", "XDG_CACHE_HOME": "cache",
 }
 #: Qronos store overrides that name one file, redirected into <workspace>/state. The folder is created and the
 #: file is not, so each store starts empty and the Paint reference is simply unavailable.

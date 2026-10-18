@@ -321,7 +321,6 @@ The source owned by the Qronos project is licensed under the Apache License 2.0:
 and [NOTICE](NOTICE). Third-party components keep their own licences and are not relicensed. They include:
 
 - the bundled libraries;
-- the Vazirmatn fonts;
 - the template icons and logos in `desktop/src-tauri/icons/`, `desktop/public/` and `desktop/src/assets/`.
   These come from the create-tauri-app and create-vite templates and are not Qronos artwork; see
   `build_support/desktop_artwork.json`;

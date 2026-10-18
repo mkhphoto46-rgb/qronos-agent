@@ -2,7 +2,7 @@
 The start-up order of every Qronos process that opens persistent stores.
 
 Before the FIRST store opens (settings, history, journals, library, memory,
-permissions, approval secret, audit logs, media, update records), a process
+permissions, approval secret, audit logs, update records), a process
 runs, in this order, once:
 
 1. Instance ownership, when the service is a singleton (the runtime bridge):
@@ -109,12 +109,10 @@ def admitted() -> bool:
         return "admission" in _held
 
 
-#: Environment overrides that move one persistent store to a chosen file (the
-#: media index: its folder, ``qronos_media.service.default_data_dir``).
+#: Environment overrides that move one persistent store to a chosen file.
 STORE_PATH_OVERRIDES = (
     "QRONOS_SETTINGS_PATH", "QRONOS_CONVERSATION_HISTORY_PATH", "QRONOS_QUEUE_STATE_PATH",
     "QRONOS_PERMISSION_POLICY_PATH", "QRONOS_PERMISSION_AUDIT_PATH", "QRONOS_APPROVAL_SECRET_PATH",
-    "QRONOS_MEDIA_DATA_DIR",
 )
 
 

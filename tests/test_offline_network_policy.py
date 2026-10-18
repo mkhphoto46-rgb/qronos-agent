@@ -46,7 +46,7 @@ def test_webview_has_no_ungated_native_opener_permission():
 # never quietly widen. Behavioral tests elsewhere still prove each hardened
 # sidecar is loopback-only; this inventory proves nothing new slipped past them.
 
-PRODUCT_PACKAGES = ("core", "security", "qronos_media")
+PRODUCT_PACKAGES = ("core", "security")
 PRODUCT_FILES = ("build_support/runtime_entry.py",)  # frozen backend entry point
 
 # Imported module (or dotted prefix) -> family. Longest prefix wins.

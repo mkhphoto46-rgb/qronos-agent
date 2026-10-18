@@ -4,15 +4,13 @@ Each seam is already implemented and tested in its own module; this file checks 
 that the one enablement point (core.update_cli.LAUNCH_ENABLED) is open:
 - every frozen backend service has its update refusal (writer admission, instance/sidecar guard, or the fence check);
 - the updater's hold names exactly the singletons the runtime, supervisor and sidecars own, and the same fence;
-- every store-opening entry runs the start-up order (barrier + lifetime writer admission) before its first store,
-  the media host included, and the bridge closes the media host at shutdown;
+- every store-opening entry runs the start-up order (barrier + lifetime writer admission) before its first store;
 - the product enables ONLY the owned launch hold, the class default stays refusing, the launch hands over through
   the fenced launcher, and the desktop launches only through its lifecycle when the backend reports it available.
 Fakes only: no named mutex with a product name is created, no store opens, no process starts.
 """
 from __future__ import annotations
 
-import ast
 import json
 from pathlib import Path
 
@@ -130,38 +128,6 @@ def test_the_start_up_order_is_barrier_then_lifetime_admission_and_a_refusal_ope
         assert startup_admission.admitted()  # kept for the process's life (released by Windows at exit)
     finally:
         startup_admission._reset_for_tests()
-
-
-def test_the_media_host_admits_its_store_before_opening_it_and_the_bridge_closes_it(tmp_path):
-    from qronos_media.host import MediaHost
-
-    from tests.test_media_semantic import authority
-
-    auth, _ = authority(tmp_path)
-    opened = []
-
-    def refuse(root):
-        raise startup_admission.StartupRefused("update_in_progress")
-
-    host = MediaHost(auth, data_dir=lambda: tmp_path / "media", tools=lambda: None, permissions=lambda: None,
-                     admit_store=refuse, service_factory=lambda *a, **k: opened.append(a) or object())
-    with pytest.raises(startup_admission.StartupRefused):
-        host._open()
-    assert opened == []  # refused: nothing opened
-    admitted = []
-    host = MediaHost(auth, data_dir=lambda: tmp_path / "media", tools=lambda: None, permissions=lambda: None,
-                     admit_store=lambda root: admitted.append(Path(root)),
-                     service_factory=lambda *a, **k: opened.append(a) or type("S", (), {"close": lambda self: None})())
-    host._open()
-    assert admitted == [tmp_path / "media"] and len(opened) == 1  # admitted, THEN opened
-    host.close()
-    assert host.status()["storeOpen"] is False  # the store closes with the host
-    tree = ast.parse(_source("qronos_media/host.py"))
-    assert any(isinstance(node, ast.FunctionDef) and node.name == "media_store_admission" for node in tree.body)
-    assert "enter_for_store(\"media\", \"QRONOS_MEDIA_DATA_DIR\"" in _source("qronos_media/host.py")
-    bridge = _source("core/runtime_bridge.py")
-    shutdown = bridge[bridge.index("media_host = self._media_host"):]
-    assert shutdown.index("media_host.close()") < shutdown.index("self._approvals.close()")
 
 
 # ------------------------------------------------------------------ the product enablement and the hand-over

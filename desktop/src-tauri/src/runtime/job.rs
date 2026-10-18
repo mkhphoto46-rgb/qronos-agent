@@ -1,9 +1,9 @@
 //! The desktop-owned Job Object around the supervised runtime.
 //!
 //! The supervisor is created suspended, assigned to this Job and only then
-//! resumed, so it and every process it (or the bridge, a sidecar, a media
-//! worker) starts is a member from its first instruction. The supervisor's own
-//! kill-on-close Job and the bridge's sidecar/media Jobs nest inside it.
+//! resumed, so it and every process it (or the bridge or a sidecar) starts is
+//! a member from its first instruction. The supervisor's own kill-on-close Job
+//! and the bridge's sidecar Jobs nest inside it.
 //!
 //! This Job never kills: it sets no kill-on-close, so an ordinary app exit keeps
 //! the runtime's graceful shutdown. It is the PROOF of a stop: the runtime has

@@ -153,9 +153,8 @@ LAUNCH_DEPENDENCIES = (
     "(core/startup_admission.py enter(instance=True), core/supervisor.py SupervisorInstanceGuard, "
     "core/instance_ownership.py; the sidecars through core/windows_sidecar_guard.py).",
     "Runtime and Control: EVERY process that opens a Qronos store (bridge, settings/permissions/library/memory/"
-    "update services, standalone jobs, the media host) takes core.store_admission.admit_writer before its first store "
-    "opens and keeps it for its life (build_support/runtime_entry.py STORE_SERVICES, each CLI's enter_cli, "
-    "qronos_media/host.py enter_for_store).",
+    "update services, standalone jobs) takes core.store_admission.admit_writer before its first store "
+    "opens and keeps it for its life (build_support/runtime_entry.py STORE_SERVICES, each CLI's enter_cli).",
     "Runtime: every backend service entry refuses while update_in_progress() is true (the writer admission, the "
     "instance and sidecar guards, and build_support/runtime_entry.py FENCED_SERVICES).",
     "Runtime: recover_before_stores() runs and is awaited before any store opens, and its refusal stops start-up "

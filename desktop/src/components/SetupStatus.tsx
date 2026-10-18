@@ -7,7 +7,6 @@ const featureNames: Record<string, string> = {
   speechRecognition: "تبدیل گفتار به متن",
   persistentSpeechRecognition: "سرویس پیوستهٔ گفتار (اختیاری)",
   speechSynthesis: "پاسخ صوتی",
-  imageSearch: "جست‌وجوی تصویری فریم‌ها (اختیاری)",
 };
 const roleNames: Record<string, string> = { fast: "پاسخ سریع", heavy: "پردازش سنگین", vision: "دیدن صفحه" };
 

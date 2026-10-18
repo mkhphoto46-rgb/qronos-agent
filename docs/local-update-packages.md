@@ -211,7 +211,7 @@ reviewed code in the new build.
 **Activation status (round 59): the product launch is ENABLED in this source**,
 pending its independent acceptance. Every dependency in `LAUNCH_DEPENDENCIES`
 is present: the runtime's own instance ownership, store admission in every
-store-opening process (the media host included), the fence refusal of every
+store-opening process, the fence refusal of every
 backend service (`build_support/runtime_entry.py` `FENCED_SERVICES` for the
 services that open no store), the awaited start-up barrier, and the desktop's
 drain of its writers (`tests/test_update_launch_composition.py`). The product's
@@ -625,8 +625,8 @@ enablement point (round 59), pending independent acceptance.** In
 - C2 stop result: the supervisor is created suspended, made a member of a
   desktop-owned Job Object (no kill-on-close, no breakaway) and then resumed. A
   stop is proved only when the exact supervisor exited and the Job has no live
-  process (the supervisor's kill-on-close Job ends the bridge, sidecars and media
-  workers). An unproved stop launches nothing and restarts nothing; the Job is
+  process (the supervisor's kill-on-close Job ends the bridge and sidecars). An
+  unproved stop launches nothing and restarts nothing; the Job is
   kept as busy ownership, so a runtime start or a launch is refused until it is
   proved empty. The status reports `stopping` meanwhile.
 - C1 launch path: the update service is started with `launch`, the token on its
@@ -646,12 +646,6 @@ enablement point (round 59), pending independent acceptance.** In
   opens only when the backend reports `launchAvailable`, a ready launch, nothing
   in progress or pending, and no earlier launch from the panel is unresolved. The
   panel has no stop, restart or exit hook; stale answers are dropped.
-- Media: the media host runs inside the admitted bridge. It admits its own store
-  (`media_store_admission`, `enter_for_store`) before opening it, and the
-  bridge's shutdown calls `media_host.close()` (the stage is preempted, its
-  workers joined, the store closed). The desktop's Job proof covers any
-  remaining media or model child either way, because the media Jobs nest inside
-  the supervisor's Job, which nests in the desktop's.
 - Not proved here: a real runtime, installer or update. The tests use inert
   base-interpreter process trees in real private Jobs and fake update services.
 

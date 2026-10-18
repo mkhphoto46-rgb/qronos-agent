@@ -167,18 +167,11 @@ def build(destination: Path, *, allow_audited_interpreter: bool = False) -> Path
         "--name", "qronos-runtime", "--distpath", str(destination),
         "--workpath", str(work / "analysis"), "--specpath", str(work / "spec"),
         "--paths", str(ROOT), "--collect-submodules", "core",
-        "--collect-submodules", "security", "--collect-submodules", "qronos_media",
+        "--collect-submodules", "security",
         "--hidden-import", "openwakeword.model",
         "--hidden-import", "sounddevice",
         "--add-data", f"{ROOT / 'config' / 'brains.json'}:config",
-        # PDF reports: the HarfBuzz shaper, which fpdf2 imports only optionally.
-        "--hidden-import", "uharfbuzz",
     ]
-    # ... and exactly the pinned font files of the registry (OFL; runtime_notices attributes them to the font).
-    fonts = ROOT / "qronos_media" / "fonts"
-    registry = json.loads((fonts / "fonts.json").read_text(encoding="utf-8"))
-    for name in [entry["file"] for entry in registry["files"]] + ["fonts.json"]:
-        command.extend(["--add-data", f"{fonts / name}:qronos_media/fonts"])
     for excluded in ("pytest", "tests", "tools", "torch", "torchaudio", "torchvision", "tensorflow", "matplotlib"):
         command.extend(["--exclude-module", excluded])
     command.append(str(ROOT / "build_support" / "runtime_entry.py"))

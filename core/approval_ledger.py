@@ -57,9 +57,6 @@ class ApprovalKind(Enum):
     APP_WORKFLOW = "app_workflow"
     # Undoing one earlier file change from the desktop history (core/activity_history.py).
     HISTORY_UNDO = "history_undo"
-    # One media library question (qronos_media.permissions: index a root, export a report, open at a time).
-    # Its payload is media's own; only the media route consumes it.
-    MEDIA_ACTION = "media_action"
 
 
 class StaleApproval(LookupError):

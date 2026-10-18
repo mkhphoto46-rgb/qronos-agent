@@ -28,9 +28,8 @@ Two layers, both pattern-based and model-free:
 These are deterministic patterns, not a semantic classifier: a request can be
 phrased in a way the input patterns do not list, which is why the output layer
 exists. Neither layer executes anything; the runtime has no code-execution
-capability in its chat path. Internal model tasks that must return data (for
-example the media labels and split proposals, which use their own
-``answer_chat_only`` calls) are not passed through here.
+capability in its chat path. Internal model tasks that must return data
+through their own ``answer_chat_only`` calls are not passed through here.
 """
 
 from __future__ import annotations

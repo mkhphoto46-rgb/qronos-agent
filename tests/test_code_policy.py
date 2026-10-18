@@ -249,7 +249,7 @@ def test_phone_chat_refuses_before_the_brain_and_never_sends_code():
 # ------------------------------------------------------------------ what is NOT passed through here
 
 def test_internal_data_calls_and_their_json_are_untouched():
-    """The media Fast labels/split proposals use answer_chat_only, which the boundary does not wrap."""
+    """Internal data calls use answer_chat_only, which the boundary does not wrap."""
     assert "code_policy" not in inspect.getsource(Orchestrator.answer_chat_only)
     source = inspect.getsource(Orchestrator.execute_plan)
     assert "check_request" in source and "check_answer" in source

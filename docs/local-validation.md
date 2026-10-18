@@ -25,8 +25,8 @@ python -m build_support.local_validate --node "C:/Program Files/nodejs/node.exe"
 - **Isolation:** every child process gets the same environment:
   - `QRONOS_RUN_LIVE_DEVICE_TESTS=0`, `QRONOS_OLLAMA_AUTO_START=0` and `PYTHONDONTWRITEBYTECODE=1`;
   - `QRONOS_DESKTOP_WAKE_BOOTSTRAP` and `QRONOS_PACKAGED_RUNTIME` removed;
-  - `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `HOME`, `TEMP`/`TMP`, `QRONOS_DATA_ROOT`, `QRONOS_ASSET_ROOT`,
-    `QRONOS_MEDIA_DATA_DIR` and the npm and XDG caches pointed into the workspace;
+  - `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `HOME`, `TEMP`/`TMP`, `QRONOS_DATA_ROOT`, `QRONOS_ASSET_ROOT` and
+    the npm and XDG caches pointed into the workspace;
   - the store overrides `QRONOS_CONVERSATION_HISTORY_PATH`, `QRONOS_SETTINGS_PATH`, `QRONOS_QUEUE_STATE_PATH`,
     `QRONOS_PERMISSION_POLICY_PATH`, `QRONOS_PERMISSION_AUDIT_PATH`, `QRONOS_APPROVAL_SECRET_PATH` and
     `QRONOS_PAINT_REFERENCE_PATH` pointed at new, empty locations under `<workspace>/state`, so an inherited value

@@ -311,8 +311,8 @@ generated answer that holds a fenced code block, two consecutive code-like lines
 or one machine-changing command before it is recorded, shown, sent or spoken. The
 decision and its audit record (category, channel, stage, rule and length, never
 the text) come from `security.gate` and the permission engine. Internal data
-calls that use `answer_chat_only` directly (for example the media labels and
-split proposals) are not passed through it. Its red-team measurement (layer 5)
+calls that use `answer_chat_only` directly are not passed through it. Its
+red-team measurement (layer 5)
 is still owed.
 
 ## External Intrusion Response

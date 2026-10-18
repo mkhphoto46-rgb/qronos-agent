@@ -8,8 +8,6 @@ owned by the Qronos project is licensed under the Apache License, Version 2.0
 Third-party software, fonts, artwork and data included with or used by Qronos
 are NOT covered by that licence and are not relicensed by it. Each keeps its
 own licence and notices, which are kept and distributed unchanged:
-  - the Vazirmatn fonts in qronos_media/fonts/ (SIL Open Font License 1.1;
-    OFL.txt is kept with them);
   - the template icons and logos in desktop/src-tauri/icons/,
     desktop/public/tauri.svg, desktop/public/vite.svg and
     desktop/src/assets/react.svg, which are byte-identical to files of the
@@ -29,8 +27,8 @@ own licence and notices, which are kept and distributed unchanged:
     (THIRD_PARTY_NOTICES-desktop.txt and its licenses/ folder) and the
     packaged runtime's Python, CPython, PyInstaller and Microsoft components
     (the runtime's third-party-notices/ folder);
-  - runtime assets provisioned separately (speech, voice and wake models,
-    ffmpeg and other tools), under the licence recorded for each asset in
+  - runtime assets provisioned separately (speech, voice and wake models and
+    their tools), under the licence recorded for each asset in
     build_support/runtime_assets.json and the notices shipped beside it.
     Some of these are not open source (for example, pretrained wake-word
     models published under CC BY-NC-SA 4.0); their terms apply whatever

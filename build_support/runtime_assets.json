@@ -54,7 +54,7 @@
       "bytes": 574041195,
       "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
       "source": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo-q5_0.bin",
-      "evidence": "local file equals the Hugging Face LFS oid and size (api/models/ggerganov/whisper.cpp/tree/main, 2026-10-12); also Media's pin",
+      "evidence": "local file equals the Hugging Face LFS oid and size (api/models/ggerganov/whisper.cpp/tree/main, 2026-10-12)",
       "licence": "OpenAI Whisper weights, MIT (whisper.cpp model repository)"
     },
     {
@@ -240,102 +240,6 @@
       "source": "https://github.com/ggml-org/whisper.cpp/blob/v1.9.5/LICENSE",
       "evidence": "the LICENSE file at tag v1.9.5 (commit d1be6fde), unchanged",
       "licence": "MIT"
-    },
-    {
-      "path": "runtime/ffmpeg/bin/ffmpeg.exe",
-      "feature": "mediaDecoding",
-      "status": "verified",
-      "provenance": "reproducible_build_of_signed_source",
-      "bytes": 21947392,
-      "sha256": "6c3fc768ef1de9ee4d514ae15b789ed77dc39f95a3a379b75bec4fcf4e0c65b9",
-      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
-      "evidence": "NOT a publisher binary: built by Qronos (MSVC, Brepro) from the signed official source with --disable-network --disable-protocols --enable-protocol=file,pipe and no GPL, version3 or nonfree; a second clean build was byte-identical; staged set (MANIFEST 011a697d594c2aaf...) verified by Root 26/26; recipe in runtime/ffmpeg/SOURCE/build",
-      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
-    },
-    {
-      "path": "runtime/ffmpeg/bin/ffprobe.exe",
-      "feature": "mediaDecoding",
-      "status": "verified",
-      "provenance": "reproducible_build_of_signed_source",
-      "bytes": 21726208,
-      "sha256": "ef43e6e32a54646d1ba38957ebba4396699a1032f9be1e6c402bcb87c2ac6406",
-      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
-      "evidence": "NOT a publisher binary: built by Qronos (MSVC, Brepro) from the signed official source with --disable-network --disable-protocols --enable-protocol=file,pipe and no GPL, version3 or nonfree; a second clean build was byte-identical; staged set (MANIFEST 011a697d594c2aaf...) verified by Root 26/26; recipe in runtime/ffmpeg/SOURCE/build",
-      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
-    },
-    {
-      "path": "runtime/ffmpeg/SOURCE/ffmpeg-9.0.2.tar.xz",
-      "feature": "mediaDecodingSource",
-      "status": "verified",
-      "provenance": "publisher",
-      "bytes": 12040788,
-      "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
-      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
-      "evidence": "the official source release; its .asc is a GOODSIG/VALIDSIG by FCF986EA15E6E293A5644F10B4322F04D67658D8 (fingerprint published on ffmpeg.org/download.html)",
-      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
-    },
-    {
-      "path": "runtime/ffmpeg/SOURCE/ffmpeg-9.0.2.tar.xz.asc",
-      "feature": "mediaDecodingSource",
-      "status": "verified",
-      "provenance": "publisher",
-      "bytes": 520,
-      "sha256": "d617fd94ea354dadd2a8bb16243d37c44e1e9729b06b6ad58fe30bfb0fa943f2",
-      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc",
-      "evidence": "the official detached signature published with the source release",
-      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
-    },
-    {
-      "path": "runtime/ffmpeg/LICENSE/COPYING.LGPLv2.1",
-      "feature": "mediaDecoding",
-      "status": "verified",
-      "provenance": "publisher",
-      "bytes": 26517,
-      "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
-      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
-      "evidence": "the file of that name in the signed source",
-      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
-    },
-    {
-      "path": "runtime/ffmpeg/LICENSE/LICENSE.md",
-      "feature": "mediaDecoding",
-      "status": "verified",
-      "provenance": "publisher",
-      "bytes": 4346,
-      "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af",
-      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
-      "evidence": "the file of that name in the signed source",
-      "licence": "LGPL v2.1 or later (IJG credit in runtime/ffmpeg/LICENSE/NOTICE.txt); AV1 video decode not included"
-    },
-    {
-      "path": "runtime/models/siglip2-base-patch16-224/vision_model_quantized.onnx",
-      "feature": "imageSearch",
-      "status": "verified",
-      "bytes": 94553333,
-      "sha256": "5f2b401c1a4fc095702a5d45348e17ad46c4f87064085365b43c6e8eaa5c0070",
-      "source": "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/vision_model_quantized.onnx",
-      "evidence": "the publisher's Hugging Face LFS identity at the immutable revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4 (onnx-community/siglip2-base-patch16-224-ONNX) is 94553333 bytes, sha256 5f2b401c1a4fc095702a5d45348e17ad46c4f87064085365b43c6e8eaa5c0070, also pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8; the approved round-80 acquisition from that revision, cached at E:/qronos-image-r79/assets/models/siglip2-base-patch16-224, was re-hashed equal to it (2026-10-16). Image-retrieval quality is not measured.",
-      "licence": "owner-review-required: base model google/siglip2-base-patch16-224 is Apache-2.0 (publisher card, revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2); the onnx-community conversion states no licence of its own"
-    },
-    {
-      "path": "runtime/models/siglip2-base-patch16-224/text_model_quantized.onnx",
-      "feature": "imageSearch",
-      "status": "verified",
-      "bytes": 283438275,
-      "sha256": "3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400",
-      "source": "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/text_model_quantized.onnx",
-      "evidence": "the publisher's Hugging Face LFS identity at the immutable revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4 (onnx-community/siglip2-base-patch16-224-ONNX) is 283438275 bytes, sha256 3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400, also pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8; the approved round-80 acquisition from that revision, cached at E:/qronos-image-r79/assets/models/siglip2-base-patch16-224, was re-hashed equal to it (2026-10-16). Image-retrieval quality is not measured.",
-      "licence": "owner-review-required: base model google/siglip2-base-patch16-224 is Apache-2.0 (publisher card, revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2); the onnx-community conversion states no licence of its own"
-    },
-    {
-      "path": "runtime/models/siglip2-base-patch16-224/tokenizer.model",
-      "feature": "imageSearch",
-      "status": "verified",
-      "bytes": 4241003,
-      "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
-      "source": "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/tokenizer.model",
-      "evidence": "the publisher's Hugging Face LFS identity at the immutable revision ba1f3b0843f24bc5417d38e19c37b287d719b2f4 (onnx-community/siglip2-base-patch16-224-ONNX) is 4241003 bytes, sha256 61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2, also pinned in qronos_media.resources.SIGLIP2_BASE_224_INT8; the approved round-80 acquisition from that revision, cached at E:/qronos-image-r79/assets/models/siglip2-base-patch16-224, was re-hashed equal to it (2026-10-16). Image-retrieval quality is not measured.",
-      "licence": "owner-review-required: base model google/siglip2-base-patch16-224 is Apache-2.0 (publisher card, revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2); the onnx-community conversion states no licence of its own"
     }
   ]
 }

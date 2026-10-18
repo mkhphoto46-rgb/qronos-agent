@@ -50,7 +50,7 @@ model; profile unchanged) starts inside a private Job Object owned by its guard 
 - A server that died while a runner lingers keeps everything owned (`running`) until a retire observes the tree
   ended. A new generation starts only after that.
 
-Consumers that hold resources for the sidecar's model (the media index's bge-m3 slot) may free them on their
+Consumers that hold resources for the sidecar's model may free them on their
 captured generation's `tree_exited` only; that wiring belongs to the consumer and is not part of this module.
 
 Ollama documents [cloud routing through the local daemon](https://docs.ollama.com/cloud)

@@ -26,7 +26,7 @@ def test_the_repository_licence_is_the_official_apache_text_and_notice_states_it
     found = project_licence.read()
     assert set(found) == {"LICENSE", "NOTICE"}
     notice = found["NOTICE"].decode("utf-8")
-    for excluded in ("qronos_media/fonts/", "desktop/src-tauri/installer-template/", "cpython_notice_texts/",
+    for excluded in ("desktop/src-tauri/installer-template/", "cpython_notice_texts/",
                      "desktop_notice_upstream/", "runtime_notice_texts/", "build_support/runtime_assets.json",
                      "CC BY-NC-SA 4.0"):
         assert excluded in notice, excluded

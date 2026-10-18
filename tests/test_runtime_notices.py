@@ -874,7 +874,7 @@ def test_review_file_refuses_unknown_fields(tmp_path):
 
 def test_committed_reviews_pin_vendored_texts_that_match_their_hashes():
     reviews = load_reviews()
-    assert set(reviews) == {("sounddevice", "0.5.6"), ("uharfbuzz", "0.56.3")}
+    assert set(reviews) == {("sounddevice", "0.5.6")}
     review = reviews[("sounddevice", "0.5.6")]
     vendored = review["vendoredNotices"]
     assert {item["file"] for item in vendored} == {
@@ -887,63 +887,6 @@ def test_committed_reviews_pin_vendored_texts_that_match_their_hashes():
     text = (runtime_notices.VENDORED_TEXTS / "portaudio-v19.7.0/LICENSE.txt").read_text(encoding="ascii")
     assert "Copyright (c) 1999-2006 Ross Bencina and Phil Burk" in text
     assert "Permission is hereby granted, free of charge" in text
-
-
-def test_the_harfbuzz_review_pins_its_upstream_text_and_the_extension_module():
-    review = load_reviews()[("uharfbuzz", "0.56.3")]
-    (item,) = review["vendoredNotices"]
-    runtime_notices._vendored_source(runtime_notices.VENDORED_TEXTS, item["file"], item["sha256"])
-    assert item["component"] == "HarfBuzz" and item["sourceCommit"] in item["sourceUrl"]
-    assert item["covers"] == [{"path": "uharfbuzz/_harfbuzz.pyd",
-                               "sha256": "2ab785a40370050976c5ca1c26c2274b682290b047f2427a7a4c6fc83b7715c8"}]
-    text = (runtime_notices.VENDORED_TEXTS / item["file"]).read_text(encoding="utf-8")
-    assert '"Old MIT" license' in text and "Permission is hereby granted" in text
-    assert "uharfbuzz" in runtime_notices.NATIVE_REVIEW_REQUIRED
-    try:
-        dist = importlib.metadata.distribution("uharfbuzz")
-    except importlib.metadata.PackageNotFoundError:
-        return
-    record = runtime_notices._installed_distributions([dist])[0]
-    runtime_notices._check_covered_binary(record, item["covers"][0], None)
-
-
-def _font_bundle(tmp_path: Path) -> tuple[Path, runtime_notices.FrozenContents]:
-    source = Path(__file__).resolve().parents[1] / "qronos_media" / "fonts"
-    internal = tmp_path / "bundle" / "_internal"
-    target = internal / "qronos_media" / "fonts"
-    target.mkdir(parents=True)
-    registry = json.loads((source / "fonts.json").read_text(encoding="utf-8"))
-    for name in [entry["file"] for entry in registry["files"]] + ["fonts.json"]:
-        (target / name).write_bytes((source / name).read_bytes())
-    files = tuple(sorted(f"qronos_media/fonts/{p.name}" for p in target.iterdir()) + ["qronos_media/reports.pyc"])
-    return internal, runtime_notices.FrozenContents(frozenset(), {"qronos_media": files})
-
-
-def test_bundled_pdf_fonts_are_attributed_to_their_pinned_registry_with_the_ofl_text(tmp_path):
-    internal, contents = _font_bundle(tmp_path)
-    entry, copies = runtime_notices._plan_fonts(contents, internal)
-    assert entry["family"] == "Vazirmatn" and entry["version"] == "33.003" and entry["licence"] == "OFL-1.1"
-    assert entry["notice"] == "third-party-notices/fonts/Vazirmatn-33.003/OFL.txt"
-    assert {f["path"] for f in entry["files"]} == {"qronos_media/fonts/Vazirmatn-Regular.ttf",
-                                                   "qronos_media/fonts/Vazirmatn-Bold.ttf", "qronos_media/fonts/OFL.txt"}
-    assert [copy.kind for copy in copies] == ["license-text"]
-    assert runtime_notices._plan_fonts(runtime_notices.FrozenContents(frozenset(), {}), internal) == (None, [])
-
-
-@pytest.mark.parametrize("change", ["tampered", "unlisted"])
-def test_a_bundled_font_that_is_not_the_pinned_one_stops_the_build(tmp_path, change):
-    internal, contents = _font_bundle(tmp_path)
-    fonts = internal / "qronos_media" / "fonts"
-    if change == "tampered":
-        data = bytearray((fonts / "Vazirmatn-Bold.ttf").read_bytes())
-        data[200] ^= 0x01
-        (fonts / "Vazirmatn-Bold.ttf").write_bytes(bytes(data))
-    else:
-        (fonts / "Other.ttf").write_bytes(b"not pinned")
-        contents = runtime_notices.FrozenContents(
-            frozenset(), {"qronos_media": contents.internal_roots["qronos_media"] + ("qronos_media/fonts/Other.ttf",)})
-    with pytest.raises(NoticeError, match="font"):
-        runtime_notices._plan_fonts(contents, internal)
 
 
 def test_committed_review_matches_the_installed_wheel_when_present():
