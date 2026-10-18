@@ -446,7 +446,7 @@ swap is counted. It covers:
 - None of this has run as a real Tauri-built installer on a real machine; see
   below.
 
-**Open installer gates** (independent review Media18; nothing here is
+**Open installer gates** (independent review; nothing here is
 activated):
 - **O-B, defence in depth.** `verify_generated_order` does not inspect the
   sections that run before the Install section. That they do nothing rests on

@@ -247,7 +247,7 @@ def test_nested_npm_resolution_prefers_the_nearest_copy():
     assert npm_production_keys(lock) == ["node_modules/app", "node_modules/app/node_modules/shared"]
 
 
-# ----------------------------------------------- licence text and roles (N1)
+# ----------------------------------------------- licence text and roles
 
 
 def test_licence_and_auxiliary_notices_are_copied_with_distinct_roles(tmp_path):
@@ -361,7 +361,7 @@ def test_the_committed_exception_list_is_empty_and_well_formed():
     assert notices.load_exceptions() == {}
 
 
-# ------------------------------------------------ identity and folders (N2, N3)
+# ------------------------------------------------ identity and folders
 
 
 @pytest.mark.parametrize("version", [
@@ -534,7 +534,7 @@ def test_output_carrying_a_private_path_is_refused_before_writing(tmp_path, spel
     assert not (tmp_path / "out").exists()
 
 
-# ------------------------------------------------- output ownership (N4)
+# ------------------------------------------------- output ownership
 
 
 def test_a_forged_marker_directory_is_refused_and_preserved(tmp_path):
@@ -602,7 +602,7 @@ def test_an_existing_empty_directory_is_used_without_deleting_anything(tmp_path)
     assert (tmp_path / "out/licenses/rust/demo/1.0.0/LICENSE").is_file()
 
 
-# ------------------------------------------ hashes and revalidation (C1)
+# ------------------------------------------ hashes and revalidation
 
 
 def test_every_copied_file_has_its_size_and_hash_and_the_manifest_verifies(tmp_path):
@@ -868,7 +868,7 @@ def test_the_committed_upstream_registry_verifies_offline():
         assert meta["revision"] in meta["url"] and path.stat().st_size < 64 * 1024
     for notice in upstream.values():
         assert len(notice.entry["upstream"]["revision"]) == 40  # a full commit, not a branch
-    # Root decisions: UNIC authorship attribution, Microsoft terms flagged, selectors designated text.
+    # Review decisions: UNIC authorship attribution, Microsoft terms flagged, selectors designated text.
     for key in COMMITTED_UPSTREAM:
         if key[1].startswith("unic-"):
             assert "authors" in {meta["role"] for meta, _ in upstream[key].texts}
@@ -924,7 +924,7 @@ def test_generation_is_deterministic_and_relative(tmp_path):
         (tmp_path / "alpha" / "LICENSE").read_bytes()
 
 
-# ------------------------------------------------- target binding (C3)
+# ------------------------------------------------- target binding
 
 # Installer wiring and Windows x64 bundle refusal are covered in test_desktop_installer.py.
 

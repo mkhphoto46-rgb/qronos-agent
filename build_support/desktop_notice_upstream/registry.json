@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Verified upstream licence and notice texts for exact desktop dependencies whose published package lacks licence text. Each entry pins the exact package (ecosystem, name, version, locked checksum or integrity, declared licence, local identity-file hashes) and each vendored file (immutable URL, revision, source path, SHA-256), with the evidence that established the pins and any owner review still required. Nothing here grants a licence; it reproduces upstream text. Changes need Root review.",
+  "comment": "Verified upstream licence and notice texts for exact desktop dependencies whose published package lacks licence text. Each entry pins the exact package (ecosystem, name, version, locked checksum or integrity, declared licence, local identity-file hashes) and each vendored file (immutable URL, revision, source path, SHA-256), with the evidence that established the pins and any owner review still required. Nothing here grants a licence; it reproduces upstream text. Changes need review.",
   "packages": [
     {
       "ecosystem": "npm",

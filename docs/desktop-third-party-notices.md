@@ -174,7 +174,7 @@ Any of the following stops the build:
 
 ## Exceptions
 
-`build_support/desktop_notice_exceptions.json` is empty. Root must review an entry
+`build_support/desktop_notice_exceptions.json` is empty. An entry must be reviewed
 before it is added.
 
 Each entry has to match the exact ecosystem, name, version and provenance. It
@@ -225,7 +225,7 @@ Each of the 12 is pinned to the source revision recorded for it:
 | rust | webview2-com, webview2-com-macros | 0.38.2, 0.8.1 | MIT | repository `LICENSE` |
 | rust | webview2-com-sys | 0.38.2 | MIT | repository `LICENSE`, plus Microsoft's `LICENSE.txt` and `NOTICE.txt`; see below |
 
-Root decisions (2026-10-07). These are technical packaging decisions, not
+Review decisions (2026-10-07). These are technical packaging decisions, not
 redistribution clearance:
 
 - **`selectors`:** the exact stylo source revision has no licence file. Its

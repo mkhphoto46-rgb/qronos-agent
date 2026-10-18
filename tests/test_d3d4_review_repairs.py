@@ -1,4 +1,4 @@
-"""Regressions for the independent D3/D4 review (findings F1-F3, F5-F10).
+"""Regressions for the independent D3/D4 review.
 
 Each test asserts the CORRECTED behaviour on realistic synthetic frames.
 Everything Windows-facing is injected: window snapshots (real WindowBinder
@@ -135,7 +135,7 @@ def _authorization(binding, app="files"):
     return BoundInputAuthorization.bind(grant, binding)
 
 
-# ------------------------------------------------------- F1 colour-aware
+# ------------------------------------------------------- colour-aware
 
 
 def test_F1_a_low_contrast_selection_moved_to_another_row_is_refused():
@@ -164,7 +164,7 @@ def test_F1_an_unchanged_realistic_frame_is_confirmed():
     assert _confirm(button, binding, binder, window) == (button.point.screen_x, button.point.screen_y)
 
 
-# ------------------------------------------------------- F2 context bounds
+# ------------------------------------------------------- context bounds
 
 
 def test_F2_a_changed_status_label_on_1280_is_refused():
@@ -203,7 +203,7 @@ def test_F2_a_tiny_caret_blink_far_away_is_tolerated_at_1280_and_4k():
     assert _confirm(button, binding, binder, window)
 
 
-# ------------------------------------------------------- F3 move -> confirm -> press
+# ------------------------------------------------------- move -> confirm -> press
 
 
 class _Desk:
@@ -335,7 +335,7 @@ def test_F3_a_native_release_failure_still_leaves_no_button_held():
     assert desk.buttons[0] is True and False in desk.buttons
 
 
-# ------------------------------------------------------- F10 hover epoch
+# ------------------------------------------------------- hover epoch
 
 
 def test_F10_hover_motion_advances_the_input_epoch():
@@ -349,7 +349,7 @@ def test_F10_hover_motion_advances_the_input_epoch():
     assert state_epoch(binding.identity_token) == before + 2
 
 
-# ------------------------------------------------------- F5 / F6 Paint watch
+# ------------------------------------------------------- Paint watch
 
 
 CANVAS = WindowRect(60, 80, 340, 260)
@@ -421,7 +421,7 @@ def test_F6_own_strokes_alone_never_stop_the_drawing():
     assert calls["n"] == 3
 
 
-# ------------------------------------------------------- F7 / F8 language
+# ------------------------------------------------------- language
 
 
 @pytest.mark.parametrize("text, name", [
@@ -455,7 +455,7 @@ def test_F8_negated_requests_are_refused_explicitly(text):
         parse_paint_draw_action(text)
 
 
-# ------------------------------------------------------- F9 failure kinds
+# ------------------------------------------------------- failure kinds
 
 
 def _wrapped(outer_cls, inner):

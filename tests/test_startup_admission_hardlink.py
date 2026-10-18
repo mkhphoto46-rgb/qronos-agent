@@ -1,5 +1,5 @@
 """
-Round 16 (Media20 H20-1): a store override that is a file with more than one name (an NTFS hard link) is refused
+A store override that is a file with more than one name (an NTFS hard link) is refused
 before any store is opened or changed, because resolving its path cannot show whether its other names lie in
 installed data.
 

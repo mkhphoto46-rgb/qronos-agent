@@ -504,7 +504,7 @@ class DesktopRelay:
     def end_generation(self) -> None:
         """
         Fence the current bridge generation's output: a bounded drain, then no
-        line of it is ever queued again (F1).
+        line of it is ever queued again.
         """
         with self._cond:
             generation, pump = self._generation, self._pump

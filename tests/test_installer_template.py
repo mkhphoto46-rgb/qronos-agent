@@ -4,11 +4,11 @@ Source checks: exact upstream bytes and licences, the reviewed diff, renderer fi
 Native checks compile the whole template (tests/fixtures/nsis_full_template.py: real sections, page functions and
 hooks; registry, shortcuts, app start and app kill made inert, every transformation count recorded) and run it
 silently as the current user, only inside the test's tmp folder:
-F2 the reinstall page never starts a previous uninstaller (a planted marker program stands in for it);
-F3 a real failure at each material step stops the installation (it never ends successfully);
-F5 an installed probe uninstalls its listed files and its registration;
-F7 nothing is stopped, deleted or registered unless the folder and its list are Qronos's own;
-F8 the uninstaller removes only what the owned list names.
+the reinstall page never starts a previous uninstaller (a planted marker program stands in for it);
+a real failure at each material step stops the installation (it never ends successfully);
+an installed probe uninstalls its listed files and its registration;
+nothing is stopped, deleted or registered unless the folder and its list are Qronos's own;
+the uninstaller removes only what the owned list names.
 No real installer, uninstaller, app, registry, UAC, SCM or WebView2 installer is involved.
 """
 from __future__ import annotations
@@ -134,7 +134,7 @@ class Env:
 
         probe = build_full_probe(self.base / name, profile=self.profile, version=VERSION, compile_log=COMPILES,
                                  **options)
-        seed_registry(probe, {})  # only the WebView2 version; F2 re-seeds with a planted previous installation
+        seed_registry(probe, {})  # only the WebView2 version; the reinstall test re-seeds with a planted previous installation
         return probe
 
 
@@ -154,7 +154,7 @@ def seeded_only(probe) -> bool:
     return "[HKCU" not in text
 
 
-# ------------------------------------------------------------------------------- F2 reinstall page
+# ------------------------------------------------------------------------------- reinstall page
 
 
 def _marker_program(folder: Path) -> tuple[Path, Path]:
@@ -202,7 +202,7 @@ def test_f2_the_reinstall_page_never_starts_a_previous_uninstaller(tmp_path, cas
         assert code == 0 and "reinstall-page returned" in log and (probe.instdir / "qronos-probe.exe").is_file()
 
 
-# ------------------------------------------------------------------------------- F3 a failed step stops the install
+# ------------------------------------------------------------------------------- a failed step stops the install
 
 def _prior_install(folder: Path, files: list[str]) -> None:
     """A previous Qronos installation's folder: its manifest lists only `files` (forward slashes)."""
@@ -291,7 +291,7 @@ def test_f3_a_failure_at_any_material_step_stops_the_installation(tmp_path, fail
         assert REFUSALS[failure] in probe.read_result(), probe.read_result()
 
 
-# ------------------------------------------------------------------------------- F5 the uninstaller
+# ------------------------------------------------------------------------------- the uninstaller
 
 
 @native
@@ -317,7 +317,7 @@ def test_f5_an_installed_probe_uninstalls_its_listed_files_and_registration(tmp_
     assert "[HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" not in probe.registry_text()
 
 
-# ------------------------------------------------------------------------------- F7 nothing is deleted unless owned
+# ------------------------------------------------------------------------------- nothing is deleted unless owned
 
 DELETION_CASES = ["protected_root", "protected_root_with_a_list", "protected_ancestor_alias", "nested_payload_junction",
                   "missing_manifest_with_sentinels", "malformed_manifest_with_sentinels"]
@@ -408,7 +408,7 @@ def test_f7_nothing_is_stopped_deleted_or_registered_unless_the_folder_and_its_l
         _remove_junctions(env.base / "apps-target")
 
 
-# ------------------------------------------------------------------------------- F8 only listed files go
+# ------------------------------------------------------------------------------- only listed files go
 
 
 @native
@@ -469,7 +469,7 @@ def _uninstall_into(probe, target: Path) -> int:
 
 @native
 def test_f8_a_file_named_uninstall_exe_is_deleted_only_when_the_owned_list_names_it(tmp_path):
-    """Root round 12: the fixed-name uninstaller deletion needs list membership, not just the name."""
+    """The fixed-name uninstaller deletion needs list membership, not just the name."""
     from build_support import install_manifest
 
     env = Env(tmp_path)

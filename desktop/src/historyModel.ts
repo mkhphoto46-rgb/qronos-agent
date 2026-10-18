@@ -37,7 +37,7 @@ export type UndoPrompt = {
   reversal: string;
   name: string;
   needsSecret: boolean;
-  /** The confirmation also covers reading the copy's original once more (round 34). */
+  /** The confirmation also covers reading the copy's original once more. */
   readsSource: boolean;
 };
 

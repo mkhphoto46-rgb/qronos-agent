@@ -1,4 +1,4 @@
-"""The chat's code boundary (Main64 G2): requests to write, change or run code are refused before any Brain, and a
+"""The chat's code boundary: requests to write, change or run code are refused before any Brain, and a
 generated answer containing code is never recorded, shown or spoken. Read-only code analysis stays permitted
 (docs/qronos_voice_output.md; security/permissions.py CODE_ANALYSIS is AUTO_ALLOW).
 
@@ -233,7 +233,7 @@ def test_every_production_orchestrator_is_given_the_audit_trail():
     assert source.count("code_policy_audit = self._code_policy_audit") == 2
 
 
-# ------------------------------------------------------------------ B1 (Media73): one-line and in-sentence code
+# ------------------------------------------------------------------ one-line and in-sentence code
 
 # Each answers an ordinary question the input layer admits; the raw command/statement must never be released.
 B1_ANSWERS = {
@@ -345,7 +345,7 @@ def test_b1_followup_variants_never_reach_any_output(name, tmp_path):
     assert raw not in json.dumps(voice_events, ensure_ascii=False)
 
 
-# ------------------------------------------------------------------ R1/R2 (Media75): admin tools at a line start and
+# ------------------------------------------------------------------ admin tools at a line start and
 # fetch-and-run as root - withheld as broadly as 78ed5dc withheld them
 
 R1_R2 = {
@@ -383,7 +383,7 @@ def test_r1_r2_answers_never_leave_the_orchestrator(name):
     assert [(r.category, r.outcome) for r in audit.records()] == [("script_execution", "refused")]
 
 
-# ------------------------------------------------------------------ R3 (Media76): Windows admin tools in any letter
+# ------------------------------------------------------------------ Windows admin tools in any letter
 # case (Windows runs them as typed); prose is told apart by the word after the name, never by its case
 
 R3 = {

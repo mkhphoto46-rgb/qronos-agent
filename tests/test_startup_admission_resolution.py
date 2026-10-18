@@ -1,5 +1,5 @@
 """
-Round 14 (Runtime17 F1/F2): the start-up order on the RESOLVED data root, bound per process, and run before the
+The start-up order on the RESOLVED data root, bound per process, and run before the
 first store by both the frozen dispatch and a source CLI.
 
 Native boundary of these fixtures (audited):

@@ -59,7 +59,7 @@ def test_a_malformed_registry_is_refused(tmp_path, bad):
 
 
 def test_an_empty_registry_fails_closed_at_every_layer(tmp_path, monkeypatch, capsys):
-    # Media35 C1: zero entries must never read as "all verified".
+    # Zero entries must never read as "all verified".
     registry = tmp_path / "registry.json"
     registry.write_text(json.dumps({"schema": 1, "assets": []}), encoding="utf-8")
     with pytest.raises(runtime_assets.RegistryError):

@@ -47,7 +47,7 @@ python -m build_support.local_validate --node "C:/Program Files/nodejs/node.exe"
   select.
 - It does not run the app, the installer, native acceptance, models or devices.
 - Live-device tests stay skipped.
-- Files that execute native installers or write the registry (see the A103/A104 records) should not be selected
+- Files that execute native installers or write the registry should not be selected
   on the development machine.
 - It does not run the Rust tests or builds (`cargo test`, `cargo check`, `tauri build`); those stay separate,
   explicitly named checks.

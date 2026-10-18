@@ -413,7 +413,7 @@ def test_memory_launch_captures_identity_and_binds_child_lifetime(tmp_path, monk
     assert manager.owned_process is identity
     identity.create_time.assert_called_once_with()
     if os.name == "nt":
-        # Round 24: the child's lifetime is bound by creating it INSIDE the guard's Job (suspended, assigned,
+        # The child's lifetime is bound by creating it INSIDE the guard's Job (suspended, assigned,
         # resumed), never by binding an already running Popen.
         (argv,), options = guard.spawn_contained.call_args
         assert argv == ["owned-ollama", "serve"] and options["env"]["OLLAMA_HOST"] == "127.0.0.1:11435"

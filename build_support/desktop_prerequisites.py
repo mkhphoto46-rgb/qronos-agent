@@ -471,7 +471,7 @@ def _statements(block: str) -> list[str]:
 
 
 def verify_generated_order(script: str) -> None:
-    """Tauri's REAL generated installer.nsi has the Qronos order (contracts round 11-12)."""
+    """Tauri's REAL generated installer.nsi has the Qronos order."""
     text = script.lstrip("\ufeff").replace("\r\n", "\n")
     if "!ifndef QRONOS_TEMPLATE_HOOKS" not in text:
         raise PrerequisiteError("The generated installer script is not from the Qronos template.")

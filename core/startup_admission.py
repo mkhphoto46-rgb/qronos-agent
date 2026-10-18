@@ -160,7 +160,7 @@ def _resolved(value: Any) -> tuple[str, Path]:
 
 def _require_one_name(resolved: Path) -> None:
     """
-    Refuse a store override that is a file with more than one name (an NTFS hard link; Media20 H20-1).
+    Refuse a store override that is a file with more than one name (an NTFS hard link).
 
     A hard link keeps its own full name, so resolving the path cannot show that
     the same file also lives in installed data, and an appending or in-place
@@ -270,7 +270,7 @@ def enter(
     """Run steps 1-2 once for this process; return the held writer admission (or raise StartupRefused)."""
     with _lock:
         # What THIS call asks for (applicability and the RESOLVED data root), decided before anything held is
-        # handed back: an earlier admission authorises only the same root and mode (Runtime17 F2).
+        # handed back: an earlier admission authorises only the same root and mode.
         applicable, key, root = _binding(environ, data_root, windows, installed)
         if "admission" in _held:
             if _held.get("binding") != (applicable, key):
@@ -377,8 +377,8 @@ def enter_for_store(service: str, override: str, store_path: Any, *,
     The exact path is put in its own override (one of ``STORE_PATH_OVERRIDES``),
     so the whole existing order applies to it: a source process whose store
     leads into installed data is admitted on that root (or refused if it was
-    already admitted for something else, Runtime17 F2), a file with more than
-    one name is refused (H20-1), and an unresolvable path is refused. For an
+    already admitted for something else), a file with more than
+    one name is refused, and an unresolvable path is refused. For an
     installed binding the store must also lie inside the admitted data root:
     a store elsewhere would be data the admission does not cover.
     Returns what ``enter`` returns; raises StartupRefused with nothing opened.

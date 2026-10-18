@@ -95,7 +95,7 @@ All waits in the channel have deadlines.
 
 ## Product wiring (supervised desktop runtime)
 
-Implemented in round 1 of the production wave: the desktop now reaches the
+Implemented: the desktop now reaches the
 supervisor.
 
 ```text

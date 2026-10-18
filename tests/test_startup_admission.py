@@ -160,7 +160,7 @@ def test_the_bridge_never_deadlocks_on_the_supervisor_singleton(tmp_path):
         supervisor.release()
 
 
-# ------------------------------------------------------------ frozen dispatch (R4/N9)
+# ------------------------------------------------------------ frozen dispatch
 
 
 def test_only_store_services_are_admitted():
