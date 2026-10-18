@@ -1,10 +1,8 @@
-# Supervisor, user runtime and Elevated Action Broker (D8)
+# Supervisor and user runtime (D8)
 
 Status: **the supervisor is wired into the desktop's runtime start, stop and
-shutdown (see [Product wiring](#product-wiring-supervised-desktop-runtime)),
-and the broker holds one production action, the print-spooler restart,
-reached from the person's own desktop chat turn.** Nothing here is installed, registered as a
-service, started at sign-in, or exercised through a real UAC prompt. Live
+shutdown (see [Product wiring](#product-wiring-supervised-desktop-runtime)).**
+Nothing here is installed, registered as a service or started at sign-in. Live
 acceptance on a real desktop is deferred. See
 [What is not done](#what-is-not-done).
 
@@ -21,14 +19,9 @@ accepts one exact approved action rather than a shell command.
 | `core/pipe_peer.py` | Read-only pipe peer process ids (`GetNamedPipe{Client,Server}ProcessId`) | both sides |
 | `core/supervisor.py` | `Supervisor` (keeps the runtime alive) and `SupervisedRuntimeClient` (the runtime's half) | signed-in user |
 | `core/supervisor_relay.py` | Desktop mode: relays the desktop's pipes to the bridge, Job Object, lifecycle events | signed-in user |
-| `core/action_broker.py` | The broker: verify one request, perform it, exit | elevated, via UAC |
-| `core/action_broker_client.py` | `BrokerSession`: the runtime's side, from a gate grant to a result | user runtime |
-| `core/uac_launch.py` | Starts the bundled broker with `ShellExecuteExW` `runas` | user runtime |
-| `core/elevated_actions.py` | The spooler-restart request, typed-secret prompt, cancellation and outcomes | user runtime |
-| `core/spooler_service.py` | Stops and starts the one service `Spooler` through the Service Control Manager | elevated, via UAC |
 
-`build_support/runtime_entry.py` exposes them as two more closed services of
-the frozen executable: `supervisor` and `action-broker`.
+`build_support/runtime_entry.py` exposes the supervisor as one more closed
+service of the frozen executable: `supervisor`.
 
 ## Channel
 
@@ -99,109 +92,6 @@ All waits in the channel have deadlines.
 - **Scope.** It imports no audio, screen, UI or dialog module (a test
   enforces this). `SupervisorInstanceGuard` allows one supervisor per Windows
   session (`Local\QronosSupervisor`).
-
-## Elevated Action Broker
-
-`BrokerSession.perform(action, request, grant)`:
-
-1. **Grant.** It takes a live `security.gate.ActionGrant` for exactly that
-   `ActionRequest`. It refuses anything else, and refuses a second use within
-   the session before launching.
-2. **Envelope.** It builds the approval envelope: action id, category,
-   target, the digest of the canonical typed action, wall-clock issue and
-   expiry (at most what the grant has left and at most 180 s), a nonce, and an
-   HMAC under a fresh session key.
-3. **Launch and connect.** It listens on a fresh pipe and launches the broker
-   (`UacBrokerLauncher` in production: the normal UAC prompt, which the user
-   can decline). The broker's command line carries only public identifiers:
-   `action-broker --pipe NAME --runtime-pid PID`. The session key never goes
-   on a command line, in the environment or in a log. The session accepts
-   only the launched process id and releases the key to it on the pipe. It
-   then runs the mutual handshake and sends one request: the typed action,
-   the envelope and the person's typed secret. It reads one result and waits
-   for the broker to exit.
-4. **Cancellation.** Each approved action has one `Cancellation`, which the
-   coordinator's `discard` (Stop, Pause, shutdown) cancels under the same
-   lock as its epoch change. The session honours it:
-   - before launching, and after the UAC prompt returns;
-   - while waiting for the broker to connect, for the handshake and for its
-     hello. `cancel()` interrupts the listener, and the other waits look
-     every 50 ms, so Stop ends the session at once, not after the 120 s
-     connect timeout;
-   - at key release. The key is written only after `release_key()` grants
-     it, and that grant is the ordering point. A Stop that comes first means
-     no key byte is sent, which covers every Stop made while the session
-     still waits for the broker to connect. A Stop that comes after the
-     grant is ordered after the release: the key is being, or has been,
-     written to the launched, PID-checked broker, and the Stop still ends
-     the handshake and stops the request. The write is not done under the
-     lock, so a stalled peer can never hold up Stop;
-   - at the single commit point, `commit()`, just before the request is
-     sent. A Stop before it means nothing is sent (`BrokerCancelled`, shown
-     as cancelled). A Stop after it cancels nothing: the broker performs one
-     action or none, and the real result, or "unknown", is reported. It is
-     never re-sent.
-   A cancelled session closes its listener and releases the broker's process
-   handle once. A broker that finds no key or no request exits on its own
-   deadline.
-
-The broker (`serve_once`) does the following, in order:
-
-1. **Peer.** It refuses unless the named launching process runs as the same
-   user and runs the broker's own installed executable. Then it connects,
-   requires the pipe server to be exactly that process, receives the session
-   key on the pipe, and runs the mutual handshake.
-2. **Envelope.** It checks the envelope shape, then the HMAC.
-3. **Freshness.** Not issued in the future (5 s skew), not expired, and a
-   lifetime of at most 180 s.
-4. **Digest.** The approval must cover exactly this kind and these
-   parameters. A change to a non-target parameter is refused too.
-5. **Registry.** The kind must be in the closed registry, and the parameters
-   must be exactly the spec's fields and types and pass its validation.
-6. **No code or shell.** No parameter may name code, a script, an executable
-   or shell syntax.
-7. **Category and target.** Both are re-derived from the parameters and must
-   match the approval.
-7a. **Typed secret, checked here.** The person's typed approval secret is
-   checked in the broker itself, against the same per-profile store and
-   shared lockout, whatever the permission settings say. The pipe, the key
-   and the envelope are all chosen by whoever launched the broker, so a
-   local program that is not Qronos could forge every one of them. It cannot
-   type the person's secret. A refusal does not use up the approval.
-8. **Permission gate.** It re-asks `security.gate`. A category the policy
-   forbids is refused even with an approval.
-9. **Single use.** The nonce is claimed with an atomic exclusive create in
-   `ActionBroker/consumed`, so a replay to this broker or a later one is
-   refused.
-10. **Perform.** It performs the action and reports the result. It audits the
-    kind, the action id and the outcome, never parameters, keys or MACs.
-
-The registry refuses command-like kinds (`shell`, `cmd`, `powershell`,
-`script`, `exec`, `run`, `eval`, …) and categories that are never brokered
-(script execution, code, registry, boot, raw disk, security settings, backup
-destruction, privilege escalation, cyber attack).
-
-**`PRODUCTION_ACTIONS` holds exactly one action: `printer.spooler_restart`.**
-
-- **Need.** The print workflow stops with "The Windows print spooler is not
-  responding". Restarting that one service is the standard recovery, and
-  Windows lets only administrators do it.
-- **Spec.** It has no parameters. The service is the constant `Spooler`,
-  never chosen by a caller. The category is `device_control`, and the
-  target is "Windows Print Spooler service (Spooler)".
-- **Adapter.** `core/spooler_service.py` uses the Service Control Manager
-  with query, stop and start rights only. It never runs a shell, `sc.exe`,
-  `net.exe` or PowerShell.
-- **Behaviour.** It stops the service, waits up to 30 s, starts it, and
-  waits up to 30 s. Each failure says how far it got. Dependent services
-  are never stopped, a paused service is not touched, and the service's
-  configuration is never read or changed.
-- **Everything else** is refused with `unknown_action`.
-- **Not done.** The real restart, UAC prompt and elevated run have not been
-  exercised. That is deferred live acceptance.
-
-Adding any further action needs a reviewed `ActionSpec`, a permission
-policy for its category, and live UAC acceptance.
 
 ## Product wiring (supervised desktop runtime)
 
@@ -325,56 +215,6 @@ desktop (Tauri start_runtime)
   (Control). `runtime_error` and `runtime_stopping` already reach existing
   handling.
 
-**Elevated action (`core/elevated_actions.py`).** The person's own desktop
-chat turn reaches it, for example "سرویس چاپ را ری‌استارت کن" or "restart
-the print spooler". A strict deterministic parser is used; negations and
-other text are ignored. Device Link text goes to the tool-free chat path and
-never reaches it. The layers, all required, in order:
-
-1. The permission gate must not refuse `device_control`.
-2. The typed approval secret, always. This is a floor even if settings
-   lowered device control to "allow" or "ask". A UAC dialog is Windows'
-   consent to elevation, not Qronos's approval of the exact action.
-3. A gate grant for this exact request (170 s). `BrokerSession` turns it into
-   a single-use HMAC envelope.
-4. The UAC prompt, which the person can decline.
-5. The broker's own verification and gate re-check.
-
-The prompt uses the existing app-workflow protocol:
-- `app_workflow_approval_required` with phase `printer_spooler_restart` and
-  permission `require_typed_secret`.
-- The decision comes back through `qronos.app_workflow_decision`, routed by
-  token.
-- Prompts expire after 120 s and are revoked by Stop, Pause and shutdown.
-
-Outcomes are reported once and never retried:
-- `succeeded`.
-- `failed`: the adapter's reviewed message.
-- `refused`: declined, UAC declined, cancelled by Stop/Pause/shutdown
-  before the request left, unavailable, forbidden, or not the installed
-  build.
-- `uncertain`: `BrokerOutcomeUnknown`. The request left but the answer was
-  lost, so the person is told to check the service. An unexpected error
-  also ends here, so every path gives exactly one visible result.
-
-Only one elevated action runs at a time. From source, elevation is refused
-before any prompt.
-
-**Desktop contract.** `desktop/src/appWorkflowApproval.ts` accepts
-`printer_spooler_restart` only with permission `require_typed_secret`; any
-weaker tier is not shown. The dialog's title is "راه‌اندازی دوبارهٔ سرویس چاپ
-ویندوز", with two fixed rows (the Windows service, and that Windows asks for
-UAC after the secret). The answer follows the same single-use path as `print`:
-- the secret is typed, sent once and never kept;
-- an empty secret is not sent, and a denial carries no secret;
-- a wrong secret keeps the prompt for another single try;
-- Stop, Pause and revocation dismiss it without an answer.
-An `uncertain` result asks the person to check the print service. It does not
-offer the print/Telegram uncertain-attempt list, which never holds a spooler
-attempt. Verified only with fixture events captured from the real coordinator
-(desktop/tests/app-workflow-approval.test.mjs), never with a real UAC prompt or
-spooler.
-
 ## Start-up order, singletons and the update fence
 
 Every process that opens Qronos's persistent stores runs one order before its
@@ -431,9 +271,6 @@ Which processes run what:
 - **The update service:** the whole order for every operation except `launch`,
   which takes the exclusive admission itself (`LaunchHold`) and cannot also
   hold a shared one. It stays refused by default.
-- **The elevated action broker:** a shared admission on its known-folder
-  profile, without the barrier, because it only ever runs inside a live runtime
-  that already passed it.
 - **Audio and doctor** open no store.
 
 Where it applies: the installed runtime. That is always the frozen executable,
@@ -504,25 +341,8 @@ point until independent acceptance.
   part-way write being reported as unconfirmed. One end-to-end test runs
   `python -m core.supervisor --desktop` with the real bridge on throwaway
   state, through ping, pong and shutdown.
-- `tests/test_elevated_actions.py`: the request parser; the exact production
-  spec (no parameters, so a caller cannot choose the service); reviewed
-  failure messages only; the SCM adapter with a fake advapi32, covering each
-  stop/start/timeout/dependent/paused path and only `Spooler` opened; the
-  coordinator, covering the typed-secret floor whatever the settings,
-  single use, refusals before any prompt, every outcome reported once and
-  never retried, UAC declined, revocation and pause; bridge routing; and,
-  with real non-elevated broker children, the production spec end to end
-  (only `perform` replaced by a marker write) and a lost answer after acting,
-  which is reported as `BrokerOutcomeUnknown`.
 - Rust (`backend.rs`, `mod.rs`): the closed `supervisor --desktop` command,
   and `runtime_stopping` ending pending pairing requests.
-- `tests/test_action_broker.py`: every verification step and refusal, the
-  registry rules, single use across instances and races, and audit contents.
-- `tests/test_action_broker_session.py`: a real non-elevated broker child
-  (`tests/fixtures/broker_child.py`, same code, test-only action table) over a
-  real pipe. It also covers the UAC launcher with every Win32 call injected:
-  verb `runas`, the exact arguments, a declined prompt, and refused
-  executables and arguments.
 
 Test children start the base interpreter directly. A venv `python.exe` is a
 launcher whose child is the real process, and the peer-id check correctly
@@ -530,67 +350,8 @@ refuses that indirection.
 
 ## What is not done
 
-- The bridge does route the broker. `QronosRuntime` builds the coordinator
-  lazily, sends it the person's own chat turn and the prompt decisions, and
-  calls its `discard` on Stop, Pause and shutdown. The desktop frontend does
-  not yet show the `printer_spooler_restart` prompt (Control contract
-  above), so the action cannot be approved from the UI today; it fails
-  closed. The supervisor is wired into the desktop's start, stop and
+- The supervisor is wired into the desktop's start, stop and
   shutdown. The installer starts nothing at sign-in.
-- No live UAC prompt, elevated run, Windows service, scheduled task or
-  sign-in entry has been created or exercised.
-- `printer.spooler_restart` has never been run for real: no UAC prompt,
-  elevated broker or Service Control Manager call has been exercised. The
-  desktop does not yet display its prompt (Control contract above).
-- An over-the-shoulder elevation, where a standard user types an
-  administrator's credentials, runs the broker as another user. The broker's
-  same-user check then refuses it. This fails closed, but it means such users
-  cannot use elevated actions.
-- **Trust boundary, stated precisely.** The broker's authority is the
-  approval-secret store in the signed-in user's own profile,
-  `<Local AppData>\Qronos\approval_secret.sqlite3`. That is an ordinary
-  per-user file: a salted scrypt record with no administrator-protected
-  access list and no integrity binding. The supported boundary is therefore
-  another Windows user, or a same-user program that does not tamper with the
-  person's profile.
-  - Within that boundary, nothing but the person's typed secret gets an
-    elevated action. A caller-chosen key, pipe, process id or MAC'd envelope
-    is not authority, and neither is a secret store chosen through the
-    environment. Tests: a hostile local "runtime" with its own pipe, key and
-    envelope, and a launcher pointing the environment at its own store.
-  - Outside it: a same-user program can REPLACE that store file with one
-    holding a secret it chose. It can then satisfy both a genuine runtime it
-    started and the broker with that secret. This is tested, and it is a
-    known limit. Redirecting the user's Local AppData known folder (the
-    per-user "User Shell Folders" setting, which the same user can write)
-    is the same kind of relocation. That one is source-level and was not
-    tested, because the real registry is not changed.
-  - What still stands against such a program: Windows' UAC consent prompt,
-    which the person must accept, and the fixed registry, which holds one
-    action (stop and start the `Spooler` service, no parameters).
-  - A stronger binding would need a verifier record that only an
-    administrator can write. It does not exist.
-  - Nothing here defends against a same-user account that is already
-    compromised in other ways, for example malware that reads what the
-    person types or injects into the Qronos runtime.
-- **Profile binding.** The elevated broker takes its authority from the
-  installed profile, `<Local AppData>\Qronos`. It finds that folder through
-  Windows' known-folder API for its own token
-  (`SHGetKnownFolderPath(FOLDERID_LocalAppData)`), never from environment
-  values a launcher may have chosen, such as `QRONOS_APPROVAL_SECRET_PATH`,
-  `QRONOS_DATA_ROOT` or `QRONOS_PERMISSION_AUDIT_PATH`. This removes the
-  environment as a way to choose the store. It does not stop a same-user
-  program from relocating the known folder or replacing the file in it (see
-  the trust boundary above). Its authority there
-  is the approval-secret store with its lockout and audit, the single-use
-  journal, and its own audit.
-  - Tested: a launcher pointing those variables at its own store with
-    secret B is refused, and only the profile's secret A works.
-  - If the runtime was configured to keep its secret elsewhere, the broker
-    refuses and fails closed.
-  - Not checked: how Windows passes, or does not pass, a caller's
-    environment to an elevated process. The design does not depend on it.
-  - The broker's gate re-check still reads the permission policy through
-    the ordinary configuration. A launcher could only make that check
-    stricter or looser; the typed-secret floor binds either way.
+- No Windows service, scheduled task or sign-in entry has been created or
+  exercised.
 - Off Windows, sessions are refused by design.

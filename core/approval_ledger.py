@@ -52,7 +52,7 @@ class ApprovalKind(Enum):
     PAINT_UNDO = "paint_undo"
     SCREEN_READ = "screen_read"
     FILE_ACTION = "file_action"
-    # One step of an application workflow (Telegram inspect/download, print).
+    # One step of an application workflow (browser navigation).
     # The payload names the exact workflow phase and plan it approves.
     APP_WORKFLOW = "app_workflow"
     # Undoing one earlier file change from the desktop history (core/activity_history.py).
@@ -60,8 +60,6 @@ class ApprovalKind(Enum):
     # One media library question (qronos_media.permissions: index a root, export a report, open at a time).
     # Its payload is media's own; only the media route consumes it.
     MEDIA_ACTION = "media_action"
-    # One Device Hub job-control question (core/device_hub.py). Its payload is the Device Hub's own.
-    DEVICE_ACTION = "device_action"
 
 
 class StaleApproval(LookupError):

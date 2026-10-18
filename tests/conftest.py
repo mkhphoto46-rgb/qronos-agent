@@ -13,13 +13,6 @@ import pytest
 import core.audio_input as audio_input
 import core.audio_output as audio_output
 import core.computer_executor as computer_executor
-import core.device_hub as device_hub
-import core.power_wake as power_wake
-import core.wia_imaging as wia_imaging
-import core.camera_capture as camera_capture
-import core.print3d_native as print3d_native
-import core.print_renderer as print_renderer
-import core.print_workflow as print_workflow
 import core.screen_capture as screen_capture
 import core.window_binding as window_binding
 import core.windows_accessibility as accessibility_reader
@@ -53,16 +46,6 @@ LIVE_DEVICE_FUNCTIONS = (
     (audio_output, "_get_sounddevice", "opening the real audio output stack (speakers)"),
     (accessibility_reader, "_run_uia_script", "reading the real UI Automation tree"),
     (accessibility_reader, "focused_element", "reading the real focused UI element"),
-    (print_workflow, "WinSpooler", "reading or driving the real print spooler"),
-    (print_workflow, "_shell_execute_printto", "starting a real print handler"),
-    (print_renderer, "printer_capabilities", "reading a real printer's capabilities"),
-    (print_renderer, "job_devmode", "opening a real printer's settings"),
-    (print_renderer, "_create_printer_dc", "opening a real printer device context"),
-    (device_hub, "WinDeviceSpooler", "reading or driving the real print spooler and drivers (Device Hub)"),
-    (print3d_native, "Win3DPrinting", "reading or driving a real 3D printer's driver"),
-    (power_wake, "WinPowerWake", "reading or arming this PC's real power capabilities and wake timers"),
-    (wia_imaging, "WinWia", "listing or scanning with this PC's real WIA scanners"),
-    (camera_capture, "WinCamera", "listing or turning on this PC's real cameras (Media Foundation)"),
 )
 # Child processes that read the GPU or run local inference.
 LIVE_DEVICE_EXECUTABLES = frozenset({
@@ -442,17 +425,3 @@ def block_real_windows_computer_side_effects(
         "_default_gui_action",
         blocked_side_effect,
     )
-
-    # The Elevated Action Broker's native adapters: the real UAC prompt
-    # (ShellExecuteExW "runas") and the real Service Control Manager. Tests
-    # inject fake Win32 calls; resolving the real ones is refused.
-    from core import spooler_service, uac_launch
-
-    monkeypatch.setattr(uac_launch, "_real_win32_calls", blocked_side_effect)
-    monkeypatch.setattr(spooler_service, "_real_advapi32", blocked_side_effect)
-    # The broker's installed profile is a real known folder, not an
-    # environment value, so the isolated test profile cannot redirect it:
-    # tests must inject where it is.
-    from core import action_broker
-
-    monkeypatch.setattr(action_broker, "_known_local_appdata", blocked_side_effect)

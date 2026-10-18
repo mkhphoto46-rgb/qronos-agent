@@ -21,18 +21,6 @@
   overflow-wrap: anywhere;
 }
 
-.workflow-approval-secret {
-  display: grid;
-  gap: 6px;
-  margin: 12px 0;
-}
-
-.workflow-approval-secret input {
-  font: inherit;
-  padding: 8px 10px;
-  border-radius: 8px;
-}
-
 .workflow-result {
   position: fixed;
   inset-block-end: 24px;

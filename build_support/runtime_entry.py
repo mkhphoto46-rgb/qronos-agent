@@ -26,9 +26,6 @@ SERVICES = {
     # Lifecycle only (`supervisor --desktop`): starts the bridge, relays the
     # desktop's pipes to it and keeps it alive; no audio, UI or dialogs.
     "supervisor": "core.supervisor",
-    # One exact approved typed action per launch; started through UAC by the
-    # runtime when needed. Refuses everything while no action is registered.
-    "action-broker": "core.action_broker",
     # The Installer's offline update service (core/update_cli.py). Its launch
     # stays refused (launch_unavailable) until the hand-over path is accepted.
     "update": "core.update_cli",
@@ -38,10 +35,7 @@ SERVICES = {
 #: order of core/startup_admission.py BEFORE its module is imported, so no
 #: import-time code can open a store first: the bridge also owns its singleton.
 #: The supervisor opens no store (it owns its own singleton in run_desktop);
-#: audio (playback) and doctor (read-only diagnostics) open none either; the
-#: action broker takes its own shared admission on its known-folder profile
-#: inside serve_once, right after it has authenticated the live, admitted bridge
-#: that launched it and before any of its stores (core/action_broker.py).
+#: audio (playback) and doctor (read-only diagnostics) open none either.
 STORE_SERVICES = {
     "bridge": {"instance": True},
     "settings": {},
@@ -58,7 +52,7 @@ UPDATE_EXCLUSIVE_OPERATIONS = frozenset({"launch"})
 #: update's installer replaces, so while the update fence exists (an update launch or its installer is alive)
 #: they refuse BEFORE their module is imported. The store services are refused by their writer admission, the
 #: bridge and supervisor by their instance ownership, the sidecars by their guards (each checks the same fence).
-FENCED_SERVICES = frozenset({"audio", "doctor", "action-broker"})
+FENCED_SERVICES = frozenset({"audio", "doctor"})
 
 
 def _prevent_asio_selection() -> None:

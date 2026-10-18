@@ -70,7 +70,6 @@ import RightTelemetryPanel from "./components/RightTelemetryPanel";
 import QueueDrawer from "./components/QueueDrawer";
 import HistoryDrawer from "./components/HistoryDrawer";
 import MediaDrawer from "./components/MediaDrawer";
-import DeviceHubDrawer from "./components/DeviceHubDrawer";
 import ScreenApprovalDialog from "./components/ScreenApprovalDialog";
 import AppWorkflowDialog from "./components/AppWorkflowDialog";
 import QronosOrb from "./components/QronosOrb";
@@ -293,7 +292,7 @@ function App() {
     [screenApproval],
   );
 
-  // Telegram / print / browser workflow steps: one app-native prompt at a
+  // App workflow steps (browser navigation): one app-native prompt at a
   // time, answered only with the step's single-use backend actionToken.
   const workflowApprovalRef =
     useRef<WorkflowApprovalController | null>(null);
@@ -388,8 +387,8 @@ function App() {
   }, [workflowApproval]);
 
   const answerWorkflowApproval = useCallback(
-    (actionToken: string, approved: boolean, secret?: string) => {
-      void workflowApproval.answer(actionToken, approved, secret);
+    (actionToken: string, approved: boolean) => {
+      void workflowApproval.answer(actionToken, approved);
     },
     [workflowApproval],
   );
@@ -1512,7 +1511,7 @@ function App() {
               );
             }
 
-            // Telegram / print / browser workflow prompts and results.
+            // App workflow (browser navigation) prompts and results.
             if (workflowApprovalRef.current !== null) {
               applyWorkflowEvent(
                 workflowApprovalRef.current,
@@ -2584,15 +2583,6 @@ function App() {
       {/* The media library: chosen folders, background indexing, search with evidence cards, open at a time
           and reports, all through the runtime's one media host (qronos.media actions). */}
       <MediaDrawer
-        hidden={
-          viewPhase !== "home" &&
-          viewPhase !== "conversations"
-        }
-      />
-
-      {/* The Device Hub: printers Windows already has (local and LAN connections), their driver capabilities,
-          the print queue with own-job pause/resume/cancel, and printing one exact file (qronos.device_hub). */}
-      <DeviceHubDrawer
         hidden={
           viewPhase !== "home" &&
           viewPhase !== "conversations"

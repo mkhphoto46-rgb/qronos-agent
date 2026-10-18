@@ -1,12 +1,11 @@
 """
 Runtime coordination for the application workflows.
 
-Turns one recognised request into a short sequence of approval prompts and
-executions, each with its own single-use identity from the shared
+Turns one recognised request into an approval prompt and its execution,
+each prompt with its own single-use identity from the shared
 :class:`core.approval_ledger.ApprovalLedger`:
 
-    Telegram  inspect (voice/click) -> download (on-screen confirmation)
-    Print     submit (typed approval secret)
+    Browser   navigate (voice/click) -> open the page and read what it shows
 
 Each answer is honoured only by presenting the identity of the prompt it
 answers. Stop, Pause and shutdown revoke every open prompt (``discard``) and
@@ -14,18 +13,15 @@ cancel the running step through the shared ActiveActionRegistry, so a late
 "yes" can never start or continue a workflow. Every execution runs on a
 worker thread inside one cancellable active action.
 
-The desktop sees four events (JSON messages): ``app_workflow_approval_required``,
-``app_workflow_clarification``, ``app_workflow_finished`` and
-``app_workflow_stale``. User-facing text is Persian; the English technical
-detail is kept separately for the audit trail. The approval secret for
-printing is verified here and never echoed, logged or stored.
+The desktop sees three events (JSON messages): ``app_workflow_approval_required``,
+``app_workflow_finished`` and ``app_workflow_stale``. User-facing text is
+Persian; the English technical detail is kept separately for the audit trail.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import json
-from pathlib import Path
 import threading
 from typing import Any, Callable
 
@@ -45,24 +41,12 @@ from core.app_workflow import (
     WorkflowStopped,
     plan_digest,
 )
-from core.app_workflow_intents import (
-    PrintIntent,
-    TelegramDownloadIntent,
-    WorkflowClarification,
-    parse_workflow_intent,
-)
 from core.approval_ledger import ApprovalKind, ApprovalLedger, StaleApproval
 from core.browser_research import (
     BrowserNavigation,
     BrowserResearchWorkflow,
     NavigationClarification,
     plan_navigation,
-)
-from core.print_workflow import PreparedPrint, PrintRequest, PrintWorkflow
-from core.telegram_workflow import (
-    PreparedTelegramDownload,
-    TelegramDownloadRequest,
-    TelegramDownloadWorkflow,
 )
 from security.permissions import ActionCategory, PermissionDecision
 
@@ -71,26 +55,18 @@ APP_WORKFLOW_DECISION_ACTION = "qronos.app_workflow_decision"
 # Lists attempts awaiting a person's check; with "acknowledge", releases one.
 APP_WORKFLOW_UNCERTAIN_ACTION = "qronos.app_workflow_uncertain"
 
-PHASE_TELEGRAM_INSPECT = "telegram_inspect"
-PHASE_TELEGRAM_DOWNLOAD = "telegram_download"
-PHASE_PRINT = "print"
 PHASE_BROWSER = "browser_navigate"
 # Page text shown in the result event is bounded; it is untrusted content.
 MAX_EVENT_PAGE_CHARS = 6000
 MAX_EVENT_LINKS = 20
 
 _PERMISSION_FOR_PHASE = {
-    PHASE_TELEGRAM_INSPECT: PermissionDecision.REQUIRE_VOICE_CONFIRMATION,
-    PHASE_TELEGRAM_DOWNLOAD: PermissionDecision.REQUIRE_UI_CONFIRMATION,
-    PHASE_PRINT: PermissionDecision.REQUIRE_TYPED_SECRET,
     PHASE_BROWSER: PermissionDecision.REQUIRE_VOICE_CONFIRMATION,
 }
 
 # Persian outcome headlines shown to the person.
 _FINISHED_FA = {
     "succeeded": "انجام شد.",
-    "submitted": "کار چاپ در صف چاپگر است و هنوز تمام نشده است.",
-    "needs_attention": "کار چاپ در صف است اما چاپگر به رسیدگی نیاز دارد. کرونوس دوباره چاپ نمی‌کند.",
     "uncertain": "نتیجه قطعی نیست. کرونوس این کار را تکرار نمی‌کند؛ لطفاً خودتان بررسی کنید.",
     "refused": "انجام نشد؛ هیچ کاری روی سیستم انجام نشد.",
     "stopped": "متوقف شد؛ هیچ کار تازه‌ای شروع نشد.",
@@ -102,9 +78,6 @@ _FINISHED_FA = {
 class PendingWorkflowStep:
     request_id: str
     phase: str
-    telegram_request: TelegramDownloadRequest | None = None
-    telegram_prepared: PreparedTelegramDownload | None = None
-    print_prepared: PreparedPrint | None = None
     navigation: BrowserNavigation | None = None
     details: dict = field(default_factory=dict)
     audit_request: ActionRequest | None = None
@@ -125,30 +98,18 @@ class AppWorkflowCoordinator:
         ledger: ApprovalLedger,
         notify: Callable[[str, str, str], None],
         actions: ActiveActionRegistry,
-        telegram_workflow: Callable[[], TelegramDownloadWorkflow],
-        print_workflow: Callable[[], PrintWorkflow],
-        resolve_file: Callable[[str], Path],
-        default_printer: Callable[[], str | None],
-        verify_secret: Callable[[str], bool] | None,
         paused: Callable[[], bool],
         run_async: Callable[[Callable[[], None]], None] = _start_thread,
         audit: ActionAuditLog | None = None,
         journal: SideEffectJournal | None = None,
         browser_workflow: Callable[[], BrowserResearchWorkflow] | None = None,
-        secret_status: Callable[[], str] | None = None,
     ) -> None:
         self._browser = browser_workflow
-        self._secret_status = secret_status
         self._audit = audit
         self._journal = journal
         self._ledger = ledger
         self._notify = notify
         self._actions = actions
-        self._telegram = telegram_workflow
-        self._print = print_workflow
-        self._resolve_file = resolve_file
-        self._default_printer = default_printer
-        self._verify_secret = verify_secret
         self._paused = paused
         self._run_async = run_async
         self._lock = threading.Lock()
@@ -161,72 +122,6 @@ class AppWorkflowCoordinator:
         Returns the Persian reply that ends the chat turn, or None when the
         text is not a workflow request. Prompts and results follow as events.
         """
-        intent = parse_workflow_intent(text)
-        if intent is None:
-            return self._try_begin_navigation(text, request_id)
-        if isinstance(intent, WorkflowClarification):
-            self._finish(request_id, "clarification", "refused", intent.question, "clarification needed")
-            return intent.question
-        if self._paused():
-            message = "کرونوس متوقف است؛ کاری شروع نشد."
-            self._finish(request_id, "workflow", "stopped", message, "runtime paused")
-            return message
-        if isinstance(intent, TelegramDownloadIntent):
-            try:
-                request = TelegramDownloadRequest(intent.contact)
-            except ValueError as error:
-                message = "نام مخاطب معتبر نیست."
-                self._finish(request_id, "telegram", "refused", message, str(error))
-                return message
-            self._prompt(PendingWorkflowStep(
-                request_id=request_id,
-                phase=PHASE_TELEGRAM_INSPECT,
-                telegram_request=request,
-                details={"contact": request.contact},
-            ), f"پیدا کردن گفتگوی دقیق «{request.contact}» در تلگرام و خواندن پیام‌های اخیر آن، بدون ارسال پیام.")
-            return "برای ادامه، درخواست تأیید را ببینید. بدون تأیید شما هیچ کاری در تلگرام انجام نمی‌شود."
-        if isinstance(intent, PrintIntent):
-            return self.begin_print(intent, request_id)
-        return None
-
-    def begin_print(self, intent: PrintIntent, request_id: str) -> str:
-        """Start the reviewed print step for one exact request (text intent or Device Hub's typed request).
-
-        The same checks, prompt, approval, typed secret, submission and recovery apply whatever asked for it.
-        Returns the Persian reply; the prompt and the result follow as events.
-        """
-        if self._paused():
-            message = "کرونوس متوقف است؛ کاری شروع نشد."
-            self._finish(request_id, "workflow", "stopped", message, "runtime paused")
-            return message
-        if self._verify_secret is None:
-            # Printing needs the typed approval secret, and this process is
-            # not one of the reviewed paths allowed to check it. Refuse
-            # before showing a prompt that could never be approved.
-            message = (
-                "چاپ به رمز تأیید نیاز دارد و این مسیر هنوز اجازهٔ بررسی رمز را ندارد؛ "
-                "چیزی چاپ نشد."
-            )
-            self._finish(request_id, PHASE_PRINT, "refused", message, "typed-secret path unavailable")
-            return message
-        state = self._secret_state()
-        if state != "ready":
-            # A prompt nobody can approve would only invite guesses.
-            message = _SECRET_STATE_FA.get(state, _SECRET_STATE_FA["unavailable"])
-            self._finish(request_id, PHASE_PRINT, "refused", message, f"approval secret {state}")
-            return message
-        self._run_async(lambda: self._prepare_print(intent, request_id))
-        return "فایل و چاپگر بررسی می‌شوند؛ پیش از چاپ، جزئیات برای تأیید نشان داده می‌شود."
-
-    def _secret_state(self) -> str:
-        if self._secret_status is None:
-            return "ready"
-        try:
-            return str(self._secret_status())
-        except Exception:  # noqa: BLE001 - an unreadable store never allows printing
-            return "unavailable"
-
-    def _try_begin_navigation(self, text: str, request_id: str) -> str | None:
         navigation = plan_navigation(text)
         if navigation is None or self._browser is None:
             return None
@@ -278,7 +173,7 @@ class AppWorkflowCoordinator:
 
     # ---------------------------------------------------------- decisions
 
-    def resolve(self, action_token: str, *, approved: bool, secret: str | None = None) -> None:
+    def resolve(self, action_token: str, *, approved: bool) -> None:
         token = str(action_token or "").strip()
         if self._paused():
             self._stale(token, "runtime_paused")
@@ -287,38 +182,19 @@ class AppWorkflowCoordinator:
         if step is None:
             self._stale(token, "unknown_or_used")
             return
-        needed = _PERMISSION_FOR_PHASE[step.phase]
-        if approved and needed is PermissionDecision.REQUIRE_TYPED_SECRET:
-            try:
-                verified = self._verify_secret is not None and bool(self._verify_secret(secret or ""))
-            except Exception:  # noqa: BLE001 - locked or unavailable secret store
-                verified = False
-            if not verified:
-                # The prompt stays open; only a correct secret consumes it.
-                self._notify("app_workflow_secret_rejected", "approval_required", _json({
-                    "actionToken": token,
-                    "requestId": step.request_id,
-                    "message": "رمز تأیید درست نیست یا موقتاً قفل است. چیزی چاپ نشد.",
-                }))
-                return
         try:
             ticket = self._ledger.take(token, kinds=(ApprovalKind.APP_WORKFLOW,))
         except StaleApproval as stale:
             self._stale(token, stale.reason)
             return
         step = ticket.payload
+        needed = _PERMISSION_FOR_PHASE[step.phase]
         self._record(step, AuditEvent.APPROVED if approved else AuditEvent.DENIED_BY_USER, decision=needed)
         if not approved:
             self._finish_step(step, "refused", "لغو شد؛ هیچ کاری انجام نشد.", "declined")
             return
         approval = (ticket.approval_id, needed)
-        if step.phase == PHASE_TELEGRAM_INSPECT:
-            self._run_async(lambda: self._telegram_inspect(step, needed))
-        elif step.phase == PHASE_TELEGRAM_DOWNLOAD:
-            self._run_async(lambda: self._telegram_download(step, approval))
-        elif step.phase == PHASE_PRINT:
-            self._run_async(lambda: self._print_submit(step, approval))
-        elif step.phase == PHASE_BROWSER:
+        if step.phase == PHASE_BROWSER:
             self._run_async(lambda: self._browser_navigate(step, approval))
 
     def _open_step(self, token: str) -> PendingWorkflowStep | None:
@@ -335,7 +211,7 @@ class AppWorkflowCoordinator:
     def report_uncertain(self, acknowledge: str | None = None) -> None:
         """Publish attempts awaiting a person's check; optionally release one.
 
-        Acknowledging means the person checked the printer or folder. It never
+        Acknowledging means the person checked the outcome. It never
         repeats anything by itself; it only allows a new, separately approved
         request for the same content.
         """
@@ -363,106 +239,6 @@ class AppWorkflowCoordinator:
 
     def _approval_valid(self) -> bool:
         return not self._paused() and not self._ledger.closed
-
-    def _telegram_inspect(self, step: PendingWorkflowStep, decision: PermissionDecision) -> None:
-        def run(token):
-            prepared = self._telegram().inspect(
-                step.telegram_request, approved=decision, token=token, approval_valid=self._approval_valid,
-            )
-            message = (
-                f"جدیدترین فایل دریافتی از «{prepared.request.contact}»: «{prepared.message.file_name}» "
-                f"({prepared.message.size_text or 'اندازه نامشخص'}) در پوشه «{prepared.destination}» ذخیره شود؟"
-            )
-            self._prompt(PendingWorkflowStep(
-                request_id=step.request_id,
-                phase=PHASE_TELEGRAM_DOWNLOAD,
-                telegram_prepared=prepared,
-                details={
-                    "contact": prepared.request.contact,
-                    "fileName": prepared.message.file_name,
-                    "sizeText": prepared.message.size_text,
-                    "destination": str(prepared.destination),
-                },
-            ), message)
-
-        self._execute(step, "qronos-telegram-inspect", run)
-
-    def _telegram_download(self, step: PendingWorkflowStep, approval) -> None:
-        approval_id, decision = approval
-        prepared = step.telegram_prepared
-
-        def run(token):
-            report = self._telegram().download(
-                prepared,
-                WorkflowApproval(
-                    approval_id=approval_id, plan_digest=prepared.digest, decision=decision,
-                    evidence_identity_token=prepared.evidence.identity_token,
-                ),
-                token=token, approval_valid=self._approval_valid,
-            )
-            self._report(step, report)
-
-        self._execute(step, "qronos-telegram-download", run)
-
-    def _prepare_print(self, intent: PrintIntent, request_id: str) -> None:
-        try:
-            path = self._resolve_file(intent.file_reference)
-        except Exception as error:  # noqa: BLE001 - not found, ambiguous or search limit
-            self._finish(request_id, PHASE_PRINT, "refused",
-                         "فایل دقیق پیدا نشد یا بیش از یک فایل با این نام هست؛ چیزی چاپ نشد.",
-                         type(error).__name__)
-            return
-        try:
-            printer = intent.printer or self._default_printer()
-            if not printer:
-                self._finish(request_id, PHASE_PRINT, "refused",
-                             "چاپگر پیش‌فرضی پیدا نشد. نام دقیق چاپگر را بگویید.", "no default printer")
-                return
-            prepared = self._print().prepare(PrintRequest(
-                path, printer, copies=intent.copies, color=intent.color, pages=intent.pages,
-            ))
-        except WorkflowError as error:
-            self._finish(request_id, PHASE_PRINT, "refused", _refusal_fa(error), str(error))
-            return
-        except (ValueError, LookupError) as error:
-            self._finish(request_id, PHASE_PRINT, "refused",
-                         "فایل یا چاپگر دقیق مشخص نشد؛ چیزی چاپ نشد.", str(error))
-            return
-        default_note = "" if intent.printer else " (چاپگر پیش‌فرض)"
-        self._prompt(PendingWorkflowStep(
-            request_id=request_id,
-            phase=PHASE_PRINT,
-            print_prepared=prepared,
-            details={
-                "file": str(prepared.file_path),
-                "size": prepared.size,
-                "sha256": prepared.sha256,
-                "printer": prepared.printer.name + default_note,
-                "copies": prepared.options.copies,
-                "color": _COLOR_FA[prepared.options.color],
-                "pages": _pages_fa(prepared.options.describe_pages()),
-                "handler": prepared.handler,
-                "warnings": list(prepared.warnings),
-            },
-        ), (
-            f"فایل «{prepared.file_path.name}» با چاپگر «{prepared.printer.name}»{default_note} "
-            f"چاپ شود؟ ({prepared.options.copies} نسخه، {_COLOR_FA[prepared.options.color]}، "
-            f"{_pages_fa(prepared.options.describe_pages())}) برای تأیید، رمز تأیید را وارد کنید."
-        ))
-
-    def _print_submit(self, step: PendingWorkflowStep, approval) -> None:
-        approval_id, decision = approval
-        prepared = step.print_prepared
-
-        def run(token):
-            report = self._print().submit(
-                prepared,
-                WorkflowApproval(approval_id=approval_id, plan_digest=prepared.digest, decision=decision),
-                token=token, approval_valid=self._approval_valid,
-            )
-            self._report(step, report)
-
-        self._execute(step, "qronos-print", run)
 
     def _browser_navigate(self, step: PendingWorkflowStep, approval) -> None:
         approval_id, decision = approval
@@ -509,10 +285,6 @@ class AppWorkflowCoordinator:
 
     def _report(self, step: PendingWorkflowStep, report: WorkflowReport) -> None:
         headline = _FINISHED_FA.get(report.outcome, _FINISHED_FA["failed"])
-        if report.outcome == "succeeded" and "path" in report.result:
-            headline = f"فایل دانلود شد: {report.result['path']}"
-        elif report.outcome == "succeeded" and "jobId" in report.result:
-            headline = f"چاپ انجام شد (کار شماره {report.result['jobId']} در «{report.result['printer']}»)."
         self._finish_step(step, report.outcome, headline, report.detail, dict(report.result))
 
     def _record(self, step: PendingWorkflowStep, event: AuditEvent, *, outcome=None, decision=None) -> None:
@@ -538,23 +310,6 @@ class AppWorkflowCoordinator:
         }))
 
 
-_COLOR_FA = {"default": "رنگ پیش‌فرض چاپگر", "color": "رنگی", "monochrome": "سیاه و سفید"}
-
-# Why printing cannot be approved right now; nothing was printed in any case.
-_SECRET_STATE_FA = {
-    "not_configured": (
-        "چاپ به رمز تأیید نیاز دارد و هنوز رمزی تعیین نشده است. "
-        "ابتدا در بخش مجوزها رمز تأیید را تعیین کنید؛ چیزی چاپ نشد."
-    ),
-    "locked": "رمز تأیید به‌خاطر تلاش‌های نادرست موقتاً قفل است؛ بعداً دوباره امتحان کنید. چیزی چاپ نشد.",
-    "unavailable": "وضعیت رمز تأیید قابل خواندن نیست؛ چیزی چاپ نشد.",
-}
-
-
-def _pages_fa(description: str) -> str:
-    return "همه صفحه‌ها" if description == "all" else f"صفحه‌های {description}"
-
-
 def _refusal_fa(error: Exception) -> str:
     if isinstance(error, WorkflowAmbiguous):
         return "بیش از یک گزینه دقیقاً با این نام پیدا شد؛ کرونوس حدس نمی‌زند. لطفاً دقیق‌تر بگویید."
@@ -565,44 +320,18 @@ def _refusal_fa(error: Exception) -> str:
 
 _AUDIT_OUTCOME = {
     "succeeded": ActionOutcome.SUCCEEDED,
-    # The job reached the printer queue: the side effect happened.
-    "submitted": ActionOutcome.SUCCEEDED,
     "refused": ActionOutcome.REFUSED,
     "stopped": ActionOutcome.CANCELLED,
     "uncertain": ActionOutcome.FAILED,
-    "needs_attention": ActionOutcome.FAILED,
     "failed": ActionOutcome.FAILED,
 }
 
 
 def _audit_request(step: PendingWorkflowStep) -> ActionRequest:
     """The typed action a prompt asks about, for the audit trail."""
-    if step.phase == PHASE_BROWSER:
-        return ActionRequest(
-            category=ActionCategory.BROWSER_NAVIGATION,
-            target=step.navigation.url,
-            summary="Open one exact page in the visible browser and read what it shows.",
-            parameters={"kind": step.navigation.kind, "query": step.navigation.query},
-        )
-    if step.phase == PHASE_TELEGRAM_INSPECT:
-        return ActionRequest(
-            category=ActionCategory.GUI_AUTOMATION,
-            target="app:telegram",
-            summary="Find one exact Telegram chat and read its recent messages.",
-            parameters={"contact": step.telegram_request.contact},
-        )
-    if step.phase == PHASE_TELEGRAM_DOWNLOAD:
-        prepared = step.telegram_prepared
-        return ActionRequest(
-            category=ActionCategory.CREATE_OR_EDIT_FILE,
-            target=str(prepared.destination / prepared.message.file_name),
-            summary="Download one exact Telegram attachment.",
-            parameters={"contact": prepared.request.contact, "fileName": prepared.message.file_name},
-        )
-    prepared = step.print_prepared
     return ActionRequest(
-        category=ActionCategory.DEVICE_CONTROL,
-        target=f"printer:{prepared.printer.name}",
-        summary="Print one exact file once.",
-        parameters={"file": str(prepared.file_path), "sha256": prepared.sha256},
+        category=ActionCategory.BROWSER_NAVIGATION,
+        target=step.navigation.url,
+        summary="Open one exact page in the visible browser and read what it shows.",
+        parameters={"kind": step.navigation.kind, "query": step.navigation.query},
     )

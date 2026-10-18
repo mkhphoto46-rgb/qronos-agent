@@ -121,7 +121,7 @@ NETWORK_EXCEPTIONS = {
     "core.link_server": ({"socket", "ssl"}, "Permission-controlled Device Link listener and its stop socketpair."),
     "core.link_transport": ({"socket", "ssl"}, "Authenticated/encrypted Device Link TLS transport."),
     "core.link_pairing": ({"socket"}, "Local Device Link address discovery; no inference or web requests."),
-    # D8 supervisor/broker channel (Runtime c3649ad, not yet integrated).
+    # D8 supervisor channel (Runtime c3649ad, not yet integrated).
     "core.supervisor_ipc": (
         {"multiprocessing-connection"},
         "Windows named pipes only: require_local_address admits only local qronos-<purpose>-<128-bit hex> "

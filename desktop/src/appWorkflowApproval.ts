@@ -1,34 +1,19 @@
 /**
- * Telegram / print / browser / print-spooler workflow prompts from the runtime.
+ * App workflow prompts (browser navigation) from the runtime.
  *
  * Every prompt carries a single-use backend identity (actionToken). The
  * desktop answers with that identity only. Stop, Pause and shutdown revoke
  * open prompts in the runtime (app_workflow_stale), which dismisses them
  * here without answering. One decision is sent per prompt; an unconfirmed
- * send is reported honestly and never replayed automatically. The approval
- * secret is sent only with an approved typed-secret step (printing, restarting
- * the Windows print spooler) and is never kept.
+ * send is reported honestly and never replayed automatically.
  */
 
-export type WorkflowPhase =
-  | "telegram_inspect"
-  | "telegram_download"
-  | "print"
-  | "browser_navigate"
-  /** core/elevated_actions.py: restart the Windows print spooler (UAC broker), always behind the typed secret. */
-  | "printer_spooler_restart";
+export type WorkflowPhase = "browser_navigate";
 
-export type WorkflowPermission =
-  | "require_voice_confirmation"
-  | "require_ui_confirmation"
-  | "require_typed_secret";
+export type WorkflowPermission = "require_voice_confirmation";
 
 const PERMISSION_FOR_PHASE: Record<WorkflowPhase, WorkflowPermission> = {
-  telegram_inspect: "require_voice_confirmation",
-  telegram_download: "require_ui_confirmation",
-  print: "require_typed_secret",
   browser_navigate: "require_voice_confirmation",
-  printer_spooler_restart: "require_typed_secret",
 };
 
 const ACTION_TOKEN = /^[A-Za-z0-9_-]{22,64}$/;
@@ -100,13 +85,7 @@ export function isActionToken(value: unknown): value is string {
 }
 
 function isPhase(value: unknown): value is WorkflowPhase {
-  return (
-    value === "telegram_inspect" ||
-    value === "telegram_download" ||
-    value === "print" ||
-    value === "browser_navigate" ||
-    value === "printer_spooler_restart"
-  );
+  return value === "browser_navigate";
 }
 
 function boundedText(value: unknown, limit: number): string | null {
@@ -206,57 +185,18 @@ export function parseWorkflowFinished(message: string): WorkflowResult | null {
   };
 }
 
-export function needsSecret(prompt: WorkflowPrompt): boolean {
-  return prompt.permission === "require_typed_secret";
-}
-
 export function workflowTitle(phase: WorkflowPhase): string {
   switch (phase) {
-    case "telegram_inspect":
-      return "یافتن گفتگوی تلگرام";
-    case "telegram_download":
-      return "دانلود یک فایل از تلگرام";
-    case "print":
-      return "چاپ یک فایل";
     case "browser_navigate":
       return "باز کردن صفحه در مرورگر";
-    case "printer_spooler_restart":
-      return "راه‌اندازی دوبارهٔ سرویس چاپ ویندوز";
   }
 }
 
 const DETAIL_LABELS: Record<WorkflowPhase, Array<[string, string]>> = {
-  telegram_inspect: [["contact", "مخاطب (نام دقیق)"]],
-  telegram_download: [
-    ["contact", "مخاطب"],
-    ["fileName", "نام فایل"],
-    ["sizeText", "اندازه"],
-    ["destination", "پوشهٔ ذخیره"],
-  ],
-  print: [
-    ["file", "فایل"],
-    ["printer", "چاپگر"],
-    ["copies", "تعداد نسخه"],
-    ["color", "رنگ"],
-    ["pages", "صفحه‌ها"],
-    ["handler", "برنامهٔ چاپ"],
-    ["warnings", "هشدار"],
-  ],
   browser_navigate: [
     ["url", "نشانی"],
     ["query", "عبارت جستجو"],
   ],
-  printer_spooler_restart: [
-    ["service", "سرویس ویندوز"],
-    ["elevation", "اجازهٔ مدیر"],
-  ],
-};
-
-/** Known detail values shown as a Persian sentence; any other value is shown as sent. */
-const DETAIL_VALUE_TEXT: Partial<Record<WorkflowPhase, Record<string, Record<string, string>>>> = {
-  printer_spooler_restart: {
-    elevation: { uac: "پس از تأیید با رمز، ویندوز اجازهٔ مدیر (UAC) را می‌پرسد" },
-  },
 };
 
 /** Only known fields, in a fixed order, with Persian labels. */
@@ -265,42 +205,28 @@ export function workflowDetailRows(prompt: WorkflowPrompt): Array<{ label: strin
   for (const [key, label] of DETAIL_LABELS[prompt.phase]) {
     const value = prompt.details[key];
     if (value === undefined || value === "" || (Array.isArray(value) && value.length === 0)) continue;
-    const shown = Array.isArray(value) ? value.join("، ") : String(value);
-    const known = DETAIL_VALUE_TEXT[prompt.phase]?.[key];
-    rows.push({
-      label,
-      value: known && Object.prototype.hasOwnProperty.call(known, shown) ? known[shown] : shown,
-    });
+    rows.push({ label, value: Array.isArray(value) ? value.join("، ") : String(value) });
   }
   return rows;
 }
 
-/** The runtime action for one answer. The secret travels only with an approved typed-secret step. */
+/** The runtime action for one answer. */
 export function decisionAction(
   prompt: WorkflowPrompt,
   approved: boolean,
-  secret?: string,
-): { actionId: string; data: { actionToken: string; approved: boolean; secret?: string } } {
-  const data: { actionToken: string; approved: boolean; secret?: string } = {
-    actionToken: prompt.actionToken,
-    approved,
-  };
-  if (approved && needsSecret(prompt)) {
-    data.secret = secret ?? "";
-  }
-  return { actionId: APP_WORKFLOW_DECISION_ACTION, data };
+): { actionId: string; data: { actionToken: string; approved: boolean } } {
+  return { actionId: APP_WORKFLOW_DECISION_ACTION, data: { actionToken: prompt.actionToken, approved } };
 }
 
 export type WorkflowApprovalView = {
   prompt: WorkflowPrompt | null;
   submitting: boolean;
   unconfirmed: boolean;
-  secretRejected: boolean;
   result: WorkflowResult | null;
   recovery: RecoveryView | null;
 };
 
-type Send = (prompt: WorkflowPrompt, approved: boolean, secret?: string) => Promise<void>;
+type Send = (prompt: WorkflowPrompt, approved: boolean) => Promise<void>;
 type SendRecovery = (acknowledge?: string) => Promise<void>;
 
 export class WorkflowApprovalController {
@@ -308,12 +234,11 @@ export class WorkflowApprovalController {
   private revoked = new Set<string>();
   private submitting: string | null = null;
   private unconfirmed = false;
-  private secretRejected = false;
   private result: WorkflowResult | null = null;
   private recovery: RecoveryView | null = null;
   private listeners = new Set<() => void>();
   private view: WorkflowApprovalView = {
-    prompt: null, submitting: false, unconfirmed: false, secretRejected: false, result: null, recovery: null,
+    prompt: null, submitting: false, unconfirmed: false, result: null, recovery: null,
   };
 
   constructor(
@@ -335,7 +260,6 @@ export class WorkflowApprovalController {
       prompt,
       submitting: prompt !== null && this.submitting === prompt.actionToken,
       unconfirmed: prompt !== null && this.unconfirmed,
-      secretRejected: prompt !== null && this.secretRejected,
       result: this.result,
       recovery: this.recovery,
     };
@@ -345,7 +269,6 @@ export class WorkflowApprovalController {
   private resetDisplayedState(): void {
     this.submitting = null;
     this.unconfirmed = false;
-    this.secretRejected = false;
   }
 
   prompt(prompt: WorkflowPrompt): void {
@@ -369,13 +292,6 @@ export class WorkflowApprovalController {
     this.queue = this.queue.filter((item) => item.requestId !== result.requestId);
     if (displayed && displayed.requestId === result.requestId) this.resetDisplayedState();
     this.result = result;
-    this.publish();
-  }
-
-  secretWasRejected(actionToken: string): void {
-    if (this.queue[0]?.actionToken !== actionToken) return;
-    this.submitting = null;
-    this.secretRejected = true;
     this.publish();
   }
 
@@ -437,16 +353,14 @@ export class WorkflowApprovalController {
     this.publish();
   };
 
-  async answer(actionToken: string, approved: boolean, secret?: string): Promise<void> {
+  async answer(actionToken: string, approved: boolean): Promise<void> {
     const prompt = this.queue[0];
     if (!prompt || prompt.actionToken !== actionToken || this.submitting !== null) return;
-    if (approved && needsSecret(prompt) && !(secret ?? "").trim()) return;
     this.submitting = actionToken;
     this.unconfirmed = false;
-    this.secretRejected = false;
     this.publish();
     try {
-      await this.send(prompt, approved, approved && needsSecret(prompt) ? secret : undefined);
+      await this.send(prompt, approved);
     } catch (error) {
       if (this.queue[0]?.actionToken === actionToken) {
         this.submitting = null;
@@ -457,10 +371,6 @@ export class WorkflowApprovalController {
       return;
     }
     if (this.queue[0]?.actionToken !== actionToken) return;
-    if (approved && needsSecret(prompt)) {
-      // Stay open until the runtime answers: a wrong secret keeps the prompt.
-      return;
-    }
     // The identity is consumed; the next step arrives as its own prompt.
     this.queue.shift();
     this.resetDisplayedState();
@@ -473,8 +383,8 @@ export function createWorkflowApprovalController(
   onError: (error: unknown) => void,
 ): WorkflowApprovalController {
   return new WorkflowApprovalController(
-    async (prompt, approved, secret) => {
-      const action = decisionAction(prompt, approved, secret);
+    async (prompt, approved) => {
+      const action = decisionAction(prompt, approved);
       await invoke("send_runtime_action", { actionId: action.actionId, data: action.data });
     },
     onError,
@@ -504,11 +414,6 @@ export function applyWorkflowEvent(
       if (token !== null) controller.revoke(token);
       return true;
     }
-    case "app_workflow_secret_rejected": {
-      const token = parseWorkflowStale(message);
-      if (token !== null) controller.secretWasRejected(token);
-      return true;
-    }
     case "app_workflow_finished": {
       const result = parseWorkflowFinished(message);
       if (result !== null) controller.finished(result);
@@ -524,23 +429,15 @@ export function applyWorkflowEvent(
   }
 }
 
-/**
- * Outcomes after which the person may need to release a blocked attempt. A print-spooler
- * restart never enters that list (its uncertain result asks the person to check the service).
- */
-export function outcomeNeedsCheck(outcome: string, workflow?: string): boolean {
-  if (workflow === "printer_spooler_restart") return false;
-  return outcome === "uncertain" || outcome === "needs_attention";
+/** Outcomes after which the person may need to release a blocked attempt. */
+export function outcomeNeedsCheck(outcome: string): boolean {
+  return outcome === "uncertain";
 }
 
 export function outcomeTitle(outcome: string): string {
   switch (outcome) {
     case "succeeded":
       return "انجام شد";
-    case "submitted":
-      return "در صف چاپ";
-    case "needs_attention":
-      return "نیاز به رسیدگی";
     case "uncertain":
       return "نتیجه نامطمئن";
     case "stopped":

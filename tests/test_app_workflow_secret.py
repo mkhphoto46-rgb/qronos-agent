@@ -1,4 +1,4 @@
-"""The typed approval secret behind printing, through the Library's store.
+"""The typed approval secret check the runtime borrows, through the Library's store.
 
 Every test uses the per-test secret path from conftest or its own tmp_path
 file; nothing touches the user's real approval secret.
@@ -39,7 +39,7 @@ def store(tmp_path: Path, clock: Clock) -> ApprovalSecretStore:
                                audit_path=tmp_path / "audit.jsonl")
 
 
-def test_without_a_configured_secret_printing_is_not_ready_and_nothing_verifies(store):
+def test_without_a_configured_secret_the_check_is_not_ready_and_nothing_verifies(store):
     check = WorkflowSecretCheck(store)
     assert check.status() == "not_configured"
     assert not store.path.exists(), "the check made before prompting never creates the store"

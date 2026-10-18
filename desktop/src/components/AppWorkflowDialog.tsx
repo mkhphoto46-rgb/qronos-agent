@@ -1,8 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import type { KeyboardEvent } from "react";
 
 import {
-  needsSecret,
   outcomeNeedsCheck,
   outcomeTitle,
   workflowDetailRows,
@@ -19,7 +18,7 @@ import "./AppWorkflowDialog.css";
 
 type Props = {
   view: WorkflowApprovalView;
-  onAnswer: (actionToken: string, approved: boolean, secret?: string) => void;
+  onAnswer: (actionToken: string, approved: boolean) => void;
   onDismissResult: () => void;
   onOpenRecovery: () => void;
   onAcknowledge: (operationKey: string) => void;
@@ -27,18 +26,16 @@ type Props = {
 };
 
 /**
- * App-native approval for Telegram, print, browser and print-spooler restart steps.
+ * App-native approval for app workflow steps (browser navigation).
  *
  * Shows exactly what the runtime will do (the details come from the prompt,
  * in a fixed order), answers only with the prompt's single-use identity,
- * starts on the safe choice, and declines on Escape. A typed-secret step
- * (printing, restarting the Windows print spooler) needs the approval secret,
- * typed here and sent once; it is never stored. A result
- * from a page in the browser is shown as untrusted page content.
+ * starts on the safe choice, and declines on Escape. A result from a page in
+ * the browser is shown as untrusted page content.
  *
  * An attempt whose outcome is unclear blocks a repeat of the same work. The
- * recovery list lets the person release one after checking the printer or
- * folder themselves; releasing never retries anything.
+ * recovery list lets the person release one after checking the outcome
+ * themselves; releasing never retries anything.
  */
 export default function AppWorkflowDialog({
   view,
@@ -55,7 +52,6 @@ export default function AppWorkflowDialog({
         prompt={view.prompt}
         submitting={view.submitting}
         unconfirmed={view.unconfirmed}
-        secretRejected={view.secretRejected}
         onAnswer={onAnswer}
       />
     );
@@ -73,20 +69,16 @@ function WorkflowPromptPanel({
   prompt,
   submitting,
   unconfirmed,
-  secretRejected,
   onAnswer,
 }: {
   prompt: WorkflowPrompt;
   submitting: boolean;
   unconfirmed: boolean;
-  secretRejected: boolean;
   onAnswer: Props["onAnswer"];
 }) {
   const declineRef = useRef<HTMLButtonElement | null>(null);
   const sectionRef = useRef<HTMLElement | null>(null);
   const wasSubmitting = useRef(false);
-  const [secret, setSecret] = useState("");
-  const secretNeeded = needsSecret(prompt);
   const titleId = `workflow-approval-title-${prompt.actionToken}`;
   const bodyId = `workflow-approval-body-${prompt.actionToken}`;
 
@@ -103,15 +95,8 @@ function WorkflowPromptPanel({
     wasSubmitting.current = submitting;
   }, [submitting]);
 
-  useEffect(() => {
-    if (secretRejected) setSecret("");
-  }, [secretRejected]);
-
   const approve = () => {
-    const typed = secret;
-    // Clear the field before sending: the secret is used once, never kept.
-    setSecret("");
-    onAnswer(prompt.actionToken, true, secretNeeded ? typed : undefined);
+    onAnswer(prompt.actionToken, true);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -143,7 +128,7 @@ function WorkflowPromptPanel({
   };
 
   const rows = workflowDetailRows(prompt);
-  const canApprove = !submitting && (!secretNeeded || secret.trim().length > 0);
+  const canApprove = !submitting;
 
   return (
     <div className="file-approval-backdrop" role="presentation">
@@ -174,25 +159,6 @@ function WorkflowPromptPanel({
               </div>
             ))}
           </dl>
-        )}
-
-        {secretNeeded && (
-          <label className="workflow-approval-secret">
-            رمز تأیید
-            <input
-              type="password"
-              autoComplete="off"
-              value={secret}
-              disabled={submitting}
-              onChange={(event) => setSecret(event.target.value)}
-            />
-          </label>
-        )}
-
-        {secretRejected && (
-          <div className="file-approval-warning" role="status">
-            رمز تأیید درست نبود یا موقتاً قفل است؛ چیزی انجام نشد.
-          </div>
         )}
 
         {unconfirmed && (
@@ -248,7 +214,7 @@ function WorkflowResultPanel({
         </details>
       )}
       <div className="workflow-result-actions">
-        {outcomeNeedsCheck(result.outcome, result.workflow) && (
+        {outcomeNeedsCheck(result.outcome) && (
           <button type="button" className="file-approval-button" onClick={onOpenRecovery}>
             کارهای نیازمند بررسی
           </button>
@@ -279,7 +245,7 @@ function RecoveryPanel({
     >
       <h3>کارهای با نتیجهٔ نامطمئن</h3>
       <p>
-        Qronos این کارها را تکرار نمی‌کند. اول خودتان چاپگر یا پوشه را بررسی کنید؛
+        Qronos این کارها را تکرار نمی‌کند. اول خودتان نتیجه را بررسی کنید؛
         «بررسی کردم» فقط این قفل را برمی‌دارد و چیزی را دوباره انجام نمی‌دهد.
       </p>
       {recovery.message && <p dir="auto">{recovery.message}</p>}

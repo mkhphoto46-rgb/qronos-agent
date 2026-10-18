@@ -4,9 +4,9 @@ Which process is on the other end of a Windows named pipe. Read-only.
 Two Win32 calls, both queries: ``GetNamedPipeClientProcessId`` and
 ``GetNamedPipeServerProcessId``. They take the pipe handle this process
 already holds and report a process id; they change nothing. The supervisor
-and the Action Broker use them to check that the process which connected is
-the exact child they launched, and that the server a broker connected to is
-the runtime that launched it.
+and the runtime use them to check that the process which connected is the
+exact child they launched, and that the server a child connected to is the
+process that launched it.
 
 Elsewhere, or when a handle is not a named pipe, the answer is None and the
 caller decides what an unverifiable peer means (the callers refuse).

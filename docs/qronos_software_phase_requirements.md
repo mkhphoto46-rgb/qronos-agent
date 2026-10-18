@@ -97,8 +97,8 @@ an item to a document does not change its key.
 | D2 | Typed action contract, scoped single-use approvals, audit, honest undo | V | Approval ledger, action audit, undo journal; suite | — |
 | D3 | Fresh window/process/screenshot binding; coordinates expire on change; postconditions | M | Roadmap Stage 4B; `computer_control_implementation_status.md` item 3 | workflows worker |
 | D4 | Native Paint drawing | M | Deliberately disabled: `_default_gui_action` raises "grounding" (`tests/test_offline_network_policy.py`). Undo exists only for a verified drawing | workflows worker |
-| D5 | Telegram: exact contact → newest incoming attachment → one verified download | P | `core/telegram_workflow.py` (`12b4536`) and intents (`d5b2ddf`) exist with fake-UI tests. Not imported by the runtime, approval ledger or desktop, so no user can reach it. Journal defects W1–W6 are open | workflows worker |
-| D6 | Print one exact file → one verified spool job, bounded non-duplicating recovery | P | `core/print_workflow.py` (`15a6234`) exists with fake-spooler tests; not wired. The native submitter waits up to 120 s without cancellation (P1) | workflows worker |
+| D5 | Telegram: exact contact → newest incoming attachment → one verified download | M | Absent | workflows worker |
+| D6 | Print one exact file → one verified spool job, bounded non-duplicating recovery | M | Absent | workflows worker |
 | D7 | Visible, permission-gated, audited browser workflow (the only public-internet route) | M | User-supplied browser source not in repo; legacy HTTP transport refuses (`core/web_providers.py`); `core/web_worker.py` is unregistered; saved links offer Copy only | workflows worker (report missing source to Root) |
 | D8 | Elevated Action Broker / supervisor split (architecture) | M | Absent; no worker assigned | unassigned |
 | D9 | Deterministic Security Monitor (reject/throttle/contain/safe-shutdown) | M | Absent. Required before Layer 2 remote access is enabled for users | unassigned (link-adjacent) |
@@ -125,9 +125,9 @@ an item to a document does not change its key.
 
 | # | Requirement | Key | Evidence / gap |
 |---|---|---|---|
-| H1 | Device Hub for printers, 3D printers and other local/LAN devices, with explicit per-device capability limits, permission, audit and live acceptance per workflow (project context; delivery status) | P | Printer and 3D chunks (docs/device_hub.md): Windows-installed local and LAN printers, driver capabilities, queue, own-job (user + this computer) pause/resume/cancel and exact-file print; 3D printers proven by their driver's PrintCapabilities with one exact .3mf handed to the Windows 3D print path (handoff only, never a printed-part claim); gated, approved with the typed secret and audited; Persian drawer. WIA 2.0 scanners: one gated, typed-secret scan through Windows' own dialog into one new PNG/JPEG. Proven local USB hardware cameras (Media Foundation, VIDCAP_HW_SOURCE): one gated, typed-secret still frame into one new PNG/JPEG, camera turned on only for the capture, no video/audio; a camera that has not closed blocks new captures. WIA 1.0 still cameras, virtual/network/phone/non-USB cameras, other local devices and live acceptance on real hardware remain REQUIRED |
-| H2 | Local driver/spooler only; no vendor cloud or smart-device service | V (rule) | The printer and 3D chunks use only the Windows spooler, Print Ticket API and drivers (no socket/HTTP/vendor API, process or shell in core/device_hub.py or core/print3d_native.py); re-verify for each new device class |
-| H3 | Wake-from-sleep via hardware capability or secure Wake-on-LAN, not a universal voice-wake claim | P | Hardware wake timer on THIS PC (docs/device_hub.md, core/power_wake.py): read-only capability (firmware RTC/Modern Standby, the power plan's Allow wake timers for AC/DC), gated single-use typed-secret approval, Windows-accepted claim only, Pause/Stop/close cancel; Persian drawer. No voice wake from sleep, no Wake-on-LAN (network scope). Live acceptance on real hardware remains REQUIRED |
+| H1 | Device Hub for printers, 3D printers and other local/LAN devices, with explicit per-device capability limits, permission, audit and live acceptance per workflow (project context; delivery status) | M | Absent |
+| H2 | Local driver/spooler only; no vendor cloud or smart-device service | V (rule) | Re-verify for each new device class |
+| H3 | Wake-from-sleep via hardware capability or secure Wake-on-LAN, not a universal voice-wake claim | M | Absent |
 
 ### F. Cross-cutting invariants
 
@@ -235,10 +235,6 @@ are in `work/opus-five-review-status.json`.
   - the doc claims the build downloads nothing, but the locked bundler
     fetches the NSIS toolset when it is absent
   - the hook's `ExecWait` launch-failure path relies on a stale register
-- **Workflows `15a6234`/`d5b2ddf`:** the printer and intent parsers are
-  helper modules, not wired. `ShellPrintToSubmitter.submit` blocks up to
-  120 s with no cancellation, and a job that finishes during that wait is
-  reported as uncertain (P1). No W1–W6 repair has landed yet.
 
 ### Unassigned software, to be assigned after current chunks
 

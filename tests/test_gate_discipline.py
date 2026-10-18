@@ -39,13 +39,7 @@ EXECUTOR_MODULES: tuple[str, ...] = (
     "core.screen_capture",
     "core.library_executor",
     # Application workflows: every side effect needs a gate grant.
-    "core.telegram_workflow",
-    "core.print_workflow",
     "core.browser_research",
-    # Performs one exact approved typed action, re-asking the gate first.
-    "core.action_broker",
-    # Device Hub: changes only the caller's own print job (SetJob), each time through the DEVICE_CONTROL gate.
-    "core.device_hub",
 )
 
 # The one sanctioned route to performing an action.
@@ -64,16 +58,6 @@ NATIVE_BACKENDS = {
         "core.keyboard_control", "core.mouse_button", "core.mouse_hover", "core.mouse_wheel",
     }),
     "core.windows_accessibility_mutation": frozenset({"core.accessibility_action_executor"}),
-    # GDI/GDI+/Windows.Data.Pdf print renderer: only the gated print workflow.
-    "core.print_renderer": frozenset({"core.print_workflow"}),
-    # Print Ticket capabilities and the Windows 3D manufacturing package path: only the gated Device Hub.
-    "core.print3d_native": frozenset({"core.device_hub"}),
-    # Read-only power capabilities and the hardware wake timer of this PC: only the gated Device Hub.
-    "core.power_wake": frozenset({"core.device_hub"}),
-    # WIA 2.0 scanner listing and the one-scan dialog: only the gated Device Hub.
-    "core.wia_imaging": frozenset({"core.device_hub"}),
-    # Media Foundation camera listing and the one still frame: only the gated Device Hub.
-    "core.camera_capture": frozenset({"core.device_hub"}),
 }
 
 # Modules that legitimately touch these without being action executors, with
@@ -139,20 +123,9 @@ KNOWN_SYSTEM_MODULES: dict[str, str] = {
         "pipes to it, binds it to a kill-on-close Job Object and stops only "
         "that exact child. It performs no user action and owns no audio, UI or dialog."
     ),
-    "core.spooler_service": (
-        "Stops and starts the one Windows service named Spooler (a constant) "
-        "through the Service Control Manager, with query/stop/start rights "
-        "only. Called only by the broker's registered printer.spooler_restart "
-        "action, after the broker's full verification and its gate re-check."
-    ),
     "core.pipe_peer": (
         "Calls GetNamedPipeClientProcessId/GetNamedPipeServerProcessId through "
         "ctypes only to read which process is on the other end of a Qronos pipe."
-    ),
-    "core.uac_launch": (
-        "Starts only the bundled Qronos executable as the Action Broker through "
-        "ShellExecuteExW 'runas', i.e. the normal UAC prompt the user can decline; "
-        "the handle is used only to read its id, wait and read its exit code."
     ),
     "core.windows_power_status": (
         "Calls GetSystemPowerStatus through ctypes only to read whether Windows "
@@ -307,8 +280,7 @@ class TestNoUndeclaredSystemAccess(unittest.TestCase):
                 if backend in imports:
                     self.assertIn(name, callers, f"{name} bypasses the reviewed {backend} callers")
                     guard = "security.gate" if name in {
-                        "core.computer_executor", "core.accessibility_action_executor", "core.print_workflow",
-                        "core.device_hub",
+                        "core.computer_executor", "core.accessibility_action_executor",
                     } else "core.input_safety"
                     self.assertIn(guard, imports, f"{name} lost its action guard")
 

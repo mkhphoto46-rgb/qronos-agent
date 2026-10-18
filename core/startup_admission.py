@@ -355,20 +355,10 @@ def enter(
     retry_seconds: float = ENTRY_RETRY_SECONDS,
     windows: Optional[bool] = None,
     installed: Optional[bool] = None,
-    barrier: bool = True,
     confirm: Optional[Callable[[str], dict]] = None,
     running_version: Optional[Callable[[], str]] = None,
 ) -> Any:
-    """Run steps 1-4 once for this process; return the held writer admission (or raise StartupRefused).
-
-    ``barrier=False`` skips steps 2-3 for the elevated action broker only, and
-    only as it is called there: AFTER ``core.action_broker.serve_once`` has
-    authenticated its parent (same user, the installed image, the pipe served by
-    exactly that process, and the session key received from it). Only a live
-    bridge's broker session releases that key, and a bridge exists only after it
-    passed this whole order and while it keeps its shared admission, so no update
-    can be between steps then. Nothing earlier in the broker opens a store.
-    """
+    """Run steps 1-4 once for this process; return the held writer admission (or raise StartupRefused)."""
     with _lock:
         # What THIS call asks for (applicability and the RESOLVED data root), decided before anything held is
         # handed back: an earlier admission authorises only the same root and mode (Runtime17 F2).
@@ -393,18 +383,16 @@ def enter(
         try:
             if instance:
                 guard = _acquire(acquire_instance, retry_seconds)
-            if barrier:
-                running = version or _version_of(running_version, environ)
-                outcome = _recover(recover or (lambda v: recover_on(root, v)), running)
-                if outcome.get("ok") is not True:
-                    raise StartupRefused(str(outcome.get("code") or "recovery_failed"))
+            running = version or _version_of(running_version, environ)
+            outcome = _recover(recover or (lambda v: recover_on(root, v)), running)
+            if outcome.get("ok") is not True:
+                raise StartupRefused(str(outcome.get("code") or "recovery_failed"))
             admission = _admit(admit, root)
-            if barrier:
-                # Under the shared admission no update can start any more; one may have run between the barrier
-                # and this admission (Runtime17 O1). Re-read this root's lifecycle and refuse a new pending one.
-                confirmed = _recover(confirm or (lambda v: pending_on(root, v)), running)
-                if confirmed.get("ok") is not True:
-                    raise StartupRefused(str(confirmed.get("code") or "recovery_pending"))
+            # Under the shared admission no update can start any more; one may have run between the barrier
+            # and this admission (Runtime17 O1). Re-read this root's lifecycle and refuse a new pending one.
+            confirmed = _recover(confirm or (lambda v: pending_on(root, v)), running)
+            if confirmed.get("ok") is not True:
+                raise StartupRefused(str(confirmed.get("code") or "recovery_pending"))
         except BaseException:
             if admission is not None:
                 _release(admission)

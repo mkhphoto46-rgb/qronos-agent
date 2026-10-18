@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import stat
 import re
 import sys
 import threading
@@ -94,9 +93,7 @@ from core.spoken_normalizer import normalise_spoken_text
 from core.settings_service import (
     DEFAULT_DEFINITIONS,
     DEFAULT_SETTINGS_PATH,
-    TELEGRAM_DOWNLOAD_FOLDER,
     SettingsService,
-    folder_form_problem,
 )
 from core.screen_capture import (
     Capture,
@@ -234,8 +231,6 @@ LINK_RELAY_SET_ACTION = "qronos.link_relay_set"
 LINK_SECURITY_RESET_ACTION = "qronos.link_security_reset"
 # The media product route (qronos_media.product): typed {op, requestId, ...} operations on the one media host.
 MEDIA_ACTION = "qronos.media"
-# The Device Hub (core/device_hub.py): typed {op, requestId, ...} operations on local spooler/driver devices.
-DEVICE_HUB_ACTION = "qronos.device_hub"
 #: How long a brain/voice media request waits for its typed result before answering honestly that it did not.
 MEDIA_INTENT_WAIT_SECONDS = 12.0
 LINK_ACTIONS = frozenset({
@@ -1333,72 +1328,6 @@ class RuntimeEvent:
     message: str
 
 
-def _telegram_download_folder(configured: object = "") -> tuple[Path | None, str]:
-    """The exact folder Telegram saves into, and whether it is usable now.
-
-    Telegram decides where a download is saved; Qronos verifies it there and
-    never searches elsewhere. The folder is the person's own setting
-    (``workflows.telegram_download_folder``, Settings > General), or the older
-    explicit ``QRONOS_TELEGRAM_DOWNLOAD_FOLDER`` when the setting is empty;
-    Qronos never guesses it. It must be an existing local folder that is not a
-    link, judged by the Library's storage-root rules (core/storage_locations.py).
-    Returns ``(folder, "ready")`` or ``(None, code)``.
-    """
-    from core.path_safety import drive_status, is_link_or_reparse_point
-
-    value = configured.strip() if isinstance(configured, str) else ""
-    if not value:
-        value = os.environ.get("QRONOS_TELEGRAM_DOWNLOAD_FOLDER", "").strip()
-    if not value:
-        return None, "not_configured"
-    problem = folder_form_problem(value)
-    if problem is not None:
-        return None, problem
-    drive = drive_status(value)
-    if drive == "remote":
-        return None, "network_drive"
-    if drive == "unknown":
-        return None, "drive_unknown"
-    folder = Path(os.path.normpath(value))
-    if any(is_link_or_reparse_point(part) for part in (folder, *folder.parents)):
-        return None, "link"
-    try:
-        info = os.lstat(folder)
-    except FileNotFoundError:
-        return None, "missing"
-    except OSError:
-        return None, "unreadable"
-    if not stat.S_ISDIR(info.st_mode):
-        return None, "not_directory"
-    return folder, "ready"
-
-
-_TELEGRAM_FOLDER_FA = {
-    "missing": "پوشهٔ دانلود تلگرام که در تنظیمات آمده پیدا نشد.",
-    "not_directory": "مسیری که برای دانلود تلگرام در تنظیمات آمده پوشه نیست.",
-    "link": (
-        "پوشهٔ دانلود تلگرام یک پیوند (link یا junction) است یا از یک پیوند می‌گذرد؛ "
-        "کرونوس از مسیر پیوندی استفاده نمی‌کند."
-    ),
-    "network_drive": "پوشهٔ دانلود تلگرام روی درایو شبکه است؛ فقط پوشهٔ محلی پذیرفته می‌شود.",
-    "network_or_device": "پوشهٔ دانلود تلگرام مسیر شبکه یا دستگاه است؛ فقط پوشهٔ محلی پذیرفته می‌شود.",
-    "drive_unknown": "محلی بودن درایو پوشهٔ دانلود تلگرام معلوم نیست؛ فقط پوشهٔ محلی پذیرفته می‌شود.",
-}
-
-
-def _telegram_folder_refusal(state: str) -> str:
-    """The Persian prerequisite answer before any Telegram approval (never the path itself)."""
-    if state == "not_configured":
-        reason = "پوشهٔ دانلود تلگرام هنوز تعیین نشده است."
-    else:
-        reason = _TELEGRAM_FOLDER_FA.get(state, "پوشهٔ دانلود تلگرام که در تنظیمات آمده معتبر نیست.")
-    return (
-        f"{reason} در «تنظیمات ← عمومی ← پوشهٔ دانلود تلگرام» همان پوشهٔ محلی‌ای را بنویسید که "
-        "برنامهٔ تلگرام فایل‌ها را در آن ذخیره می‌کند؛ کرونوس آن را حدس نمی‌زند. "
-        "کاری در تلگرام انجام نشد."
-    )
-
-
 def _text_event_message(
     request_id: str,
     **fields: Any,
@@ -1531,7 +1460,7 @@ class QronosRuntime:
         # nothing about media runs, probes or opens at startup.
         self._media_host: Any = None
         self._media_host_lock = threading.Lock()
-        # Telegram download / print workflows; prompts share the ledger above.
+        # App workflows (browser navigation); prompts share the ledger above.
         self._app_workflows: AppWorkflowCoordinator | None = None
         # One explicit UI approval grants a short, process-local lease for
         # ordinary reversible file-write actions. The window is fixed: auto-
@@ -1730,32 +1659,6 @@ class QronosRuntime:
             return owned_generation()
         except Exception:  # an unreadable generation is no generation
             return None
-
-    def device_hub(self) -> Any:
-        """The Device Hub (core/device_hub.py), built on first use; spooler/driver calls happen only per request."""
-        with self._media_host_lock:
-            hub = getattr(self, "_device_hub", None)
-        if hub is not None:
-            return hub
-        from core.device_hub import DeviceHub, default_source
-        from core.library_executor import WorkflowSecretCheck
-
-        workflows = self._ensure_app_workflows()
-        secret_check = WorkflowSecretCheck()  # the bridge never opens the secret store itself
-        with self._media_host_lock:
-            hub = getattr(self, "_device_hub", None)
-            if hub is None:
-                hub = DeviceHub(
-                    source=default_source,
-                    ledger=self._approvals,
-                    emit=lambda event, status, payload: self._notify(event, status, _compact(payload)),
-                    paused=lambda: self.runtime_paused,
-                    begin_print=workflows.begin_print,
-                    verify_secret=secret_check.verify,
-                    audit=self.action_audit,
-                )
-                self._device_hub = hub
-        return hub
 
     def media_product(self) -> Any:
         """The typed media operations (qronos_media.product) on the one media host, built with it."""
@@ -2839,7 +2742,6 @@ class QronosRuntime:
         if paused:
             self._discard_pending_file_approvals(CANCEL_REASON_PAUSE)
             self._discard_pending_media_approvals(CANCEL_REASON_PAUSE)
-            self._discard_pending_device_approvals(CANCEL_REASON_PAUSE)
             self._discard_pending_history_undo(CANCEL_REASON_PAUSE)
             # Pause stops GUI work the same way Stop does: in-flight actions
             # are cancelled cooperatively (releasing held buttons), turns in
@@ -3815,20 +3717,16 @@ class QronosRuntime:
             self.file_resolver = KnownFolderFileResolver(use_index=True)
 
     def _ensure_app_workflows(self) -> AppWorkflowCoordinator:
-        """Prepare the Telegram/print workflow coordinator with real Windows adapters.
+        """Prepare the app-workflow coordinator with real Windows adapters.
 
         Native collaborators are created only when a workflow step runs, so a
-        recognised request never touches Telegram or the spooler before its
-        approval. Tests inject their own coordinator instead.
+        recognised request never opens a browser before its approval. Tests
+        inject their own coordinator instead.
         """
         existing = getattr(self, "_app_workflows", None)
         if existing is not None:
             return existing
-        self._ensure_file_runtime()
-        from core.app_workflow import SideEffectJournal, WorkflowError, WorkflowRefused
-        from core.file_resolver import NamedFileRequest
-        from core.print_workflow import PrintWorkflow, ShellPrintToSubmitter, WinSpooler, default_renderer
-        from core.telegram_workflow import LocalDownloadFolder, TelegramDownloadWorkflow, UiaTelegramUi
+        from core.app_workflow import SideEffectJournal, WorkflowError
 
         journal = SideEffectJournal(Path(CONFIG.paths.data) / "workflows" / "side-effects.json")
         # Durable, shared by every workflow in this runtime; kept for inspection.
@@ -3839,36 +3737,6 @@ class QronosRuntime:
             journal.reconcile_interrupted()
         except WorkflowError:
             pass  # a damaged journal refuses every side effect on use anyway
-
-        def telegram_workflow() -> TelegramDownloadWorkflow:
-            self._ensure_computer_runtime()
-            executor = self.computer_executor
-            folder, state = self._telegram_folder()
-            if folder is None:
-                raise WorkflowRefused(f"Telegram's download folder is not usable ({state}).")
-
-            def target():
-                from core.computer_executor import get_app_spec
-                from core.window_binding import WindowTarget
-
-                spec = get_app_spec(executor.resolve_app_id("telegram"))
-                return WindowTarget(
-                    app_id=spec.app_id, display_name=spec.display_name, aliases=spec.aliases,
-                    executable=spec.executable, process_names=spec.process_names,
-                )
-
-            from core.accessibility_action_executor import AccessibilityActionExecutor
-            from core.accessibility_targeting import AccessibilityTargetLocator
-
-            binder = executor.window_binder
-            # Exact-RuntimeId actions only; the locator has no model and is unused.
-            actuator = AccessibilityActionExecutor(binder, executor, AccessibilityTargetLocator(None))
-            return TelegramDownloadWorkflow(
-                UiaTelegramUi(binder=binder, target_fn=target, actuator=actuator),
-                binder=binder,
-                journal=journal,
-                folder=LocalDownloadFolder(folder),
-            )
 
         def browser_workflow():
             from core.browser_research import (
@@ -3886,36 +3754,10 @@ class QronosRuntime:
                 foreground_fn=foreground_window_snapshot,
             )
 
-        def print_workflow() -> PrintWorkflow:
-            return PrintWorkflow(
-                spooler=WinSpooler(), submitter=ShellPrintToSubmitter(), journal=journal,
-                renderer=default_renderer(),
-            )
-
-        def resolve_file(reference: str) -> Path:
-            exact = reference if Path(reference).is_absolute() else None
-            return self.file_resolver.resolve(NamedFileRequest(name_hint=reference, exact_path=exact)).path
-
-        def default_printer() -> str | None:
-            return next((item.name for item in WinSpooler().printers() if item.is_default), None)
-
-        from core.library_executor import WorkflowSecretCheck
-
-        # The per-profile approval secret and its shared lockout (Library store).
-        secret_check = WorkflowSecretCheck()
-
         self._app_workflows = AppWorkflowCoordinator(
             ledger=self._approvals,
             notify=self._notify,
             actions=self._computer_actions,
-            telegram_workflow=telegram_workflow,
-            print_workflow=print_workflow,
-            resolve_file=resolve_file,
-            default_printer=default_printer,
-            # The bridge never opens the secret store itself
-            # (tests/test_approval_secret.py); it borrows the Library's check.
-            verify_secret=secret_check.verify,
-            secret_status=secret_check.status,
             paused=lambda: self.runtime_paused,
             audit=self.action_audit,
             journal=journal,
@@ -3923,68 +3765,11 @@ class QronosRuntime:
         )
         return self._app_workflows
 
-    def _ensure_elevated_actions(self):
-        """The elevated-action coordinator (core/elevated_actions.py), built on first use."""
-        coordinator = getattr(self, "_elevated_actions", None)
-        if coordinator is None:
-            from core.elevated_actions import ElevatedActionCoordinator
-            from core.library_executor import WorkflowSecretCheck
-
-            # The bridge never opens the secret store itself; like printing,
-            # it borrows the Library's per-profile check and shared lockout.
-            secret_check = WorkflowSecretCheck()
-            coordinator = ElevatedActionCoordinator(
-                notify=self._notify,
-                verify_secret=secret_check.verify,
-                secret_status=secret_check.status,
-                paused=lambda: self.runtime_paused,
-            )
-            self._elevated_actions = coordinator
-        return coordinator
-
-    def _begin_text_elevated_action(self, text: str, request_id: str, started_at: float) -> bool:
-        """
-        Route the person's own request to restart the print spooler.
-
-        Only desktop chat turns come here; Device Link text goes to the
-        tool-free chat path and can never reach an elevated action.
-        """
-        from core.elevated_actions import parse_spooler_restart
-
-        if not parse_spooler_restart(text):
-            return False
-        if self._computer_actions.stopped_since_turn_start():
-            self._finish_text_file_action(
-                request_id=request_id,
-                response="لغو شد؛ هیچ کاری شروع نشد.",
-                started_at=started_at,
-            )
-            return True
-        reply = self._ensure_elevated_actions().try_begin(text, request_id)
-        if reply is None:
-            return False
-        self._finish_text_file_action(request_id=request_id, response=reply, started_at=started_at)
-        return True
-
-    def _telegram_folder(self) -> tuple[Path | None, str]:
-        """Telegram's download folder from the CURRENT settings (reloaded with them), checked now."""
-        settings = getattr(self, "settings", None)
-        try:
-            configured = settings.get(TELEGRAM_DOWNLOAD_FOLDER) if settings is not None else ""
-        except Exception:  # noqa: BLE001 - an unreadable setting is "not set", never a guess
-            configured = ""
-        return _telegram_download_folder(configured)
-
     def _begin_text_app_workflow(self, text: str, request_id: str, started_at: float) -> bool:
-        """Route a Telegram-download or print request to its approval flow."""
-        from core.app_workflow_intents import TelegramDownloadIntent, parse_workflow_intent
+        """Route a browser navigation or web search request to its approval flow."""
         from core.browser_research import plan_navigation
 
-        if self._begin_text_elevated_action(text, request_id, started_at):
-            return True
-
-        intent = parse_workflow_intent(text)
-        if intent is None and plan_navigation(text) is None:
+        if plan_navigation(text) is None:
             return False
         if self._computer_actions.stopped_since_turn_start():
             self._finish_text_file_action(
@@ -3993,35 +3778,14 @@ class QronosRuntime:
                 started_at=started_at,
             )
             return True
-        if isinstance(intent, TelegramDownloadIntent):
-            # A missing prerequisite is said BEFORE the first approval: no prompt the
-            # workflow could only refuse afterwards, and nothing touches Telegram.
-            _, state = self._telegram_folder()
-            if state != "ready":
-                self._finish_text_file_action(
-                    request_id=request_id,
-                    response=_telegram_folder_refusal(state),
-                    started_at=started_at,
-                )
-                return True
         reply = self._ensure_app_workflows().try_begin(text, request_id)
         if reply is None:
             return False
         self._finish_text_file_action(request_id=request_id, response=reply, started_at=started_at)
         return True
 
-    def resolve_app_workflow_decision(
-        self,
-        action_token: str,
-        *,
-        approved: bool,
-        secret: str | None = None,
-    ) -> None:
+    def resolve_app_workflow_decision(self, action_token: str, *, approved: bool) -> None:
         """Answer one workflow prompt by its single-use identity."""
-        elevated = getattr(self, "_elevated_actions", None)
-        if elevated is not None and elevated.owns(action_token):
-            elevated.resolve(action_token, approved=approved, secret=secret)
-            return
         coordinator = getattr(self, "_app_workflows", None)
         if coordinator is None:
             self._notify(
@@ -4030,7 +3794,7 @@ class QronosRuntime:
                 json.dumps({"actionToken": str(action_token or ""), "reason": "unknown"}, separators=(",", ":")),
             )
             return
-        coordinator.resolve(action_token, approved=approved, secret=secret)
+        coordinator.resolve(action_token, approved=approved)
 
     def _ensure_computer_runtime(self) -> None:
         """Prepare the trusted Windows computer-action collaborator."""
@@ -7267,16 +7031,6 @@ class QronosRuntime:
         """
         return len(self._approvals.revoke_kinds((ApprovalKind.MEDIA_ACTION,), reason))
 
-    def _discard_pending_device_approvals(self, reason: str) -> int:
-        """Revoke every Device Hub question (DEVICE_ACTION) at Pause, Stop and shutdown, and cancel an armed wake
-        timer. Payloads belong to core/device_hub.py and are never read here; a late answer is stale there.
-        Idempotent."""
-        revoked = len(self._approvals.revoke_kinds((ApprovalKind.DEVICE_ACTION,), reason))
-        hub = getattr(self, "_device_hub", None)
-        if hub is not None:
-            hub.cancel_wake(reason)
-        return revoked
-
     def _notify_file_stale(self, action_token: str, reason: str) -> None:
         self._notify(
             "file_action_stale",
@@ -7348,13 +7102,8 @@ class QronosRuntime:
                     pass
         app_workflows = getattr(self, "_app_workflows", None)
         if app_workflows is not None:
-            # Telegram/print prompts and running steps stop with everything else.
+            # App-workflow prompts and running steps stop with everything else.
             app_workflows.discard(reason)
-        elevated = getattr(self, "_elevated_actions", None)
-        if elevated is not None:
-            # Open elevation prompts too. A broker already started is not
-            # interrupted: it performs one action or none, and reports.
-            elevated.discard(reason)
         if revoked:
             self._notify(
                 "computer_approval_discarded",
@@ -7410,7 +7159,6 @@ class QronosRuntime:
             CANCEL_REASON_USER_STOP
         )
         self._discard_pending_media_approvals(CANCEL_REASON_USER_STOP)
-        self._discard_pending_device_approvals(CANCEL_REASON_USER_STOP)
         self._discard_pending_history_undo(CANCEL_REASON_USER_STOP)
 
         with self._lock:
@@ -10126,7 +9874,6 @@ class QronosRuntime:
         self._discard_pending_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_file_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_media_approvals(CANCEL_REASON_SHUTDOWN)
-        self._discard_pending_device_approvals(CANCEL_REASON_SHUTDOWN)
         self._discard_pending_history_undo(CANCEL_REASON_SHUTDOWN)
         self._approvals.close()
         self._computer_actions.wait_idle(COMPUTER_ACTION_SHUTDOWN_GRACE_SECONDS)
@@ -10349,11 +10096,6 @@ def handle_action(
         action_id,
     )
 
-    if action_id == DEVICE_HUB_ACTION:
-        # The Device Hub applies its own pause rule per operation (reads stay available while paused).
-        handle_device_hub_action(runtime, payload)
-        return
-
     if action_id == MEDIA_ACTION:
         # The media product applies its own pause rule per operation (reads stay available while paused).
         handle_media_action(runtime, payload)
@@ -10555,15 +10297,10 @@ def handle_action(
         approved = data.get("approved", False)
         if not isinstance(approved, bool):
             raise ValueError("Workflow decision approved must be boolean.")
-        secret = data.get("secret")
-        if secret is not None and (not isinstance(secret, str) or len(secret) > 256):
-            # Never echo the value; only its shape is wrong.
-            raise ValueError("Workflow decision secret must be a short string.")
         worker = threading.Thread(
             target=lambda: runtime.resolve_app_workflow_decision(
                 action_token,
                 approved=approved,
-                secret=secret,
             ),
             name="qronos-app-workflow-decision",
             daemon=True,
@@ -11498,14 +11235,6 @@ def handle_media_status(
     host = runtime._media_host
     status = host.status() if host is not None else {"workerStarted": False}
     runtime._notify("media_status", "ready", _compact(status))
-
-
-def handle_device_hub_action(
-    runtime: QronosRuntime,
-    payload: dict[str, Any],
-) -> None:
-    """One typed Device Hub operation (the data object only; validated in core/device_hub.py)."""
-    runtime.device_hub().handle(payload.get("data"))
 
 
 def handle_media_action(
