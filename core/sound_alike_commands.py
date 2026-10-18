@@ -144,7 +144,8 @@ CONFIRMATION_SECONDS = 30.0
 _YES = {_sound_key(word) for word in (
     "آره", "آری", "بله", "بلی", "بل", "باشه", "اوهوم", "آره آره", "بله بله", "آره باز کن", "بله باز کن",
     # The same answers as an English transcription hears them (see the confirmation retry in runtime_bridge).
-    "yes", "yeah", "yep", "yup", "ok", "okay", "are", "aare", "bale", "bali", "belle", "bella", "sure",
+    "yes", "yeah", "yep", "yup", "yah", "ya", "ok", "okay", "all right", "alright", "right", "sure", "uh huh",
+    "aha", "are", "aare", "ara", "bale", "bali", "belle", "bella",
 )}
 _NO = {_sound_key(word) for word in ("نه", "نخیر", "نه نه", "ولش کن", "نمی‌خوام", "no", "nah", "nope", "na", "nay", "neh")}
 

@@ -213,7 +213,7 @@ def test_not_yes_words(word):
     assert not is_yes(word)
 
 
-@pytest.mark.parametrize("heard", ["Okay.", "Yeah.", "Are.", "Bale.", "بل"])
+@pytest.mark.parametrize("heard", ["Okay.", "Yeah.", "All right.", "Are.", "Bale.", "بل"])
 def test_a_yes_as_an_english_transcription_hears_it(heard):
     # A headset recording of «آره» read in English came out as "Okay." and, under a yes/no grammar, "Yeah.".
     from core.sound_alike_commands import is_yes
