@@ -589,6 +589,8 @@ async fn execute(
     let (mut child, mut stdin, stdout, stderr) = spawn_with_pipes(command, deadline)
         .await
         .map_err(|failure| plan.error(failure, false))?;
+    // The reply of a backend that exited with failure: kept so its own refusal can be shown.
+    let mut exit_reply: Option<Vec<u8>> = None;
     let result = async {
         // Each task owns one pipe. Aborting a task drops the pipe even if a
         // descendant inherited the opposite end. Never kill a document app.
@@ -641,6 +643,7 @@ async fn execute(
                 }
                 if written && drained && bytes.is_some() && status.is_some() {
                     if !status.unwrap().success() {
+                        exit_reply = bytes.take();
                         return Err(Failure::Exit);
                     }
                     return Ok(bytes.unwrap());
@@ -668,7 +671,16 @@ async fn execute(
     if child.wait().await.is_err() {
         return Err(plan.error(Failure::Io, true));
     }
-    let output = result.map_err(|failure| plan.error(failure, true))?;
+    let output = match result {
+        // A backend that refused exits with failure after printing its one reply line; show its reason.
+        Err(Failure::Exit) => {
+            return Err(exit_reply
+                .as_deref()
+                .and_then(backend_refusal)
+                .unwrap_or_else(|| plan.error(Failure::Exit, true)))
+        }
+        other => other.map_err(|failure| plan.error(failure, true))?,
+    };
     checkpoint().map_err(|failure| plan.error(failure, true))?;
     // All closed CLI entrypoints emit one compact JSON line. Do not accept
     // truncated JSON or extra frames, even when a descendant retains stdout.
@@ -695,16 +707,57 @@ async fn execute(
         return Err(plan.error(Failure::Reply, true));
     }
     if !plan.doctor && value.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(plan.error(Failure::Refused, true));
+        return Err(backend_refusal(&output).unwrap_or_else(|| plan.error(Failure::Refused, true)));
     }
     checkpoint().map_err(|failure| plan.error(failure, true))?;
     Ok(value)
+}
+
+/// The backend's own reason from a complete one-line `{"ok": false, "status": "refused", "error": "..."}` reply.
+///
+/// Only an explicit refusal is shown: its reason is written for the person (for example "No approval secret is set.
+/// Open Permissions and use APPROVAL SECRET to set one") and replacing it with a generic failure leaves them stuck.
+/// Any other failure text, such as an exception message, may carry private details and keeps the generic, uncertain
+/// error, as does anything that is not exactly one reply line.
+fn backend_refusal(bytes: &[u8]) -> Option<String> {
+    let newline = bytes.iter().position(|byte| *byte == b'\n')?;
+    if bytes[newline + 1..].iter().any(|byte| !byte.is_ascii_whitespace()) {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&bytes[..newline]).ok()?;
+    if value.get("ok").and_then(Value::as_bool) != Some(false)
+        || value.get("status").and_then(Value::as_str) != Some("refused")
+    {
+        return None;
+    }
+    let message = value.get("error").and_then(Value::as_str)?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(message.chars().take(2000).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_backend_refusal_keeps_its_own_reason() {
+        let refused = |error: &str| format!("{{\"ok\":false,\"status\":\"refused\",\"error\":\"{error}\"}}\n");
+        assert_eq!(
+            backend_refusal(refused("No approval secret is set.").as_bytes()).as_deref(),
+            Some("No approval secret is set.")
+        );
+        assert_eq!(backend_refusal(refused(&"a".repeat(5000)).as_bytes()).map(|m| m.len()), Some(2000));
+        // Not an explicit refusal, not one complete reply line, or no message: the generic error stays.
+        assert_eq!(backend_refusal(b"{\"ok\":false,\"error\":\"raw exception text\"}\n"), None);
+        assert_eq!(backend_refusal(refused("x").trim_end().as_bytes()), None);
+        assert_eq!(backend_refusal(format!("{}{{}}\n", refused("x")).as_bytes()), None);
+        assert_eq!(backend_refusal(b"{\"ok\":true,\"status\":\"refused\",\"error\":\"x\"}\n"), None);
+        assert_eq!(backend_refusal(refused("  ").as_bytes()), None);
+        assert_eq!(backend_refusal(b"not json\n"), None);
+    }
     use std::sync::atomic::AtomicU64;
     use sysinfo::{Pid, ProcessesToUpdate, System};
 
