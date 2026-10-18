@@ -240,3 +240,47 @@ def test_a_bare_music_transcript_is_not_speech():
 
     assert is_whisper_non_speech("موسیقی") and is_whisper_non_speech("Music.")
     assert not is_whisper_non_speech("موسیقی پخش کن") and not is_whisper_non_speech("")
+
+
+class _GrammarReader:
+    """A speech runtime whose grammar-limited re-read returns a fixed text."""
+
+    def __init__(self, reading):
+        self.reading = reading
+        self.calls = []
+
+    def transcribe_file(self, audio_path, language="auto", grammar=None):
+        self.calls.append((language, grammar is not None))
+        return self.reading
+
+
+@pytest.mark.parametrize(
+    "reading, opens",
+    [
+        ("نوت پد رو باز کن.", True),       # the audio confirms the same command: act
+        ("ماشی", False),                    # a fragment: not a command, still ask
+        ("ماشین حساب رو باز کن", False),    # a different app: still ask
+    ],
+)
+def test_a_fairly_close_command_is_acted_on_only_when_the_audio_confirms_it(voice_runtime, tmp_path, reading, opens):
+    runtime, launched = voice_runtime
+    audio = tmp_path / "command.wav"
+    audio.write_bytes(b"RIFF")
+    runtime._last_voice_audio_path = audio
+    runtime.speech_runtime = _GrammarReader(reading)
+    report = {}
+    response = runtime._execute_voice_computer_action("اتفاد رو باز کن", report)
+    assert runtime.speech_runtime.calls == [("fa", True)]
+    assert report["voiceCommandGrammar"] == reading
+    if opens:
+        assert launched == [("notepad.exe",)] and "باز شد" in response
+    else:
+        assert launched == [] and "منظورتان" in response
+
+
+def test_the_command_grammar_accepts_only_whole_command_sentences():
+    from core.sound_alike_commands import command_from_grammar_reading
+
+    assert command_from_grammar_reading(" نوت پد رو باز کن.")[1] == "notepad"
+    assert command_from_grammar_reading("نوت پد رو") is None
+    assert command_from_grammar_reading("اکس") is None

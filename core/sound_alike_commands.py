@@ -178,3 +178,23 @@ def is_whisper_non_speech(text: str) -> bool:
 #: Whisper grammar for re-reading a spoken answer to "did you mean ...?": the audio
 #: decides between these words only. On headset recordings of «آره» it gives "Yeah.".
 YES_NO_GRAMMAR = 'root ::= " " ("Yes" | "Yeah" | "No") "."?'
+
+
+#: Whisper grammar allowing only the known spoken app commands. Re-reading a
+#: possible command with it lets the audio pick the sentence: on a headset
+#: recording that free transcription heard as "نوت پدرو بسکو" it gives exactly
+#: "نوت پد رو باز کن". Audio that is not a command cannot complete a sentence
+#: and stops at a fragment, which command_from_grammar_reading() rejects.
+COMMAND_GRAMMAR = (
+    'root ::= " " ('
+    + " | ".join(f'"{sentence}"' for sentence in sorted({c[2] for c in _COMMANDS}))
+    + ') "."?'
+)
+_SENTENCE_ACTIONS = {(" ".join(sentence.split())): (operation, app_id) for operation, app_id, sentence, _ in _COMMANDS}
+
+
+def command_from_grammar_reading(text: str) -> tuple[ComputerOperation, str, str] | None:
+    """(operation, app_id, sentence) when ``text`` is exactly one complete known command sentence, else None."""
+    sentence = " ".join(text.strip().rstrip(".").split())
+    found = _SENTENCE_ACTIONS.get(sentence)
+    return None if found is None else (found[0], found[1], sentence)
