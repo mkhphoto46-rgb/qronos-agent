@@ -54,6 +54,7 @@ from core.file_resolver import (
 )
 from core.sound_alike_commands import (
     CONFIRMATION_SECONDS as SOUND_ALIKE_CONFIRMATION_SECONDS,
+    YES_NO_GRAMMAR as SOUND_ALIKE_YES_NO_GRAMMAR,
     SoundAlikeDecision,
     is_no as is_spoken_no,
     is_yes as is_spoken_yes,
@@ -8274,19 +8275,25 @@ class QronosRuntime:
 
             # While a "did you mean ...?" question is open the answer is yes or
             # no. A one-word «آره» on a headset microphone is often transcribed
-            # as something else in Persian («موسیقی», «با»), but in English it
-            # comes out as "Okay"/"Yeah". Only then, re-read the same audio in
-            # English and keep the answer if it is a clear yes or no.
+            # as something else in Persian («موسیقی», «با»). Only then, re-read
+            # the same audio limited to a yes/no grammar (it gives "Yeah.") and
+            # keep the answer if it is a clear yes or no.
             if (
                 self._live_pending_sound_alike() is not None
                 and not (is_spoken_yes(transcript) or is_spoken_no(transcript))
             ):
                 try:
                     inference_checkpoint()
+                    # The CLI can limit its output to a yes/no grammar, so the
+                    # audio itself decides; free English text drifts ("Vale.").
+                    reader = getattr(
+                        self.speech_runtime, "fallback_runtime", self.speech_runtime
+                    )
                     english = (
-                        self.speech_runtime.transcribe_file(
+                        reader.transcribe_file(
                             recording.audio_path,
                             language="en",
+                            grammar=SOUND_ALIKE_YES_NO_GRAMMAR,
                         )
                         .strip()
                     )

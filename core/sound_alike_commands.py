@@ -173,3 +173,8 @@ def is_whisper_non_speech(text: str) -> bool:
     """A transcript that is only Whisper's stock output for unreadable audio («موسیقی», "music")."""
     key = _sound_key(text)
     return bool(key) and key in _NON_SPEECH
+
+
+#: Whisper grammar for re-reading a spoken answer to "did you mean ...?": the audio
+#: decides between these words only. On headset recordings of «آره» it gives "Yeah.".
+YES_NO_GRAMMAR = 'root ::= " " ("Yes" | "Yeah" | "No") "."?'
